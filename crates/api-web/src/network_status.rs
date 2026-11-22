@@ -29,6 +29,7 @@ use hyper::http::StatusCode;
 use rpc::forge as forgerpc;
 use rpc::forge::forge_server::Forge;
 
+use super::pagination::PageContext;
 use super::{Base, filters};
 
 const DEFAULT_PAGE_RECORD_LIMIT: usize = 50;
@@ -42,13 +43,7 @@ struct NetworkStatus {
     healthy_count: usize,
     unhealthy_count: usize,
     outdated_count: usize,
-    current_page: usize,
-    previous: usize,
-    next: usize,
-    pages: usize,
-    page_range_start: usize,
-    page_range_end: usize,
-    limit: usize,
+    page: PageContext,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -66,7 +61,10 @@ pub(super) async fn show_html(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let filter = params.get("filter").cloned().unwrap_or("all".to_string());
+    let filter = params
+        .get("filter")
+        .cloned()
+        .unwrap_or_else(|| "all".to_string());
 
     let current_page = params
         .get("current_page")
@@ -77,8 +75,20 @@ pub(super) async fn show_html(
             min(s, DEFAULT_PAGE_RECORD_LIMIT)
         })
     });
+    // fetch_network_status serves 0 as the default page size, not "All"
+    let limit = if limit == 0 {
+        DEFAULT_PAGE_RECORD_LIMIT
+    } else {
+        limit
+    };
+    if !matches!(
+        filter.as_str(),
+        "all" | "healthy" | "unhealthy" | "outdated"
+    ) {
+        return (StatusCode::BAD_REQUEST, "Unknown filter").into_response();
+    }
 
-    let (pages, all_status) = match fetch_network_status(state, current_page, limit).await {
+    let (total_dpus, all_status) = match fetch_network_status(state, current_page, limit).await {
         Ok(all) => all,
         Err(err) => {
             tracing::error!(error = %err, "fetch_network_status");
@@ -103,7 +113,6 @@ pub(super) async fn show_html(
             outdated_count += 1;
         }
         match filter.as_str() {
-            "all" => dpus.push(display),
             "healthy" => {
                 if display.is_healthy {
                     dpus.push(display);
@@ -119,12 +128,20 @@ pub(super) async fn show_html(
                     dpus.push(display);
                 }
             }
-            _ => {
-                return (StatusCode::BAD_REQUEST, "Unknown filter").into_response();
-            }
+            // "all"; unknown filters were rejected above
+            _ => dpus.push(display),
         }
     }
 
+    let extra_query_params = if filter == "all" {
+        String::new()
+    } else {
+        format!("&filter={filter}")
+    };
+    let page =
+        PageContext::from_total_items(current_page, limit, total_dpus, "/admin/network-status")
+            .with_extra_params(extra_query_params)
+            .with_max_limit(DEFAULT_PAGE_RECORD_LIMIT);
     let tmpl = NetworkStatus {
         dpus,
         active_filter: filter,
@@ -132,13 +149,7 @@ pub(super) async fn show_html(
         healthy_count,
         unhealthy_count,
         outdated_count,
-        current_page,
-        previous: current_page.saturating_sub(1),
-        next: current_page.saturating_add(1),
-        pages,
-        page_range_start: current_page.saturating_sub(3),
-        page_range_end: min(current_page.saturating_add(4), pages),
-        limit,
+        page,
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
@@ -171,6 +182,7 @@ pub(super) async fn show_all_json(
     (StatusCode::OK, Json(all_status)).into_response()
 }
 
+/// One page of DPU network status, and the total number of DPUs across pages.
 async fn fetch_network_status(
     api: Arc<Api>,
     current_page: usize,
@@ -201,7 +213,7 @@ async fn fetch_network_status(
         limit
     };
 
-    let pages = all_ids.len().div_ceil(limit);
+    let total_dpus = all_ids.len();
 
     let current_record_cnt_seen = current_page.saturating_mul(limit);
 
@@ -209,7 +221,7 @@ async fn fetch_network_status(
     // query params and suddenly setting a limit that makes
     // current_record_cnt_seen no longer make sense.
     if current_record_cnt_seen > all_ids.len() {
-        return Ok((pages, vec![]));
+        return Ok((total_dpus, vec![]));
     }
 
     let ids_for_page = all_ids
@@ -282,7 +294,7 @@ async fn fetch_network_status(
         });
     }
 
-    Ok((pages, result))
+    Ok((total_dpus, result))
 }
 
 impl super::Base for NetworkStatus {}

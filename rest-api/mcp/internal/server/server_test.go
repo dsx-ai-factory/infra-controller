@@ -4,14 +4,91 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
+
+	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
+
+// TestNewHTTPServer protects the time left for MCP to write a tool error after a REST timeout.
+func TestNewHTTPServer(t *testing.T) {
+	for _, tc := range []struct{ name string }{
+		// Use actual constructors so changing either component's budget cannot hide behind a copied default.
+		{name: "body and tool read leave response time"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := appcli.NewClient("https://api.example.com", "acme", "token", nil, false)
+
+			server := newHTTPServer("", http.NotFoundHandler())
+
+			require.Greater(t, toolReadTimeout, cutil.WorkflowContextTimeout)
+			require.Less(t, toolReadTimeout, client.HTTPClient.Timeout)
+			require.GreaterOrEqual(t, server.WriteTimeout, server.ReadTimeout+toolReadTimeout+5*time.Second)
+		})
+	}
+}
+
+// TestReadGET protects the complete tool budget and preserves the SDK context needed for its JSON result.
+func TestReadGET(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		ownerTimeout time.Duration
+	}{
+		// The child expires while the SDK parent can still serialize a timeout result.
+		{name: "tool budget leaves parent alive"},
+		// An owner with less time must stop the same outbound request earlier.
+		{name: "shorter owner deadline", ownerTimeout: 2 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				parent := context.Background()
+				if tc.ownerTimeout != 0 {
+					var cancel context.CancelFunc
+					parent, cancel = context.WithTimeout(parent, tc.ownerTimeout)
+					defer cancel()
+				}
+				client := appcli.NewClient("https://api.example.com", "acme", "token", nil, false)
+				client.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					<-request.Context().Done()
+					return nil, request.Context().Err()
+				})
+				started := time.Now()
+
+				result := readGET(parent, client, "/v2/org/{org}/nico/rack/{id}/power", map[string]string{"id": "rack-01"}, nil)
+
+				require.True(t, result.IsError)
+				require.Len(t, result.Content, 1)
+				text, ok := result.Content[0].(*mcp.TextContent)
+				require.True(t, ok)
+				require.Contains(t, text.Text, context.DeadlineExceeded.Error())
+				// The retained HTTP transport error test owns SDK envelope/JSONResponse wiring.
+				encoded, err := json.Marshal(result)
+				require.NoError(t, err)
+				var wire rpcToolCallResult
+				require.NoError(t, json.Unmarshal(encoded, &wire))
+				require.True(t, wire.IsError)
+				require.Contains(t, firstText(wire), context.DeadlineExceeded.Error())
+				if tc.ownerTimeout == 0 {
+					require.NoError(t, parent.Err())
+					require.Equal(t, toolReadTimeout, time.Since(started))
+				} else {
+					require.ErrorIs(t, parent.Err(), context.DeadlineExceeded)
+					require.Equal(t, tc.ownerTimeout, time.Since(started))
+				}
+			})
+		})
+	}
+}
 
 func TestToolName(t *testing.T) {
 	cases := []struct {

@@ -18,6 +18,8 @@
 use bmc_platform::PlatformError;
 use thiserror::Error;
 
+use crate::{CredentialRequestError, ExploredBmcRefError};
+
 /// Failure while authenticating and connecting to a BMC.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ConnectError {
@@ -27,4 +29,37 @@ pub enum ConnectError {
     /// Concrete Redfish transport or authentication failed.
     #[error("BMC connection failed: {0}")]
     Transport(PlatformError),
+}
+
+/// A [`crate::DriverConnector`] that could not be built.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum DriverConnectorError {
+    #[error(transparent)]
+    CallerIdentity(#[from] CredentialRequestError),
+    /// The pool for explicit credentials routes through nico-bmc-proxy,
+    /// which authenticates with the stored credentials instead.
+    #[error("the direct BMC pool must not route through nico-bmc-proxy")]
+    ProxiedDirectPool,
+}
+
+/// Failure to connect to a BMC from its exploration report.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum ExploredConnectError {
+    #[error(transparent)]
+    Reference(#[from] ExploredBmcRefError),
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
+}
+
+impl ExploredConnectError {
+    /// Classifies this connection failure as a [`PlatformError`] so callers can
+    /// branch on authentication or transport failures uniformly.
+    pub fn into_platform_error(self) -> PlatformError {
+        match self {
+            Self::Connect(ConnectError::Transport(err) | ConnectError::Credentials(err)) => err,
+            Self::Reference(err) => PlatformError::InvalidResponse {
+                message: err.to_string(),
+            },
+        }
+    }
 }

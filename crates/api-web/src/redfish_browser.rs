@@ -31,6 +31,7 @@ use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 use serde::Deserialize;
 
+use super::browser_response::{ResponseHeader, response_headers};
 use super::{Base, Oauth2Layer};
 use crate::redfish_actions::RedfishActionsTable;
 
@@ -43,15 +44,8 @@ struct RedfishBrowser {
     error: String,
     machine_id: String,
     response: String,
-    status_code: u16,
-    status_string: String,
-    response_headers: Vec<Header>,
+    response_headers: Vec<ResponseHeader>,
     actions: RedfishActionsTable,
-}
-
-struct Header {
-    name: String,
-    value: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,8 +89,6 @@ pub(super) async fn query(
         response: "".to_string(),
         response_headers: Vec::new(),
         error: "".to_string(),
-        status_code: 0,
-        status_string: "".to_string(),
         actions: RedfishActionsTable {
             action_requests: vec![],
             required_approvals: NUM_REQUIRED_APPROVALS,
@@ -204,9 +196,7 @@ pub(super) async fn query(
         }
     };
 
-    for (name, value) in response.headers {
-        browser.response_headers.push(Header { name, value })
-    }
+    browser.response_headers = response_headers(response.headers);
 
     browser.response = response.text;
 

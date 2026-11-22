@@ -60,7 +60,7 @@ pub(super) async fn repair_gb200_host_interface_if_needed(
         return Ok(());
     }
 
-    match ensure_gb200_host_interface_static_ipv4(redfish_client)
+    match ensure_gb200_host_interface_static_ipv4(&ctx.services.instrumentation, redfish_client)
         .await
         .map_err(|error| redfish_error("ensure_gb200_host_interface_static_ipv4", error))?
     {
@@ -91,7 +91,7 @@ async fn is_reported_gb200(
     };
 
     let endpoints =
-        db::explored_endpoints::find_by_ips(&mut ctx.services.db_reader, vec![host_bmc_ip]).await?;
+        db::explored_endpoints::find_by_ips(&ctx.services.db_pool, vec![host_bmc_ip]).await?;
     let product_family = endpoints
         .first()
         .and_then(|endpoint| endpoint.report.model())

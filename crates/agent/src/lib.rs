@@ -23,17 +23,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ::rpc::DiscoveryInfo;
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::machine_discovery::{DmiData, DpuData};
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_host_support::hardware_enumeration::{
     enumerate_and_save_hardware, enumerate_hardware, load_hardware_from_cache,
 };
 use carbide_host_support::registration::register_machine;
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::arch::CpuArchitecture;
 pub use command_line::{AgentCommand, AgentPlatformType, Options, RunOptions, WriteTarget};
 use eyre::WrapErr;
-use forge_tls::client_config::ClientCert;
 use futures_util::TryStreamExt;
 use mac_address::MacAddress;
 use network_monitor::{NetworkPingerType, Ping};
@@ -396,10 +396,12 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         None => (AgentConfig::default(), "default".to_string()),
         // development overrides
         Some(config_path) => (
-            AgentConfig::load_from(&config_path).wrap_err(format!(
-                "error loading agent configuration from {}",
-                config_path.display()
-            ))?,
+            AgentConfig::load_from(&config_path).wrap_err_with(|| {
+                format!(
+                    "error loading agent configuration from {}",
+                    config_path.display()
+                )
+            })?,
             config_path.display().to_string(),
         ),
     };
@@ -426,8 +428,8 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         agent.forge_system.client_cert.clone(),
         agent.forge_system.client_key.clone(),
     );
-    let forge_client_config = Arc::new(
-        ForgeClientConfig::new(
+    let carbide_client_config = Arc::new(
+        CarbideClientConfig::new(
             agent.forge_system.root_ca.clone(),
             Some(ClientCert {
                 cert_path: agent.forge_system.client_cert.clone(),
@@ -480,7 +482,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                 result = main_loop::setup_and_run(
                     machine_id,
                     factory_mac_address,
-                    forge_client_config,
+                    carbide_client_config,
                     agent,
                     *options,
                 ) => result.wrap_err("main_loop error exit"),
@@ -568,7 +570,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                 network_monitor::NetworkMonitor::new(machine_id, None, pinger);
 
             network_monitor
-                .run_onetime(&agent.forge_system.api_server, &forge_client_config)
+                .run_onetime(&agent.forge_system.api_server, &carbide_client_config)
                 .await;
         }
 
@@ -602,15 +604,16 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
                     ),
                     machine_id,
                     forge_api: forge_api_server.clone(),
-                    forge_client_config: Arc::clone(&forge_client_config),
+                    carbide_client_config: Arc::clone(&carbide_client_config),
                 },
+                crate::instrumentation::get_event_instrumentation(),
             )
             .await;
 
             let host_machine_id = match get_host_machine_id_retry(
                 &agent,
                 &periodic_config_fetcher,
-                Arc::clone(&forge_client_config),
+                Arc::clone(&carbide_client_config),
                 &forge_api_server,
             )
             .await
@@ -908,7 +911,9 @@ async fn register(
                 e
             )
         })?,
-        None => eyre::bail!("missing DPU info, should be impossible"),
+        None => {
+            eyre::bail!("missing DPU info, should be impossible");
+        }
     };
 
     let (registration_data, ..) = register_machine(
@@ -960,14 +965,14 @@ fn fake_dpu_discovery_info() -> DiscoveryInfo {
 }
 
 pub fn pretty_cmd(c: &Command) -> String {
-    format!(
-        "{} {}",
-        c.get_program().to_string_lossy(),
-        c.get_args()
-            .map(|x| x.to_string_lossy())
-            .collect::<Vec<std::borrow::Cow<'_, str>>>()
-            .join(" ")
-    )
+    let mut output = format!("{} ", c.get_program().to_string_lossy());
+    for (index, argument) in c.get_args().enumerate() {
+        if index != 0 {
+            output.push(' ');
+        }
+        output.push_str(&argument.to_string_lossy());
+    }
+    output
 }
 
 // fill_fake_dpu_info will take a pre-populated DiscoveryInfo

@@ -4,16 +4,23 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -78,6 +85,171 @@ func newHTTP2ResetServer(t *testing.T) (*httptest.Server, *http.Transport, <-cha
 	return server, transport, requests
 }
 
+// TestNewClient protects the default REST wait and an explicit caller timeout override.
+func TestNewClient(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		wantErr bool
+	}{
+		// The default must leave room after the REST handler stops waiting for its workflow.
+		{name: "default receives a response after the proxy wait"},
+		// An embedding application still owns an intentionally shorter timeout.
+		{name: "explicit shorter timeout", timeout: 20 * time.Second, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client := NewClient("https://api.example.com", "test-org", "test-token", nil, false)
+				require.Greater(t, client.HTTPClient.Timeout, cutil.WorkflowContextTimeout)
+				if tc.timeout != 0 {
+					client.HTTPClient.Timeout = tc.timeout
+				}
+				client.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					select {
+					case <-time.After(cutil.WorkflowContextTimeout + 5*time.Second):
+						return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+							Body: io.NopCloser(strings.NewReader(`{"id":"rack-01"}`))}, nil
+					case <-request.Context().Done():
+						return nil, request.Context().Err()
+					}
+				})
+
+				body, _, err := client.Do(http.MethodGet, "/v2/org/{org}/nico/rack/{id}/power",
+					map[string]string{"id": "rack-01"}, map[string]string{"siteId": "test-site"}, nil)
+
+				if tc.wantErr {
+					require.ErrorIs(t, err, context.DeadlineExceeded)
+					return
+				}
+				require.NoError(t, err)
+				assert.JSONEq(t, `{"id":"rack-01"}`, string(body))
+			})
+		})
+	}
+}
+
+// TestClient_DoWithContext keeps cancellation and auth retries under the original owner deadline.
+func TestClient_DoWithContext(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		phase         string
+		wantRequests  int
+		wantRefreshes int
+		wantErr       error
+	}{
+		// A short owner deadline interrupts the first in-flight attempt.
+		{name: "owner deadline", phase: "request", wantRequests: 1, wantErr: context.DeadlineExceeded},
+		// An unauthorized response cannot start token refresh after its owner was cancelled.
+		{name: "cancel before refresh", phase: "unauthorized", wantRequests: 1, wantErr: context.Canceled},
+		// A non-context-aware refresh may finish after cancellation; it must not start another request.
+		{name: "cancel during refresh", phase: "refresh", wantRequests: 1, wantRefreshes: 1, wantErr: context.Canceled},
+		// Time spent refreshing belongs to the same deadline, not a fresh retry allowance.
+		{name: "retry retains deadline", phase: "retry", wantRequests: 2, wantRefreshes: 1, wantErr: context.DeadlineExceeded},
+		// The fallback must retain its owner even when the client's own timeout is disabled.
+		{name: "owner cancels HTTP2 fallback", phase: "HTTP2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.phase == "HTTP2" {
+				testClientDoWithContextCancelsFallback(t)
+				return
+			}
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				deadline, _ := ctx.Deadline()
+				requests, refreshes := 0, 0
+				client := NewClient("https://api.example.com", "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					requests++
+					requestDeadline, _ := request.Context().Deadline()
+					assert.Equal(t, deadline, requestDeadline)
+					if requests == 1 && tc.phase != "request" {
+						if tc.phase == "unauthorized" {
+							cancel()
+						}
+						return &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header),
+							Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+					}
+					<-request.Context().Done()
+					return nil, request.Context().Err()
+				})
+				client.TokenRefresh = func() (string, error) {
+					refreshes++
+					if tc.phase == "refresh" {
+						cancel()
+					} else {
+						time.Sleep(time.Second)
+					}
+					return "refreshed-token", nil
+				}
+				started := time.Now()
+
+				_, _, err := client.DoWithContext(ctx, http.MethodGet, "/v2/org/{org}/nico/rack/{id}/power",
+					map[string]string{"id": "rack-01"}, nil, nil)
+
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Equal(t, tc.wantRequests, requests)
+				assert.Equal(t, tc.wantRefreshes, refreshes)
+				if tc.wantErr == context.DeadlineExceeded {
+					assert.Equal(t, 2*time.Second, time.Since(started))
+				}
+			})
+		})
+	}
+}
+
+// testClientDoWithContextCancelsFallback cancels after HTTP/1.1 starts, so the
+// initial HTTP/2 request cannot accidentally supply the cancellation proof.
+func testClientDoWithContextCancelsFallback(t *testing.T) {
+	t.Helper()
+
+	fallbackStarted := make(chan struct{})
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.ProtoMajor == 2 {
+			w.WriteHeader(http.StatusOK)
+			assert.NoError(t, http.NewResponseController(w).Flush())
+			panic(http.ErrAbortHandler)
+		}
+		close(fallbackStarted)
+		<-request.Context().Done()
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	defer server.CloseClientConnections()
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.Protocols.SetHTTP2(true)
+	client := NewClient(server.URL, "test-org", "test-token", nil, false)
+	client.HTTPClient.Transport = transport
+	client.HTTPClient.Timeout = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := client.DoWithContext(ctx, http.MethodGet, "/v2/org/{org}/nico/rack/rack-01/power", nil, nil, nil)
+		done <- err
+	}()
+	select {
+	case <-fallbackStarted:
+	case err := <-done:
+		t.Fatalf("request returned before the HTTP/1.1 fallback started: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTP/1.1 fallback did not start")
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner cancellation did not stop the HTTP/1.1 fallback")
+	}
+}
+
+// TestClient_Do protects retries and authentication shared by CLI, TUI and MCP callers.
 func TestClient_Do(t *testing.T) {
 	tests := []struct {
 		name string
@@ -170,11 +342,61 @@ func TestClient_Do(t *testing.T) {
 	}
 }
 
+// TestClient_do protects the per-request notification that MCP metrics count.
+func TestClient_do(t *testing.T) {
+	transportErr := errors.New("connection refused")
+	readErr := errors.New("body read failure")
+	for _, tc := range []struct {
+		name       string
+		response   func() (*http.Response, error)
+		wantStatus int
+		wantErr    error
+	}{
+		{name: "success reports its status", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[]`))}, nil
+		}, wantStatus: http.StatusOK},
+		// An API error is still a response; its status must not be reported as a failure to connect.
+		{name: "API error reports its status", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}, wantStatus: http.StatusNotFound},
+		{name: "transport failure reports the error", response: func() (*http.Response, error) {
+			return nil, transportErr
+		}, wantErr: transportErr},
+		// Headers arrived but the body did not, so no status is reported as read.
+		{name: "body read failure reports the error", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: &errorReadCloser{err: readErr}}, nil
+		}, wantErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client := NewClient("https://api.example.com", "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					time.Sleep(3 * time.Second)
+					return tc.response()
+				})
+				var events []RequestEvent
+				client.RequestNotify = func(event RequestEvent) {
+					events = append(events, event)
+				}
+
+				_, _, _ = client.Do(http.MethodGet, "/v2/org/{org}/nico/instance", nil, nil, nil)
+
+				require.Len(t, events, 1)
+				assert.Equal(t, http.MethodGet, events[0].Method)
+				assert.Equal(t, tc.wantStatus, events[0].StatusCode)
+				assert.ErrorIs(t, events[0].Err, tc.wantErr)
+				assert.Equal(t, 3*time.Second, events[0].Duration)
+			})
+		})
+	}
+}
+
 func TestClient_doWithQueryValues(t *testing.T) {
 	tests := []struct {
 		name string
 		run  func(*testing.T)
 	}{
+		{name: "redacts firmware credentials in debug output", run: testClientDebugFirmwareCredentials},
 		// Multi-value requests must preserve every value at the HTTP boundary.
 		{
 			name: "preserves repeated query values",
@@ -483,6 +705,31 @@ func TestFormatDebugBodyRedactsNestedSecrets(t *testing.T) {
 	assert.Contains(t, formatted, `"publicKey":"ssh-ed25519 public"`)
 }
 
+func TestFormatDebugBodyRedactsFirmwareURLSecrets(t *testing.T) {
+	body := []byte(`{
+		"components":[{"firmware":[{
+			"artifacts":[
+				{"url":"https://user:synthetic-pass@fw.example.invalid/et07.lod?token=synthetic#frag","sha256":"abc"},
+				{"url":"https://fw.example.invalid/plain.bin"}
+			],
+			"upgradeScript":{"url":"https://scripts.example.invalid/up.sh?X-Amz-Signature=synthetic","sha256":"def"}
+		}]}],
+		"documentationUrl":"https://docs.example.invalid/firmware?page=2"
+	}`)
+
+	formatted := formatDebugBody(body)
+
+	assert.NotContains(t, formatted, "synthetic-pass")
+	assert.NotContains(t, formatted, "token=synthetic")
+	assert.NotContains(t, formatted, "X-Amz-Signature")
+	assert.NotContains(t, formatted, "frag")
+	assert.Contains(t, formatted, `"url":"https://redacted@fw.example.invalid/et07.lod?<redacted>"`)
+	assert.Contains(t, formatted, `"url":"https://fw.example.invalid/plain.bin"`)
+	assert.Contains(t, formatted, `"url":"https://scripts.example.invalid/up.sh?<redacted>"`)
+	assert.Contains(t, formatted, `"sha256":"abc"`)
+	assert.Contains(t, formatted, `"documentationUrl":"https://docs.example.invalid/firmware?page=2"`)
+}
+
 func TestFormatDebugBodyPreservesJSONNumberLiterals(t *testing.T) {
 	assert.Equal(
 		t,
@@ -493,4 +740,40 @@ func TestFormatDebugBodyPreservesJSONNumberLiterals(t *testing.T) {
 
 func TestFormatDebugBodyPreservesNonJSONDiagnostics(t *testing.T) {
 	assert.Equal(t, "upstream unavailable", formatDebugBody([]byte("upstream unavailable")))
+}
+
+// Exercise both HTTP logging directions without changing the credential-bearing wire body.
+func testClientDebugFirmwareCredentials(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct{ name, field, value string }{
+		{"shared download auth", "downloadCredentials", `{"shared":"download-secret"}`},
+		{"per-component download auth", "downloadCredentials", `{"perComponent":{"compute":"download-secret"}}`},
+		{"legacy download auth", "authenticationData", `{"shared":"download-secret"}`},
+		{"device overrides", "deviceCredentialOverrides", `{"bmc":{"username":"device-user","password":"device-secret"},"nvos":{"username":"nvos-user","password":"nvos-secret"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"siteId":"site-1","` + tc.field + `":` + tc.value + `}`)
+			var logs bytes.Buffer
+			logger := logrus.New()
+			logger.SetOutput(&logs)
+			logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true, DisableColors: true})
+			client := NewClient("https://api.example.com", "test-org", "bearer-secret", logrus.NewEntry(logger), true)
+			client.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				received, err := io.ReadAll(request.Body)
+				require.NoError(t, err)
+				require.JSONEq(t, string(body), string(received))
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
+			})
+			response, _, err := client.doWithQueryValues(http.MethodPatch, "/v2/org/{org}/nico/tray/tray-1/firmware", nil, nil, body)
+			require.NoError(t, err)
+			require.JSONEq(t, string(body), string(response))
+			for _, secret := range []string{"download-secret", "device-user", "device-secret", "nvos-user", "nvos-secret", "bearer-secret"} {
+				assert.NotContains(t, logs.String(), secret)
+			}
+			assert.Contains(t, logs.String(), "Request body:")
+			assert.Contains(t, logs.String(), "Response body:")
+			assert.Contains(t, logs.String(), "site-1")
+			assert.Contains(t, logs.String(), "<redacted>")
+		})
+	}
 }

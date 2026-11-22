@@ -17,6 +17,7 @@
 
 use common::api_fixtures::create_test_env;
 use common::api_fixtures::dpu::dpu_discover_dhcp;
+use db::TransactionVending as _;
 use rpc::protos::forge::forge_server::Forge;
 
 use crate::DatabaseError;
@@ -31,7 +32,7 @@ async fn only_one_custom_pxe_per_interface(
     let new_interface_id =
         dpu_discover_dhcp(&env, &DPU_OOB_MAC_ADDRESS_POOL.allocate().to_string()).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let expected_pxe = Some("custom_pxe_string".to_string());
     let expected_user_data = Some("custom_user_data_string".to_string());
@@ -56,7 +57,7 @@ async fn only_one_custom_pxe_per_interface(
     assert_eq!(machine_boot_override.custom_pxe, expected_pxe);
     assert_eq!(machine_boot_override.custom_user_data, expected_user_data);
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let output = db::machine_boot_override::create(
         &mut txn,
@@ -78,7 +79,7 @@ async fn confirm_null_fields(pool: sqlx::PgPool) -> Result<(), Box<dyn std::erro
     let new_interface_id =
         dpu_discover_dhcp(&env, &DPU_OOB_MAC_ADDRESS_POOL.allocate().to_string()).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     db::machine_boot_override::create(&mut txn, new_interface_id, None, None)
         .await?
@@ -107,7 +108,7 @@ async fn api_get(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let new_interface_id =
         dpu_discover_dhcp(&env, &DPU_OOB_MAC_ADDRESS_POOL.allocate().to_string()).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     db::machine_boot_override::create(
         &mut txn,
@@ -160,10 +161,8 @@ async fn api_set(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to set overrides via API")
         .into_inner();
 
-    let mut txn = env.pool.begin().await?;
-
     let machine_boot_override =
-        db::machine_boot_override::find_optional(txn.as_mut(), machine_interface_id)
+        db::machine_boot_override::find_optional(&env.pool, machine_interface_id)
             .await
             .expect("Could not load custom boot")
             .unwrap();
@@ -183,7 +182,7 @@ async fn api_clear(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>>
     let new_interface_id =
         dpu_discover_dhcp(&env, &DPU_OOB_MAC_ADDRESS_POOL.allocate().to_string()).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     db::machine_boot_override::create(
         &mut txn,
@@ -202,11 +201,9 @@ async fn api_clear(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>>
         .await
         .expect("Failed to clear overrides via API");
 
-    let mut txn = env.pool.begin().await?;
-
     // ensure these stay Nones as we have code that will react to them not being None
     let machine_boot_override =
-        db::machine_boot_override::find_optional(txn.as_mut(), new_interface_id)
+        db::machine_boot_override::find_optional(&env.pool, new_interface_id)
             .await
             .expect("Could not load custom boot");
 
@@ -247,10 +244,8 @@ async fn api_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         .expect("Failed to set overrides via API")
         .into_inner();
 
-    let mut txn = env.pool.begin().await?;
-
     let machine_boot_override =
-        db::machine_boot_override::find_optional(txn.as_mut(), machine_interface_id)
+        db::machine_boot_override::find_optional(&env.pool, machine_interface_id)
             .await
             .expect("Could not load custom boot")
             .unwrap();

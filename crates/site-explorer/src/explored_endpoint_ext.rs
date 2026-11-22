@@ -149,7 +149,7 @@ pub fn get_sys_image_version(services: &[Service]) -> Result<&String, String> {
     image
         .version
         .as_ref()
-        .ok_or("Missing DPU_SYS_IMAGE version".to_string())
+        .ok_or_else(|| "Missing DPU_SYS_IMAGE version".to_string())
 }
 
 /// get_base_mac_from_sys_image_version returns a base MAC address

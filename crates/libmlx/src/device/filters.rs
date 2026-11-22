@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::str::FromStr;
 
@@ -99,8 +100,9 @@ impl FromStr for DeviceFilter {
         // Parse comma-separated values for OR logic.
         let values: Vec<String> = parts[1]
             .split(',')
-            .map(|v| v.trim().to_string())
+            .map(str::trim)
             .filter(|v| !v.is_empty())
+            .map(str::to_owned)
             .collect();
 
         if values.is_empty() {
@@ -127,10 +129,9 @@ impl FromStr for DeviceFilter {
 impl Display for DeviceFilter {
     // fmt formats the filter as field:value1,value2:match_mode.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let field_name = self.field.to_string();
-        let values_str = self.values.join(",");
-        let mode_name = self.match_mode.to_string();
-        write!(f, "{field_name}:{values_str}:{mode_name}")
+        write!(f, "{}:", self.field)?;
+        crate::write_joined(f, &self.values, ",")?;
+        write!(f, ":{}", self.match_mode)
     }
 }
 
@@ -139,12 +140,7 @@ impl Display for DeviceFilterSet {
         if self.filters.is_empty() {
             write!(f, "No filters")
         } else {
-            let filter_strings: Vec<String> = self
-                .filters
-                .iter()
-                .map(|filter| filter.to_string())
-                .collect();
-            write!(f, "{}", filter_strings.join(", "))
+            crate::write_joined(f, &self.filters, ", ")
         }
     }
 }
@@ -279,33 +275,33 @@ impl DeviceFilter {
 
     // matches checks if a device satisfies this filter.
     pub fn matches(&self, device: &MlxDeviceInfo) -> bool {
-        let device_value = self.get_device_field_value(device);
+        let device_lower = self.get_device_field_value(device).to_lowercase();
 
         self.values
             .iter()
-            .any(|filter_value| self.matches_value(&device_value, filter_value))
+            .any(|filter_value| self.matches_value(&device_lower, filter_value))
     }
 
     // get_device_field_value extracts the specified field value
     // from a device as a formatted string. Used for display and
     // filter matching purposes (since filter matching is all
     // based on strings).
-    fn get_device_field_value(&self, device: &MlxDeviceInfo) -> String {
-        match self.field {
-            DeviceField::DeviceType => device.device_type_pretty(),
-            DeviceField::PartNumber => device.part_number_pretty(),
-            DeviceField::FirmwareVersion => device.fw_version_current_pretty(),
-            DeviceField::MacAddress => device.base_mac_pretty(),
-            DeviceField::Description => device.device_description_pretty(),
-            DeviceField::PciName => device.pci_name_pretty(),
-            DeviceField::Status => device.status_pretty(),
-        }
+    fn get_device_field_value<'a>(&self, device: &'a MlxDeviceInfo) -> Cow<'a, str> {
+        let field_name = match self.field {
+            DeviceField::DeviceType => "device_type",
+            DeviceField::PartNumber => "part_number",
+            DeviceField::FirmwareVersion => "fw_version_current",
+            DeviceField::MacAddress => "base_mac",
+            DeviceField::Description => "device_description",
+            DeviceField::PciName => "pci_name",
+            DeviceField::Status => "status",
+        };
+        device.get_field_value_ref(field_name)
     }
 
     // matches_value checks if a device field value matches a filter value.
     // All matching is case-insensitive.
-    fn matches_value(&self, device_value: &str, filter_value: &str) -> bool {
-        let device_lower = device_value.to_lowercase();
+    fn matches_value(&self, device_lower: &str, filter_value: &str) -> bool {
         let filter_lower = filter_value.to_lowercase();
 
         match self.match_mode {
@@ -315,7 +311,7 @@ impl DeviceFilter {
                     .case_insensitive(true)
                     .build()
                 {
-                    Ok(re) => re.is_match(&device_lower),
+                    Ok(re) => re.is_match(device_lower),
                     Err(_) => {
                         // If regex is invalid, fall back to exact matching.
                         device_lower == filter_lower

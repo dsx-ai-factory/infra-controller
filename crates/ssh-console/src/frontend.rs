@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use carbide_uuid::machine::MachineId;
 use lazy_static::lazy_static;
+use rpc::carbide_api_client::CarbideApiClient;
 use rpc::forge::ValidateTenantPublicKeyRequest;
-use rpc::forge_api_client::ForgeApiClient;
 use russh::keys::ssh_key::AuthorizedKeys;
 use russh::keys::{Certificate, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Session, VerifiedPublicKey};
@@ -81,7 +81,7 @@ lazy_static! {
 
 pub(crate) struct Handler {
     config: Arc<Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     bmc_connection_store: BmcConnectionStore,
     /// The machine_id or instance_id the user is attempting to log into. Used as the username in the ssh command line (ie. ssh machine_id@ssh-console)
     authenticated_machine_string: Option<String>,
@@ -102,14 +102,14 @@ impl Handler {
     pub(crate) fn new(
         bmc_connection_store: BmcConnectionStore,
         config: Arc<Config>,
-        forge_api_client: ForgeApiClient,
+        carbide_api_client: CarbideApiClient,
         metrics: Arc<ServerMetrics>,
         peer_addr: Option<SocketAddr>,
     ) -> Self {
         tracing::debug!("spawning new frontend connection handler");
         Self {
             config,
-            forge_api_client,
+            carbide_api_client,
             bmc_connection_store,
             authenticated_machine_string: None,
             per_client_state: HashMap::new(),
@@ -198,12 +198,7 @@ impl russh::server::Handler for Handler {
         let channel_id = channel.id();
         let bmc_connection = self
             .bmc_connection_store
-            .get_connection(
-                machine,
-                &self.config,
-                &self.forge_api_client,
-                self.metrics.clone(),
-            )
+            .get_connection(machine, self.metrics.clone())
             .await
             .map_err(|error| GettingBmcConnection {
                 machine: machine.to_owned(),
@@ -352,7 +347,7 @@ impl russh::server::Handler for Handler {
             true
         } else if Uuid::from_str(machine_string).is_ok() {
             // Only try tenant auth if the user is a valid-looking UUID.
-            pubkey_auth_tenant(machine_string, public_key, &self.forge_api_client)
+            pubkey_auth_tenant(machine_string, public_key, &self.carbide_api_client)
                 .await
                 .map_err(|error| PubkeyAuthTenant {
                     instance_id: machine_string.to_owned(),
@@ -742,7 +737,7 @@ fn pubkey_auth_admin_authorized_keys(
 
     let authorized_keys = AuthorizedKeys::read_file(authorized_keys_path).map_err(|error| {
         PubkeyAuthError::ReadingAuthorizedKeys {
-            path: authorized_keys_path.to_string_lossy().to_string(),
+            path: authorized_keys_path.to_string_lossy().into_owned(),
             error,
         }
     })?;
@@ -764,9 +759,9 @@ fn pubkey_auth_admin_authorized_keys(
 async fn pubkey_auth_tenant(
     user: &str,
     public_key: &PublicKey,
-    forge_api_client: &ForgeApiClient,
+    carbide_api_client: &CarbideApiClient,
 ) -> Result<bool, PubkeyAuthError> {
-    let authorized = match forge_api_client
+    let authorized = match carbide_api_client
         .validate_tenant_public_key(ValidateTenantPublicKeyRequest {
             instance_id: user.to_string(),
             tenant_public_key: public_key.public_key_base64(),

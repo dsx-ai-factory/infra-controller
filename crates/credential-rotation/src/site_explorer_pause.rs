@@ -48,7 +48,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use db::DatabaseError;
+use db::{DatabaseError, TransactionVending as _};
 use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use sqlx::{PgConnection, PgPool};
@@ -89,10 +89,7 @@ pub async fn gate_before_credential_change(
         return Ok(GateDecision::Proceed);
     }
 
-    let mut txn = pool
-        .begin()
-        .await
-        .map_err(|e| DatabaseError::query("begin site-explorer pause gate transaction", e))?;
+    let mut txn = pool.txn_begin().await?;
     for mac in macs {
         db::bmc_suppression::upsert(
             &mut txn,
@@ -112,9 +109,7 @@ pub async fn gate_before_credential_change(
         source,
     )
     .await?;
-    txn.commit()
-        .await
-        .map_err(|e| DatabaseError::query("commit site-explorer pause gate transaction", e))?;
+    txn.commit().await?;
 
     let all_acknowledged = macs.iter().all(|mac| {
         rows.iter()
@@ -177,6 +172,7 @@ pub async fn resume_after_credential_change(
 
 #[cfg(test)]
 mod tests {
+    use db::TransactionVending as _;
     use mac_address::MacAddress;
     use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
     use sqlx::PgPool;
@@ -214,7 +210,7 @@ mod tests {
         );
 
         // Acknowledging only one leaves the gate waiting.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert!(
             db::bmc_suppression::acknowledge(
                 &mut txn,
@@ -237,7 +233,7 @@ mod tests {
         );
 
         // Once site-explorer has acknowledged both, the gate proceeds.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert!(
             db::bmc_suppression::acknowledge(
                 &mut txn,

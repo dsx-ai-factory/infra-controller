@@ -17,11 +17,11 @@
 
 use std::sync::Arc;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use carbide_host_support::agent_config::AgentConfig;
+use carbide_tls::client_config::ClientCert;
 pub use command_line::{AgentCommand, Options, RunOptions};
 use eyre::WrapErr;
-use forge_tls::client_config::ClientCert;
 
 mod command_line;
 
@@ -33,10 +33,12 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         None => (AgentConfig::default(), "default".to_string()),
         // development overrides
         Some(config_path) => (
-            AgentConfig::load_from(&config_path).wrap_err(format!(
-                "error loading agent configuration from {}",
-                config_path.display()
-            ))?,
+            AgentConfig::load_from(&config_path).wrap_err_with(|| {
+                format!(
+                    "error loading agent configuration from {}",
+                    config_path.display()
+                )
+            })?,
             config_path.display().to_string(),
         ),
     };
@@ -46,8 +48,8 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         "Using agent configuration"
     );
 
-    let forge_client_config = Arc::new(
-        ForgeClientConfig::new(
+    let carbide_client_config = Arc::new(
+        CarbideClientConfig::new(
             agent.forge_system.root_ca.clone(),
             Some(ClientCert {
                 cert_path: agent.forge_system.client_cert.clone(),
@@ -63,7 +65,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         }
 
         Some(AgentCommand::Run(options)) => {
-            main_loop::setup_and_run(forge_client_config, agent, *options)
+            main_loop::setup_and_run(carbide_client_config, agent, *options)
                 .await
                 .wrap_err("main_loop error exit")?;
             tracing::info!("Agent exit");

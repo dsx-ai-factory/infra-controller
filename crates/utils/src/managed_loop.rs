@@ -70,6 +70,23 @@ pub struct ManagedLoopIteration {
     pub error: String,
 }
 
+impl ManagedLoopIteration {
+    /// Builds an iteration event for recording with an explicit instrumentation handle.
+    pub fn from_result<T, E: std::fmt::Display>(
+        manager: LoopManager,
+        result: &Result<T, E>,
+    ) -> Self {
+        Self {
+            manager,
+            outcome: Outcome::from(result),
+            error: match result {
+                Ok(_) => String::new(),
+                Err(error) => error.to_string(),
+            },
+        }
+    }
+}
+
 /// Every iteration is counted; only the failures write the WARN line these
 /// loops have always logged.
 impl carbide_instrument::DynamicLog for ManagedLoopIteration {
@@ -85,14 +102,7 @@ impl carbide_instrument::DynamicLog for ManagedLoopIteration {
 /// silently, a failed one also writes the event's WARN line with the error
 /// text.
 pub fn record_iteration<T, E: std::fmt::Display>(manager: LoopManager, result: &Result<T, E>) {
-    carbide_instrument::emit(ManagedLoopIteration {
-        manager,
-        outcome: Outcome::from(result),
-        error: match result {
-            Ok(_) => String::new(),
-            Err(error) => error.to_string(),
-        },
-    });
+    carbide_instrument::emit(ManagedLoopIteration::from_result(manager, result));
 }
 
 #[cfg(test)]

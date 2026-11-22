@@ -18,8 +18,9 @@
 //! Handler for RackState::Maintenance.
 
 use std::collections::HashSet;
+use std::fmt::Write;
 
-use carbide_instrument::{Event, emit};
+use carbide_instrument::Event;
 use carbide_rack::firmware_object::{
     ANY_RACK_HARDWARE_TYPE, profile_hardware_type_wire_value, rack_maintenance_access_token_key,
     rms_access_token_or_noauth,
@@ -49,8 +50,9 @@ use component_manager::nv_switch_manager::{
     ScaleUpFabricManagerJobStatus, SwitchCertificateEndpoint, SwitchPasswordRotationState,
 };
 use component_manager::{NvosUpdateRequest, RackFirmwareUpdateRequest};
+use db::db_read::{DbReader, PgPoolReader};
 use db::{
-    host_machine_update as db_host_machine_update, machine as db_machine,
+    TransactionVending as _, host_machine_update as db_host_machine_update, machine as db_machine,
     machine_topology as db_machine_topology, power_options as db_power_options,
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
@@ -80,7 +82,12 @@ async fn clear_rv_labels(
     rack: &Rack,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<(), StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let machines = super::get_machines_from_rack(rack, &mut txn).await?;
 
@@ -94,7 +101,9 @@ async fn clear_rv_labels(
         }
     }
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     Ok(())
 }
 
@@ -102,7 +111,12 @@ async fn request_compute_host_restarts(
     rack: &mut Rack,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let mut machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
     let automatic = is_automatic_ingestion(rack);
     if automatic {
@@ -132,7 +146,9 @@ async fn request_compute_host_restarts(
         machines.retain(|machine| !desired_off_ids.contains(&machine.id.into()));
     }
     if !automatic && !desired_off_ids.is_empty() {
-        txn.rollback().await?;
+        txn.rollback()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let rack_id = rack.id.clone();
         return transition_to_rack_error(
             &rack_id,
@@ -155,7 +171,9 @@ async fn request_compute_host_restarts(
         .map(|machine| machine.id.to_string())
         .collect::<Vec<_>>();
     if !unavailable_machine_ids.is_empty() {
-        txn.rollback().await?;
+        txn.rollback()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting to request compute host restarts; unavailable machines: {}",
             unavailable_machine_ids.join(", ")
@@ -172,7 +190,9 @@ async fn request_compute_host_restarts(
         )
         .await?
         {
-            txn.rollback().await?;
+            txn.rollback()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             return Ok(StateHandlerOutcome::wait(format!(
                 "machine {} is no longer eligible for the rack restart request",
                 machine.id
@@ -202,10 +222,9 @@ async fn wait_for_compute_host_restarts(
     scope: &MaintenanceScope,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let mut machines = {
-        let mut connection = ctx.services.db_pool.acquire().await?;
-        super::get_machines_from_rack(rack, &mut connection).await?
-    };
+    let mut machines =
+        super::get_machines_from_rack(rack, &mut PgPoolReader::from(ctx.services.db_pool.clone()))
+            .await?;
     let current_machine_ids = machines
         .iter()
         .map(|machine| HostMachineId::from(machine.id))
@@ -236,7 +255,8 @@ async fn wait_for_compute_host_restarts(
                 request.initiator != initiator
                     || !matches!(
                         request.operation,
-                        MachineMaintenanceOperation::Reboot | MachineMaintenanceOperation::Reset
+                        MachineMaintenanceOperation::Reboot
+                            | MachineMaintenanceOperation::Reset { .. }
                     )
             })
     }) {
@@ -420,7 +440,12 @@ async fn terminate_active_rack_maintenance(
         .maintenance_requested
         .clone()
         .unwrap_or_default();
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let targets = load_rack_maintenance_target_ids(txn.as_mut(), rack_id, &scope).await?;
     let initiator = rack_maintenance_initiator(rack_id);
 
@@ -534,7 +559,7 @@ enum DeviceFirmwareProgress {
         failed: usize,
     },
     Failed {
-        failed: usize,
+        failed_device_ids: Vec<String>,
         total: usize,
     },
     Completed {
@@ -551,14 +576,14 @@ enum DeviceFirmwareOutcome {
 }
 
 async fn desired_off_machine_ids(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
 ) -> Result<Vec<HostMachineId>, StateHandlerError> {
     if machine_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut machine_ids = db_power_options::get_by_ids(machine_ids, txn)
+    let mut machine_ids = db_power_options::get_by_ids(machine_ids, db)
         .await?
         .into_iter()
         .filter(|options| options.desired_power_state == model::power_manager::PowerState::Off)
@@ -569,20 +594,26 @@ async fn desired_off_machine_ids(
 }
 
 fn format_machine_ids(machine_ids: &[HostMachineId]) -> String {
-    machine_ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut output = String::new();
+    for (index, machine_id) in machine_ids.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        write!(output, "{machine_id}").expect("writing to a String cannot fail");
+    }
+    output
 }
 
-async fn load_scoped_machines(
-    txn: &mut sqlx::PgConnection,
+async fn load_scoped_machines<DB>(
+    db: &mut DB,
     rack_id: &RackId,
     scope: &MaintenanceScope,
-) -> Result<Vec<HostMachine>, StateHandlerError> {
+) -> Result<Vec<HostMachine>, StateHandlerError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
-        &mut *txn,
+        &mut *db,
         model::machine::machine_search_config::MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
             ..Default::default()
@@ -594,7 +625,7 @@ async fn load_scoped_machines(
         Vec::new()
     } else {
         db_machine::find(
-            &mut *txn,
+            &mut *db,
             db::ObjectFilter::List(&machine_ids),
             model::machine::machine_search_config::MachineSearchConfig::default(),
         )
@@ -604,11 +635,12 @@ async fn load_scoped_machines(
 }
 
 async fn power_blocked_rack_firmware_machine_ids(
-    txn: &mut sqlx::PgConnection,
+    db_pool: &sqlx::PgPool,
     rack_id: &RackId,
     scope: &MaintenanceScope,
 ) -> Result<Vec<HostMachineId>, StateHandlerError> {
-    let machines = load_scoped_machines(txn, rack_id, scope).await?;
+    let machines =
+        load_scoped_machines(&mut PgPoolReader::from(db_pool.clone()), rack_id, scope).await?;
     let initiator = rack_maintenance_initiator(rack_id);
     let ready_rack_requested_ids = machines
         .iter()
@@ -621,11 +653,11 @@ async fn power_blocked_rack_firmware_machine_ids(
         })
         .map(|machine| machine.id)
         .collect::<Vec<_>>();
-    desired_off_machine_ids(txn, &ready_rack_requested_ids).await
+    desired_off_machine_ids(db_pool, &ready_rack_requested_ids).await
 }
 
 async fn resolve_machine_id_for_firmware_device(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     device: &FirmwareUpgradeDeviceStatus,
 ) -> Result<Option<HostMachineId>, StateHandlerError> {
     if !device.node_id.is_empty() {
@@ -635,11 +667,11 @@ async fn resolve_machine_id_for_firmware_device(
         Ok(mac) => mac,
         Err(_) => return Ok(None),
     };
-    Ok(db_machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(txn, mac).await?)
+    Ok(db_machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(db, mac).await?)
 }
 
 async fn resolve_switch_id_for_firmware_device(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     rack_id: &RackId,
     device: &FirmwareUpgradeDeviceStatus,
 ) -> Result<Option<carbide_uuid::switch::SwitchId>, StateHandlerError> {
@@ -654,7 +686,7 @@ async fn resolve_switch_id_for_firmware_device(
         Err(_) => return Ok(None),
     };
     Ok(db_switch::find_ids(
-        txn,
+        db,
         model::switch::SwitchSearchFilter {
             bmc_mac: Some(mac),
             rack_id: Some(rack_id.clone()),
@@ -667,7 +699,7 @@ async fn resolve_switch_id_for_firmware_device(
 }
 
 async fn resolve_power_shelf_id_for_firmware_device(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     rack_id: &RackId,
     device: &FirmwareUpgradeDeviceStatus,
 ) -> Result<Option<carbide_uuid::power_shelf::PowerShelfId>, StateHandlerError> {
@@ -682,7 +714,7 @@ async fn resolve_power_shelf_id_for_firmware_device(
         Err(_) => return Ok(None),
     };
     Ok(db_power_shelf::find_ids(
-        txn,
+        db,
         model::power_shelf::PowerShelfSearchFilter {
             bmc_mac: Some(mac),
             rack_id: Some(rack_id.clone()),
@@ -744,17 +776,16 @@ async fn load_ingestion_firmware_inventory(
     rack: &Rack,
     services: &crate::context::RackStateHandlerServices,
 ) -> Result<RackFirmwareInventory, StateHandlerError> {
-    let mut conn = services.db_pool.acquire().await?;
-    let mut machine_ids =
-        load_scoped_machines(conn.as_mut(), &rack.id, &MaintenanceScope::default())
-            .await?
-            .iter()
-            .filter(|machine| ready_for_ingestion_firmware(machine))
-            .map(|machine| machine.id)
-            .collect::<Vec<_>>();
-    let off = desired_off_machine_ids(conn.as_mut(), &machine_ids).await?;
+    let mut reader = PgPoolReader::from(services.db_pool.clone());
+    let mut machine_ids = load_scoped_machines(&mut reader, &rack.id, &MaintenanceScope::default())
+        .await?
+        .iter()
+        .filter(|machine| ready_for_ingestion_firmware(machine))
+        .map(|machine| machine.id)
+        .collect::<Vec<_>>();
+    let off = desired_off_machine_ids(&services.db_pool, &machine_ids).await?;
     machine_ids.retain(|id| !off.contains(id));
-    let switch_ids = load_scoped_switches(conn.as_mut(), &rack.id, &MaintenanceScope::default())
+    let switch_ids = load_scoped_switches(&mut reader, &rack.id, &MaintenanceScope::default())
         .await?
         .iter()
         .filter(|switch| {
@@ -765,7 +796,6 @@ async fn load_ingestion_firmware_inventory(
         })
         .map(|switch| switch.id)
         .collect::<Vec<_>>();
-    drop(conn);
     let machines = load_compute_firmware_inventory(
         &services.db_pool,
         services.credential_manager.as_ref(),
@@ -793,13 +823,16 @@ async fn load_ingestion_firmware_inventory(
     })
 }
 
-async fn submitted_firmware_machine_ids(
-    txn: &mut sqlx::PgConnection,
+async fn submitted_firmware_machine_ids<DB>(
+    db: &mut DB,
     job: &FirmwareUpgradeJob,
-) -> Result<HashSet<HostMachineId>, StateHandlerError> {
+) -> Result<HashSet<HostMachineId>, StateHandlerError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut ids = HashSet::new();
     for device in &job.machines {
-        if let Some(id) = resolve_machine_id_for_firmware_device(txn, device).await? {
+        if let Some(id) = resolve_machine_id_for_firmware_device(&mut *db, device).await? {
             ids.insert(id);
         }
     }
@@ -818,9 +851,9 @@ async fn reconcile_ingestion_firmware_machines(
     if !state.config.ingestion_in_progress || state.config.maintenance_requested.is_some() {
         return Ok(false);
     }
-    let mut conn = ctx.services.db_pool.acquire().await?;
-    let submitted = submitted_firmware_machine_ids(conn.as_mut(), job).await?;
-    let missing = load_scoped_machines(conn.as_mut(), &state.id, &MaintenanceScope::default())
+    let mut reader = PgPoolReader::from(ctx.services.db_pool.clone());
+    let submitted = submitted_firmware_machine_ids(&mut reader, job).await?;
+    let missing = load_scoped_machines(&mut reader, &state.id, &MaintenanceScope::default())
         .await?
         .into_iter()
         // Tenant-owned hosts are outside automatic supplemental maintenance.
@@ -837,12 +870,11 @@ async fn reconcile_ingestion_firmware_machines(
     if ready_ids.is_empty() {
         return Ok(!missing.is_empty());
     }
-    let desired_off = desired_off_machine_ids(conn.as_mut(), &ready_ids).await?;
+    let desired_off = desired_off_machine_ids(&ctx.services.db_pool, &ready_ids).await?;
     ready_ids.retain(|id| !desired_off.contains(id));
     if ready_ids.is_empty() {
         return Ok(true);
     }
-    drop(conn);
 
     let config_json = configured_profile_firmware_object_json(&state.id, rack_profile_id, ctx)
         .await
@@ -887,7 +919,12 @@ async fn reconcile_ingestion_firmware_machines(
         .await
         .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     trigger_rack_firmware_reprovisioning_requests(
         txn.as_mut(),
         &state.id,
@@ -917,7 +954,9 @@ async fn reconcile_ingestion_firmware_machines(
     job.completed_at = None;
     job.status = Some(FirmwareProgressState::InProgress);
     db_rack::update_firmware_upgrade_job(txn.as_mut(), &state.id, Some(job)).await?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     Ok(true)
 }
 
@@ -987,19 +1026,23 @@ fn power_shelf_firmware_outcome(
     }
 }
 
-fn summarize_firmware_outcomes(outcomes: &[DeviceFirmwareOutcome]) -> DeviceFirmwareProgress {
+fn summarize_firmware_outcomes(
+    outcomes: &[(String, DeviceFirmwareOutcome)],
+) -> DeviceFirmwareProgress {
     let total = outcomes.len();
     let completed = outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, DeviceFirmwareOutcome::Completed))
+        .filter(|(_, outcome)| matches!(outcome, DeviceFirmwareOutcome::Completed))
         .count();
-    let failed = outcomes
+    let mut failed_device_ids = outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, DeviceFirmwareOutcome::Failed))
-        .count();
+        .filter(|(_, outcome)| matches!(outcome, DeviceFirmwareOutcome::Failed))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let failed = failed_device_ids.len();
     let pending = outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, DeviceFirmwareOutcome::Waiting))
+        .filter(|(_, outcome)| matches!(outcome, DeviceFirmwareOutcome::Waiting))
         .count();
     if pending > 0 {
         return DeviceFirmwareProgress::Waiting {
@@ -1010,18 +1053,42 @@ fn summarize_firmware_outcomes(outcomes: &[DeviceFirmwareOutcome]) -> DeviceFirm
         };
     }
     if failed > 0 {
-        return DeviceFirmwareProgress::Failed { failed, total };
+        failed_device_ids.sort();
+        return DeviceFirmwareProgress::Failed {
+            failed_device_ids,
+            total,
+        };
     }
     DeviceFirmwareProgress::Completed { completed, total }
 }
 
-async fn load_scoped_switches(
-    txn: &mut sqlx::PgConnection,
+/// Retains the MAC identity for older NVOS job entries without a managed ID.
+fn failed_nvos_switch_ids(job: &model::rack::NvosUpdateJob) -> Vec<String> {
+    let mut ids = job
+        .all_switches()
+        .filter(|switch| switch.status == "failed")
+        .map(|switch| {
+            if switch.node_id.is_empty() {
+                format!("MAC {}", switch.mac)
+            } else {
+                switch.node_id.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+async fn load_scoped_switches<DB>(
+    db: &mut DB,
     rack_id: &RackId,
     scope: &MaintenanceScope,
-) -> Result<Vec<model::switch::Switch>, StateHandlerError> {
+) -> Result<Vec<model::switch::Switch>, StateHandlerError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let switch_ids = db_switch::find_ids(
-        &mut *txn,
+        &mut *db,
         model::switch::SwitchSearchFilter {
             rack_id: Some(rack_id.clone()),
             deleted: model::DeletedFilter::Exclude,
@@ -1033,7 +1100,7 @@ async fn load_scoped_switches(
         Vec::new()
     } else {
         db_switch::find_by(
-            txn,
+            db,
             db::ObjectColumnFilter::List(db_switch::IdColumn, &switch_ids),
         )
         .await?
@@ -1043,25 +1110,28 @@ async fn load_scoped_switches(
 }
 
 async fn scoped_switch_waiting_for_nvos(
-    txn: &mut sqlx::PgConnection,
+    db_pool: &sqlx::PgPool,
     rack_id: &RackId,
     scope: &MaintenanceScope,
 ) -> Result<bool, StateHandlerError> {
     let initiator = rack_maintenance_initiator(rack_id);
-    Ok(load_scoped_switches(txn, rack_id, scope)
-        .await?
-        .iter()
-        .any(|switch| {
-            matches!(
-                switch.controller_state.value,
-                model::switch::SwitchControllerState::ReProvisioning {
-                    reprovisioning_state: model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
-                }
-            ) && switch
-                .switch_reprovisioning_requested
-                .as_ref()
-                .is_some_and(|request| request.initiator == initiator)
-        }))
+    Ok(
+        load_scoped_switches(&mut PgPoolReader::from(db_pool.clone()), rack_id, scope)
+            .await?
+            .iter()
+            .any(|switch| {
+                matches!(
+                    switch.controller_state.value,
+                    model::switch::SwitchControllerState::ReProvisioning {
+                        reprovisioning_state:
+                            model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
+                    }
+                ) && switch
+                    .switch_reprovisioning_requested
+                    .as_ref()
+                    .is_some_and(|request| request.initiator == initiator)
+            }),
+    )
 }
 
 /// Reads device controller states for devices in `rack_id`,
@@ -1093,7 +1163,7 @@ async fn evaluate_firmware_progress_from_devices(
         Vec::new()
     } else {
         db_power_shelf::find_by(
-            txn,
+            &mut *txn,
             db::ObjectColumnFilter::List(db_power_shelf::IdColumn, &power_shelf_ids),
         )
         .await?
@@ -1121,20 +1191,22 @@ async fn evaluate_firmware_progress_from_devices(
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(machine.id.to_string());
         }
-        outcomes.push(outcome);
+        outcomes.push((machine.id.to_string(), outcome));
     }
     let mut submitted_switches = HashSet::new();
     let mut submitted_shelves = HashSet::new();
     if let Some(job) = ingestion_job {
         for device in &job.switches {
-            if let Some(id) = resolve_switch_id_for_firmware_device(txn, rack_id, device).await? {
+            if let Some(id) =
+                resolve_switch_id_for_firmware_device(&mut *txn, rack_id, device).await?
+            {
                 submitted_switches.insert(id);
             }
         }
         submitted_shelves.extend(job.ingestion_power_shelf_ids.iter().flatten().copied());
         for device in &job.power_shelves {
             if let Some(id) =
-                resolve_power_shelf_id_for_firmware_device(txn, rack_id, device).await?
+                resolve_power_shelf_id_for_firmware_device(&mut *txn, rack_id, device).await?
             {
                 submitted_shelves.insert(id);
             }
@@ -1148,7 +1220,7 @@ async fn evaluate_firmware_progress_from_devices(
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(switch.id.to_string());
         }
-        outcomes.push(outcome);
+        outcomes.push((switch.id.to_string(), outcome));
     }
     for power_shelf in &power_shelves {
         if ingestion_job.is_some() && !submitted_shelves.contains(&power_shelf.id) {
@@ -1158,7 +1230,7 @@ async fn evaluate_firmware_progress_from_devices(
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(power_shelf.id.to_string());
         }
-        outcomes.push(outcome);
+        outcomes.push((power_shelf.id.to_string(), outcome));
     }
     pending_device_ids.sort();
     Ok((summarize_firmware_outcomes(&outcomes), pending_device_ids))
@@ -1271,14 +1343,20 @@ async fn transition_to_rack_error(
     cause: impl Into<String>,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let cause = cause.into();
+    let outcome = rack_maintenance_error_outcome(rack_id, cause.into());
+    clear_maintenance_requested_on_error(rack_id, state, outcome, ctx).await
+}
+
+fn rack_maintenance_error_outcome(
+    rack_id: &RackId,
+    cause: String,
+) -> StateHandlerOutcome<RackState> {
     tracing::warn!(rack_id = %rack_id, %cause, "Rack maintenance failed, transitioning to Error");
-    let outcome = StateHandlerOutcome::transition(RackState::Error {
+    StateHandlerOutcome::transition(RackState::Error {
         certificate_failure: None,
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
-    });
-    clear_maintenance_requested_on_error(rack_id, state, outcome, ctx).await
+    })
 }
 
 async fn transition_rack_to_switch_certificate_error(
@@ -1318,7 +1396,12 @@ async fn transition_to_rack_error_with_firmware_job(
     state.firmware_upgrade_job = Some(job.clone());
     state.config.maintenance_requested = None;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db_rack::update_firmware_upgrade_job(txn.as_mut(), rack_id, Some(&job)).await?;
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
 
@@ -1331,12 +1414,12 @@ async fn transition_to_rack_error_with_firmware_job(
 }
 
 /// If `maintenance_requested` is set, clear it and persist the updated config
-/// using a fresh transaction attached to the outcome. Used when transitioning
+/// reusing the outcome's transaction, or starting one when absent. Used when transitioning
 /// from `Maintenance` to `Error` to break the Error → Maintenance loop.
 async fn clear_maintenance_requested_on_error(
     rack_id: &RackId,
     state: &mut Rack,
-    outcome: StateHandlerOutcome<RackState>,
+    mut outcome: StateHandlerOutcome<RackState>,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     if state.config.maintenance_requested.is_none()
@@ -1345,9 +1428,55 @@ async fn clear_maintenance_requested_on_error(
         return Ok(outcome);
     }
     state.config.maintenance_requested = None;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = match outcome.take_transaction() {
+        Some(txn) => txn,
+        None => ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?,
+    };
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
     Ok(outcome.with_txn(txn))
+}
+
+async fn nvos_job_switch_id(
+    db: impl DbReader<'_>,
+    rack_id: &RackId,
+    switch: &NvosUpdateSwitchStatus,
+) -> Result<Option<SwitchId>, StateHandlerError> {
+    if !switch.node_id.is_empty() {
+        return Ok(switch.node_id.parse().ok());
+    }
+    let Ok(mac) = switch.mac.parse::<mac_address::MacAddress>() else {
+        return Ok(None);
+    };
+    Ok(db_switch::find_ids(
+        db,
+        model::switch::SwitchSearchFilter {
+            bmc_mac: Some(mac),
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        },
+    )
+    .await?
+    .first()
+    .copied())
+}
+
+fn nvos_request_hardware_job<'a>(
+    rack: &'a Rack,
+    scope: &MaintenanceScope,
+    requested_at: chrono::DateTime<chrono::Utc>,
+) -> Option<&'a FirmwareUpgradeJob> {
+    rack.firmware_upgrade_job.as_ref().filter(|job| {
+        scope.should_run(&MaintenanceActivity::FirmwareUpgrade {
+            firmware_version: None,
+            components: vec![],
+            force_update: false,
+        }) && job.started_at.is_some_and(|at| at >= requested_at)
+    })
 }
 
 fn nvos_update_selected(scope: &MaintenanceScope) -> bool {
@@ -1457,12 +1586,13 @@ struct RackMaintenanceAccessTokenCleanupFailed {
 async fn delete_rack_maintenance_access_token(
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) {
     if let Err(error) = credential_manager
         .delete_credentials(&rack_maintenance_access_token_key(rack_id))
         .await
     {
-        emit(RackMaintenanceAccessTokenCleanupFailed {
+        instrumentation.emit(RackMaintenanceAccessTokenCleanupFailed {
             rack_id: rack_id.clone(),
             error: error.to_string(),
         });
@@ -2422,7 +2552,12 @@ async fn verify_scale_up_fabric_manager_v2(
     };
 
     let observed_primary_node_id = observed_primary.to_string();
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Keep the primary and per-switch status atomic so readers cannot observe a
     // newly selected primary paired with stale Fabric Manager state.
@@ -2452,7 +2587,9 @@ async fn verify_scale_up_fabric_manager_v2(
         .with_txn(txn));
     }
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     start_primary_switch_certificate_configuration(
         id,
@@ -2477,6 +2614,136 @@ async fn verify_scale_up_fabric_manager_v2(
 /// Returns an error when a required database, credential, firmware-source, or
 /// backend operation fails.
 pub async fn handle_maintenance(
+    id: &RackId,
+    state: &mut Rack,
+    rack_profile_id: Option<&RackProfileId>,
+    maintenance_state: &RackMaintenanceState,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let action_id = state
+        .config
+        .maintenance_requested
+        .as_ref()
+        .and_then(|scope| scope.action_id);
+    let pool = ctx.services.db_pool.clone();
+    let scope = state.config.maintenance_requested.clone();
+    let mut outcome = db::cm_action::resume(
+        &pool,
+        action_id,
+        handle_maintenance_inner(id, state, rack_profile_id, maintenance_state, ctx),
+    )
+    .await?;
+    if let RackMaintenanceState::NVOSUpdate { nvos_update } = maintenance_state
+        && let Some(scope) = scope
+        && let Some(requested_at) = scope.requested_at
+        && nvos_update_selected(&scope)
+        && (scope.is_full_rack() || !scope.switch_ids.is_empty())
+    {
+        let failure = match &outcome {
+            StateHandlerOutcome::Transition {
+                next_state: RackState::Error { cause, .. },
+                ..
+            } => Some(cause.clone()),
+            _ => None,
+        };
+        let finished = matches!(&outcome, StateHandlerOutcome::Transition {
+            next_state: RackState::Maintenance { maintenance_state }, ..
+        } if !matches!(maintenance_state, RackMaintenanceState::NVOSUpdate { .. }));
+        let skipped = matches!(nvos_update, NvosUpdateState::Start) && finished;
+        if skipped
+            || (finished
+                && state
+                    .nvos_update_job
+                    .as_ref()
+                    .and_then(|job| job.request.as_ref())
+                    .is_none_or(|request| request.requested_at != requested_at))
+            || failure.is_some()
+        {
+            let mut txn = match outcome.take_transaction() {
+                Some(txn) => txn,
+                None => pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?,
+            };
+            let switch_ids = if let Some(request) = state
+                .nvos_update_job
+                .as_ref()
+                .and_then(|job| job.request.as_ref())
+                .filter(|request| request.requested_at == requested_at)
+            {
+                request.switch_ids.clone()
+            } else if matches!(nvos_update, NvosUpdateState::WaitForComplete) {
+                let mut switch_ids = Vec::new();
+                if let Some(job) = &state.nvos_update_job {
+                    for switch in &job.switches {
+                        if let Some(switch_id) =
+                            nvos_job_switch_id(txn.as_mut(), id, switch).await?
+                        {
+                            switch_ids.push(switch_id);
+                        }
+                    }
+                }
+                switch_ids
+            } else {
+                let mut switch_ids = db_switch::find_ids(
+                    txn.as_mut(),
+                    model::switch::SwitchSearchFilter {
+                        rack_id: Some(id.clone()),
+                        deleted: model::DeletedFilter::Exclude,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                if !scope.is_full_rack() {
+                    switch_ids.retain(|id| scope.switch_ids.contains(id));
+                }
+                switch_ids
+            };
+            // A Start error/skip belongs to a new attempt, never to the previous job.
+            let mut job = if matches!(nvos_update, NvosUpdateState::WaitForComplete) {
+                state.nvos_update_job.clone().unwrap_or_default()
+            } else {
+                model::rack::NvosUpdateJob::default()
+            };
+            let firmware_job = nvos_request_hardware_job(state, &scope, requested_at);
+            let firmware = firmware_job.is_some();
+            let target_version = match job
+                .request
+                .as_ref()
+                .filter(|request| request.requested_at == requested_at)
+            {
+                Some(request) => request.target_version.clone(),
+                None => firmware_job
+                    .and_then(|job| job.firmware_id.clone())
+                    .or_else(|| (!job.firmware_id.is_empty()).then(|| job.firmware_id.clone())),
+            };
+            if skipped || failure.is_some() {
+                if matches!(nvos_update, NvosUpdateState::Start) {
+                    job.status = Some(if skipped { "skipped" } else { "failed" }.into());
+                    job.started_at = Some(requested_at);
+                }
+                job.completed_at.get_or_insert_with(chrono::Utc::now);
+            }
+            job.request = Some(model::rack::RackNvosUpdateRequest {
+                target_version,
+                requested_at,
+                switch_ids,
+                firmware,
+                skipped,
+                failure,
+            });
+            // Reuse the transition transaction so failure cleanup and its NVOS
+            // result commit together, including before a backend job exists.
+            db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
+            state.nvos_update_job = Some(job);
+            outcome = outcome.with_txn(txn);
+        }
+    }
+    Ok(outcome)
+}
+
+async fn handle_maintenance_inner(
     id: &RackId,
     state: &mut Rack,
     rack_profile_id: Option<&RackProfileId>,
@@ -2560,19 +2827,23 @@ pub async fn handle_maintenance(
                 let nvos_json_pending = explicit_nvos_config_json(scope).is_some();
 
                 let desired_off_machine_ids = {
-                    let mut conn = ctx.services.db_pool.acquire().await?;
-                    let machine_ids = load_scoped_machines(conn.as_mut(), id, scope)
-                        .await?
-                        .into_iter()
-                        .map(|machine| machine.id)
-                        .collect::<Vec<_>>();
-                    desired_off_machine_ids(conn.as_mut(), &machine_ids).await?
+                    let machine_ids = load_scoped_machines(
+                        &mut PgPoolReader::from(ctx.services.db_pool.clone()),
+                        id,
+                        scope,
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|machine| machine.id)
+                    .collect::<Vec<_>>();
+                    desired_off_machine_ids(&ctx.services.db_pool, &machine_ids).await?
                 };
                 if !is_automatic_ingestion(state) && !desired_off_machine_ids.is_empty() {
                     if uses_stored_token {
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2595,6 +2866,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2650,6 +2922,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2668,6 +2941,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2719,6 +2993,7 @@ pub async fn handle_maintenance(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
                 }
@@ -2758,7 +3033,12 @@ pub async fn handle_maintenance(
                     "Rack firmware update was accepted"
                 );
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 let power_shelf_ids = db_power_shelf::find_ids(
                     txn.as_mut(),
                     model::power_shelf::PowerShelfSearchFilter {
@@ -2828,10 +3108,9 @@ pub async fn handle_maintenance(
                     ));
                 }
 
-                let power_blocked_machine_ids = {
-                    let mut conn = ctx.services.db_pool.acquire().await?;
-                    power_blocked_rack_firmware_machine_ids(conn.as_mut(), id, scope).await?
-                };
+                let power_blocked_machine_ids =
+                    power_blocked_rack_firmware_machine_ids(&ctx.services.db_pool, id, scope)
+                        .await?;
                 if !power_blocked_machine_ids.is_empty() {
                     let now = chrono::Utc::now();
                     let mut job = state.firmware_upgrade_job.clone().unwrap();
@@ -2850,10 +3129,16 @@ pub async fn handle_maintenance(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
 
-                    let mut recovery_txn = ctx.services.db_pool.begin().await?;
+                    let mut recovery_txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_rack::update_firmware_upgrade_job(recovery_txn.as_mut(), id, Some(&job))
                         .await?;
                     state.firmware_upgrade_job = Some(job);
@@ -2888,6 +3173,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -2903,7 +3189,12 @@ pub async fn handle_maintenance(
                     .await
                     .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
 
                 for device in job.machines.iter() {
                     if let Some(machine_id) =
@@ -3035,11 +3326,18 @@ pub async fn handle_maintenance(
                         job.completed_at = None;
                     }
                     db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
-                    txn.commit().await?;
+                    txn.commit()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     state.firmware_upgrade_job = Some(job.clone());
                     reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
                         .await?;
-                    txn = ctx.services.db_pool.begin().await?;
+                    txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                 }
 
                 // Advancement is driven by machine/switch/power-shelf controller
@@ -3074,7 +3372,10 @@ pub async fn handle_maintenance(
                         ))
                         .with_txn(txn))
                     }
-                    DeviceFirmwareProgress::Failed { failed, total } => {
+                    DeviceFirmwareProgress::Failed {
+                        failed_device_ids,
+                        total,
+                    } => {
                         let should_cleanup_token = explicit_nvos_config_json(scope).is_some();
                         let now = chrono::Utc::now();
                         job.status = Some(FirmwareProgressState::Failed);
@@ -3082,23 +3383,33 @@ pub async fn handle_maintenance(
                             job.completed_at = Some(now);
                         }
                         let cause = format!(
-                            "firmware upgrade failed: {}/{} devices failed",
-                            failed, total
+                            "firmware upgrade failed: {}/{} devices failed; failed devices: [{}]",
+                            failed_device_ids.len(),
+                            total,
+                            failed_device_ids.join(", ")
                         );
 
                         // Persist the device status updates already accumulated in this
                         // transaction, but leave the maintenance scope intact while deleting
                         // credentials so a concurrent termination retains the original scope.
-                        txn.commit().await?;
+                        txn.commit()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         if should_cleanup_token {
                             delete_rack_maintenance_access_token(
                                 ctx.services.credential_manager.as_ref(),
                                 id,
+                                &ctx.services.instrumentation,
                             )
                             .await;
                         }
 
-                        let mut recovery_txn = ctx.services.db_pool.begin().await?;
+                        let mut recovery_txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db_rack::update_firmware_upgrade_job(recovery_txn.as_mut(), id, Some(&job))
                             .await?;
                         state.firmware_upgrade_job = Some(job);
@@ -3156,6 +3467,7 @@ pub async fn handle_maintenance(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
 
@@ -3173,6 +3485,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3195,10 +3508,9 @@ pub async fn handle_maintenance(
                                 })?;
 
                         let Some(config_json) = config_json else {
-                            let switch_waiting_for_nvos = {
-                                let mut conn = ctx.services.db_pool.acquire().await?;
-                                scoped_switch_waiting_for_nvos(conn.as_mut(), id, scope).await?
-                            };
+                            let switch_waiting_for_nvos =
+                                scoped_switch_waiting_for_nvos(&ctx.services.db_pool, id, scope)
+                                    .await?;
 
                             if switch_waiting_for_nvos {
                                 return transition_to_rack_error(
@@ -3226,6 +3538,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3272,6 +3585,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3288,6 +3602,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3308,6 +3623,7 @@ pub async fn handle_maintenance(
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
                             id,
+                            &ctx.services.instrumentation,
                         )
                         .await;
                     }
@@ -3347,6 +3663,17 @@ pub async fn handle_maintenance(
                     })?;
                 }
 
+                let submitted_switch_ids: Vec<_> = switch_inventory
+                    .switch_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        switch_inventory
+                            .switches
+                            .iter()
+                            .any(|switch| switch.node_id == id.to_string())
+                    })
+                    .collect();
                 let submit_result = nvos_update_manager
                     .start_nvos_update(NvosUpdateRequest {
                         rack_id: id,
@@ -3360,13 +3687,14 @@ pub async fn handle_maintenance(
                 // Invalid requests cannot succeed on retry. Backend submission
                 // failures remain handler errors, with the token retained so
                 // the Start state can resubmit the request.
-                let job = match submit_result {
+                let mut job = match submit_result {
                     Ok(job) => job,
                     Err(ComponentManagerError::InvalidArgument(cause)) => {
                         if uses_stored_token {
                             delete_rack_maintenance_access_token(
                                 ctx.services.credential_manager.as_ref(),
                                 id,
+                                &ctx.services.instrumentation,
                             )
                             .await;
                         }
@@ -3384,12 +3712,33 @@ pub async fn handle_maintenance(
                     delete_rack_maintenance_access_token(
                         ctx.services.credential_manager.as_ref(),
                         id,
+                        &ctx.services.instrumentation,
                     )
                     .await;
                 }
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 clear_nvos_update_statuses(txn.as_mut(), &switch_inventory.switch_ids).await?;
+                job.request = scope.requested_at.map(|requested_at| {
+                    let firmware_job = nvos_request_hardware_job(state, scope, requested_at);
+                    model::rack::RackNvosUpdateRequest {
+                        target_version: firmware_job
+                            .and_then(|job| job.firmware_id.clone())
+                            .or_else(|| {
+                                (!job.firmware_id.is_empty()).then(|| job.firmware_id.clone())
+                            }),
+                        requested_at,
+                        switch_ids: submitted_switch_ids,
+                        firmware: firmware_job.is_some(),
+                        skipped: false,
+                        failure: None,
+                    }
+                });
                 db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
                 state.nvos_update_job = Some(job);
 
@@ -3424,6 +3773,7 @@ pub async fn handle_maintenance(
                     .all_switches()
                     .all(|switch| matches!(switch.status.as_str(), "completed" | "failed"));
 
+                let mut password_failure = None;
                 if images_terminal {
                     let Some(profile) = super::resolve_profile(id, rack_profile_id, ctx) else {
                         let cause =
@@ -3434,7 +3784,12 @@ pub async fn handle_maintenance(
                         state.nvos_update_job = Some(job.clone());
                         state.config.maintenance_requested = None;
 
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
 
@@ -3464,16 +3819,11 @@ pub async fn handle_maintenance(
                                     }
 
                                     SwitchPasswordRotationState::Failed => {
-                                        return transition_to_rack_error(
-                                            id,
-                                            state,
-                                            format!(
-                                                "NVOS password recovery job {job_id} failed for switch {}",
-                                                switch.node_id
-                                            ),
-                                            ctx,
-                                        )
-                                        .await;
+                                        password_failure = Some(format!(
+                                            "NVOS password recovery job {job_id} failed for switch {}",
+                                            switch.node_id
+                                        ));
+                                        break;
                                     }
 
                                     SwitchPasswordRotationState::NotFound
@@ -3542,7 +3892,12 @@ pub async fn handle_maintenance(
                     }
                 }
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
 
                 let build_status = |switch: &NvosUpdateSwitchStatus| -> SwitchNvosUpdateStatus {
                     let status = match (&switch.password_update, switch.status.as_str()) {
@@ -3580,28 +3935,7 @@ pub async fn handle_maintenance(
                 };
 
                 for switch in job.switches.iter() {
-                    let switch_id = if !switch.node_id.is_empty() {
-                        switch
-                            .node_id
-                            .parse::<carbide_uuid::switch::SwitchId>()
-                            .ok()
-                    } else {
-                        let mac: mac_address::MacAddress = match switch.mac.parse() {
-                            Ok(mac) => mac,
-                            Err(_) => continue,
-                        };
-                        db_switch::find_ids(
-                            txn.as_mut(),
-                            model::switch::SwitchSearchFilter {
-                                bmc_mac: Some(mac),
-                                rack_id: Some(id.clone()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?
-                        .first()
-                        .copied()
-                    };
+                    let switch_id = nvos_job_switch_id(txn.as_mut(), id, switch).await?;
                     if let Some(switch_id) = switch_id {
                         let nvos_status = build_status(switch);
                         db_switch::update_nvos_update_status(
@@ -3623,15 +3957,22 @@ pub async fn handle_maintenance(
                     .all_switches()
                     .filter(|switch| switch.status == "completed")
                     .count();
-                let failed = job
-                    .all_switches()
-                    .filter(|switch| switch.status == "failed")
-                    .count();
+                let failed_switch_ids = failed_nvos_switch_ids(&job);
+                let failed = failed_switch_ids.len();
 
                 let password_updates_completed = job
                     .all_switches()
                     .filter(|switch| switch.password_update == NvosPasswordUpdateState::Completed)
                     .count();
+
+                if let Some(cause) = password_failure {
+                    // Commit earlier peers' recovery observations before the
+                    // failure transition, using the same transaction as cleanup.
+                    db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
+                    state.nvos_update_job = Some(job);
+                    let outcome = rack_maintenance_error_outcome(id, cause).with_txn(txn);
+                    return clear_maintenance_requested_on_error(id, state, outcome, ctx).await;
+                }
 
                 if images_terminal && password_updates_completed < total {
                     db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
@@ -3648,18 +3989,14 @@ pub async fn handle_maintenance(
                 if images_terminal && failed > 0 {
                     db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
                     state.nvos_update_job = Some(job);
-                    if state.config.maintenance_requested.is_some() {
-                        state.config.maintenance_requested = None;
-                        db_rack::update(txn.as_mut(), id, &state.config).await?;
-                    }
-                    let cause = format!("NVOS update failed: {}/{} switches failed", failed, total);
-                    tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
-                    return Ok(StateHandlerOutcome::transition(RackState::Error {
-                        certificate_failure: None,
-                        cause,
-                        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
-                    })
-                    .with_txn(txn));
+                    let cause = format!(
+                        "NVOS update failed: {}/{} switches failed; failed switches: [{}]",
+                        failed,
+                        total,
+                        failed_switch_ids.join(", ")
+                    );
+                    let outcome = rack_maintenance_error_outcome(id, cause).with_txn(txn);
+                    return clear_maintenance_requested_on_error(id, state, outcome, ctx).await;
                 }
 
                 if completed < total {
@@ -3800,7 +4137,12 @@ pub async fn handle_maintenance(
                     }
                     // Also persist the marker when late hosts are not ready and
                     // reconciliation has not submitted a batch yet.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
                     state.firmware_upgrade_job = Some(job);
                     return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
@@ -3824,7 +4166,12 @@ pub async fn handle_maintenance(
             if state.config.maintenance_requested.is_some() || state.config.ingestion_in_progress {
                 state.config.maintenance_requested = None;
                 state.config.ingestion_in_progress = false;
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db_rack::update(txn.as_mut(), id, &state.config).await?;
                 outcome = outcome.with_txn(txn);
             }
@@ -3852,9 +4199,9 @@ mod tests {
 
     use super::{
         DeviceFirmwareOutcome, DeviceFirmwareProgress, compute_reset_start,
-        delete_rack_maintenance_access_token, explicit_nvos_config_json, filter_inventory_by_scope,
-        first_maintenance_state, next_state_after_firmware, next_state_after_nvos,
-        next_state_if_activity_not_requested, profile_hardware_type_or_any,
+        delete_rack_maintenance_access_token, explicit_nvos_config_json, failed_nvos_switch_ids,
+        filter_inventory_by_scope, first_maintenance_state, next_state_after_firmware,
+        next_state_after_nvos, next_state_if_activity_not_requested, profile_hardware_type_or_any,
         summarize_firmware_outcomes, validate_complete_nmx_fabric_inventory,
     };
 
@@ -3973,11 +4320,12 @@ mod tests {
             run = |delete_fails: bool| {
                 let credential_manager = TestCredentialManager::default();
                 credential_manager.set_delete_credentials_failure(delete_fails);
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
                     runtime.block_on(delete_rack_maintenance_access_token(
                         &credential_manager,
                         &rack_id,
+                        metrics.instrumentation(),
                     ));
                 })
                 .into_iter()
@@ -4145,15 +4493,43 @@ mod tests {
     }
 
     #[test]
+    fn nvos_failure_identities_preserve_legacy_mac_and_exclude_successful_peers() {
+        let job = model::rack::NvosUpdateJob {
+            switches: vec![
+                model::rack::NvosUpdateSwitchStatus {
+                    node_id: "switch-b".into(),
+                    status: "failed".into(),
+                    ..Default::default()
+                },
+                model::rack::NvosUpdateSwitchStatus {
+                    mac: "00:11:22:33:44:55".into(),
+                    status: "failed".into(),
+                    ..Default::default()
+                },
+                model::rack::NvosUpdateSwitchStatus {
+                    node_id: "switch-a".into(),
+                    status: "completed".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            failed_nvos_switch_ids(&job),
+            vec!["MAC 00:11:22:33:44:55", "switch-b"]
+        );
+    }
+
+    #[test]
     fn test_summarize_firmware_outcomes_from_controller_states() {
         check_values(
             [
                 Check {
                     scenario: "any waiting keeps rack waiting",
                     input: vec![
-                        DeviceFirmwareOutcome::Completed,
-                        DeviceFirmwareOutcome::Waiting,
-                        DeviceFirmwareOutcome::Failed,
+                        ("machine-a".into(), DeviceFirmwareOutcome::Completed),
+                        ("switch-a".into(), DeviceFirmwareOutcome::Waiting),
+                        ("shelf-a".into(), DeviceFirmwareOutcome::Failed),
                     ],
                     expect: DeviceFirmwareProgress::Waiting {
                         pending: 1,
@@ -4165,8 +4541,8 @@ mod tests {
                 Check {
                     scenario: "all completed advances",
                     input: vec![
-                        DeviceFirmwareOutcome::Completed,
-                        DeviceFirmwareOutcome::Completed,
+                        ("machine-a".into(), DeviceFirmwareOutcome::Completed),
+                        ("switch-a".into(), DeviceFirmwareOutcome::Completed),
                     ],
                     expect: DeviceFirmwareProgress::Completed {
                         completed: 2,
@@ -4174,14 +4550,15 @@ mod tests {
                     },
                 },
                 Check {
-                    scenario: "any failed without waiting errors",
+                    scenario: "terminal failures retain sorted identities without completed peers",
                     input: vec![
-                        DeviceFirmwareOutcome::Completed,
-                        DeviceFirmwareOutcome::Failed,
+                        ("machine-a".into(), DeviceFirmwareOutcome::Completed),
+                        ("switch-b".into(), DeviceFirmwareOutcome::Failed),
+                        ("shelf-a".into(), DeviceFirmwareOutcome::Failed),
                     ],
                     expect: DeviceFirmwareProgress::Failed {
-                        failed: 1,
-                        total: 2,
+                        failed_device_ids: vec!["shelf-a".into(), "switch-b".into()],
+                        total: 3,
                     },
                 },
             ],

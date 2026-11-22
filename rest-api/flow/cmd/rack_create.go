@@ -93,5 +93,5 @@ func doCreateRack() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to marshal response")
 	}
-	fmt.Println(string(out))
+	fmt.Printf("%s\n", out)
 }

@@ -20,14 +20,14 @@
 use carbide_dpf::{
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterfaceDefinition, DpfError,
-    DpuServiceObservation, detached_dpu_service_chain_spec, detached_dpu_service_interface_spec,
+    DpuServiceObservation, detached_dpu_service_interface_spec,
 };
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_uuid::extension_service::ExtensionServiceId;
-use db::DatabaseError;
+use db::{DatabaseError, TransactionVending as _};
 use futures::{StreamExt, stream};
 use model::extension_service::{
-    DPF_HELM_CHART_OWNER_LABEL, DpfHelmChartServiceData, ExtensionService,
+    DPF_HELM_CHART_OWNER_LABEL, DpfHelmChartIdentity, DpfHelmChartServiceData, ExtensionService,
     ExtensionServiceLifecycleState, ServiceVpcAddressFamily,
 };
 use state_controller::state_handler::{
@@ -121,7 +121,7 @@ async fn reconcile_registration(
 ) -> Result<StateHandlerOutcome<ExtensionServiceLifecycleState>, StateHandlerError> {
     // Load and commit the service row, V1 definition, references, and MAC before contacting DPF so
     // this pass cannot mix database versions.
-    let desired = match load_desired_registration(
+    let mut desired = match load_desired_registration(
         service_id,
         mode,
         &ctx.services.db_pool,
@@ -374,6 +374,27 @@ async fn reconcile_registration(
                     "could not read service-VPC chain; retrying",
                     error,
                 ));
+            }
+        }
+    }
+
+    // Read durable exclusions after the Kubernetes observations so repair cannot pair an old
+    // selector snapshot with a newer resource version. Intervening Kubernetes writes to that chain
+    // invalidate the repair's observed UID/resource-version preconditions.
+    if !desired.resources.chains.is_empty() {
+        let selectors =
+            db::extension_service::find_chain_selectors(&ctx.services.db_pool, service_id).await?;
+        let identity = DpfHelmChartIdentity::from_service_id(service_id);
+        for selector in selectors {
+            let name = identity.slot_chain_name(selector.interface_ordinal, selector.slot);
+            if let Some(chain) = desired
+                .resources
+                .chains
+                .iter_mut()
+                .find(|chain| chain.name == name)
+            {
+                chain.excluded_dpu_ids = selector.excluded_dpu_ids;
+                chain.selector_version = Some(selector.version);
             }
         }
     }
@@ -707,8 +728,8 @@ async fn reconcile_registration(
                 parent_created = true;
             }
             Err(error) if error.is_already_exists_or_conflict() => {
-                // Reread only after POST conflict to distinguish an owned create race from a
-                // foreign deterministic-name collision.
+                // Reread after create or UID-stamping conflicts to distinguish an owned create
+                // race from a foreign deterministic-name collision.
                 let existing = match dpf_sdk.get_detached_dpu_service_chain(&chain.name).await {
                     Ok(Some(existing)) => existing,
                     Ok(None) => {
@@ -1000,10 +1021,10 @@ async fn load_desired_registration(
     db_pool: &sqlx::PgPool,
     service_vpc_slots: carbide_dpf::ServiceVpcSlots,
 ) -> Result<DesiredRegistration, LoadDesiredRegistrationError> {
-    let mut txn = db::Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
 
     // Re-read under lock because the state-controller snapshot predates this reconciliation call.
-    let service = db::extension_service::find_by_ids(txn.as_mut(), &[service_id], true, true)
+    let service = db::extension_service::find_by_ids_for_update(txn.as_mut(), &[service_id], true)
         .await?
         .into_iter()
         .next()
@@ -1286,37 +1307,18 @@ async fn reconcile_obsolete_chains(
         ));
     }
 
-    // The observed resource version fences each repair without another Kubernetes read.
+    // The observed UID and resource version fence each repair without a pre-write Kubernetes read.
     for (existing, definition) in repairs {
-        let Some(name) = existing.name.as_deref() else {
-            return Some(permanent_failure(
-                service_id,
-                "DPUServiceChain is missing metadata.name",
-                "observed owned chain has no name",
-            ));
-        };
-        let Some(resource_version) = existing.resource_version.as_deref() else {
-            return Some(permanent_failure(
-                service_id,
-                "DPUServiceChain update requires metadata.resourceVersion",
-                "observed DPUServiceChain is missing metadata.resourceVersion",
-            ));
-        };
-        let spec = match detached_dpu_service_chain_spec(definition) {
-            Ok(spec) => spec,
-            Err(error) => {
-                return Some(permanent_failure(
-                    service_id,
-                    "could not project desired DPUServiceChain specification",
-                    error,
+        let preconditions = match existing.delete_preconditions() {
+            Ok(preconditions) => preconditions,
+            Err(_) => {
+                return Some(StateHandlerOutcome::wait(
+                    "DPUServiceChain repair requires metadata.uid and metadata.resourceVersion; retrying".to_owned(),
                 ));
             }
         };
         let patched = match dpf_sdk
-            .patch_detached_dpu_service_chain(
-                name,
-                detached_resource_spec_patch(spec, resource_version),
-            )
+            .patch_detached_dpu_service_chain(definition, &preconditions)
             .await
         {
             Ok(patched) => patched,
@@ -1612,12 +1614,10 @@ async fn reconcile_delete(
 
     // Skip Kubernetes cleanup when no MAC was allocated because service-VPC parent creation
     // cannot precede that durable identity.
-    let has_interface_mac = {
-        let mut connection = ctx.services.db_pool.acquire().await?;
-        !db::extension_service::find_interface_macs(&mut connection, service_id)
+    let has_interface_mac =
+        !db::extension_service::find_interface_macs(&ctx.services.db_pool, service_id)
             .await?
-            .is_empty()
-    };
+            .is_empty();
     if !has_interface_mac {
         return Ok(StateHandlerOutcome::transition(
             ExtensionServiceLifecycleState::Deleted,
@@ -1666,9 +1666,9 @@ async fn reconcile_delete(
     }
 
     // Serialize the final reference check and MAC release with attachment writers.
-    let mut txn = db::Transaction::begin(&ctx.services.db_pool).await?;
+    let mut txn = ctx.services.db_pool.txn_begin().await?;
     let service_exists =
-        !db::extension_service::find_by_ids(txn.as_mut(), &[service_id], true, true)
+        !db::extension_service::find_by_ids_for_update(txn.as_mut(), &[service_id], true)
             .await?
             .is_empty();
     if !service_exists {

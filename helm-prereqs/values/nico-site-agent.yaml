@@ -18,10 +18,11 @@ global:
     pullPolicy: IfNotPresent
   imagePullSecrets:
     - name: image-pull-secret
-  # Cert issued by vault-nico-issuer so nico-api (same Vault PKI CA) trusts
-  # the site-agent's client cert for mTLS.  The ca.crt in the issued secret is
-  # the Vault PKI CA which the site-agent also uses as ServerCAPath to verify
-  # nico-api's server cert.
+  # Cert issued by the site's ClusterIssuer (vault-nico-issuer here; setup.sh
+  # --skip-vault sets site-issuer), which chains to the same site-root CA as
+  # nico-api's certificate, so nico-api trusts the site-agent's client cert for
+  # mTLS. The ca.crt in the issued secret is that CA, which the site-agent also
+  # uses as ServerCAPath to verify nico-api's server cert.
   certificate:
     issuerRef:
       kind: ClusterIssuer

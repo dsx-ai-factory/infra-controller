@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util/redact"
 	"github.com/sirupsen/logrus"
 )
 
@@ -31,6 +33,20 @@ type Client struct {
 	TokenRefresh    func() (string, error)
 	AuthRetryMax    int
 	AuthRetryNotify func(AuthRetryEvent)
+	// RequestNotify, when set, is called once for every HTTP request the
+	// client sends, after the response body is read or the request fails.
+	RequestNotify func(RequestEvent)
+}
+
+// RequestEvent describes one finished HTTP request for RequestNotify.
+type RequestEvent struct {
+	Method string
+	// StatusCode is the response status, or 0 when no response was read.
+	StatusCode int
+	// Err is the transport or body-read failure when StatusCode is 0.
+	Err error
+	// Duration runs from sending the request to reading the full body.
+	Duration time.Duration
 }
 
 // http2StreamError matches net/http's private stream error through errors.As.
@@ -41,6 +57,10 @@ type http2StreamError struct {
 }
 
 const http2InternalErrorCode uint32 = 0x2
+
+// defaultRequestTimeout leaves time for the REST proxy's 50-second wait and
+// response transfer. Callers can still set HTTPClient.Timeout or supply a client.
+const defaultRequestTimeout = time.Minute
 
 func (hse http2StreamError) Error() string {
 	return fmt.Sprintf("HTTP/2 stream %d failed with code %d", hse.StreamID, hse.Code)
@@ -80,12 +100,14 @@ func (e *APIError) Error() string {
 	if e.Data != nil {
 		dataJSON, err := json.Marshal(e.Data)
 		if err == nil && string(dataJSON) != "null" {
-			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, string(dataJSON))
+			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, dataJSON)
 		}
 	}
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, msg)
 }
 
+// NewClient creates a REST client whose default timeout covers the bounded
+// Flow proxy wait. Embedders can replace HTTPClient or set its Timeout.
 func NewClient(baseURL, org, token string, log *logrus.Entry, debug bool) *Client {
 	if log == nil {
 		log = logrus.NewEntry(logrus.StandardLogger())
@@ -100,7 +122,7 @@ func NewClient(baseURL, org, token string, log *logrus.Entry, debug bool) *Clien
 		Token:   token,
 		APIName: "nico",
 		HTTPClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: defaultRequestTimeout,
 		},
 		Debug: debug,
 		Log:   log,
@@ -120,18 +142,33 @@ func (c *Client) rewriteAPIName(path string) string {
 
 // Do executes an HTTP request against the API.
 func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
+	return c.DoWithContext(context.Background(), method, pathTemplate, pathParams, queryParams, body)
+}
+
+// DoWithContext uses the caller's context for the request and every retry.
+// `TokenRefresh` has no context parameter; check cancellation before calling it
+// and after it returns, since the callback itself cannot be interrupted here.
+func (c *Client) DoWithContext(ctx context.Context, method, pathTemplate string, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
 	queryValues := make(url.Values, len(queryParams))
 	for key, value := range queryParams {
 		queryValues.Set(key, value)
 	}
-	return c.doWithQueryValues(method, pathTemplate, pathParams, queryValues, body)
+	return c.doWithQueryValuesContext(ctx, method, pathTemplate, pathParams, queryValues, body)
 }
 
 // doWithQueryValues executes an HTTP request while preserving repeated query
 // values required by generated repeatable flags.
 func (c *Client) doWithQueryValues(method, pathTemplate string, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
+	return c.doWithQueryValuesContext(context.Background(), method, pathTemplate, pathParams, queryParams, body)
+}
+
+// doWithQueryValuesContext keeps repeated parameters and retries under one owner deadline.
+func (c *Client) doWithQueryValuesContext(ctx context.Context, method, pathTemplate string, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
 	doClient := c
-	respBody, respHeader, err := doClient.do(method, pathTemplate, pathParams, queryParams, body)
+	respBody, respHeader, err := doClient.do(ctx, method, pathTemplate, pathParams, queryParams, body)
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
 	streamErr, isHTTP2StreamError := errors.AsType[http2StreamError](err)
 	if method == http.MethodGet && isHTTP2StreamError && streamErr.Code == http2InternalErrorCode {
 		var transport *http.Transport
@@ -155,8 +192,11 @@ func (c *Client) doWithQueryValues(method, pathTemplate string, pathParams map[s
 			retryClient := *c
 			retryClient.HTTPClient = &httpClient
 			doClient = &retryClient
-			respBody, respHeader, err = doClient.do(method, pathTemplate, pathParams, queryParams, body)
+			respBody, respHeader, err = doClient.do(ctx, method, pathTemplate, pathParams, queryParams, body)
 		}
+	}
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
 	}
 	if isUnauthorizedError(err) && c.TokenRefresh != nil && !canReplayAfterAuthRefresh(method) {
 		apiErr := err.(*APIError)
@@ -173,6 +213,9 @@ func (c *Client) doWithQueryValues(method, pathTemplate string, pathParams map[s
 
 	maxAttempts := c.authRetryMax()
 	for attempt := 1; attempt <= maxAttempts && isUnauthorizedError(err) && c.TokenRefresh != nil; attempt++ {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		apiErr := err.(*APIError)
 		c.notifyAuthRetry(AuthRetryEvent{
 			Action:      AuthRetryActionLogin,
@@ -182,7 +225,13 @@ func (c *Client) doWithQueryValues(method, pathTemplate string, pathParams map[s
 			Status:      apiErr.Status,
 			Method:      method,
 		})
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		token, refreshErr := c.TokenRefresh()
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		if refreshErr != nil {
 			return nil, nil, fmt.Errorf("refreshing auth token after unauthorized response: %w", refreshErr)
 		}
@@ -199,7 +248,10 @@ func (c *Client) doWithQueryValues(method, pathTemplate string, pathParams map[s
 			Status:      apiErr.Status,
 			Method:      method,
 		})
-		respBody, respHeader, err = doClient.do(method, pathTemplate, pathParams, queryParams, body)
+		respBody, respHeader, err = doClient.do(ctx, method, pathTemplate, pathParams, queryParams, body)
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 	}
 	return respBody, respHeader, err
 }
@@ -217,6 +269,12 @@ func (c *Client) notifyAuthRetry(event AuthRetryEvent) {
 	}
 }
 
+func (c *Client) notifyRequest(event RequestEvent) {
+	if c.RequestNotify != nil {
+		c.RequestNotify(event)
+	}
+}
+
 func canReplayAfterAuthRefresh(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -226,7 +284,10 @@ func canReplayAfterAuthRefresh(method string) bool {
 	}
 }
 
-func (c *Client) do(method, pathTemplate string, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
+func (c *Client) do(ctx context.Context, method, pathTemplate string, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
 	path := pathTemplate
 	path = strings.ReplaceAll(path, "{org}", url.PathEscape(c.Org))
 	for k, v := range pathParams {
@@ -244,7 +305,7 @@ func (c *Client) do(method, pathTemplate string, pathParams map[string]string, q
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequest(method, reqURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -263,16 +324,20 @@ func (c *Client) do(method, pathTemplate string, pathParams map[string]string, q
 		c.Log.Debugf("Request body: %s", formatDebugBody(body))
 	}
 
+	start := time.Now()
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		c.notifyRequest(RequestEvent{Method: method, Err: err, Duration: time.Since(start)})
 		return nil, nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.notifyRequest(RequestEvent{Method: method, Err: err, Duration: time.Since(start)})
 		return nil, nil, fmt.Errorf("reading response: %w", err)
 	}
+	c.notifyRequest(RequestEvent{Method: method, StatusCode: resp.StatusCode, Duration: time.Since(start)})
 
 	if c.Debug {
 		c.Log.Debugf("API response: %s %s -> %s", method, reqURL, resp.Status)
@@ -337,7 +402,7 @@ func redactSensitiveJSONValue(value interface{}, inherited bool) {
 	switch typed := value.(type) {
 	case map[string]interface{}:
 		for key, nested := range typed {
-			sensitive := inherited || isSensitiveJSONField(key)
+			sensitive := inherited || isSensitiveJSONField(key) || isSensitiveJSONContainerField(key)
 			if sensitive && !isJSONContainer(nested) {
 				typed[key] = "<redacted>"
 				continue
@@ -346,6 +411,9 @@ func redactSensitiveJSONValue(value interface{}, inherited bool) {
 				nested,
 				inherited || isSensitiveJSONContainerField(key),
 			)
+			if redact.IsURLParentField(key) {
+				redact.NestedURLs(nested, "<redacted>")
+			}
 		}
 	case []interface{}:
 		for i, nested := range typed {
@@ -379,6 +447,10 @@ func isSensitiveJSONField(name string) bool {
 
 func isSensitiveJSONContainerField(name string) bool {
 	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(name))
+	switch normalized {
+	case "authenticationdata", "devicecredentialoverrides":
+		return true
+	}
 	for _, suffix := range []string{
 		"credential", "credentials",
 		"password", "passwords",
@@ -451,7 +523,7 @@ func ResolveToken(token, tokenCommand string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("executing token command: %w", err)
 		}
-		return strings.TrimSpace(string(out)), nil
+		return string(bytes.TrimSpace(out)), nil
 	}
 	return "", nil
 }

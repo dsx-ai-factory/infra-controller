@@ -67,6 +67,7 @@ Sourced from `crates/dpf/src/sdk.rs` and `crates/machine-controller/src/dpf.rs`:
 | DPUNode CR name | `node-{dpf_id}` (`dpf_id` = host BMC MAC, `:`→`-`) | NICo creates |
 | DPUDevice CR name | `device-{device_id}` | NICo creates |
 | DPU CR name | `node-{dpf_id}-device-{device_id}` | **operator/simulator creates** |
+| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v26.4.0` | **sim creates** it, keeps the version, and removes any `Ready` condition. NICo reads the version once at startup |
 | machine link label | `carbide.nvidia.com/dpu-machine-id` (copy DPUDevice→DPU) | must propagate |
 | device marker | `carbide.nvidia.com/controlled.device=true` | on DPUDevice |
 | host BMC IP label | `carbide.nvidia.com/host-bmc-ip`: IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens | on device+node |
@@ -99,7 +100,8 @@ dpf-sim-controller/
 ├── cmd/main.go                      # manager wiring, flags
 ├── internal/
 │   ├── controller/
-│   │   └── dpudevice_controller.go  # reconcile DPUDevice → ensure+advance DPU
+│   │   ├── dpudevice_controller.go  # reconcile DPUDevice → ensure+advance DPU
+│   │   └── operator_config.go       # keep the DPFOperatorConfig NICo reads at startup
 │   ├── simulator/
 │   │   └── phases.go                # phase state machine + dwell timing
 │   └── carbide/
@@ -117,11 +119,50 @@ the CRs NICo references) present on the cluster, never the DPF operator. Those
 CRDs ship in this repo at `crates/dpf/crds/`, so `make deploy` applies them
 directly. It does **not** depend on the setup.sh DPF-install work: that branch
 installs the real operator, which you must **not** run here. The operator and
-the simulator would both drive `DPU.status.phase` and fight.
+the simulator would both drive `DPU.status.phase` and the `DPFOperatorConfig`
+status and fight.
 
 The only coupling is version consistency: the simulator's Go types are pinned to
-doca-platform **v26.4.0** (`go.mod`), so the applied CRDs must be v26.4.0
-compatible. `crates/dpf/crds/` is that version.
+doca-platform **v26.4.0** (`go.mod`), so the applied CRDs must accept v26.4.0
+objects. The CRDs in `crates/dpf/crds/` are newer than those types, and the
+simulator relies only on fields both have. It handles `DPFOperatorConfig` as
+unstructured data, because the shipped CRD requires `spec.deploymentMode` and
+the v26.4.0 types do not have it.
+
+## The operator config NICo reads at startup
+
+When nico-api starts with `[dpf] enabled = true`, it reads `status.version` of
+the `DPFOperatorConfig` named `dpfoperatorconfig` in the DPF namespace
+(`crates/dpf/src/sdk/version.rs`). It drops a leading `v` and parses the rest
+as a semantic version. When the object is missing, or the version is missing
+or does not parse, nico-api exits with `failed to initialize DPF SDK`. On a
+real site the installer creates the object and the operator writes the
+version. A simulated site has neither, so the simulator provides both:
+
+- It creates the object when it is absent, with only what the CRD in
+  `crates/dpf/crds/` requires: `deploymentMode: zero-trust` and the Redfish
+  install interface that mode needs. Nothing reads that spec on a simulated
+  site.
+- It keeps `status.version` at `v26.4.0`, the release the simulator
+  reproduces. NICo treats versions from 26.8.0 as supporting per-DPU BMC
+  credential Secrets, and the simulator reads only the shared Secret.
+- It checks when it starts and every 30 seconds after that, so a deleted
+  object comes back. A failed check is logged and retried, and the DPU walk
+  continues meanwhile.
+
+The simulator never changes the spec of an object that already exists. At
+every check, it removes any `Ready` condition from the status, including one
+that a real operator left, and keeps the other conditions. NICo scans for DPUs
+that no longer match their `DPUDeployment` only while a `Ready` condition is
+`True`, so the scan stays off while the simulator runs.
+
+nico-api reads the version once, at startup, so the simulator has to run
+before nico-api starts. A nico-api that starts first exits, and Kubernetes
+restarts it until the version is there. The Core install in
+`helm-prereqs/setup.sh` waits 600 seconds for nico-api to become ready and
+then fails. `helm-prereqs/clean.sh` deletes `dpf-operator-system` and the
+DPF CRDs, and the simulator and the object with them, so deploy the simulator
+again before the next `setup.sh`. `make undeploy` leaves the object in place.
 
 ## Quick start (against a machine-a-tron cluster)
 
@@ -132,8 +173,13 @@ Discovery from a shared pod IP needs `allow_insecure_discovery = true` in the
 nico-api site config. Both are set in
 `helm-prereqs/values/nico-core-simulation.yaml`.
 
+nico-api also needs a `DPFOperatorConfig` with a `status.version` at startup.
+The simulator creates it, so run `make deploy` before `setup.sh --skip-dpf`.
+Refer to
+[The operator config NICo reads at startup](#the-operator-config-nico-reads-at-startup).
+
 Never run the simulator beside the real DPF operator: both would drive
-`DPU.status.phase`. Check before deploying. The command prints nothing when no
+`DPU.status.phase` and the `DPFOperatorConfig` status. Check before deploying. The command prints nothing when no
 operator is deployed. Otherwise remove the operator first, or leave the
 simulator out and accept that ingested hosts park in `dpuinit`:
 
@@ -169,6 +215,11 @@ make deploy IMG=<registry>/dpf-sim-controller:<tag> \
 # Then bring up machine-a-tron: simulated hosts reach dpuinit, NICo writes
 # DPUDevice/DPUNode CRs, the simulator creates DPUs and walks them to Ready.
 ```
+
+The deploy applies the pod resources and reconcile worker count in
+`config/manager/manager.yaml`, which are sized for small fleets. For fleets of
+thousands of DPUs, refer to
+[Sizing for large simulated fleets](#sizing-for-large-simulated-fleets).
 
 > **Required nico-api setting for ANY machine-a-tron simulation** (#3561, cores
 > after `v2.1.0-pr-294`): `DiscoverMachine` resolves callers by TCP source IP,
@@ -218,6 +269,46 @@ kubectl annotate dpunode node-02-00-00-00-00-01 -n dpf-operator-system \
 > native amd64 (CI); on an Apple-Silicon laptop, cross-compile first
 > (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/dpf-sim-controller ./cmd`)
 > and build a copy-only image, or build on an amd64 host.
+
+## Sizing for large simulated fleets
+
+`make deploy` takes the pod resources and the number of parallel reconcile
+workers as variables, and `make run` takes the worker count. The defaults equal
+`config/manager/manager.yaml`, so a deploy without them applies the checked-in
+manifest unchanged. Pass bare quantities. The render quotes them. `make render`
+prints the RBAC and Deployment manifests exactly as `make deploy` applies them,
+so the effect of an override can be diffed before it reaches the cluster.
+
+| Variable | Default | Sets |
+|---|---|---|
+| `CPU_REQUEST` | `500m` | `resources.requests.cpu` |
+| `MEM_REQUEST` | `1Gi` | `resources.requests.memory` |
+| `CPU_LIMIT` | `2` | `resources.limits.cpu` |
+| `MEM_LIMIT` | `4Gi` | `resources.limits.memory` |
+| `RECONCILE_CONCURRENCY` | `16` | `--reconcile-concurrency`, the parallel reconcile workers, at least 1 |
+
+The simulator's work grows with the DPU count. On a fleet of 20,016 simulated
+hosts with 40,032 DPUs it ran at its CPU limit from fleet-up until NICo had
+created the DPF CRs for every DPU, both at the default 2 CPU and at 8 CPU (7.3
+to 7.9 cores), with the default 16 workers. At 2 CPU, memory peaked at 2.2 GiB
+and the count of ready machines ran up to 22 percent behind the 8 CPU run while
+the DPF CRs were being created, then the ready ramp matched once all CRs
+existed. At 8 CPU the last of the 40,032 DPF CRs existed 26 minutes earlier.
+The CPU limit sets the pace of the DPU phase, and 8 CPU alone did not remove
+the bottleneck.
+
+For a fleet of that size start from the values below. The default pairs 16
+workers with 2 CPU. Keep that ratio as a starting point and raise
+`RECONCILE_CONCURRENCY` together with `CPU_LIMIT` while
+`kubectl top pod -n dpf-operator-system` shows the pod at its CPU limit through
+the DPU phase. The requests only have to fit the node next to the other
+simulator pods.
+
+```bash
+make deploy IMG=<registry>/dpf-sim-controller:<tag> \
+            CPU_REQUEST=1 MEM_REQUEST=2Gi CPU_LIMIT=8 MEM_LIMIT=8Gi \
+            RECONCILE_CONCURRENCY=64
+```
 
 ## Installing the managed BFB (optional)
 

@@ -3,7 +3,7 @@
 
 use bmc_vendor::BMCVendor;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
-use db::test_support::postgres::wait_for_blocked_query;
+use db::TransactionVending as _;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::ExpectedMachineData;
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -23,6 +23,7 @@ use model::test_support::power_shelf_config;
 
 use super::super::{FirmwareRequestSource, host_expectations, machine};
 use super::*;
+use crate::tests::wait_for_blocked_query;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -170,7 +171,7 @@ async fn seed_firmware_context(
     let switch_id = SwitchId::from(uuid::Uuid::from_u128(201));
     let endpointless_switch_id = SwitchId::from(uuid::Uuid::from_u128(203));
     let shelf_id = PowerShelfId::from(uuid::Uuid::from_u128(201));
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = db::rack::create(
         &mut txn,
         &rack_id,
@@ -429,11 +430,17 @@ async fn admission_finishes_before_database_access() -> TestResult {
 
     let ids = [host_id(203); 65];
     let result = load(&pool, &config, FirmwareTargets::Machines(&ids), None).await;
-    assert!(matches!(result, Err(CarbideError::InvalidArgument(_))));
+    assert!(matches!(
+        result,
+        Err(PreparationError::Load(error)) if matches!(*error, CarbideError::InvalidArgument(_))
+    ));
 
     let ids = [SwitchId::from(uuid::Uuid::from_u128(201))];
     let result = load(&pool, &config, FirmwareTargets::Switches(&ids), None).await;
-    assert!(matches!(result, Err(CarbideError::DBError(_))));
+    assert!(matches!(
+        result,
+        Err(PreparationError::Load(error)) if matches!(*error, CarbideError::DBError(_))
+    ));
 
     let result = load(
         &pool,
@@ -442,8 +449,7 @@ async fn admission_finishes_before_database_access() -> TestResult {
         Some(Instant::now()),
     )
     .await;
-    assert!(matches!(result, Err(CarbideError::Internal { message })
-        if message == "firmware details preparation deadline exceeded"));
+    assert!(matches!(result, Err(PreparationError::DeadlineExceeded)));
     Ok(())
 }
 
@@ -566,6 +572,7 @@ async fn context_preserves_members_aliases_sources_and_input_slots(
                 let actions = machine(
                     loaded_host(context, 2),
                     Some(&context.racks[&fixture.rack_id]),
+                    &context.bmc_aliases[&fixture.hosts[0]],
                 );
                 assert_eq!(
                     actions
@@ -824,7 +831,7 @@ async fn context_snapshot_is_consistent_and_releases_its_healthy_session(
     let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&reader)
         .await?;
-    let mut writer = pool.begin().await?;
+    let mut writer = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE explored_endpoints IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *writer)
         .await?;
@@ -985,9 +992,10 @@ async fn preparation_deadlines_bound_pool_acquisition(pool: sqlx::PgPool) -> Tes
 
         assert!(pending_before, "{scenario}: expired before its budget");
         assert!(
-            matches!(result,
-            std::task::Poll::Ready(Err(CarbideError::Internal { message }))
-                if message == "firmware details preparation deadline exceeded"),
+            matches!(
+                result,
+                std::task::Poll::Ready(Err(PreparationError::DeadlineExceeded))
+            ),
             "{scenario}"
         );
     }

@@ -123,9 +123,10 @@ subscriber configuration and surrounding spans, which is why the example log lin
 
 Install the meter provider once at startup **before the first metric-backed `emit()` or
 `initialize_counter_series()` call** (every NICo binary already does this for its existing
-metrics). The generated instrument resolves from the global meter once per Event type and is
-then cached, so a first use against the default no-op provider leaves that Event type on the
-no-op instrument for the rest of the process. Production NICo binaries follow an install-once
+metrics). The first metric recording through `Instrumentation::global()` selects one global
+meter for all Event types; free recording functions use this same instance. Its instruments
+are cached, so a first use against the default no-op provider leaves global Event metrics on
+that provider for the rest of the process. Production NICo binaries follow an install-once
 provider contract; cached Event instruments do not rebind after a later provider replacement.
 
 ## Log and metric options
@@ -184,13 +185,17 @@ with the error as log-only context -- on failure. For other outbound boundaries
 (Redfish, HTTP, IPMI), wrap the call directly:
 
 ```rust
-let response = carbide_instrument::red::instrumented("redfish", "power_control",
+let response = carbide_instrument::red::instrumented(&instrumentation, "redfish", "power_control",
     client.power_control(&target, action)).await?;
 ```
 
 The `backend`/`operation` labels are `&'static str` on purpose: compile-time literals
 only, never values from the wire -- the type is the cardinality guard. Streaming calls
-record time to the stream handle, not the stream's lifetime.
+record time to the stream handle, not the stream's lifetime. RED helpers and generated
+client constructors take an explicit `Instrumentation` handle. Its clones share a lazily
+created histogram; retain the owning meter provider until all recording tasks and metric
+scrapes have finished. Independent providers and registries keep separate clients' RED
+metrics isolated.
 
 ## Rules for labels and context
 
@@ -379,8 +384,8 @@ with the semantics in attributes. The generated code:
 
 - Builds labels as a fixed-size array (no heap allocation on emit) with enum values
   rendering as `&'static str`
-- Caches the OTel instrument in a per-event-type `OnceLock` -- a metric-only emit is an
-  atomic load plus an `add()`
+- Looks up the OTel instrument in the selected `Instrumentation` instance's cache, keyed
+  by Event type or shared metric-family type; cloned handles share that cache
 - Emits the log via `tracing::event!` with real static field names, so `logfmt`, the
   admin-UI log stream, and every other subscriber layer see an ordinary tracing event in
   the surrounding span. Its tracing metadata name and structured `event_name` field are the

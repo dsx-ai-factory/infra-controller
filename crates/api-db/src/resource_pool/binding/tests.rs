@@ -29,6 +29,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use super::{BindingError, all, bind_or_verify, existing_pool_domains, load};
+use crate::TransactionVending as _;
 
 fn integrated(name: &str, value_domain: ResourcePoolValueDomain) -> ResourcePoolSelection {
     ResourcePoolSelection {
@@ -60,7 +61,7 @@ async fn repeated_bindings_preserve_identity_and_original_selector(pool: PgPool)
             let pool = &pool;
             async move {
                 assert_eq!(load(pool, &requested.pool_name).await?, None);
-                let mut txn = pool.begin().await?;
+                let mut txn = pool.txn_begin().await?;
                 let original = bind_or_verify(&mut txn, &requested).await?;
                 assert!(!original.binding_id.is_nil());
                 assert_eq!(original.backend_name, requested.backend_name);
@@ -70,7 +71,7 @@ async fn repeated_bindings_preserve_identity_and_original_selector(pool: PgPool)
                 // Each transaction starts with only the persisted identity,
                 // just as a later process would after loading configuration.
                 for backend_name in [Some("integrated-alias".to_string()), None] {
-                    let mut txn = pool.begin().await?;
+                    let mut txn = pool.txn_begin().await?;
                     let requested = ResourcePoolSelection {
                         backend_name,
                         ..requested.clone()
@@ -93,7 +94,7 @@ async fn repeated_bindings_preserve_identity_and_original_selector(pool: PgPool)
 #[crate::sqlx_test]
 async fn immutable_changes_preserve_an_empty_pool_binding(pool: PgPool) -> eyre::Result<()> {
     let requested = integrated("empty-pool", ResourcePoolValueDomain::Integer);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let original = bind_or_verify(&mut txn, &requested).await?;
     txn.commit().await?;
     let resource_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_pool")
@@ -145,7 +146,7 @@ async fn immutable_changes_preserve_an_empty_pool_binding(pool: PgPool) -> eyre:
         |requested| {
             let pool = &pool;
             async move {
-                let mut txn = pool.begin().await?;
+                let mut txn = pool.txn_begin().await?;
                 let error = bind_or_verify(&mut txn, &requested)
                     .await
                     .expect_err("changing an immutable field must fail");
@@ -173,11 +174,11 @@ async fn caller_rollback_removes_bindings_written_before_a_conflict(
     pool: PgPool,
 ) -> eyre::Result<()> {
     let existing = integrated("existing", ResourcePoolValueDomain::Integer);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let original = bind_or_verify(&mut txn, &existing).await?;
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let new = integrated("new", ResourcePoolValueDomain::IpAddress);
     let created = bind_or_verify(&mut txn, &new).await?;
     assert_eq!(load(&mut *txn, &new.pool_name).await?, Some(created));
@@ -199,12 +200,12 @@ async fn caller_rollback_removes_bindings_written_before_a_conflict(
 #[crate::sqlx_test]
 async fn concurrent_first_bindings_return_the_committed_identity(pool: PgPool) -> eyre::Result<()> {
     let requested = integrated("concurrent", ResourcePoolValueDomain::Integer);
-    let mut first_txn = pool.begin().await?;
+    let mut first_txn = pool.txn_begin().await?;
     let first = bind_or_verify(&mut first_txn, &requested).await?;
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *first_txn)
         .await?;
-    let mut second_txn = pool.begin().await?;
+    let mut second_txn = pool.txn_begin().await?;
     let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *second_txn)
         .await?;
@@ -244,7 +245,7 @@ async fn concurrent_first_bindings_return_the_committed_identity(pool: PgPool) -
 async fn migration_and_bootstrap_preserve_legacy_resources_and_snapshots(
     pool: PgPool,
 ) -> eyre::Result<()> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     // Remove both newer tables that reference the binding before exercising
     // its migration against the predecessor schema.
     sqlx::raw_sql(
@@ -338,7 +339,7 @@ async fn migration_and_bootstrap_preserve_legacy_resources_and_snapshots(
 
 #[crate::sqlx_test]
 async fn mixed_legacy_resource_domains_fail_before_binding(pool: PgPool) -> eyre::Result<()> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query(
         r#"INSERT INTO resource_pool (name, value, value_type, state)
            VALUES ('mixed', '1', 'integer', '{"state":"free"}'),

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use db::TransactionVending as _;
 pub mod config;
 pub mod errors;
 pub mod ib;
@@ -25,11 +26,12 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
+use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{self, DatabaseError};
 use health_report::HealthReportApplyMode;
@@ -47,7 +49,7 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
 };
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -64,6 +66,7 @@ pub struct IbFabricMonitor {
 
     fabrics: HashMap<String, IbFabricDefinition>,
     metric_holder: Arc<metrics::MetricHolder>,
+    instrumentation: Instrumentation,
     /// API for interaction with Forge IBFabricManager
     fabric_manager: Arc<dyn IBFabricManager>,
 
@@ -74,7 +77,7 @@ pub struct IbFabricMonitor {
 impl IbFabricMonitor {
     const ITERATION_WORK_KEY: &'static str = "IbFabricMonitor::run_single_iteration";
 
-    /// Create a IbFabricMonitor
+    /// Creates an IB monitor whose Event metrics use the supplied instrumentation.
     pub fn new(
         db_pool: PgPool,
         fabrics: HashMap<String, IbFabricDefinition>,
@@ -82,6 +85,7 @@ impl IbFabricMonitor {
         fabric_manager: Arc<dyn IBFabricManager>,
         host_health: HostHealthConfig,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         // We want to hold metrics for longer than the iteration interval, so there is continuity
         // in emitting metrics. However we want to avoid reporting outdated metrics in case
@@ -98,12 +102,14 @@ impl IbFabricMonitor {
                 .keys()
                 .map(|fab| fab.as_str())
                 .collect::<Vec<&str>>(),
+            &instrumentation,
         ));
 
         IbFabricMonitor {
             db_pool,
             fabrics,
             metric_holder,
+            instrumentation,
             fabric_manager,
             host_health,
             work_lock_manager_handle,
@@ -205,7 +211,7 @@ impl IbFabricMonitor {
             };
 
             check_ib_fabrics_span.in_scope(|| {
-                carbide_instrument::emit(match res.as_ref().err() {
+                self.instrumentation.emit(match res.as_ref().err() {
                     None => IbMonitorIterationFinished::Succeeded {
                         latency: metrics.recording_started_at.elapsed(),
                     },
@@ -238,12 +244,7 @@ impl IbFabricMonitor {
             return Ok(0);
         }
 
-        let mut conn = self
-            .db_pool
-            .acquire()
-            .await
-            .map_err(|e| IbError::from(DatabaseError::new("acquire connection", e)))?;
-        let snapshots = match self.get_all_snapshots(&mut conn).await {
+        let snapshots = match self.get_all_snapshots().await {
             Ok(snapshots) => snapshots,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to load ManagedHost snapshots in IbFabricMonitor");
@@ -257,20 +258,20 @@ impl IbFabricMonitor {
             }
         };
 
-        let tenant_partitions = match get_tenant_partitions(&mut conn).await {
-            Ok(snapshots) => snapshots,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to load Partition data in IbFabricMonitor");
-                // Record the same error for all fabrics, so that the problem is at least visible on dashboards
-                for fabric in self.fabrics.keys() {
-                    metrics.num_fabrics += 1;
-                    let fabric_metrics = metrics.fabrics.entry(fabric.to_string()).or_default();
-                    fabric_metrics.fabric_error = "ManagedHostSnapshotLoadingError".to_string();
+        let tenant_partitions =
+            match get_tenant_partitions(&self.db_pool, &self.instrumentation).await {
+                Ok(snapshots) => snapshots,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to load Partition data in IbFabricMonitor");
+                    // Record the same error for all fabrics, so that the problem is at least visible on dashboards
+                    for fabric in self.fabrics.keys() {
+                        metrics.num_fabrics += 1;
+                        let fabric_metrics = metrics.fabrics.entry(fabric.to_string()).or_default();
+                        fabric_metrics.fabric_error = "ManagedHostSnapshotLoadingError".to_string();
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
-        drop(conn); // Don't reuse the postgres connection later on. It might be stale
+            };
 
         // Create a reverse mapping from pkeys to partition IDs
         // That makes the lookup of which partition ID is associated with GUIDs
@@ -297,6 +298,7 @@ impl IbFabricMonitor {
                 fabric_definition,
                 fabric_data,
                 fabric_metrics,
+                &self.instrumentation,
             )
             .await
             {
@@ -307,7 +309,8 @@ impl IbFabricMonitor {
         let sku_inactive_cache = preload_sku_inactive_devices(&self.db_pool, &snapshots)
             .await
             .unwrap_or_else(|e| {
-                emit(IbMonitorSkuInactivePreloadFailed::new(e.to_string()));
+                self.instrumentation
+                    .emit(IbMonitorSkuInactivePreloadFailed::new(e.to_string()));
                 HashMap::new()
             });
 
@@ -330,10 +333,11 @@ impl IbFabricMonitor {
             {
                 Ok(report) => reports.push(report),
                 Err(e) => {
-                    emit(IbMonitorMachineStatusObservationFailed::new(
-                        e.to_string(),
-                        machine.to_string(),
-                    ));
+                    self.instrumentation
+                        .emit(IbMonitorMachineStatusObservationFailed::new(
+                            e.to_string(),
+                            machine.to_string(),
+                        ));
                 }
             }
         }
@@ -372,6 +376,7 @@ impl IbFabricMonitor {
             &tenant_partitions,
             &partition_ids_by_pkey,
             reports,
+            &self.instrumentation,
         )
         .await?;
 
@@ -438,7 +443,7 @@ impl IbFabricMonitor {
                         }
                     }
                 };
-                emit(skipped);
+                self.instrumentation.emit(skipped);
                 continue;
             }
 
@@ -459,7 +464,7 @@ impl IbFabricMonitor {
                 {
                     Ok(still_needed) => still_needed,
                     Err(error) => {
-                        emit(
+                        self.instrumentation.emit(
                             IbMonitorPkeyReconciliationSkipped::MembershipStateLookupFailed {
                                 fabric: retired_membership.fabric.clone(),
                                 guid: retired_membership.guid.clone(),
@@ -510,6 +515,7 @@ impl IbFabricMonitor {
                 &retired_membership.guid,
                 retired_membership.pkey,
                 &result,
+                &self.instrumentation,
             );
             if result.is_ok() {
                 num_changes += 1;
@@ -555,11 +561,7 @@ impl IbFabricMonitor {
         machine_id: HostMachineId,
         membership: &IbMembership,
     ) -> IbResult<bool> {
-        let mut txn = self
-            .db_pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin retired IB membership transaction", e))?;
+        let mut txn = self.db_pool.txn_begin().await?;
 
         let machine_exists = db::machine::find_one(
             txn.as_mut(),
@@ -572,9 +574,7 @@ impl IbFabricMonitor {
         .await?
         .is_some();
         if !machine_exists {
-            txn.commit()
-                .await
-                .map_err(|e| DatabaseError::new("commit retired IB membership transaction", e))?;
+            txn.commit().await?;
             return Ok(false);
         }
 
@@ -641,19 +641,16 @@ impl IbFabricMonitor {
             }
         }
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("commit retired IB membership transaction", e))?;
+        txn.commit().await?;
 
         Ok(still_live)
     }
 
     async fn get_all_snapshots(
         &self,
-        txn: &mut PgConnection,
     ) -> IbResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
         let machine_ids = db::machine::find_machine_ids::<HostMachineId>(
-            &mut *txn,
+            &self.db_pool,
             MachineSearchConfig {
                 include_predicted_host: true,
                 ..Default::default()
@@ -662,7 +659,7 @@ impl IbFabricMonitor {
         .await?;
 
         db::managed_host::load_by_machine_ids(
-            txn,
+            &mut PgPoolReader::from(self.db_pool.clone()),
             &machine_ids,
             LoadSnapshotOptions {
                 include_history: false,
@@ -738,6 +735,7 @@ async fn load_single_fabric_data(
     fabric_definition: &IbFabricDefinition,
     fabric_data: &mut FabricData,
     fabric_metrics: &mut FabricMetrics,
+    instrumentation: &Instrumentation,
 ) -> Option<Arc<dyn IBFabric>> {
     fabric_metrics.endpoints = fabric_definition.endpoints.clone();
     fabric_metrics.allow_insecure_fabric_configuration = fabric_manager
@@ -747,7 +745,7 @@ async fn load_single_fabric_data(
     let conn = match fabric_manager.new_client(fabric).await {
         Ok(conn) => conn,
         Err(e) => {
-            emit(IbFabricDataLoadFailed::build_client(
+            instrumentation.emit(IbFabricDataLoadFailed::build_client(
                 fabric,
                 &fabric_definition.endpoints,
                 &e,
@@ -758,7 +756,7 @@ async fn load_single_fabric_data(
     };
 
     if let Err(e) = check_ib_fabric(conn.as_ref(), fabric_metrics).await {
-        emit(IbFabricDataLoadFailed::health_check(
+        instrumentation.emit(IbFabricDataLoadFailed::health_check(
             fabric,
             &fabric_definition.endpoints,
             &e,
@@ -773,7 +771,7 @@ async fn load_single_fabric_data(
             fabric_data.ports_by_guid = Some(ports);
         }
         Err(e) => {
-            emit(IbFabricDataLoadFailed::load_ports(
+            instrumentation.emit(IbFabricDataLoadFailed::load_ports(
                 fabric,
                 &fabric_definition.endpoints,
                 &e,
@@ -789,7 +787,7 @@ async fn load_single_fabric_data(
             fabric_data.partitions = Some(partitions);
         }
         Err(e) => {
-            emit(IbFabricDataLoadFailed::load_partitions(
+            instrumentation.emit(IbFabricDataLoadFailed::load_partitions(
                 fabric,
                 &fabric_definition.endpoints,
                 &e,
@@ -1075,19 +1073,20 @@ async fn apply_guid_pkey_changes(
     tenant_partitions: &HashMap<IBPartitionId, IBPartition>,
     partition_ids_by_pkey: &HashMap<PartitionKey, IBPartitionId>,
     reports: Vec<MachineIbStatusEvaluation>,
+    instrumentation: &Instrumentation,
 ) -> IbResult<usize> {
     let mut num_changes = 0;
 
     for report in reports {
         for (fabric, guid, pkey) in report.missing_guid_pkeys {
             let Some(partition_id) = partition_ids_by_pkey.get(&pkey) else {
-                emit(IbMonitorPkeyReconciliationSkipped::NoPartitionIdForPkey {
+                instrumentation.emit(IbMonitorPkeyReconciliationSkipped::NoPartitionIdForPkey {
                     pkey: pkey.to_string(),
                 });
                 continue;
             };
             let Some(partition) = tenant_partitions.get(partition_id) else {
-                emit(IbMonitorPkeyReconciliationSkipped::PartitionMissing {
+                instrumentation.emit(IbMonitorPkeyReconciliationSkipped::PartitionMissing {
                     pkey: pkey.to_string(),
                 });
                 continue;
@@ -1103,6 +1102,7 @@ async fn apply_guid_pkey_changes(
                 &guid,
                 pkey,
                 &result,
+                instrumentation,
             );
             if result.is_ok() {
                 num_changes += 1;
@@ -1137,6 +1137,7 @@ async fn apply_guid_pkey_changes(
                 &guid,
                 pkey,
                 &result,
+                instrumentation,
             );
             if result.is_ok() {
                 num_changes += 1;
@@ -1149,10 +1150,11 @@ async fn apply_guid_pkey_changes(
 
 /// Find all active partitions in order to determine pkeys
 async fn get_tenant_partitions(
-    txn: &mut PgConnection,
+    pool: &PgPool,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<HashMap<IBPartitionId, IBPartition>, IbError> {
     let partition_ids = db::ib_partition::find_ids(
-        &mut *txn,
+        pool,
         IbPartitionSearchFilter {
             tenant_org_id: None,
             name: None,
@@ -1167,8 +1169,9 @@ async fn get_tenant_partitions(
         let page_size = PAGE_SIZE.min(partition_ids.len() - offset);
         let next_ids = &partition_ids[offset..offset + page_size];
         let partition_data = db::ib_partition::find_by(
-            &mut *txn,
+            pool,
             db::ObjectColumnFilter::List(db::ib_partition::IdColumn, next_ids),
+            instrumentation,
         )
         .await?;
 
@@ -1725,12 +1728,7 @@ async fn preload_sku_inactive_devices(
         return Ok(HashMap::new());
     }
 
-    let mut conn = db_pool
-        .acquire()
-        .await
-        .map_err(|e| DatabaseError::new("acquire connection", e))?;
-
-    let skus = db::sku::find(&mut conn, &sku_ids)
+    let skus = db::sku::find(db_pool, &sku_ids)
         .await
         .map_err(|e| IbError::internal(format!("Failed to load SKUs: {e}")))?;
 
@@ -2579,13 +2577,16 @@ mod tests {
                     };
                     let mut fabric_data = FabricData::default();
                     let mut fabric_metrics = FabricMetrics::default();
-                    let metrics = MetricsCapture::start();
+                    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                    let instrumentation = Instrumentation::new(test_meter.meter());
+                    let metrics = MetricsCapture::for_registry(test_meter.registry());
                     let (client, logs) = capture_logs_async(load_single_fabric_data(
                         &manager,
                         FABRIC,
                         &definition,
                         &mut fabric_data,
                         &mut fabric_metrics,
+                        &instrumentation,
                     ))
                     .await;
                     let log = logs.first().expect("fabric failure Event logged");
@@ -2663,7 +2664,9 @@ mod tests {
                 make_fabric_definition(vec![("0x100", "0x8FF")]),
             )]);
             let mut fabric_clients = HashMap::new();
-            let event_metrics = MetricsCapture::start();
+            let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+            let instrumentation = Instrumentation::new(test_meter.meter());
+            let event_metrics = MetricsCapture::for_registry(test_meter.registry());
 
             let num_changes = apply_guid_pkey_changes(
                 &manager,
@@ -2672,6 +2675,7 @@ mod tests {
                 &tenant_partitions,
                 &partition_ids_by_pkey,
                 five_pending_changes(FABRIC, pkey),
+                &instrumentation,
             )
             .await
             .expect("applying changes against stub fabric");
@@ -2711,6 +2715,8 @@ mod tests {
         /// one client.
         #[tokio::test]
         async fn monitor_iteration_builds_one_client_per_fabric() {
+            let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+            let instrumentation = Instrumentation::new(test_meter.meter());
             const FABRIC: &str = "reused-client-fabric";
 
             let manager = CountingFabricManager::new();
@@ -2732,6 +2738,7 @@ mod tests {
                 &definition,
                 &mut fabric_data,
                 &mut fabric_metrics,
+                &instrumentation,
             )
             .await
             .expect("client for reachable stub fabric");
@@ -2753,6 +2760,7 @@ mod tests {
                 &tenant_partitions,
                 &partition_ids_by_pkey,
                 five_pending_changes(FABRIC, pkey),
+                &instrumentation,
             )
             .await
             .expect("applying changes against stub fabric");

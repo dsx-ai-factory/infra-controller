@@ -38,7 +38,6 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
-use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use mac_address::MacAddress;
 use nv_redfish::Bmc;
 use nv_redfish::bmc_http::BmcCredentials;
@@ -159,7 +158,7 @@ impl Target {
                 .map_err(|error| format!("connecting: {error}"))?;
             bmc_explorer::nv_generate_exploration_report(connection.service_root, &explore_config())
                 .await
-                .map(|report| bmc_explorer::platform_identity(&report))
+                .map(|report| bmc_runtime::platform_identity(&report))
                 .map_err(|error| format!("exploring: {error}"))
         })
         .await
@@ -204,6 +203,7 @@ impl Target {
             self.pool.clone(),
             Arc::new(StaticCredentials(self.credentials())),
             CALLER.to_string(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .map_err(|error| error.to_string())?
         .connect(endpoint, Some(self.ipmi()))
@@ -218,16 +218,10 @@ impl Target {
                 &self.password,
             ))),
             None,
-        );
-        // The machine id only labels ipmitool errors; the validator has no machine record.
-        let machine_id = MachineId::new(
-            MachineIdSource::ProductBoardChassisSerial,
-            [0; 32],
-            MachineType::Host,
+            carbide_instrument::Instrumentation::global(),
         );
         Arc::new(EndpointIpmiOps::new(
             tool,
-            machine_id,
             SocketAddr::new(self.address.ip(), carbide_ipmi::DEFAULT_IPMI_PORT),
             credential_key(),
         ))

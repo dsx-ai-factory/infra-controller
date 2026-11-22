@@ -332,11 +332,12 @@ async fn test_remove_dhcp_address_returns_not_found(
     );
 
     // Verify the DHCP address is still there.
-    let mut txn = env.db_txn().await;
-    let addr =
-        db::machine_interface_address::find_ipv4_for_interface(&mut txn, interface.id).await?;
+    let addr = db::machine_interface_address::find_ipv4_for_interface(
+        &env.api().database_connection,
+        interface.id,
+    )
+    .await?;
     assert_eq!(addr.address, dhcp_ip, "DHCP address should still exist");
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -495,14 +496,13 @@ async fn test_assign_and_remove_resync_hostname(
     let dhcp_ip = discover_resp.address.clone();
     let interface_id = discover_resp.machine_interface_id.unwrap();
 
-    let mut txn = env.db_txn().await;
-    let iface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let iface =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     assert_eq!(
         iface.hostname,
         dhcp_ip.replace('.', "-"),
         "hostname should be derived from the DHCP address"
     );
-    txn.commit().await?;
 
     // Move it to a different static IP (same family, so it replaces the DHCP
     // one). The hostname must follow the new address, not stay pinned to the
@@ -515,14 +515,13 @@ async fn test_assign_and_remove_resync_hostname(
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let iface_after_assign = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let iface_after_assign =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     assert_eq!(
         iface_after_assign.hostname,
         static_ip.replace('.', "-"),
         "hostname should resync to the newly assigned static address"
     );
-    txn.commit().await?;
 
     // Remove the static address; with no addresses left the hostname must reset
     // to the dormant placeholder rather than keep encoding the freed IP.
@@ -533,8 +532,8 @@ async fn test_assign_and_remove_resync_hostname(
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let iface_after_remove = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let iface_after_remove =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     assert!(
         iface_after_remove
             .hostname
@@ -543,7 +542,6 @@ async fn test_assign_and_remove_resync_hostname(
         "hostname should reset to dormant format after removal, got: {}",
         iface_after_remove.hostname,
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -579,11 +577,10 @@ async fn test_remove_with_mismatched_interface_id_is_rejected(
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let owner_hostname_before = db::machine_interface::find_one(&mut *txn, owner_id)
-        .await?
-        .hostname;
-    txn.commit().await?;
+    let owner_hostname_before =
+        db::machine_interface::find_one(&env.api().database_connection, owner_id)
+            .await?
+            .hostname;
 
     // A second, unrelated interface whose id we will (incorrectly) pass to
     // remove-address.
@@ -622,9 +619,8 @@ async fn test_remove_with_mismatched_interface_id_is_rejected(
     assert_eq!(addrs.addresses.len(), 1);
     assert_eq!(addrs.addresses[0].address, owned_ip);
 
-    let mut txn = env.db_txn().await;
-    let owner_after = db::machine_interface::find_one(&mut *txn, owner_id).await?;
-    txn.commit().await?;
+    let owner_after =
+        db::machine_interface::find_one(&env.api().database_connection, owner_id).await?;
     assert_eq!(
         owner_after.hostname, owner_hostname_before,
         "the owner's hostname must be unchanged after a mismatched remove"
@@ -671,13 +667,12 @@ async fn test_assign_moves_interface_to_correct_segment(
         .await?;
 
     // Verify the interface moved to the underlay segment.
-    let mut txn = env.db_txn().await;
-    let updated = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+    let updated =
+        db::machine_interface::find_one(&env.api().database_connection, interface.id).await?;
     assert_eq!(
         updated.segment_id, underlay_segment.id,
         "interface should have moved to the underlay segment"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -717,9 +712,10 @@ async fn test_assign_external_ip_moves_to_static_assignments(
         .await?;
 
     // Verify the interface moved to static-assignments with the segment's domain.
-    let mut txn = env.db_txn().await;
-    let updated = db::machine_interface::find_one(&mut *txn, interface.id).await?;
-    let static_seg = db::network_segment::static_assignments(&mut txn).await?;
+    let updated =
+        db::machine_interface::find_one(&env.api().database_connection, interface.id).await?;
+    let static_seg =
+        db::network_segment::static_assignments(&env.api().database_connection).await?;
     assert_eq!(
         updated.segment_id, static_seg.id,
         "interface should have moved to the static-assignments segment"
@@ -728,7 +724,6 @@ async fn test_assign_external_ip_moves_to_static_assignments(
         updated.domain_id, static_seg.config.subdomain_id,
         "domain_id should match the static-assignments segment's subdomain"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -781,9 +776,10 @@ async fn test_assign_external_ipv6_matching_link_address_moves_to_dual_stack_sta
         .await?;
 
     // Re-read the interface and static segment to verify the durable topology.
-    let mut txn = env.db_txn().await;
-    let updated = db::machine_interface::find_one(&mut *txn, interface.id).await?;
-    let static_seg = db::network_segment::static_assignments(&mut txn).await?;
+    let updated =
+        db::machine_interface::find_one(&env.api().database_connection, interface.id).await?;
+    let static_seg =
+        db::network_segment::static_assignments(&env.api().database_connection).await?;
     assert_eq!(
         updated.segment_id, static_seg.id,
         "interface should have moved to the static-assignments segment"
@@ -806,7 +802,6 @@ async fn test_assign_external_ipv6_matching_link_address_moves_to_dual_stack_sta
             .any(|prefix| prefix.prefix.is_ipv6()),
         "static-assignments should include an IPv6 placeholder"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -887,20 +882,24 @@ async fn test_managed_static_address_requires_dhcp_ack_after_external_assignment
         .into_inner();
     assert_eq!(response.status(), RemoveStaticAddressStatus::Removed);
 
-    let mut txn = env.db_txn().await;
-    let updated = db::machine_interface::find_one(&mut *txn, interface.id).await?;
-    let static_segment = db::network_segment::static_assignments(&mut txn).await?;
+    let updated =
+        db::machine_interface::find_one(&env.api().database_connection, interface.id).await?;
+    let static_segment =
+        db::network_segment::static_assignments(&env.api().database_connection).await?;
     assert_eq!(updated.segment_id, static_segment.id);
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(
+        &env.api().database_connection,
+        interface.id,
+    )
+    .await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].address, managed_ipv4);
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     assert!(
-        db::bmc_suppression::is_dhcp_acknowledgement_pending(&mut *txn, mac).await?,
+        db::bmc_suppression::is_dhcp_acknowledgement_pending(&env.api().database_connection, mac)
+            .await?,
         "removing external IPv6 must not exempt the remaining managed IPv4 reservation"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -940,13 +939,12 @@ async fn test_assign_within_same_segment_no_move(
         .await?;
 
     // Verify the segment didn't change.
-    let mut txn = env.db_txn().await;
-    let updated = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+    let updated =
+        db::machine_interface::find_one(&env.api().database_connection, interface.id).await?;
     assert_eq!(
         updated.segment_id, original_segment,
         "interface should stay on the same segment"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -985,11 +983,11 @@ async fn test_dhcp_moves_interface_back_from_static_assignments(
         .await?;
 
     // Verify it's on static-assignments.
-    let mut txn = env.db_txn().await;
-    let iface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
-    let static_seg = db::network_segment::static_assignments(&mut txn).await?;
+    let iface =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
+    let static_seg =
+        db::network_segment::static_assignments(&env.api().database_connection).await?;
     assert_eq!(iface.segment_id, static_seg.id);
-    txn.commit().await?;
 
     // And then remove the static address.
     env.api()
@@ -1021,8 +1019,8 @@ async fn test_dhcp_moves_interface_back_from_static_assignments(
 
     // Verify the interface moved back to the admin segment
     // with the correct domain_id.
-    let mut txn = env.db_txn().await;
-    let updated = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let updated =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     assert_eq!(
         updated.segment_id, admin_segment.id,
         "interface should have moved back to admin segment from static-assignments"
@@ -1031,7 +1029,6 @@ async fn test_dhcp_moves_interface_back_from_static_assignments(
         updated.domain_id.is_some(),
         "domain_id should be restored when moving back from static-assignments"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -1070,15 +1067,15 @@ async fn test_dhcp_does_not_move_interface_with_static_address(
         .await?;
 
     // Verify it's on static-assignments with the static IP.
-    let mut txn = env.db_txn().await;
-    let static_seg = db::network_segment::static_assignments(&mut txn).await?;
-    let iface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let static_seg =
+        db::network_segment::static_assignments(&env.api().database_connection).await?;
+    let iface =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     assert_eq!(iface.segment_id, static_seg.id);
     assert!(
         !iface.addresses.is_empty(),
         "should have the static address"
     );
-    txn.commit().await?;
 
     // Hit the DHCP discover again -- the interface has an external static
     // IP on static-assignments. The discover flow finds the interface but
@@ -1105,8 +1102,8 @@ async fn test_dhcp_does_not_move_interface_with_static_address(
     );
 
     // Verify the interface is still on static-assignments, untouched.
-    let mut txn = env.db_txn().await;
-    let updated = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let updated =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     assert_eq!(
         updated.segment_id, static_seg.id,
         "interface should stay on static-assignments when it has a static address"
@@ -1115,7 +1112,6 @@ async fn test_dhcp_does_not_move_interface_with_static_address(
         updated.addresses.contains(&"10.50.1.201".parse().unwrap()),
         "static address should still be intact"
     );
-    txn.rollback().await?;
 
     Ok(())
 }

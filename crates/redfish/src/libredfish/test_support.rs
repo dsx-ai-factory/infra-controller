@@ -33,7 +33,7 @@ use libredfish::model::sensor::GPUSensors;
 use libredfish::model::service_root::{RedfishVendor, ServiceRoot};
 use libredfish::model::software_inventory::SoftwareInventory;
 use libredfish::model::storage::Drives;
-use libredfish::model::task::Task;
+use libredfish::model::task::{Task, TaskState};
 use libredfish::model::update_service::{ComponentType, TransferProtocolType, UpdateService};
 use libredfish::model::{ODataId, ODataLinks};
 use libredfish::standard::RedfishStandard;
@@ -47,15 +47,25 @@ use crate::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPo
 
 const TRIGGER_EVIDENCE_TASK_ID: &str = "SpdmTriggerEvidenceTaskId";
 
+/// An intercepted reset request whose response is supplied by the test.
+#[derive(Debug)]
+pub struct BmcFactoryResetRequest {
+    pub host: String,
+    pub respond: tokio::sync::oneshot::Sender<Result<(), RedfishError>>,
+}
+
 #[derive(Default)]
 struct RedfishSimState {
     hosts: HashMap<String, RedfishSimHostState>,
     users: HashMap<String, String>,
     ipmi_accounts: HashSet<String>,
     fw_version: Arc<String>,
+    firmware_upload_delay: Option<Duration>,
     secure_boot: AtomicBool,
     no_component_integrities: bool,
     firmware_for_component_error: bool,
+    /// Task IDs that `get_task` reports as `Running`, with their `PercentComplete`.
+    running_tasks: HashMap<String, Option<u32>>,
     get_task_trigger_evidence_returns_exception: bool,
     evidence_collection_running: bool,
     evidence_collection_requests: Vec<(String, String)>,
@@ -72,6 +82,7 @@ struct RedfishSimState {
     /// accepting the write without applying the requested policy.
     lockdown_bmc_applies: Option<bool>,
     next_lockdown_status_error: Option<RedfishError>,
+    next_lockdown_status: Option<libredfish::Status>,
     next_lockdown_bmc_error: Option<(EnabledDisabled, String)>,
     /// Fail one power-state read without changing the host's actual power.
     next_power_state_error: Option<(usize, String)>,
@@ -87,6 +98,7 @@ struct RedfishSimState {
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
     ac_powercycle_supported: bool,
     next_chassis_reset_error: Option<RedfishError>,
+    next_bmc_factory_reset: Option<tokio::sync::oneshot::Sender<BmcFactoryResetRequest>>,
     next_ipmi_access_error: Option<String>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
@@ -170,6 +182,11 @@ struct RedfishSimState {
     create_client_error: Option<String>,
     /// Optional latency for the three phases of SPDM attester discovery.
     create_client_delay: Duration,
+    /// Gate one successful creation across this simulator; failed attempts leave the gate armed.
+    next_client_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
     service_root_delay: Duration,
     component_integrities_delay: Duration,
     /// When set, the sim's `BmcCredentialOps::uefi_setup` override fails with
@@ -378,6 +395,13 @@ impl RedfishSim {
         self.state.lock().unwrap().no_component_integrities = no_component_integrities;
     }
 
+    /// `set_firmware_upload_delay` sets the delay for subsequent multipart uploads
+    /// from all clients of this simulator. The default is four seconds;
+    /// `Duration::ZERO` returns the task ID without a simulated wait.
+    pub fn set_firmware_upload_delay(&self, delay: Duration) {
+        self.state.lock().unwrap().firmware_upload_delay = Some(delay);
+    }
+
     /// Fail the firmware-inventory lookup an attestation makes while fetching
     /// component metadata.
     pub fn set_firmware_for_component_error(&self, error: bool) {
@@ -429,6 +453,15 @@ impl RedfishSim {
             .unwrap()
             .task_http_errors
             .insert(task_id.to_string(), status_code);
+    }
+
+    /// Report `task_id` as `Running` with `percent_complete`; other tasks keep their behavior.
+    pub fn set_running_task(&self, task_id: &str, percent_complete: Option<u32>) {
+        self.state
+            .lock()
+            .unwrap()
+            .running_tasks
+            .insert(task_id.to_string(), percent_complete);
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -491,6 +524,11 @@ impl RedfishSim {
     /// Fail one lockdown observation without changing the actual policy.
     pub fn fail_next_lockdown_status(&self, error: RedfishError) {
         self.state.lock().unwrap().next_lockdown_status_error = Some(error);
+    }
+
+    /// Override one lockdown observation without changing the actual policy.
+    pub fn set_next_lockdown_status(&self, status: libredfish::Status) {
+        self.state.lock().unwrap().next_lockdown_status = Some(status);
     }
 
     /// Fail the next matching BMC lockdown write without applying it.
@@ -697,6 +735,16 @@ impl RedfishSim {
         self.state.lock().unwrap().create_client_error = None;
     }
 
+    /// Hand the next factory-reset request to the test and await its response.
+    /// Later requests succeed normally.
+    pub fn intercept_next_bmc_factory_reset(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<BmcFactoryResetRequest> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_bmc_factory_reset = Some(send);
+        receive
+    }
+
     /// Delays client creation and both attester inventory reads independently.
     /// Zero durations restore immediate responses; delays release the state lock.
     pub fn set_attester_selection_delays(
@@ -709,6 +757,20 @@ impl RedfishSim {
         state.create_client_delay = client_creation;
         state.service_root_delay = service_root;
         state.component_integrities_delay = component_integrities;
+    }
+
+    /// Pause the next successful creation. The receiver signals when it is paused.
+    /// Sending or dropping the release sender lets creation finish.
+    pub fn pause_next_client_creation(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, preparing) = tokio::sync::oneshot::channel();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_client_pause = Some((started, paused));
+        (preparing, resume)
     }
 
     /// Force the sim's `uefi_setup` override to fail with
@@ -902,6 +964,10 @@ pub enum RedfishSimAction {
     /// A power request rejected before its effect was applied.
     PowerFailed(libredfish::SystemPowerControl),
     BmcReset(Option<ManagerResetType>),
+    /// Records a successfully accepted BMC factory reset.
+    BmcResetToDefaults,
+    /// Records a BMC factory-reset request rejected by an injected failure.
+    BmcResetToDefaultsFailed,
     /// Records a Redfish `Chassis.Reset` call with its target and reset type.
     ChassisReset {
         chassis_id: String,
@@ -1246,6 +1312,9 @@ impl Redfish for RedfishSimClient {
             if let Some(error) = state.next_lockdown_status_error.take() {
                 return Err(error);
             }
+            if let Some(status) = state.next_lockdown_status.take() {
+                return Ok(status);
+            }
             Ok(libredfish::Status::build_fake(
                 state.hosts[&self._host].lockdown,
             ))
@@ -1560,6 +1629,29 @@ impl Redfish for RedfishSimClient {
                     &format!("TaskService/Tasks/{id}"),
                     "simulated task lookup failure",
                 ));
+            }
+            let running_progress = self.state.lock().unwrap().running_tasks.get(id).copied();
+            if let Some(percent_complete) = running_progress {
+                return Ok(Task {
+                    odata: ODataLinks {
+                        odata_context: None,
+                        odata_id: format!("/redfish/v1/TaskService/Tasks/{id}"),
+                        odata_type: "#Task.v1_4_3.Task".to_string(),
+                        odata_etag: None,
+                        links: None,
+                    },
+                    id: id.to_string(),
+                    messages: Vec::new(),
+                    name: None,
+                    task_state: Some(TaskState::Running),
+                    task_status: None,
+                    task_monitor: None,
+                    percent_complete,
+                    start_time: None,
+                    end_time: None,
+                    payload: None,
+                    hide_payload: None,
+                });
             }
             if self
                 .state
@@ -2133,7 +2225,35 @@ impl Redfish for RedfishSimClient {
     fn bmc_reset_to_defaults<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let intercept = self.state.lock().unwrap().next_bmc_factory_reset.take();
+            let result = if let Some(intercept) = intercept {
+                let (respond, response) = tokio::sync::oneshot::channel();
+                intercept
+                    .send(BmcFactoryResetRequest {
+                        host: self._host.clone(),
+                        respond,
+                    })
+                    .expect("test must receive the intercepted reset request");
+                response
+                    .await
+                    .expect("test must respond to the reset request")
+            } else {
+                Ok(())
+            };
+            let mut state = self.state.lock().unwrap();
+            state
+                .hosts
+                .get_mut(&self._host)
+                .unwrap()
+                .actions
+                .push(if result.is_err() {
+                    RedfishSimAction::BmcResetToDefaultsFailed
+                } else {
+                    RedfishSimAction::BmcResetToDefaults
+                });
+            result
+        })
     }
 
     fn get_system_event_log<'a>(
@@ -2190,6 +2310,10 @@ impl Redfish for RedfishSimClient {
                 task_status: None,
                 task_monitor: None,
                 percent_complete: None,
+                start_time: None,
+                end_time: None,
+                payload: None,
+                hide_payload: None,
             })
         })
     }
@@ -2263,8 +2387,15 @@ impl Redfish for RedfishSimClient {
         _component_type: ComponentType,
     ) -> libredfish::RedfishFuture<'a, Result<String, RedfishError>> {
         Box::pin(async move {
-            // Simulate it taking a bit of time to upload
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            let delay = self
+                .state
+                .lock()
+                .unwrap()
+                .firmware_upload_delay
+                .unwrap_or(Duration::from_secs(4));
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             Ok("0".to_string())
         })
     }
@@ -3048,6 +3179,17 @@ impl Redfish for RedfishSimClient {
 
 #[async_trait]
 impl RedfishClientPool for RedfishSim {
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        // The simulator applies each action directly, without an HTTP retry layer.
+        self.create_client(host, port, auth, vendor).await
+    }
+
     async fn create_client(
         &self,
         host: &str,
@@ -3055,7 +3197,7 @@ impl RedfishClientPool for RedfishSim {
         auth: RedfishAuth,
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
-        {
+        let pause = {
             let mut state = self.state.lock().unwrap();
             state.create_client_calls.push(CreateClientCall {
                 host: host.to_string(),
@@ -3082,6 +3224,12 @@ impl RedfishClientPool for RedfishSim {
             if state.fw_version.is_empty() {
                 state.fw_version = Arc::new("24.10-17".to_string());
             }
+            state.next_client_pause.take()
+        };
+        if let Some((started, resume)) = pause
+            && started.send(()).is_ok()
+        {
+            resume.await.ok();
         }
         // Client creation can wait on credentials or authentication before returning a client.
         let delay = self.state.lock().unwrap().create_client_delay;
@@ -3110,6 +3258,7 @@ impl super::BmcCredentialOps for RedfishSim {
         _access: &carbide_utils::redfish::BmcAccessInfo,
         dpu: bool,
         sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
+        _instrumentation: &carbide_instrument::Instrumentation,
     ) -> Result<Option<String>, super::CredentialOpError> {
         let pause = {
             let mut state = self.state.lock().unwrap();

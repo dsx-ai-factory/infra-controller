@@ -33,6 +33,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+metrics-endpoint = { path = "../metrics-endpoint" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 

@@ -87,6 +87,8 @@ type DPUDeviceReconciler struct {
 //+kubebuilder:rbac:groups="",resources=secrets,resourceNames=bmc-shared-password,verbs=get
 //+kubebuilder:rbac:groups=svc.dpu.nvidia.com,resources=dpudeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=svc.dpu.nvidia.com,resources=dpudeployments/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=operator.dpu.nvidia.com,resources=dpfoperatorconfigs,verbs=get;create
+//+kubebuilder:rbac:groups=operator.dpu.nvidia.com,resources=dpfoperatorconfigs/status,verbs=patch
 
 // errNoReferencingNode reports that no DPUNode currently lists the DPUDevice —
 // the expected transient at creation time (NICo creates the two CRs in either

@@ -10,9 +10,10 @@
 
 use std::time::Duration;
 
+use bmc_platform::ResetType;
 use carbide_libmlx_model::firmware::operation::FirmwareOperationState;
 use chrono::{DateTime, Utc};
-use libredfish::SystemPowerControl;
+use db::TransactionVending as _;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::nic_firmware::{
     NicFirmwareActivation, NicFirmwareBaselineContinuation, NicFirmwareLockdownPolicy,
@@ -44,6 +45,18 @@ pub(super) async fn handle(
             "invalid admitted NIC firmware operation: {error}"
         ))
     })?;
+
+    if snapshot
+        .host_snapshot
+        .status
+        .hardware_dispatch
+        .as_ref()
+        .is_some_and(|dispatch| dispatch.is_pending())
+    {
+        return Ok(StateHandlerOutcome::wait(
+            "an earlier hardware command is still awaiting its result".to_string(),
+        ));
+    }
 
     let machine_failure = super::get_failed_state(snapshot);
     let machine_failure_reason = machine_failure.as_ref().map(|(machine_id, details)| {
@@ -251,7 +264,12 @@ pub(super) async fn handle(
             // taken before Scout's report must not cause an avoidable reboot.
             let version = snapshot.host_snapshot.state.version;
             let host_machine_id = snapshot.host_snapshot.id;
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::machine::lock_nic_firmware_state(&mut txn, &host_machine_id, version)
                 .await?
                 .check_applied()?;
@@ -344,14 +362,16 @@ pub(super) async fn handle(
             )
             .await?
             .check_applied()?;
-            txn.commit().await?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
 
             let attempt = tokio::time::timeout(
                 REBOOT_ATTEMPT_TIMEOUT,
                 super::handler_host_power_control_with_location(
                     snapshot,
                     ctx,
-                    SystemPowerControl::ForceRestart,
+                    ResetType::ForceRestart,
                     std::panic::Location::caller(),
                     Some(now),
                 ),
@@ -432,7 +452,12 @@ pub(super) async fn handle(
                 // Only safe, independently restored failure reaches this phase.
                 // A deleted original owner must still follow normal network and
                 // instance teardown; jumping to cleanup would skip those steps.
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::machine::prepare_nic_firmware_owner_release(
                     &mut txn,
                     &snapshot.host_snapshot.id,
@@ -684,7 +709,12 @@ async fn complete(
     };
     // Recheck the owner under the same locks and transaction as the ordinary
     // controller state transition, so a stale snapshot cannot hand off a host.
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::machine::prepare_nic_firmware_completion(
         &mut txn,
         &snapshot.host_snapshot.id,

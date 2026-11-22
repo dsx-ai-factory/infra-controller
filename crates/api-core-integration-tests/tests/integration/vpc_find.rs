@@ -14,12 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::ops::DerefMut;
 
 use ::rpc::forge as rpc;
 use carbide_test_harness::prelude::{PgPool, ResourcePoolBuilder, TestHarness, sqlx_test};
 use carbide_test_harness::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use carbide_uuid::vpc::VpcId;
+use db::TransactionVending as _;
 use model::resource_pool::Range;
 use model::resource_pool::common::VPC_VNI;
 use rpc::forge_server::Forge;
@@ -214,12 +214,12 @@ async fn test_find_vpcs_by_ids(pool: PgPool) {
 
 #[sqlx_test]
 async fn find_vpc_by_name(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let vpc_id = VpcId::new();
 
     sqlx::query(r#"
         INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, 'test vpc 1', $2, 'V1-T1666644937952267');
-    "#).bind(vpc_id).bind(FIXTURE_TENANT_ORG_ID).execute(txn.deref_mut()).await?;
+    "#).bind(vpc_id).bind(FIXTURE_TENANT_ORG_ID).execute(txn.as_mut()).await?;
 
     let some_vpc = db::vpc::find_by_name(txn.as_mut(), "test vpc 1").await?;
 
@@ -274,15 +274,15 @@ async fn test_vpc_search_based_on_labels(pool: PgPool) {
             .create_vpc(
                 rpc::VpcCreationRequest::builder("")
                     .metadata(rpc::Metadata {
-                        name: format!("VPC_{i}{i}{i}").to_string(),
-                        description: format!("VPC_{i}{i}{i} have labels").to_string(),
+                        name: format!("VPC_{i}{i}{i}"),
+                        description: format!("VPC_{i}{i}{i} have labels"),
                         labels: vec![
                             rpc::Label {
-                                key: format!("key_A_{i}{i}{i}").to_string(),
-                                value: Some(format!("value_A_{i}{i}{i}").to_string()),
+                                key: format!("key_A_{i}{i}{i}"),
+                                value: Some(format!("value_A_{i}{i}{i}")),
                             },
                             rpc::Label {
-                                key: format!("key_B_{i}{i}{i}").to_string(),
+                                key: format!("key_B_{i}{i}{i}"),
                                 value: None,
                             },
                         ],
@@ -364,17 +364,15 @@ async fn test_vpc_find_by_segment(pool: PgPool) {
         .await
         .id;
 
-    let mut txn = env.db_txn().await;
-    let vpc_id = db::vpc::find_by_name(txn.as_mut(), "test vpc 1")
+    let vpc_id = db::vpc::find_by_name(&env.api().database_connection, "test vpc 1")
         .await
         .unwrap()
         .first()
         .unwrap()
         .id;
-    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+    let vpc = db::vpc::find_by_segment(&env.api().database_connection, segment_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(vpc.id.to_string(), vpc_id.to_string());
-    txn.rollback().await.unwrap();
 }

@@ -129,17 +129,16 @@ async fn show_switches(
     match sort_by {
         SortField::PrimaryId => switch_list.switches.sort_by_key(|switch| switch.id),
         SortField::State => switch_list.switches.sort_by(|s1, s2| {
-            let default_state = "N/A".to_string();
             let state1 = s1
                 .status
                 .as_ref()
-                .and_then(|status| status.controller_state.as_ref())
-                .unwrap_or(&default_state);
+                .and_then(|status| status.controller_state.as_deref())
+                .unwrap_or("N/A");
             let state2 = s2
                 .status
                 .as_ref()
-                .and_then(|status| status.controller_state.as_ref())
-                .unwrap_or(&default_state);
+                .and_then(|status| status.controller_state.as_deref())
+                .unwrap_or("N/A");
             state1.cmp(state2)
         }),
     }
@@ -298,41 +297,26 @@ fn switch_details_text(switch: &Switch) -> CarbideCliResult<String> {
     // Status
     writeln!(&mut lines, "\nStatus:")?;
     if let Some(status) = &switch.status {
-        let status_data: Vec<(&str, String)> = vec![
+        let status_data: Vec<(&str, &str)> = vec![
             (
                 "Switch Name",
-                status
-                    .switch_name
-                    .clone()
-                    .unwrap_or_else(|| "N/A".to_string()),
+                status.switch_name.as_deref().unwrap_or("N/A"),
             ),
             (
                 "Power State",
-                status
-                    .power_state
-                    .clone()
-                    .unwrap_or_else(|| "N/A".to_string()),
+                status.power_state.as_deref().unwrap_or("N/A"),
             ),
             (
                 "Health Status",
-                status
-                    .health_status
-                    .clone()
-                    .unwrap_or_else(|| "N/A".to_string()),
+                status.health_status.as_deref().unwrap_or("N/A"),
             ),
             (
                 "Controller State",
-                status
-                    .controller_state
-                    .clone()
-                    .unwrap_or_else(|| "N/A".to_string()),
+                status.controller_state.as_deref().unwrap_or("N/A"),
             ),
             (
                 "Fabric Manager",
-                status
-                    .fabric_manager_status
-                    .clone()
-                    .unwrap_or_else(|| "N/A".to_string()),
+                status.fabric_manager_status.as_deref().unwrap_or("N/A"),
             ),
         ];
         let sw = 1 + status_data

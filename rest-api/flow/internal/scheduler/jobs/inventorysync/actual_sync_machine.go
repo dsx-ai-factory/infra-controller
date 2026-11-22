@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -457,11 +458,11 @@ func compareMachineFieldsForDrift(
 			if field.expected == int(*field.actual) {
 				continue
 			}
-			actualValue = fmt.Sprintf("%d", *field.actual)
+			actualValue = strconv.Itoa(int(*field.actual))
 		}
 		diffs = append(diffs, model.FieldDiff{
 			FieldName:     field.name,
-			ExpectedValue: fmt.Sprintf("%d", field.expected),
+			ExpectedValue: strconv.Itoa(field.expected),
 			ActualValue:   actualValue,
 		})
 	}

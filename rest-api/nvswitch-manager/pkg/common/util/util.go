@@ -35,9 +35,9 @@ func PrintPrettyResponse(resp *http.Response) {
 	var prettyJSON bytes.Buffer
 	if err := json.Indent(&prettyJSON, bodyBytes, "", "  "); err != nil {
 		// If the body is not JSON, just print it as a string
-		fmt.Printf("Body is not JSON: %s\n", string(bodyBytes))
+		fmt.Printf("Body is not JSON: %s\n", bodyBytes)
 		return
 	}
 
-	fmt.Println(prettyJSON.String())
+	fmt.Printf("%s\n", prettyJSON.Bytes())
 }

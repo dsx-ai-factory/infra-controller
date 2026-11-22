@@ -265,7 +265,7 @@ func NewGetAllExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) 
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "ID of Site (optional, filters results to specific site)"
 // @Param pageNumber query integer false "Page number of results returned"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} []model.APIExpectedSwitch
@@ -429,7 +429,7 @@ func NewGetExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) Get
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Expected Switch"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch/{id} [get]
 func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
@@ -467,7 +467,7 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)
@@ -587,7 +587,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)
@@ -793,7 +793,7 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)

@@ -83,7 +83,7 @@ use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue, MetricFamily};
 use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
@@ -95,6 +95,7 @@ use db::credential_rotation::{
     device_rotation_status, increment_rotate_attempt, mark_device_rotating_to_version,
     promote_rotating_to_current, rotation_status,
 };
+use db::db_read::PgPoolReader;
 use db::{ConditionalWrite, DatabaseError};
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
@@ -839,9 +840,7 @@ impl RotationGate {
         // Refresh with one cheap aggregate query. A concurrent refresh by
         // another tick is harmless: the query is read-only and idempotent, and
         // last-writer-wins on the cache is fine for a gate.
-        let mut conn = pool.acquire().await?;
-        let status = rotation_status(&mut conn, self.family).await?;
-        drop(conn);
+        let status = rotation_status(&mut PgPoolReader::from(pool.clone()), self.family).await?;
         let work_pending = status.target_version > 0 && (status.pending + status.quarantined) > 0;
 
         let mut cache = self.inner.lock().expect("rotation gate mutex poisoned");
@@ -865,8 +864,7 @@ impl RotationGate {
         if !self.rotation_pending(pool).await? {
             return Ok(false);
         }
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, self.family, device_mac).await?;
+        let status = device_rotation_status(pool, self.family, device_mac).await?;
         Ok(status.as_ref().is_some_and(needs_rotation))
     }
 }
@@ -893,9 +891,7 @@ async fn enter_device_rotation(
     mac: MacAddress,
     force: bool,
 ) -> Result<ControlFlow<RotateOutcome, (DeviceRotationStatus, u32)>, RotationEngineError> {
-    let mut conn = db_pool.acquire().await?;
-    let status = device_rotation_status(&mut conn, credential_type, mac).await?;
-    drop(conn);
+    let status = device_rotation_status(db_pool, credential_type, mac).await?;
 
     let Some(status) = status else {
         return Ok(ControlFlow::Break(RotateOutcome::NoWork));
@@ -945,12 +941,14 @@ async fn enter_device_rotation(
 /// `redfish_pool` is the direct pool's credential-operations handle
 /// ([`BmcCredentialOps`]): rotation authenticates to the BMC itself to
 /// change and verify passwords.
+/// Terminal Event metrics use the supplied instrumentation.
 pub async fn rotate_bmc(
     db_pool: &PgPool,
     credential_manager: &dyn CredentialManager,
     redfish_pool: &dyn BmcCredentialOps,
     bmc: &BmcRotationTarget,
     force: bool,
+    instrumentation: &Instrumentation,
 ) -> Result<RotateOutcome, RotationEngineError> {
     let mac = bmc.device_mac;
     let (status, target_version) = match enter_device_rotation(db_pool, BMC, mac, force).await? {
@@ -978,7 +976,7 @@ pub async fn rotate_bmc(
             }
             match convergence {
                 CredentialConvergence::Changed => {
-                    emit(BmcCredentialRotationConverged::new(mac, target_version));
+                    instrumentation.emit(BmcCredentialRotationConverged::new(mac, target_version));
                 }
                 // The change failed but the rotate-TO value already
                 // authenticated: a prior attempt changed the hardware and
@@ -988,7 +986,7 @@ pub async fn rotate_bmc(
                 // why the direct change failed (usually a stale-credential auth
                 // rejection).
                 CredentialConvergence::Recovered { change_error } => {
-                    emit(BmcCredentialRotationRecovered::new(
+                    instrumentation.emit(BmcCredentialRotationRecovered::new(
                         mac,
                         target_version,
                         change_error,
@@ -1001,7 +999,7 @@ pub async fn rotate_bmc(
             let until = backoff_until(status.rotate_attempts, Utc::now());
             let mut conn = db_pool.acquire().await?;
             increment_rotate_attempt(&mut conn, mac, BMC, &redacted, until).await?;
-            emit(BmcCredentialRotationQuarantined::new(
+            instrumentation.emit(BmcCredentialRotationQuarantined::new(
                 mac,
                 target_version,
                 redacted,
@@ -1041,12 +1039,14 @@ pub async fn rotate_bmc(
 /// `redfish_pool` is the direct pool's credential-operations handle
 /// ([`BmcCredentialOps`]): rotation authenticates to the BMC itself to
 /// change and verify passwords.
+/// Terminal Event metrics use the supplied instrumentation.
 pub async fn rotate_dpu_bmc_service(
     db_pool: &PgPool,
     credential_manager: &dyn CredentialManager,
     redfish_pool: &dyn BmcCredentialOps,
     endpoint: &BmcEndpoint,
     force: bool,
+    instrumentation: &Instrumentation,
 ) -> Result<RotateOutcome, RotationEngineError> {
     let mac = endpoint.device_mac;
     let (status, target_version) =
@@ -1079,7 +1079,7 @@ pub async fn rotate_dpu_bmc_service(
             }
             match convergence {
                 CredentialConvergence::Changed => {
-                    emit(DpuBmcServiceCredentialRotationConverged::new(
+                    instrumentation.emit(DpuBmcServiceCredentialRotationConverged::new(
                         mac,
                         target_version,
                     ));
@@ -1088,7 +1088,7 @@ pub async fn rotate_dpu_bmc_service(
                 // already authenticated: a prior tick changed the hardware and
                 // crashed before recording success, and this tick reconciled it.
                 CredentialConvergence::Recovered { change_error } => {
-                    emit(DpuBmcServiceCredentialRotationRecovered::new(
+                    instrumentation.emit(DpuBmcServiceCredentialRotationRecovered::new(
                         mac,
                         target_version,
                         change_error,
@@ -1101,7 +1101,7 @@ pub async fn rotate_dpu_bmc_service(
             let until = backoff_until(status.rotate_attempts, Utc::now());
             let mut conn = db_pool.acquire().await?;
             increment_rotate_attempt(&mut conn, mac, DPU_BMC_SERVICE, &redacted, until).await?;
-            emit(DpuBmcServiceCredentialRotationQuarantined::new(
+            instrumentation.emit(DpuBmcServiceCredentialRotationQuarantined::new(
                 mac,
                 target_version,
                 redacted,
@@ -1429,7 +1429,7 @@ async fn resolve_dispatch_vendor(
             }
             Err(format!(
                 "probe BMC dispatch vendor: {}",
-                last_err.unwrap_or_else(|| "no credential candidates".to_string())
+                last_err.as_deref().unwrap_or("no credential candidates")
             ))
         }
     }
@@ -1453,7 +1453,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration as StdDuration;
 
-    use carbide_instrument::emit;
+    use carbide_instrument::Instrumentation;
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
     use carbide_redfish::libredfish::BmcCredentialOps;
     use carbide_redfish::libredfish::test_support::RedfishSim;
@@ -1463,6 +1463,7 @@ mod tests {
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::{Check, check_values};
+    use carbide_utils::test_support::test_meter::TestMeter;
     use chrono::{Duration, Utc};
     use db::credential_rotation::{
         CredentialRotationType, DeviceRotationStatus, device_rotation_status,
@@ -1549,8 +1550,7 @@ mod tests {
     }
 
     async fn status_of(pool: &PgPool) -> DeviceRotationStatus {
-        let mut conn = pool.acquire().await.unwrap();
-        device_rotation_status(&mut conn, BMC, test_mac())
+        device_rotation_status(pool, BMC, test_mac())
             .await
             .unwrap()
             .expect("device row must exist")
@@ -1651,9 +1651,19 @@ mod tests {
             } else {
                 dpu_bmc("old", password)
             };
-            let metrics = MetricsCapture::start();
+            let test_meter = TestMeter::default();
+            let instrumentation = Instrumentation::new(test_meter.meter());
+            let metrics = MetricsCapture::for_registry(test_meter.registry());
             let result = if credential_type == BMC {
-                rotate_bmc(&pool, &credential_manager, &redfish, &target(), false).await
+                rotate_bmc(
+                    &pool,
+                    &credential_manager,
+                    &redfish,
+                    &target(),
+                    false,
+                    &instrumentation,
+                )
+                .await
             } else {
                 rotate_dpu_bmc_service(
                     &pool,
@@ -1661,6 +1671,7 @@ mod tests {
                     &redfish,
                     &dpu_service_endpoint(),
                     false,
+                    &instrumentation,
                 )
                 .await
             };
@@ -1688,8 +1699,7 @@ mod tests {
                 )),
                 "{scenario}"
             );
-            let mut conn = pool.acquire().await.unwrap();
-            let status = device_rotation_status(&mut conn, credential_type, test_mac())
+            let status = device_rotation_status(&pool, credential_type, test_mac())
                 .await
                 .unwrap()
                 .expect("the other worker's bookkeeping remains");
@@ -1723,7 +1733,9 @@ mod tests {
             .expect("the credential probe must not raise a transport error")
     }
 
-    fn rotation_result_deltas(metrics: &MetricsCapture) -> [f64; 3] {
+    fn rotation_result_deltas(
+        metrics: &carbide_instrument::testing::RegistryMetricsCapture,
+    ) -> [f64; 3] {
         [
             metrics.counter_delta(BMC_ROTATION_RESULTS_METRIC, &[("result", "converged")]),
             metrics.counter_delta(BMC_ROTATION_RESULTS_METRIC, &[("result", "recovered")]),
@@ -1805,25 +1817,33 @@ mod tests {
 
     fn observe_rotation_event(case: RotationEventCase) -> RotationEventObservation {
         let result = case.result();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| match case {
-            RotationEventCase::Converged => emit(BmcCredentialRotationConverged::new(
-                test_mac(),
-                TEST_TARGET_VERSION,
-            )),
+            RotationEventCase::Converged => {
+                metrics
+                    .instrumentation()
+                    .emit(BmcCredentialRotationConverged::new(
+                        test_mac(),
+                        TEST_TARGET_VERSION,
+                    ))
+            }
             RotationEventCase::Recovered { change_error } => {
-                emit(BmcCredentialRotationRecovered::new(
-                    test_mac(),
-                    TEST_TARGET_VERSION,
-                    change_error.to_string(),
-                ))
+                metrics
+                    .instrumentation()
+                    .emit(BmcCredentialRotationRecovered::new(
+                        test_mac(),
+                        TEST_TARGET_VERSION,
+                        change_error.to_string(),
+                    ))
             }
             RotationEventCase::Quarantined { error } => {
-                emit(BmcCredentialRotationQuarantined::new(
-                    test_mac(),
-                    TEST_TARGET_VERSION,
-                    error.to_string(),
-                ))
+                metrics
+                    .instrumentation()
+                    .emit(BmcCredentialRotationQuarantined::new(
+                        test_mac(),
+                        TEST_TARGET_VERSION,
+                        error.to_string(),
+                    ))
             }
         })
         .into_iter()
@@ -2169,8 +2189,10 @@ mod tests {
         // The BMC is on the per-device secret ("old"), so the change succeeds.
         let redfish = bmc_on_password("old");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .expect("rotation must not raise a transient engine error");
 
@@ -2220,8 +2242,10 @@ mod tests {
         // old -> new succeeds; only the store write is made to fail.
         let redfish = bmc_on_password("old");
         cm.set_set_credentials_failure(true);
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
 
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .expect("a store-persist failure is not a transient engine error");
 
@@ -2267,8 +2291,8 @@ mod tests {
         // The store becomes writable again: the next tick's change-then-verify
         // recovery re-persists and converges, reconciling hardware and store.
         cm.set_set_credentials_failure(false);
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .expect("the reconciling tick must not raise a transient engine error");
 
@@ -2312,8 +2336,10 @@ mod tests {
         // means this can only pass by probing, not by re-issuing the change.
         let redfish = bmc_on_password("new");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .unwrap();
 
@@ -2348,9 +2374,11 @@ mod tests {
         let redfish = bmc_on_password("mystery");
         redfish.set_change_password_error("BMC rejected login with password=topsecret");
 
-        let metrics = MetricsCapture::start();
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let before = Utc::now();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .unwrap();
 
@@ -2394,8 +2422,10 @@ mod tests {
         let cm = TestCredentialManager::default();
         let redfish = bmc_on_password("old");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .unwrap();
 
@@ -2426,8 +2456,10 @@ mod tests {
         // rotate_to_key(1) is intentionally left unstaged.
         let redfish = bmc_on_password("old");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .unwrap();
 
@@ -2454,8 +2486,10 @@ mod tests {
         let cm = TestCredentialManager::default();
         let redfish = bmc_on_password("old");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .unwrap();
 
@@ -2490,8 +2524,10 @@ mod tests {
         let cm = TestCredentialManager::default();
         let redfish = bmc_on_password("old");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .unwrap();
 
@@ -2536,16 +2572,11 @@ mod tests {
         drop(conn);
         let redfish = bmc_on_password("old");
 
-        // Hold the metrics serialization guard across the converging call: it
-        // emits `converged` into the process-global registry, and without the
-        // guard it could run concurrently with a metric-asserting test and leak
-        // that count into its delta window. This test asserts outcome/state, not
-        // metrics, so the guard is dropped before those checks.
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), true)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), true, &instrumentation)
             .await
             .expect("a forced rotation must not raise a transient engine error");
-        drop(metrics);
 
         assert_eq!(
             outcome,
@@ -2580,8 +2611,10 @@ mod tests {
             .unwrap();
         let redfish = bmc_on_password("old");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false)
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_bmc(&pool, &cm, &redfish, &target(), false, &instrumentation)
             .await
             .unwrap();
 
@@ -2693,8 +2726,7 @@ mod tests {
     }
 
     async fn dpu_service_status_of(pool: &PgPool) -> DeviceRotationStatus {
-        let mut conn = pool.acquire().await.unwrap();
-        device_rotation_status(&mut conn, DPU_BMC_SERVICE, test_mac())
+        device_rotation_status(pool, DPU_BMC_SERVICE, test_mac())
             .await
             .unwrap()
             .expect("device row must exist")
@@ -2716,7 +2748,9 @@ mod tests {
 
     /// `[converged, recovered, quarantined]` deltas for the shared
     /// `carbide_dpu_bmc_service_credential_rotation_results_total` metric.
-    fn dpu_service_result_deltas(metrics: &MetricsCapture) -> [f64; 3] {
+    fn dpu_service_result_deltas(
+        metrics: &carbide_instrument::testing::RegistryMetricsCapture,
+    ) -> [f64; 3] {
         [
             metrics.counter_delta(
                 DPU_SERVICE_ROTATION_RESULTS_METRIC,
@@ -2750,10 +2784,19 @@ mod tests {
         // PATCH, so the change succeeds.
         let redfish = dpu_bmc("rootpw", "old-service-pw");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), false)
-            .await
-            .expect("rotation must not raise a transient engine error");
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            false,
+            &instrumentation,
+        )
+        .await
+        .expect("rotation must not raise a transient engine error");
 
         assert_eq!(outcome, RotateOutcome::Converged);
         assert_eq!(dpu_service_result_deltas(&metrics), [1.0, 0.0, 0.0]);
@@ -2824,10 +2867,19 @@ mod tests {
         // prior (crashed) attempt.
         let redfish = dpu_bmc("rootpw", "new-service-pw");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), false)
-            .await
-            .unwrap();
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            false,
+            &instrumentation,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             outcome,
@@ -2877,10 +2929,19 @@ mod tests {
         let redfish = dpu_bmc("rootpw", "new-service-pw");
         redfish.set_reject_password_reuse(true);
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), false)
-            .await
-            .unwrap();
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            false,
+            &instrumentation,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             outcome,
@@ -2921,11 +2982,20 @@ mod tests {
         // end to end (the redfish layer and the engine both strip it).
         redfish.set_change_password_error("BMC rejected service change with password=topsecret");
 
-        let metrics = MetricsCapture::start();
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let before = Utc::now();
-        let outcome = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), false)
-            .await
-            .unwrap();
+        let outcome = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            false,
+            &instrumentation,
+        )
+        .await
+        .unwrap();
 
         let until = match outcome {
             RotateOutcome::Quarantined { until } => until,
@@ -2966,10 +3036,19 @@ mod tests {
         let cm = TestCredentialManager::default();
         let redfish = dpu_bmc("rootpw", "old-service-pw");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), false)
-            .await
-            .unwrap();
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            false,
+            &instrumentation,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome, RotateOutcome::NoWork);
         assert_eq!(dpu_service_result_deltas(&metrics), [0.0, 0.0, 0.0]);
@@ -2988,10 +3067,19 @@ mod tests {
         let cm = TestCredentialManager::default();
         let redfish = dpu_bmc("rootpw", "old-service-pw");
 
-        let metrics = MetricsCapture::start();
-        let outcome = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), false)
-            .await
-            .unwrap();
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let outcome = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            false,
+            &instrumentation,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome, RotateOutcome::Converged);
         assert_eq!(dpu_service_result_deltas(&metrics), [0.0, 0.0, 0.0]);
@@ -3029,23 +3117,37 @@ mod tests {
         .unwrap();
         let redfish = dpu_bmc("rootpw", "old-service-pw");
 
+        let test_meter = TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
         // Without force, the device is skipped inside its backoff window.
-        let skipped = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), false)
-            .await
-            .unwrap();
+        let skipped = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            false,
+            &instrumentation,
+        )
+        .await
+        .unwrap();
         assert!(matches!(skipped, RotateOutcome::Quarantined { .. }));
         assert!(
             redfish.create_client_calls().is_empty(),
             "a quarantined device is not contacted without force"
         );
 
-        // With force, the same device is attempted anyway and converges. The
-        // capture window serializes the emitted `converged` result against other
-        // tests observing the same metric family.
-        let metrics = MetricsCapture::start();
-        let forced = rotate_dpu_bmc_service(&pool, &cm, &redfish, &dpu_service_endpoint(), true)
-            .await
-            .unwrap();
+        // With force, the same device is attempted anyway and converges.
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
+        let forced = rotate_dpu_bmc_service(
+            &pool,
+            &cm,
+            &redfish,
+            &dpu_service_endpoint(),
+            true,
+            &instrumentation,
+        )
+        .await
+        .unwrap();
         assert_eq!(dpu_service_result_deltas(&metrics), [1.0, 0.0, 0.0]);
         drop(metrics);
         assert_eq!(forced, RotateOutcome::Converged);

@@ -36,10 +36,10 @@ mod transport;
 
 pub use capabilities::{
     Accounts, Attestation, Bios, BiosDiff, BiosSettings, BiosStatus, BmcControl,
-    BootInterfaceSelector, BootOrder, BootOrderStatus, Console, ConsoleFallback, ConsoleSpec,
-    ConsoleSpecError, ConsoleState, ConsoleStatus, Dpu, DpuStatus, EscapeSeq, EvidenceProgress,
-    Firmware, FirmwareComponent, FirmwareUpload, HostPrivilegeLevel, Lockdown,
-    LockdownDesiredState, LockdownScope, LockdownState, LockdownStatus, ManagerSettings,
+    BootInterfaceSelector, BootOrder, BootOrderStatus, BootProgress, BootProgressTypes, Console,
+    ConsoleFallback, ConsoleSpec, ConsoleSpecError, ConsoleState, ConsoleStatus, Dpu, DpuStatus,
+    EscapeSeq, EvidenceProgress, Firmware, FirmwareComponent, FirmwareUpload, HostPrivilegeLevel,
+    Lockdown, LockdownDesiredState, LockdownScope, LockdownState, LockdownStatus, ManagerSettings,
     ManagerSettingsDiff, ManagerSettingsStatus, NicMode, NonEmptyBytes, NonEmptyBytesError, Power,
     RshimState, SecureBoot, SecureBootStatus, SshShellSpec, Storage, SuperNic, TimeStatus,
 };
@@ -52,6 +52,8 @@ pub use matcher::{
     FirmwareVersionRange, FirmwareVersionRangeError, IdentityField, IdentityMatcher, MatchPattern,
     Precedence, derived_precedence,
 };
+/// The Redfish power types the [`Power`] capability reads and requests.
+pub use nv_redfish::resource::{PowerState, ResetType};
 pub use operation::{
     DriverOutcome, OperationReference, OperationStatus, VendorJobId, VendorJobIdError,
 };

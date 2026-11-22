@@ -18,8 +18,8 @@
 use std::path::PathBuf;
 use std::{env, fs};
 
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::ForgeClientConfig;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 
@@ -48,12 +48,12 @@ async fn test_upgrade_check() -> eyre::Result<()> {
             ::rpc::service_path!("DpuAgentUpgradeCheck"),
             post(dpu_agent_upgrade_check),
         )
-        // ForgeApiClient needs a working Version route for connection retrying
+        // CarbideApiClient needs a working Version route for connection retrying
         .route(::rpc::service_path!("Version"), post(handle_version));
     let (addr, join_handle) = common::run_grpc_server(app).await?;
 
     let client_config =
-        ForgeClientConfig::new(root_dir.join(ROOT_CERT_PATH).display().to_string(), None)
+        CarbideClientConfig::new(root_dir.join(ROOT_CERT_PATH).display().to_string(), None)
             .use_mgmt_vrf()?;
 
     let upgrade_cmd = format!(

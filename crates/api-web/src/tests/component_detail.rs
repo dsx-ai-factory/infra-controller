@@ -69,6 +69,12 @@ async fn test_component_detail_pages_return_not_found_for_missing_resources(pool
     }
 
     for route in [
+        "/admin/interface/00000000-0000-0000-0000-000000000001",
+        "/admin/interface/00000000-0000-0000-0000-000000000001.json",
+        "/admin/machinevalidation/runs/00000000-0000-0000-0000-000000000001",
+        "/admin/machinevalidation/tests/missing-test",
+        "/admin/nvlink-partition/00000000-0000-0000-0000-000000000001",
+        "/admin/nvlink-partition/00000000-0000-0000-0000-000000000001.json",
         "/admin/rack/missing-rack",
         "/admin/rack/missing-rack.json",
         "/admin/switch/sw100ntjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0",

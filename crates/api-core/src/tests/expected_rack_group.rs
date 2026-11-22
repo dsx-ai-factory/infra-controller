@@ -27,6 +27,7 @@ async fn get_all_expected_rack_groups(pool: sqlx::PgPool) {
                 racks: vec![rpc::forge::ExpectedRackGroupRack {
                     rack_id: Some("rack-01".parse().unwrap()),
                     members: vec![rpc::forge::ExpectedRackGroupMember {
+                        cartridge_index: Some(0),
                         r#type: "Switch".into(),
                         manufacturer: "NVIDIA".into(),
                         id: "switch-01".into(),
@@ -64,6 +65,7 @@ async fn expected_rack_group_duplicate_create(pool: sqlx::PgPool) {
         racks: vec![rpc::forge::ExpectedRackGroupRack {
             rack_id: Some("rack-01".parse().unwrap()),
             members: vec![rpc::forge::ExpectedRackGroupMember {
+                cartridge_index: Some(0),
                 r#type: "Switch".into(),
                 manufacturer: "NVIDIA".into(),
                 id: "switch-01".into(),

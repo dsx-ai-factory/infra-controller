@@ -27,6 +27,12 @@ pub struct TestMeter {
 }
 
 impl TestMeter {
+    /// Returns the registry owned by this test provider for isolated assertions.
+    /// Keep this TestMeter alive while capturing or collecting its metrics.
+    pub fn registry(&self) -> &prometheus::Registry {
+        &self.registry
+    }
+
     /// Returns the latest accumulated metrics in prometheus format
     pub fn export_metrics(&self) -> String {
         let mut buffer = vec![];
@@ -161,7 +167,8 @@ mod test {
         assert!(
             test_meter
                 .formatted_metrics("c_seconds_bucket")
-                .contains(&"{le=\"100\"} 1".to_string())
+                .iter()
+                .any(|value| value == "{le=\"100\"} 1")
         );
 
         assert_eq!(

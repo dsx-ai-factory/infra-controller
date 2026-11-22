@@ -274,7 +274,7 @@ jobs:
 
       - name: Upload binary artifact with semantic version
         if: inputs.push_enabled == true && inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
           display-name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
@@ -286,7 +286,7 @@ jobs:
 
       - name: Upload binary artifact with latest tag
         if: inputs.is_main_branch == 'true' && inputs.push_enabled == true && inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
           display-name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
@@ -394,7 +394,7 @@ jobs:
 
       - name: Upload Docker image artifact with semantic version
         if: inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           name: ${{ inputs.service_name }}-image
           display-name: ${{ inputs.service_name }}-image
@@ -406,7 +406,7 @@ jobs:
 
       - name: Upload Docker image artifact with latest tag
         if: inputs.is_main_branch == 'true' && inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@ae74448cafa69f20fe0011c5351c2a864a8f632d
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           name: ${{ inputs.service_name }}-image
           display-name: ${{ inputs.service_name }}-image

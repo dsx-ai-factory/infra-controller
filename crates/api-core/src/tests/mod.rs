@@ -15,16 +15,21 @@
  * limitations under the License.
  */
 
+mod admin_power;
 mod astra;
 mod boot_interface_resolution;
 mod chassis_reset;
 mod client_resolution;
 pub(in crate::tests) mod common;
+mod component_firmware_details;
 mod component_manager;
 mod component_power_details;
 mod dhcp_cross_family_regression_test;
+mod dhcp_option_set;
 mod domain;
 mod dpf;
+mod dpu_asn_backfill;
+mod dpu_ipv6_backfill;
 mod dpu_machine_update;
 mod dpu_nic_firmware;
 mod dpu_remediation;
@@ -32,7 +37,6 @@ mod dpu_remote;
 mod dpu_reprovisioning;
 mod expected_component_patch;
 mod expected_machine;
-mod expected_nvlink_domain;
 mod expected_rack;
 mod expected_rack_group;
 mod expected_switch;
@@ -48,12 +52,14 @@ mod ib_instance;
 mod ib_machine;
 mod ib_partition_find;
 mod ib_partition_lifecycle;
+mod ib_partition_remote;
 mod instance;
 mod instance_allocate;
 mod instance_batch_allocate;
 mod instance_config_update;
 mod instance_ipxe_behaviors;
 mod instance_os;
+mod instance_reboot;
 mod instance_type;
 mod ipxe;
 mod lldp;
@@ -86,6 +92,7 @@ mod nic_firmware_artifact;
 mod nic_firmware_operation;
 mod nvl_instance;
 mod nvl_logical_partition;
+mod nvlink_domain;
 mod preingestion_bfb_identity;
 mod preingestion_dpu_nic_mode;
 mod primary_interface;
@@ -93,6 +100,7 @@ mod rack_health;
 mod redfish_actions;
 mod resource_pool;
 mod resource_pool_inspection;
+mod rest_vpc_completion;
 mod routing_profiles;
 mod site_explorer;
 mod site_prefix;
@@ -106,12 +114,15 @@ mod tenant_identity_config;
 mod tenant_prefix_startup;
 mod tenants;
 mod tpm_ca;
+mod transaction;
 mod vpc;
 mod vpc_peering;
 mod vpc_prefix;
 mod vpc_remote;
 // NOTE: the admin web UI tests moved to the `carbide-api-web` crate (alongside the web code they
 // exercise).
+
+pub(crate) use common::postgres::{wait_for_blocked_queries, wait_for_blocked_query};
 
 pub(crate) use crate::tests::common::api_fixtures::create_test_env;
 /// Make these symbol available as
@@ -125,3 +136,5 @@ pub(crate) use crate::tests::common::sqlx_fixtures::sqlx_fixture_from_str;
 fn setup_test_logging() {
     crate::test_support::setup_test_logging()
 }
+
+mod machine_tracing;

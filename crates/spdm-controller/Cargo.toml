@@ -23,6 +23,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+bmc-backend = { path = "../bmc-backend" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-instrument = { path = "../instrument" }
@@ -41,8 +42,13 @@ tracing = { workspace = true }
 chrono.workspace = true
 
 [dev-dependencies]
+carbide-health-report = { path = "../health-report" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-macros = { path = "../macros" }
+carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-test-support = { path = "../test-support" }
+carbide-uuid = { path = "../uuid", features = ["sqlx"] }
+uuid = { features = ["v4", "serde"], workspace = true }
 
 [lints]
 workspace = true

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 	"github.com/google/uuid"
 
 	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
@@ -86,6 +87,7 @@ func (m *ManagerImpl) Create(
 	}
 
 	var id uuid.UUID
+	run.Metadata = &logcorrelation.Metadata{TraceID: logcorrelation.Capture(ctx)}
 	transactionFn := func(txCtx context.Context) error {
 		runID, err := m.store.Create(txCtx, run)
 		if err != nil {

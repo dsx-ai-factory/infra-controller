@@ -149,6 +149,13 @@ Each reconciliation pass does the following:
 1. Compares observed state against desired state.
 1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
+1. Removes NICo's record of any stale physical partition in the chassis's domain
+   that NMX-C has not listed on two consecutive checked passes unless NMX-C lists
+   it again before the pass ends.
+1. After every chassis has been checked, removes NICo's record of any physical
+   partition whose NVLink domain no managed host belongs to, such as after NMX-C
+   restarts with a new domain UUID. Nothing is removed this way while any host's
+   domain is unknown for the pass.
 1. Updates per-machine GPU status observations in the NICo database. The
    per-instance `configs_synced.nvlink` field is derived from these
    observations and is what gates the instance's `Ready` state.
@@ -338,8 +345,8 @@ unreachable_alert_after = 3
 | Field | Purpose |
 | ----- | ------- |
 | `nmx_c_tls_ca_cert_path` | PEM containing the CAs that verify NMX-C over HTTPS. It is the only trust source: neither the partition monitor nor the certificate monitor uses the system trust store |
-| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
-| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
+| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C. Set it together with `nmx_c_tls_client_key_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
+| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above. Set it together with `nmx_c_tls_client_cert_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
@@ -360,13 +367,13 @@ schedule the change accordingly.
 When either setting is `true`, `nico-api` fills in unset TLS settings at
 startup:
 
-- **Client certificate, key, and authority.** When none of the four
+* **Client certificate, key, and authority.** When none of the four
   `nmx_c_tls_*` keys is set, `nico-api` uses `tls.crt` and `tls.key` from the
   nico-api Helm chart's `nvSwitchTls.nicoClient` mount,
   `/var/run/secrets/nvswitch-client`, and sets `nmx_c_tls_authority` to
   `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
   defaults.
-- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+* **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
   over HTTPS, `nico-api` uses `ca.crt` from that mount, or else
   `/var/run/secrets/nico-roots/ca.crt`. This applies regardless of the other
   keys.

@@ -263,7 +263,7 @@ mod filters {
         values: &[OptionalRedfishActionResult],
         _env: &dyn askama::Values,
     ) -> ::askama::Result<Vec<String>> {
-        fn escape_quotes(s: String) -> String {
+        fn escape_quotes(s: &str) -> String {
             format!("\"{}\"", s.replace('"', r#"\""#))
         }
         values
@@ -276,17 +276,18 @@ mod filters {
                 headers.sort_by_key(|(h, _)| *h);
                 let headers = headers
                     .iter()
-                    .map(|(h, v)| escape_quotes(format!("{h}: {v}")))
+                    .map(|(h, v)| escape_quotes(&format!("{h}: {v}")))
                     .join(", ");
                 let out = format!(
                     "Status: {}. Body: {}. Completed at: {}. Headers: {headers}",
                     v.status,
-                    escape_quotes(v.body.clone()),
+                    escape_quotes(&v.body),
                     v.completed_at
                         .as_ref()
                         .map(super::date_fmt_inner)
                         .transpose()?
-                        .unwrap_or("missing timestamp".to_string()),
+                        .as_deref()
+                        .unwrap_or("missing timestamp"),
                 );
                 Ok(out)
             })

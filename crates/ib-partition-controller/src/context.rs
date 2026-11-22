@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use carbide_ib_fabric::ib::IBFabricManager;
+use carbide_resource_pool::ResourcePoolRegistry;
 use model::resource_pool::common::IbPools;
 use sqlx::PgPool;
 use state_controller::state_handler::StateHandlerContextObjects;
@@ -26,11 +27,16 @@ pub struct IBPartitionStateHandlerContextObjects {}
 
 #[derive(Clone)]
 pub struct IBPartitionStateHandlerServices {
+    /// Event destination shared by controller operations.
+    /// Retain its provider until the controller stops.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
     /// API for interaction with Forge IBFabricManager
     pub ib_fabric_manager: Arc<dyn IBFabricManager>,
     /// Resource pools for ib pkey allocation/release.
     pub ib_pools: IbPools,
+    /// Selects the allocator used to release this partition's PKey.
+    pub resource_pool_registry: Arc<ResourcePoolRegistry>,
 }
 
 impl StateHandlerContextObjects for IBPartitionStateHandlerContextObjects {

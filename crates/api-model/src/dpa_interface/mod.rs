@@ -259,6 +259,10 @@ pub struct DpaInterface {
     pub device_description: Option<String>,
 
     pub interface_type: DpaInterfaceType,
+
+    /// Declared logical interface name of the lane this interface stands for,
+    /// when the registering caller knew it.
+    pub interface_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +273,9 @@ pub struct NewDpaInterface {
     pub pci_name: String,
     pub device_description: Option<String>,
     pub interface_type: DpaInterfaceType,
+    /// Declared logical interface name of the lane this registration stands
+    /// for, when the registering caller knows it.
+    pub interface_name: Option<String>,
 }
 
 impl NewDpaInterface {
@@ -296,6 +303,8 @@ impl NewDpaInterface {
             pci_name,
             device_description,
             interface_type,
+            // Scout reports a device, not a declared lane.
+            interface_name: None,
         })
     }
 }
@@ -351,19 +360,20 @@ impl DpaInterface {
         // If there is an instance, and the instance has SPX attachments,
         // and one of the attachments matches our mac address and has a non-zero partition ID,
         // then the DPA expected version should be the instance's SPX config version.
-        if let Some(instance) = instance
-            && instance
+        if let Some(instance) = instance {
+            let mac_address = self.mac_address.to_string();
+            if instance
                 .config
                 .spxconfig
                 .spx_attachments
                 .iter()
                 .any(|attachment| {
-                    attachment.mac_address.as_deref().unwrap_or_default()
-                        == self.mac_address.to_string()
+                    attachment.mac_address.as_deref().unwrap_or_default() == mac_address
                         && attachment.spx_partition_id != NULL_SPX_PARTITION_ID
                 })
-        {
-            dpa_expected_version = instance.spx_config_version;
+            {
+                dpa_expected_version = instance.spx_config_version;
+            }
         }
 
         for obs in spx_status_observation.spx_attachments.iter() {
@@ -435,6 +445,8 @@ pub struct DpaInterfaceSnapshotPgJson {
     #[serde(default)]
     pub device_description: Option<String>,
     pub interface_type: DpaInterfaceType,
+    #[serde(default)]
+    pub interface_name: Option<String>,
 }
 
 impl TryFrom<DpaInterfaceSnapshotPgJson> for DpaInterface {
@@ -478,6 +490,7 @@ impl TryFrom<DpaInterfaceSnapshotPgJson> for DpaInterface {
             overlay_ip: value.overlay_ip,
             device_description: value.device_description,
             interface_type: value.interface_type,
+            interface_name: value.interface_name,
         })
     }
 }
@@ -897,6 +910,7 @@ mod tests {
             history: Vec::new(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         }
     }
 
@@ -925,6 +939,7 @@ mod tests {
             network: InstanceNetworkConfig::default(),
             infiniband: InstanceInfinibandConfig::default(),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             extension_services: InstanceExtensionServicesConfig::default(),
             nvlink: InstanceNvLinkConfig::default(),
             spxconfig: InstanceSpxConfig { spx_attachments },

@@ -271,14 +271,15 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 
 	// Test cases
 	tests := []struct {
-		name             string
-		requestBody      model.APIExpectedMachineCreateRequest
-		requestBodyJSON  string
-		setupContext     func(c echo.Context)
-		expectedStatus   int
-		expectedErrorMsg *string
-		rejectsMutation  bool
-		failSKULookup    bool
+		name                     string
+		requestBody              model.APIExpectedMachineCreateRequest
+		requestBodyJSON          string
+		setupContext             func(c echo.Context)
+		expectedStatus           int
+		expectedErrorMsg         *string
+		rejectsMutation          bool
+		failSKULookup            bool
+		wantRetainBmcCredentials bool
 	}{
 		{
 			name: "successful creation",
@@ -287,6 +288,24 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				BmcMacAddress:            "00:11:22:33:44:55",
 				DefaultBmcUsername:       cutil.GetPtr("admin"),
 				DefaultBmcPassword:       cutil.GetPtr("password"),
+				ChassisSerialNumber:      "CHASSIS123",
+				FallbackDPUSerialNumbers: []string{"DPU001", "DPU002"},
+				Labels:                   map[string]string{"env": "test"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name: "successful creation with long BMC user and password",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:                   site.ID.String(),
+				BmcMacAddress:            "00:11:22:33:44:72",
+				DefaultBmcUsername:       cutil.GetPtr(strings.Repeat("u", 255)),
+				DefaultBmcPassword:       cutil.GetPtr(strings.Repeat("p", 255)),
 				ChassisSerialNumber:      "CHASSIS123",
 				FallbackDPUSerialNumbers: []string{"DPU001", "DPU002"},
 				Labels:                   map[string]string{"env": "test"},
@@ -535,6 +554,24 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 		},
 		{
+			name: "successful creation with BMC credential retention",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:               site.ID.String(),
+				BmcMacAddress:        "00:11:22:33:44:CC",
+				DefaultBmcUsername:   cutil.GetPtr("admin"),
+				DefaultBmcPassword:   cutil.GetPtr("password"),
+				ChassisSerialNumber:  "CHASSIS-RETAIN-001",
+				RetainBmcCredentials: cutil.GetPtr(true),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:           http.StatusCreated,
+			wantRetainBmcCredentials: true,
+		},
+		{
 			name: "duplicate MAC address should return 409",
 			requestBody: model.APIExpectedMachineCreateRequest{
 				SiteID:                   site.ID.String(),
@@ -644,6 +681,9 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				workflowRequest := mockTemporalClient.Calls[workflowCallsBefore].Arguments.Get(3).(*corev1.ExpectedMachine)
 				assert.Equal(t, tt.requestBody.SkuID, workflowRequest.SkuId)
 				assert.Nil(t, stored.IsDpfEnabled, "response default must not change the stored optional value")
+				assert.Equal(t, fmt.Sprint(tt.wantRetainBmcCredentials), string(fields["retainBmcCredentials"]))
+				assert.Equal(t, cutil.GetPtr(tt.wantRetainBmcCredentials), stored.RetainBmcCredentials)
+				assert.Equal(t, cutil.GetPtr(tt.wantRetainBmcCredentials), workflowRequest.BmcRetainCredentials)
 				if tt.requestBodyJSON != "" {
 					assert.JSONEq(t, `{}`, string(fields["labels"]))
 					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
@@ -663,7 +703,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 					}
 				}
 			} else if tt.expectedErrorMsg != nil {
-				assert.Contains(t, rec.Body.String(), *tt.expectedErrorMsg, fmt.Sprintf("Expected: %s, got: %s", *tt.expectedErrorMsg, rec.Body.String()))
+				assert.Contains(t, rec.Body.String(), *tt.expectedErrorMsg, "Expected: %s, got: %s", *tt.expectedErrorMsg, rec.Body.Bytes())
 			}
 		})
 	}
@@ -1634,6 +1674,7 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 		{name: "request validation and metadata", run: testUpdateExpectedMachineRequest},
 		{name: "BMC address presence", run: testUpdateExpectedMachineBmcIpAddress},
 		{name: "encrypted BMC credentials", run: testUpdateExpectedMachineBmcCredentials},
+		{name: "loopback replacement intent", run: testUpdateExpectedMachineLoopbacks},
 	}
 	for _, test := range tests {
 		t.Run(test.name, test.run)
@@ -1793,6 +1834,29 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			},
 			expectedStatus: http.StatusOK,
 			expectedPaths:  []string{"metadata.labels", "chassis_serial_number"},
+		},
+		{
+			name: "BMC credential retention update reaches Core",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				RetainBmcCredentials: cutil.GetPtr(true),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"bmc_retain_credentials"},
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.True(t, response.RetainBmcCredentials)
+				assert.Equal(t, cutil.GetPtr(true), capturedRequest.BmcRetainCredentials)
+				stored, err := emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cutil.GetPtr(true), stored.RetainBmcCredentials)
+			},
 		},
 		{
 			name: "empty BMC username rejects accompanying metadata before dispatch",
@@ -2108,7 +2172,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 4)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 5)
 	require.NotNil(t, capturedRequest)
 	assert.Equal(t, testEM.BmcMacAddress, capturedRequest.GetBmcMacAddress(),
 		"Core must receive the stored BMC MAC spelling")
@@ -2234,7 +2298,7 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 			for range requestCount {
 				workflowCount := len(capturedRequests)
 				url := "/v2/org/" + org + "/nico/expected-machine/" + testEM.ID.String()
-				req := httptest.NewRequest(http.MethodPatch, url, bytes.NewBufferString(tc.body))
+				req := httptest.NewRequest(http.MethodPatch, url, strings.NewReader(tc.body))
 				req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 				rec := httptest.NewRecorder()
 				c := e.NewContext(req, rec)
@@ -3092,7 +3156,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 						NicType:    cutil.GetPtr("CX9"),
 						FixedIP:    cutil.GetPtr("192.0.2.9"),
 					}},
-					Labels: map[string]string{"env": "test"},
+					Labels:               map[string]string{"env": "test"},
+					RetainBmcCredentials: cutil.GetPtr(true),
 				},
 				{
 					SiteID:              site.ID.String(),
@@ -3127,6 +3192,10 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				require.Len(t, response[0].Interfaces, 1)
 				assert.Equal(t, cutil.GetPtr("02:AA:BB:CC:DD:EE"), response[0].Interfaces[0].MacAddress)
 				assert.Equal(t, "CX9", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetNicType())
+				assert.Equal(t, "true", string(fields[0]["retainBmcCredentials"]))
+				assert.Equal(t, "false", string(fields[1]["retainBmcCredentials"]))
+				assert.Equal(t, cutil.GetPtr(true), batchRequest.ExpectedMachines.ExpectedMachines[0].BmcRetainCredentials)
+				assert.Equal(t, cutil.GetPtr(false), batchRequest.ExpectedMachines.ExpectedMachines[1].BmcRetainCredentials)
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
 			},
@@ -3598,6 +3667,7 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code, "Response: %s", rec.Body.String())
 			require.NotNil(t, capturedPatch, "workflow should have received a request")
 			assert.Equal(t, []string{tt.expectedPath}, capturedPatch.UpdateMask.Paths)
+			assert.False(t, capturedPatch.ExpectedMachine.ReplaceDpuLoopbacks)
 			assert.Equal(t, tt.expectedUsername, capturedPatch.ExpectedMachine.BmcUsername)
 			assert.Equal(t, tt.expectedPassword, capturedPatch.ExpectedMachine.BmcPassword)
 			if tt.expectedPath == "host_nics" {
@@ -3616,11 +3686,120 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 	}
 }
 
+func testUpdateExpectedMachineLoopbacks(t *testing.T) {
+	dbSession := testExpectedMachineInitDB(t)
+	t.Cleanup(func() { dbSession.Close() })
+	ctx := context.Background()
+	const org = "test-org"
+	_, site := testExpectedMachineSetupTestData(t, dbSession, org)
+	user := &cdbm.User{OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{authz.ProviderAdminRole}}}}
+	dao := cdbm.NewExpectedMachineDAO(dbSession)
+	physical := cdbm.ExpectedMachineInterface{
+		MacAddress: cutil.GetPtr("02:00:00:00:00:20"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs),
+		FixedIP: cutil.GetPtr("192.0.2.20"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+	}
+	loopback := cdbm.ExpectedMachineInterface{
+		MacAddress: physical.MacAddress, Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback),
+		FixedIP: cutil.GetPtr("198.51.100.20"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+	}
+	existing, err := dao.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:20", ChassisSerialNumber: "LOOPBACK-PATCH",
+	})
+	require.NoError(t, err)
+	client := &tmocks.Client{}
+	run := &tmocks.WorkflowRun{}
+	var captured corev1.PatchExpectedMachineRequest
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+		Run(func(args mock.Arguments) {
+			captured = corev1.PatchExpectedMachineRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), &captured)
+		}).Return(run, nil)
+	run.On("Get", mock.Anything, mock.Anything).Return(nil)
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[site.ID.String()] = client
+	handler := NewUpdateExpectedMachineHandler(dbSession, pool, common.GetTestConfig())
+	physicalJSON := `{"macAddress":"02:00:00:00:00:20","role":"DpuOs","fixedIp":"192.0.2.20","ipAllocation":"Fixed"}`
+	tests := []struct {
+		name               string
+		body               string
+		wantPhysical       bool
+		wantLoopback       string
+		wantWireCount      int
+		wantReplace        bool
+		editAfterPreflight bool
+	}{
+		{
+			name:         "physical update preserves reservation edited after preflight",
+			body:         `{"interfaces":[` + physicalJSON + `]}`,
+			wantPhysical: true, wantLoopback: "198.51.100.30", wantWireCount: 1, editAfterPreflight: true,
+		},
+		{
+			name: "empty physical list preserves reservation",
+			body: `{"interfaces":[]}`, wantLoopback: "198.51.100.20",
+		},
+		{
+			name:         "explicit clear retains submitted physical declaration",
+			body:         `{"interfaces":[` + physicalJSON + `],"replaceDpuLoopbacks":true}`,
+			wantPhysical: true, wantWireCount: 1, wantReplace: true,
+		},
+		{
+			name:         "supplied loopback replaces prior declaration without flag",
+			body:         `{"interfaces":[{"macAddress":"02:00:00:00:00:20","role":"DpuLoopback","fixedIp":"2001:db8::20","ipAllocation":"Fixed"}]}`,
+			wantLoopback: "2001:db8::20", wantWireCount: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := dao.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+				ExpectedMachineID: existing.ID, Interfaces: []cdbm.ExpectedMachineInterface{physical, loopback},
+			})
+			require.NoError(t, err)
+			if test.editAfterPreflight {
+				hook := &expectedMachineQueryHook{
+					queryPrefix: `SELECT "em".`, armed: true,
+					afterQuery: func(_ *bun.QueryEvent) {
+						changed := loopback
+						changed.FixedIP = cutil.GetPtr("198.51.100.30")
+						_, err := dao.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+							ExpectedMachineID: existing.ID, Interfaces: []cdbm.ExpectedMachineInterface{physical, changed},
+						})
+						require.NoError(t, err)
+					},
+				}
+				dbSession.DB.AddQueryHook(hook)
+				t.Cleanup(func() { require.True(t, hook.fired, "reservation edit must happen after preflight") })
+			}
+			recorder := invokeExpectedInventoryMutationHandler(t, user, org, http.MethodPatch,
+				"/v2/org/test-org/nico/expected-machine/"+existing.ID.String(), test.body, existing.ID.String(), handler.Handle)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			require.NotNil(t, captured.ExpectedMachine)
+			require.Equal(t, []string{"host_nics"}, captured.UpdateMask.Paths)
+			require.Equal(t, test.wantReplace, captured.ExpectedMachine.ReplaceDpuLoopbacks)
+			require.Len(t, captured.ExpectedMachine.HostNics, test.wantWireCount, "only submitted declarations should reach Core")
+			stored, err := dao.Get(ctx, nil, existing.ID, nil, false)
+			require.NoError(t, err)
+			want := []cdbm.ExpectedMachineInterface{}
+			if test.wantPhysical {
+				want = append(want, physical)
+			}
+			if test.wantLoopback != "" {
+				reservation := loopback
+				reservation.FixedIP = cutil.GetPtr(test.wantLoopback)
+				want = append(want, reservation)
+			}
+			require.Equal(t, want, stored.Interfaces)
+			var response model.APIExpectedMachine
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			require.Equal(t, model.NewAPIExpectedMachine(stored).Interfaces, response.Interfaces)
+		})
+	}
+}
+
 func TestExpectedMachineUpdateFields(t *testing.T) {
-	t.Run("tracks every request field except ID and BMC IP address", func(t *testing.T) {
+	t.Run("tracks every request field except ID and per-machine exceptions", func(t *testing.T) {
 		requestFieldCount := reflect.TypeOf(model.APIExpectedMachineUpdateRequest{}).NumField()
 		updateFieldCount := reflect.TypeOf(expectedMachineUpdateFieldSet{}).NumField()
-		assert.Equal(t, requestFieldCount-2, updateFieldCount)
+		assert.Equal(t, requestFieldCount-3, updateFieldCount)
 	})
 
 	fieldPresenceTests := []struct {
@@ -3636,6 +3815,11 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 		{
 			name:      "BMC IP address may vary per machine",
 			setField:  func(req *model.APIExpectedMachineUpdateRequest) { req.BmcIpAddress = cutil.GetPtr("192.0.2.10") },
+			wantEqual: true,
+		},
+		{
+			name:      "loopback replacement intent may vary per machine",
+			setField:  func(req *model.APIExpectedMachineUpdateRequest) { req.ReplaceDpuLoopbacks = cutil.GetPtr(true) },
 			wantEqual: true,
 		},
 		{
@@ -3716,6 +3900,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 		{
 			name:     "DPF enablement",
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.IsDpfEnabled = cutil.GetPtr(true) },
+		},
+		{
+			name:     "BMC credential retention",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.RetainBmcCredentials = cutil.GetPtr(false) },
 		},
 		{
 			name:     "empty labels",
@@ -3882,7 +4070,11 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		BmcMacAddress:            "00:11:22:33:44:10",
 		ChassisSerialNumber:      "BATCH-UPDATE-001",
 		FallbackDpuSerialNumbers: []string{"DPU010"},
-		Labels:                   map[string]string{"env": "test"},
+		Interfaces: []cdbm.ExpectedMachineInterface{{
+			MacAddress: cutil.GetPtr("02:00:00:00:00:20"), FixedIP: cutil.GetPtr("198.51.100.20"),
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}},
+		Labels: map[string]string{"env": "test"},
 	})
 	assert.Nil(t, err)
 
@@ -3900,7 +4092,11 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		BmcMacAddress:            "00:11:22:33:44:11",
 		ChassisSerialNumber:      "BATCH-UPDATE-002",
 		FallbackDpuSerialNumbers: []string{"DPU011"},
-		Labels:                   map[string]string{"env": "test"},
+		Interfaces: []cdbm.ExpectedMachineInterface{{
+			MacAddress: cutil.GetPtr("02:00:00:00:00:21"), FixedIP: cutil.GetPtr("198.51.100.21"),
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}},
+		Labels: map[string]string{"env": "test"},
 	})
 	assert.Nil(t, err)
 
@@ -3970,6 +4166,52 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		rejectsSKU         bool
 		validateResp       func(t *testing.T, body []byte)
 	}{
+		{
+			name: "batch preserves loopbacks unless each machine requests replacement",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{ID: cutil.GetPtr(testEM1.ID.String()), Interfaces: model.APIExpectedMachineInterfaces{}},
+				{ID: cutil.GetPtr(testEM2.ID.String()), ReplaceDpuLoopbacks: cutil.GetPtr(true), Interfaces: model.APIExpectedMachineInterfaces{{
+					MacAddress: cutil.GetPtr("02:00:00:00:00:21"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs),
+				}}},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			validateResp: func(t *testing.T, body []byte) {
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 2)
+				for _, patch := range capturedRequest.Patches {
+					assert.Equal(t, []string{"host_nics"}, patch.UpdateMask.Paths)
+					clearing := patch.ExpectedMachine.GetId().GetValue() == testEM2.ID.String()
+					assert.Equal(t, clearing, patch.ExpectedMachine.ReplaceDpuLoopbacks)
+					if clearing {
+						require.Len(t, patch.ExpectedMachine.HostNics, 1)
+						assert.Equal(t, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_OS, patch.ExpectedMachine.HostNics[0].GetRole())
+					} else {
+						assert.Empty(t, patch.ExpectedMachine.HostNics, "cached loopbacks must not be sent as fresh intent")
+					}
+				}
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 2)
+				for _, machine := range response {
+					stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
+					require.NoError(t, err)
+					require.Len(t, stored.Interfaces, 1)
+					require.Len(t, machine.Interfaces, 1)
+					wantRole := cdbm.ExpectedInterfaceRoleDpuLoopback
+					if machine.ID == testEM2.ID {
+						wantRole = cdbm.ExpectedInterfaceRoleDpuOs
+					}
+					assert.Equal(t, cutil.GetPtr(wantRole), stored.Interfaces[0].Role)
+					assert.Equal(t, stored.Interfaces[0].Role, machine.Interfaces[0].Role)
+					assert.Equal(t, stored.Interfaces[0].FixedIP, machine.Interfaces[0].FixedIP)
+				}
+			},
+		},
 		{
 			name: "batch password-only updates remain correlated and encrypted",
 			requestBody: []model.APIExpectedMachineUpdateRequest{
@@ -4089,6 +4331,37 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 				require.Len(t, capturedRequest.Patches, 1)
 				assert.Equal(t, "test-sku-uuid-2", capturedRequest.Patches[0].ExpectedMachine.GetSkuId())
 				assert.Equal(t, []string{"sku_id"}, capturedRequest.Patches[0].UpdateMask.Paths)
+			},
+		},
+		{
+			name: "batch BMC credential retention updates reach Core",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{ID: cutil.GetPtr(testEM1.ID.String()), RetainBmcCredentials: cutil.GetPtr(true)},
+				{ID: cutil.GetPtr(testEM2.ID.String()), RetainBmcCredentials: cutil.GetPtr(false)},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			validateResp: func(t *testing.T, body []byte) {
+				want := map[string]bool{testEM1.ID.String(): true, testEM2.ID.String(): false}
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 2)
+				for _, patch := range capturedRequest.Patches {
+					assert.Equal(t, []string{"bmc_retain_credentials"}, patch.UpdateMask.Paths)
+					assert.Equal(t, cutil.GetPtr(want[patch.ExpectedMachine.GetId().GetValue()]), patch.ExpectedMachine.BmcRetainCredentials)
+				}
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 2)
+				for _, machine := range response {
+					assert.Equal(t, want[machine.ID.String()], machine.RetainBmcCredentials)
+					stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, cutil.GetPtr(want[machine.ID.String()]), stored.RetainBmcCredentials)
+				}
 			},
 		},
 		{
@@ -4461,7 +4734,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 5)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 7)
 	storedEM1, err := emDAO.Get(ctx, nil, testEM1.ID, nil, false)
 	require.NoError(t, err)
 	storedEM2, err := emDAO.Get(ctx, nil, testEM2.ID, nil, false)

@@ -18,6 +18,8 @@
 //! DPF SDK - High-level interface for DPF operations.
 
 mod bmc_credentials;
+mod node_identity;
+mod service_vpc;
 mod version;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -38,7 +40,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::crds::bfbs_generated::{BFB, BfbSpec};
-use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
+use crate::crds::bluefieldsoftwares_generated::{BlueFieldSoftware, BlueFieldSoftwareSpec};
 use crate::crds::dpudeployments_generated::{
     DPUDeployment, DpuDeploymentDpus, DpuDeploymentDpusDpuSetStrategy,
     DpuDeploymentDpusDpuSetStrategyType, DpuDeploymentDpusDpuSets,
@@ -49,9 +51,9 @@ use crate::crds::dpudeployments_generated::{
     DpuDeploymentServiceChainsUpgradePolicy, DpuDeploymentServices, DpuDeploymentServicesDependsOn,
     DpuDeploymentSpec,
 };
-#[cfg(test)]
-use crate::crds::dpudevices_generated::DpuDeviceCluster;
-use crate::crds::dpudevices_generated::{DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceSpec};
+use crate::crds::dpudevices_generated::{
+    DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceCluster, DpuDeviceSpec,
+};
 use crate::crds::dpunodes_generated::{
     DPUNode, DpuNodeDpus, DpuNodeNodeRebootMethod, DpuNodeNodeRebootMethodExternal, DpuNodeSpec,
 };
@@ -112,18 +114,19 @@ use crate::service_vpc_slot::MAX_HBN_SERVICE_INTERFACES;
 use crate::types::{
     AstraRoutePrefixes, BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType,
     DHCP_SERVER_SERVICE_NAME, DOCA_HBN_SERVICE_NAME, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF,
-    DPU_AGENT_SERVICE_NAME, DPU_ENABLED_NODE_LABEL, DTS_SERVICE_NAME,
+    DPU_AGENT_SERVICE_NAME, DPU_ENABLED_NODE_LABEL, DPU_MACHINE_ID_LABEL, DTS_SERVICE_NAME,
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
     DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions, DpfInterceptBridging,
-    DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuFailureObservation, DpuMismatch,
-    DpuNodeInfo, DpuNodeSummary, DpuPhase, DpuPhaseObservation, DpuServiceDaemonSetObservation,
-    DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
+    DpfResourcePreconditions, DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary,
+    DpuFailureObservation, DpuMismatch, DpuNodeInfo, DpuNodeSummary, DpuPhase, DpuPhaseObservation,
+    DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
     DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
     DpuServiceSecurityObservation, DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME,
     HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME,
-    PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD,
-    ServiceNADResourceType, ServiceTemplateVersion,
+    PF_TOTAL_SF_BF4_ASTRA_FUDGE, SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL,
+    SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION, ServiceConfigPortProtocol, ServiceDefinition,
+    ServiceNAD, ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -304,8 +307,8 @@ where
     /// credential does not exist yet. When a refresh interval is configured the
     /// initial read is therefore best-effort: initialization continues without
     /// the Secret, and the refresh task writes it as soon as the credential
-    /// appears — no restart needed. New DPUDevice registration remains blocked
-    /// until the shared credential has been accepted and published.
+    /// appears — no restart needed. Registration without a per-device credential reference
+    /// remains blocked until the shared credential has been accepted and published.
     ///
     /// Authoritative local ownership is the exception: local version 0 must be
     /// present before startup. This value-based activation criterion is safe
@@ -705,93 +708,37 @@ async fn create_bluefield_software<R: BlueFieldSoftwareRepository>(
     namespace: &str,
     params: &BlueFieldSoftwareParams,
 ) -> Result<String, DpfError> {
-    let current = bluefield_software_resource(namespace, params, PldmFwBundleWireFormat::Map)?;
-    match create_or_reuse_bluefield_software(repo, &current).await {
-        Err(current_error) if is_legacy_pldm_bundle_type_rejection(&current_error) => {
-            if params.pldm_fw_bundle.as_ref().map(BTreeMap::len) != Some(1) {
-                return Err(current_error);
-            }
-
-            tracing::debug!(
-                error = %current_error,
-                "BlueFieldSoftware map was rejected; retrying the legacy string format"
-            );
-            let legacy = bluefield_software_resource(
-                namespace,
-                params,
-                PldmFwBundleWireFormat::LegacyString,
-            )?;
-            create_or_reuse_bluefield_software(repo, &legacy).await
-        }
-        result => result,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum PldmFwBundleWireFormat {
-    Map,
-    LegacyString,
-}
-
-fn bluefield_software_resource(
-    namespace: &str,
-    params: &BlueFieldSoftwareParams,
-    format: PldmFwBundleWireFormat,
-) -> Result<BlueFieldSoftware, DpfError> {
     let mut hasher = Sha256::new();
     hasher.update(params.os_iso.as_bytes());
-    let pldm_fw_bundle = match (params.pldm_fw_bundle.as_ref(), format) {
-        (None, _) => None,
-        (Some(bundle), PldmFwBundleWireFormat::Map) => {
-            for (psid, url) in bundle {
-                hasher.update(b"\0");
-                hasher.update(psid.as_bytes());
-                hasher.update(b"\0");
-                hasher.update(url.as_bytes());
-            }
-            Some(serde_json::to_value(bundle)?)
-        }
-        (Some(bundle), PldmFwBundleWireFormat::LegacyString) => {
-            let url = bundle.values().next().ok_or_else(|| {
-                DpfError::ConfigError(
-                    "the legacy DPF API requires one PLDM firmware bundle".to_string(),
-                )
-            })?;
+    if let Some(bundle) = &params.pldm_fw_bundle {
+        for (psid, url) in bundle {
+            hasher.update(b"\0");
+            hasher.update(psid.as_bytes());
             hasher.update(b"\0");
             hasher.update(url.as_bytes());
-            Some(json!(url))
         }
-    };
+    }
     let name = format!(
         "{}-{}",
         BLUEFIELD_SOFTWARE_NAME_PREFIX,
         hex::encode(hasher.finalize())
     );
 
-    let spec = serde_json::from_value(json!({
-        "osIso": params.os_iso,
-        "pldmFwBundle": pldm_fw_bundle,
-    }))?;
-    Ok(BlueFieldSoftware {
+    let bfs = BlueFieldSoftware {
         metadata: ObjectMeta {
-            name: Some(name),
+            name: Some(name.clone()),
             namespace: Some(namespace.to_string()),
             ..Default::default()
         },
-        spec,
+        spec: BlueFieldSoftwareSpec {
+            os_iso: params.os_iso.clone(),
+            pldm_fw_bundle: params.pldm_fw_bundle.clone(),
+            nic_fw: None,
+            platform_pldm_fw_bundle: None,
+        },
         status: None,
-    })
-}
-
-async fn create_or_reuse_bluefield_software<R: BlueFieldSoftwareRepository>(
-    repo: &R,
-    bfs: &BlueFieldSoftware,
-) -> Result<String, DpfError> {
-    let name = bfs.metadata.name.clone().ok_or_else(|| {
-        DpfError::InvalidState("BlueFieldSoftware has no metadata.name".to_string())
-    })?;
-    let namespace = bfs.metadata.namespace.as_deref().unwrap_or("default");
-    match BlueFieldSoftwareRepository::create(repo, bfs).await {
+    };
+    match BlueFieldSoftwareRepository::create(repo, &bfs).await {
         Ok(_) => Ok(name),
         Err(DpfError::KubeError(kube::Error::Api(ref err)))
             if err.is_already_exists() || err.is_conflict() =>
@@ -815,21 +762,6 @@ async fn create_or_reuse_bluefield_software<R: BlueFieldSoftwareRepository>(
     }
 }
 
-fn is_legacy_pldm_bundle_type_rejection(error: &DpfError) -> bool {
-    matches!(error, DpfError::KubeError(kube::Error::Api(status))
-    if status.is_invalid()
-        && status.details.as_ref().is_some_and(|details| {
-                details.causes.iter().any(|cause| {
-                    cause.field == "spec.pldmFwBundle"
-                        && matches!(
-                            cause.reason.as_str(),
-                            "FieldValueInvalid" | "FieldValueTypeInvalid"
-                        )
-                        && cause.message.contains("must be of type string")
-                })
-            }))
-}
-
 /// Creates a DPUFlavor with a hash-derived name (`{default_flavor_name}-{spec_hash}`).
 /// Any change in the spec produces a different hash and therefore a new flavor name, which
 /// causes MachineUpdateManager to detect the DPUs as outdated and trigger reprovisioning.
@@ -842,6 +774,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
     let mut flavor = crate::flavor::default_flavor_for_with_topology(
         namespace,
         &config.proxy,
+        &config.registry_mirrors,
         config.deployment_type,
         config.num_of_vfs,
         resolved.pf_total_sf,
@@ -853,6 +786,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
         config.service_vpc_slots,
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
+        config.enable_pci_switch_emulation,
     )?;
     let name = flavor.unique_name(&config.flavor_name)?;
     flavor.metadata.name = Some(name.clone());
@@ -903,12 +837,14 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
     let mut template = crate::flavor::flavor_bf4_astra_with_topology(
         namespace,
         &config.proxy,
+        &config.registry_mirrors,
         resolved.pf_total_sf,
         config.intercept_bridging.as_ref(),
         dhcp_acl_interfaces,
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
         !config.partial_multiplane_disabled,
+        config.enable_pci_switch_emulation,
     )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());
@@ -1028,6 +964,7 @@ pub fn build_service_template(
                 },
                 values: helm_values,
             },
+            metadata: None,
             resource_requirements: None,
             security: None,
         },
@@ -1123,6 +1060,7 @@ pub fn build_service_configuration(
         config_ports: config_ports_crd,
         deploy_in_cluster: None,
         helm_chart: helm_chart_config,
+        metadata: None,
         service_daemon_set: Some(service_daemon_set),
     });
 
@@ -1889,6 +1827,8 @@ pub(crate) fn validate_initialization_config(
     config: &InitDpfResourcesConfig,
 ) -> Result<(), DpfError> {
     resolve_initialization_inventory(config, None)?;
+    // Reject malformed registry mirrors here, before initialization writes anything.
+    crate::flavor::registry_mirror_config_files(&config.registry_mirrors)?;
     Ok(())
 }
 
@@ -2894,6 +2834,24 @@ fn detached_dpu_service_interface_to_resource(
 fn detached_dpu_service_chain_to_resource(
     chain: &DetachedDpuServiceChainDefinition,
 ) -> Result<DPUServiceChain, DpfError> {
+    // Require identity independently of NotIn, which also matches Nodes without this label.
+    let mut expressions = vec![json!({"key": DPU_MACHINE_ID_LABEL, "operator": "Exists"})];
+    let excluded_dpu_ids = chain
+        .excluded_dpu_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    if !excluded_dpu_ids.is_empty() {
+        expressions.push(
+            json!({"key": DPU_MACHINE_ID_LABEL, "operator": "NotIn", "values": excluded_dpu_ids}),
+        );
+    }
+    let annotations = chain.selector_version.map(|version| {
+        BTreeMap::from([(
+            SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION,
+            version.to_string(),
+        )])
+    });
     let ports = chain
         .interface_selectors
         .iter()
@@ -2909,11 +2867,11 @@ fn detached_dpu_service_chain_to_resource(
         },
         "spec": {
             "template": {
-                "metadata": {"labels": chain.template_labels},
+                "metadata": {"labels": chain.template_labels, "annotations": annotations},
                 "spec": {
-                    "nodeSelector": {"matchLabels": chain.node_selector_labels},
+                    "nodeSelector": {"matchLabels": chain.node_selector_labels, "matchExpressions": expressions},
                     "template": {
-                        "metadata": {"labels": chain.template_labels},
+                        "metadata": {"labels": chain.template_labels, "annotations": annotations},
                         "spec": {
                             "switches": [{
                                 "ports": ports,
@@ -2940,12 +2898,32 @@ pub fn detached_dpu_service_interface_spec(
 
 /// Returns the canonical DPUServiceChain spec used to detect selector, port, and MTU drift.
 /// Builds through the creation converter so repair matches the CR sent to Kubernetes.
-pub fn detached_dpu_service_chain_spec(
+fn detached_dpu_service_chain_spec(
     chain: &DetachedDpuServiceChainDefinition,
 ) -> Result<serde_json::Value, DpfError> {
     Ok(serde_json::to_value(
         detached_dpu_service_chain_to_resource(chain)?.spec,
     )?)
+}
+
+/// Builds a chain spec with the supplied registration UID in both templates so remote sets and
+/// chains can be correlated with their management DPUServiceChain.
+/// Callers must supply the UID from their DPUServiceChain observation. Empty UIDs are rejected.
+pub fn registered_dpu_service_chain_spec(
+    chain: &DetachedDpuServiceChainDefinition,
+    registration_uid: &str,
+) -> Result<serde_json::Value, DpfError> {
+    if registration_uid.is_empty() {
+        return Err(DpfError::InvalidState(
+            "DPUServiceChain registration UID is empty".to_owned(),
+        ));
+    }
+    let mut registered = chain.clone();
+    registered.template_labels.insert(
+        SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL.to_owned(),
+        registration_uid.to_owned(),
+    );
+    detached_dpu_service_chain_spec(&registered)
 }
 
 /// Converts a checked DPUServiceInterface into a DetachedDpfResourceObservation while
@@ -3044,6 +3022,20 @@ impl<R: DpuServiceInterfaceRepository, L> DpfSdk<R, L> {
     }
 }
 
+// Match the ten-second management request budget used for operator-version and identity reads.
+// Each call includes client capacity waits; retries belong to later controller iterations.
+const DPF_MANAGEMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bounds one DPF management request so partial registration work can resume on a later iteration.
+async fn bounded_management_request<T>(
+    operation: &'static str,
+    request: impl std::future::Future<Output = Result<T, DpfError>>,
+) -> Result<T, DpfError> {
+    tokio::time::timeout(DPF_MANAGEMENT_REQUEST_TIMEOUT, request)
+        .await
+        .map_err(|_| DpfError::timeout(operation, "ten-second attempt deadline exceeded"))?
+}
+
 impl<R: DpuServiceChainRepository, L> DpfSdk<R, L> {
     /// Lists dynamic service chains, optionally restricted by a Kubernetes label selector.
     pub async fn list_detached_dpu_service_chains(
@@ -3068,26 +3060,98 @@ impl<R: DpuServiceChainRepository, L> DpfSdk<R, L> {
             .transpose()
     }
 
-    /// Creates one detached service chain without force-applying an existing deterministic name.
+    /// Creates a detached chain and stamps its assigned UID into both templates before returning.
+    /// Existing names are never force-applied. Each POST or PATCH has a ten-second attempt deadline.
+    /// An HTTP 400 or 422 PATCH rejection can add one bounded GET. Partial creation remains repairable.
     pub async fn create_detached_dpu_service_chain(
         &self,
         definition: &DetachedDpuServiceChainDefinition,
     ) -> Result<DetachedDpfResourceObservation, DpfError> {
         let mut resource = detached_dpu_service_chain_to_resource(definition)?;
         resource.metadata.namespace = Some(self.namespace.clone());
-        let created = DpuServiceChainRepository::create(&*self.repo, &resource).await?;
-        detached_dpu_service_chain_from_resource(created)
+        // Publish the chain first because Kubernetes assigns the UID used by both templates.
+        let created = bounded_management_request(
+            "create DPUServiceChain",
+            DpuServiceChainRepository::create(&*self.repo, &resource),
+        )
+        .await?;
+        let observed = detached_dpu_service_chain_from_resource(created)?;
+
+        // Check the create response before mutating its templates so an unexpected identity is not adopted.
+        if observed.name.as_deref() != Some(definition.name.as_str())
+            || observed.namespace.as_deref() != Some(self.namespace.as_str())
+            || observed.is_deleting
+            || !definition
+                .labels
+                .iter()
+                .all(|(key, value)| observed.labels.get(key) == Some(value))
+        {
+            return Err(DpfError::InvalidState(
+                "created DPUServiceChain identity does not match its definition".to_owned(),
+            ));
+        }
+        let preconditions = observed.delete_preconditions()?;
+
+        // Return only after the current UID has been published through the fenced spec update.
+        self.patch_detached_dpu_service_chain(definition, &preconditions)
+            .await
     }
 
-    /// Applies a revision-fenced JSON Patch and returns the resulting service-chain observation.
+    /// Replaces a DPUServiceChain spec in the SDK namespace using both observed write preconditions.
+    ///
+    /// Callers must verify the observed name, namespace, and registration labels and reject deleting
+    /// chains before supplying the UID and resource version. Empty preconditions are rejected.
+    /// Stamps the observed UID into both templates. Each PATCH or verification GET has a ten-second
+    /// deadline without automatic retries. After an HTTP 400 or 422 PATCH rejection, returns
+    /// PatchConflict if a verification GET finds absence or changed UID or resource version.
+    /// A matching observation preserves the original validation error. Other errors, including failed
+    /// verification reads, propagate.
     pub async fn patch_detached_dpu_service_chain(
         &self,
-        name: &str,
-        patch: serde_json::Value,
+        definition: &DetachedDpuServiceChainDefinition,
+        preconditions: &DpfResourcePreconditions,
     ) -> Result<DetachedDpfResourceObservation, DpfError> {
-        let patched =
-            DpuServiceChainRepository::patch(&*self.repo, name, &self.namespace, patch).await?;
-        detached_dpu_service_chain_from_resource(patched)
+        if preconditions.resource_version.is_empty() {
+            return Err(DpfError::InvalidState(
+                "DPUServiceChain resource version is empty".to_owned(),
+            ));
+        }
+        let name = &definition.name;
+        let spec = registered_dpu_service_chain_spec(definition, &preconditions.uid)?;
+        let patch = json!([
+            {"op": "test", "path": "/metadata/uid", "value": preconditions.uid},
+            {"op": "replace", "path": "/metadata/resourceVersion", "value": preconditions.resource_version},
+            {"op": "replace", "path": "/spec", "value": spec},
+        ]);
+        let result = bounded_management_request(
+            "patch DPUServiceChain",
+            DpuServiceChainRepository::patch(&*self.repo, name, &self.namespace, patch),
+        )
+        .await;
+        match result {
+            Ok(patched) => detached_dpu_service_chain_from_resource(patched),
+            // Recheck identity before treating a validation rejection as terminal for this registration.
+            Err(error) if matches!(&error, DpfError::KubeError(kube::Error::Api(status)) if matches!(status.code, 400 | 422)) =>
+            {
+                let current = bounded_management_request(
+                    "verify DPUServiceChain patch identity",
+                    DpuServiceChainRepository::get(&*self.repo, name, &self.namespace),
+                )
+                .await?;
+                if current.as_ref().is_none_or(|chain| {
+                    chain.metadata.uid.as_deref() != Some(preconditions.uid.as_str())
+                        || chain.metadata.resource_version.as_deref()
+                            != Some(preconditions.resource_version.as_str())
+                }) {
+                    return Err(DpfError::PatchConflict {
+                        kind: "DPUServiceChain",
+                        name: name.clone(),
+                    });
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Deletes the exact detached service chain previously observed.
@@ -3305,12 +3369,19 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     /// `dpu_device_name` is the raw device ID (without the `device-` CR
     /// prefix); the SDK applies the prefix internally. `Some(value)` adds or
     /// replaces a label, while `None` removes it. Existing node labels and
-    /// cluster fields not named by `changes` are preserved.
+    /// cluster fields not named by `changes` are preserved. The DPU machine identity label is
+    /// reserved. Attempts to set or remove it fail.
     pub async fn merge_dpu_device_node_labels(
         &self,
         dpu_device_name: &str,
         changes: BTreeMap<String, Option<String>>,
     ) -> Result<(), DpfError> {
+        // Keep placement updates from reassigning the identity used by chain exclusions.
+        if changes.contains_key(DPU_MACHINE_ID_LABEL) {
+            return Err(DpfError::InvalidState(
+                "DPU identity cannot be changed through placement label updates".to_owned(),
+            ));
+        }
         let cr_name = dpu_device_cr_name(dpu_device_name);
         let patch = json!({
             "spec": {
@@ -3346,6 +3417,11 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     ///
     /// This operation is idempotent - if the device already exists, it will be
     /// skipped. This handles state machine retries gracefully.
+    ///
+    /// New devices declare their DPU machine ID in `spec.cluster.nodeLabels` for chain selectors.
+    /// Existing-device retries do not backfill this identity. Callers must use
+    /// [`Self::ensure_dpu_device_node_identity`] when backfill is needed and separately verify the
+    /// remote Node.
     pub async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
@@ -3359,6 +3435,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     ///
     /// The Secret must have been created in this SDK's namespace first. Existing devices are
     /// never switched to a different credential by registration; a mismatched reference is an error.
+    /// New-device Node identity and existing-device backfill follow [`Self::register_dpu_device`].
     pub async fn register_dpu_device_with_credential(
         &self,
         info: DpuDeviceInfo,
@@ -3477,7 +3554,15 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 psid: None,
                 serial_number: info.serial_number,
                 bmc_credential_secret_name: credential_secret_name.clone(),
-                cluster: None,
+                // DPF propagates spec.cluster.nodeLabels to the remote Node; metadata labels alone
+                // cannot satisfy the chain selector's DPU identity requirement.
+                cluster: Some(DpuDeviceCluster {
+                    node_annotations: None,
+                    node_labels: Some(BTreeMap::from([(
+                        DPU_MACHINE_ID_LABEL.to_owned(),
+                        info.dpu_machine_id.clone(),
+                    )])),
+                }),
                 nic_device_count: None,
                 values,
                 // NICo owns BMC initialization and decommissioning. Resetting
@@ -4685,7 +4770,7 @@ impl<R: DpuNodeRepository + DpuDeviceRepository + DpuRepository, L> DpfSdk<R, L>
                     labels: dev.metadata.labels.clone().unwrap_or_default(),
                     bmc_ip: dev.spec.bmc_ip.clone(),
                     bmc_port: dev.spec.bmc_port,
-                    serial_number: dev.spec.serial_number.clone(),
+                    serial_number: dev.spec.serial_number,
                 });
             }
 
@@ -4966,6 +5051,9 @@ impl<R: DpuRepository, L: ResourceLabeler> DpfSdk<R, L> {
 
 #[cfg(test)]
 mod tests {
+    mod chain_deadlines;
+    pub(in crate::sdk) mod service_vpc;
+
     use std::collections::BTreeMap;
     use std::future::Future;
     use std::sync::{Arc, RwLock};
@@ -4973,7 +5061,9 @@ mod tests {
     use async_trait::async_trait;
     use carbide_test_support::Outcome::{Fails, FailsWith, Yields};
     use carbide_test_support::{scenarios, value_scenarios};
+    use config_version::ConfigVersion;
     use kube::Resource;
+    use kube::core::SelectorExt as _;
 
     use super::*;
     use crate::crds::dpuflavors_generated::DPUFlavor;
@@ -4987,210 +5077,45 @@ mod tests {
     };
     use crate::types::{
         DetachedDpuServiceSecurity, DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging,
-        DpfInterfaceIdentity, DpfProxyDetails, DpuDeviceInfo, DpuNodeInfo,
+        DpfInterfaceIdentity, DpfProxyDetails, DpfRegistryMirror, DpuDeviceInfo, DpuNodeInfo,
     };
 
-    #[derive(Clone)]
-    struct LegacyBlueFieldSoftwareRepository {
-        create_attempts: Arc<RwLock<Vec<BlueFieldSoftware>>>,
-        map_rejection_field: &'static str,
-        reject_legacy: bool,
-    }
-
-    impl Default for LegacyBlueFieldSoftwareRepository {
-        fn default() -> Self {
-            Self {
-                create_attempts: Default::default(),
-                map_rejection_field: "spec.pldmFwBundle",
-                reject_legacy: false,
-            }
-        }
-    }
-
-    fn invalid_field_error(reason: &str, field: &str, message: &str) -> DpfError {
-        let details = kube::core::response::StatusDetails {
-            name: String::new(),
-            group: String::new(),
-            kind: String::new(),
-            uid: String::new(),
-            causes: vec![kube::core::response::StatusCause {
-                reason: reason.to_string(),
-                message: message.to_string(),
-                field: field.to_string(),
-            }],
-            retry_after_seconds: 0,
-        };
-        DpfError::KubeError(kube::Error::Api(
-            kube::core::Status::failure(message, "Invalid")
-                .with_code(422)
-                .with_details(details)
-                .boxed(),
-        ))
-    }
-
-    #[async_trait]
-    impl BlueFieldSoftwareRepository for LegacyBlueFieldSoftwareRepository {
-        async fn get(
-            &self,
-            _name: &str,
-            _namespace: &str,
-        ) -> Result<Option<BlueFieldSoftware>, DpfError> {
-            Ok(None)
-        }
-
-        async fn list(&self, _namespace: &str) -> Result<Vec<BlueFieldSoftware>, DpfError> {
-            Ok(Vec::new())
-        }
-
-        async fn create(&self, bfs: &BlueFieldSoftware) -> Result<BlueFieldSoftware, DpfError> {
-            self.create_attempts.write().unwrap().push(bfs.clone());
-            match bfs.spec.pldm_fw_bundle.as_ref() {
-                Some(value) if value.is_object() => {
-                    return Err(invalid_field_error(
-                        "FieldValueTypeInvalid",
-                        self.map_rejection_field,
-                        "Invalid value: \"object\": must be of type string",
-                    ));
-                }
-                Some(value) if value.is_string() && self.reject_legacy => {
-                    return Err(invalid_field_error(
-                        "FieldValueInvalid",
-                        "spec.pldmFwBundle",
-                        "legacy PLDM bundle rejected",
-                    ));
-                }
-                _ => {}
-            }
-            Ok(bfs.clone())
-        }
-
-        async fn delete(&self, _name: &str, _namespace: &str) -> Result<(), DpfError> {
-            Ok(())
-        }
-    }
-
     #[test]
-    fn legacy_pldm_bundle_type_rejection_accepts_kubernetes_reason_variants() {
-        value_scenarios!(
-            run = |reason| is_legacy_pldm_bundle_type_rejection(&invalid_field_error(
-                reason,
-                "spec.pldmFwBundle",
-                "Invalid value: \"object\": must be of type string",
-            ));
-            "type rejection reasons" {
-                "FieldValueInvalid" => true,
-                "FieldValueTypeInvalid" => true,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn bluefield_software_falls_back_to_the_legacy_pldm_wire_format() {
-        let repo = LegacyBlueFieldSoftwareRepository::default();
-        let params = BlueFieldSoftwareParams {
-            os_iso: "http://example.com/os.iso".to_string(),
-            pldm_fw_bundle: Some(BTreeMap::from([(
-                "pldmid001".to_string(),
-                "http://example.com/astra.pldm".to_string(),
-            )])),
-        };
-
-        let name = create_bluefield_software(&repo, "test", &params)
-            .await
-            .expect("the legacy string format should be accepted");
-
-        assert_eq!(
-            name,
-            "bf-software-aaa364c320bfb2c8e634a6dc5d0a5cd06a84a9853d6e929dec68cb5c974ac7d1"
-        );
-        let attempts = repo.create_attempts.read().unwrap();
-        assert_eq!(attempts.len(), 2);
-        assert!(
-            attempts[0]
-                .spec
-                .pldm_fw_bundle
-                .as_ref()
-                .is_some_and(serde_json::Value::is_object)
-        );
-        assert_eq!(
-            attempts[1].spec.pldm_fw_bundle,
-            Some(json!("http://example.com/astra.pldm"))
-        );
-    }
-
-    #[tokio::test]
-    async fn bluefield_software_does_not_retry_an_unrelated_invalid_resource() {
-        let repo = LegacyBlueFieldSoftwareRepository {
-            map_rejection_field: "spec.osIso",
-            ..Default::default()
-        };
-        let params = BlueFieldSoftwareParams {
-            os_iso: "http://example.com/os.iso".to_string(),
-            pldm_fw_bundle: Some(BTreeMap::from([(
-                "pldmid001".to_string(),
-                "http://example.com/astra.pldm".to_string(),
-            )])),
-        };
-
-        assert!(
-            create_bluefield_software(&repo, "test", &params)
-                .await
-                .is_err()
-        );
-        assert_eq!(repo.create_attempts.read().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn bluefield_software_returns_the_legacy_attempt_error() {
-        let repo = LegacyBlueFieldSoftwareRepository {
-            reject_legacy: true,
-            ..Default::default()
-        };
-        let params = BlueFieldSoftwareParams {
-            os_iso: "http://example.com/os.iso".to_string(),
-            pldm_fw_bundle: Some(BTreeMap::from([(
-                "pldmid001".to_string(),
-                "http://example.com/astra.pldm".to_string(),
-            )])),
-        };
-
-        let error = create_bluefield_software(&repo, "test", &params)
-            .await
-            .expect_err("the legacy rejection should be returned");
-
-        assert!(error.to_string().contains("legacy PLDM bundle rejected"));
-        assert_eq!(repo.create_attempts.read().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn bluefield_software_deserializes_legacy_pldm_fields() {
+    fn bluefield_software_deserializes_pldm_maps() {
+        let bundle = BTreeMap::from([
+            (
+                "psid001".to_string(),
+                "http://example.com/first.pldm".to_string(),
+            ),
+            (
+                "psid002".to_string(),
+                "http://example.com/second.pldm".to_string(),
+            ),
+        ]);
         let resource: BlueFieldSoftware = serde_json::from_value(json!({
             "apiVersion": "provisioning.dpu.nvidia.com/v1alpha1",
             "kind": "BlueFieldSoftware",
-            "metadata": { "name": "legacy" },
+            "metadata": { "name": "software" },
             "spec": {
                 "osIso": "http://example.com/os.iso",
-                "pldmFwBundle": "http://example.com/astra.pldm"
+                "pldmFwBundle": bundle
             },
             "status": {
                 "phase": "Ready",
                 "downloadedComponents": {
-                    "pldmFwBundle": "http://example.com/astra.pldm"
+                    "pldmFwBundle": bundle
                 }
             }
         }))
-        .expect("legacy BlueFieldSoftware should deserialize");
+        .expect("BlueFieldSoftware with PSID-keyed maps should deserialize");
 
-        assert_eq!(
-            resource.spec.pldm_fw_bundle,
-            Some(json!("http://example.com/astra.pldm"))
-        );
+        assert_eq!(resource.spec.pldm_fw_bundle.as_ref(), Some(&bundle));
         assert_eq!(
             resource
                 .status
                 .and_then(|status| status.downloaded_components)
                 .and_then(|components| components.pldm_fw_bundle),
-            Some(json!("http://example.com/astra.pldm"))
+            Some(bundle)
         );
     }
 
@@ -6365,21 +6290,21 @@ mod tests {
             .services
             .get(OTEL_COLLECTOR_SERVICE_NAME)
             .expect("otelcol service present");
-        let deps: Vec<String> = otel
+        let deps: Vec<&str> = otel
             .depends_on
             .as_ref()
             .expect("otelcol should declare dependencies")
             .iter()
-            .map(|d| d.name.clone())
+            .map(|d| d.name.as_str())
             .collect();
 
         assert!(
-            deps.contains(&DTS_SERVICE_NAME.to_string()),
+            deps.contains(&DTS_SERVICE_NAME),
             "otelcol must depend on dts so its scrape target resolves; got {deps:?}"
         );
         // The previously-working dependencies must remain.
-        assert!(deps.contains(&DPU_AGENT_SERVICE_NAME.to_string()));
-        assert!(deps.contains(&FMDS_SERVICE_NAME.to_string()));
+        assert!(deps.contains(&DPU_AGENT_SERVICE_NAME));
+        assert!(deps.contains(&FMDS_SERVICE_NAME));
     }
 
     /// Service/NAD CR names are suffixed per deployment so BF3 and BF4 don't
@@ -6507,6 +6432,9 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct SdkMock {
+        clusters: Arc<RwLock<BTreeMap<String, crate::crds::dpuclusters_generated::DPUCluster>>>,
+        observer_clients: Arc<RwLock<BTreeMap<String, kube::Client>>>,
+        observer_requests: Arc<RwLock<Vec<crate::types::DpuClusterIdentity>>>,
         devices: Arc<RwLock<BTreeMap<String, DPUDevice>>>,
         nodes: Arc<RwLock<BTreeMap<String, DPUNode>>>,
         dpus: Arc<RwLock<BTreeMap<String, DPU>>>,
@@ -6515,6 +6443,8 @@ mod tests {
         services: Arc<RwLock<BTreeMap<String, DPUService>>>,
         service_interfaces: Arc<RwLock<BTreeMap<String, DPUServiceInterface>>>,
         service_chains: Arc<RwLock<BTreeMap<String, DPUServiceChain>>>,
+        chain_patch_requests: Arc<RwLock<Vec<serde_json::Value>>>,
+        chain_patch_error: Arc<RwLock<Option<DpfError>>>,
         service_patch: Arc<RwLock<Option<(String, String, serde_json::Value)>>>,
         service_delete_preconditions: Arc<RwLock<Option<(String, String, DpfDeletePreconditions)>>>,
         service_interface_delete_preconditions:
@@ -6774,6 +6704,7 @@ mod tests {
                 .collect())
         }
 
+        /// Assigns and stores a chain UID and resource version so stamp tests use a POST observation.
         async fn create(&self, chain: &DPUServiceChain) -> Result<DPUServiceChain, DpfError> {
             let key = Self::key(chain);
             let mut chains = self.service_chains.write().unwrap();
@@ -6782,16 +6713,34 @@ mod tests {
                     chain.meta().name.as_deref().unwrap_or(""),
                 ));
             }
-            chains.insert(key, chain.clone());
-            Ok(chain.clone())
+            // Assign creation metadata before retaining the chain for later stamp and repair requests.
+            let mut created = chain.clone();
+            created.metadata.uid = Some(format!(
+                "uid-{}",
+                chain.metadata.name.as_deref().expect("chain name")
+            ));
+            created.metadata.resource_version = Some("1".to_owned());
+            chains.insert(key, created.clone());
+            Ok(created)
         }
 
+        /// Records chain PATCHes and consumes one injected error so later calls can exercise stamp repair.
         async fn patch(
             &self,
             name: &str,
             ns: &str,
             patch: serde_json::Value,
         ) -> Result<DPUServiceChain, DpfError> {
+            // Record failed attempts as well as accepted writes so recovery tests can count every PATCH.
+            self.chain_patch_requests
+                .write()
+                .unwrap()
+                .push(patch.clone());
+            // Consume the injected failure once so a later repair can reach the retained chain.
+            if let Some(error) = self.chain_patch_error.write().unwrap().take() {
+                return Err(error);
+            }
+            // Apply successful writes to retained state so a fresh GET can verify the repaired chain.
             Self::patch_resource(
                 &self.service_chains,
                 Self::ns_key(ns, name),
@@ -7150,12 +7099,292 @@ mod tests {
         }
     }
 
+    /// Rejects unidentified or excluded Nodes while retaining placement requirements, preventing
+    /// cached Node labels from reconnecting a retired service chain.
+    #[test]
+    fn detached_chain_selector_fences_unidentified_and_excluded_nodes() {
+        // Vary identity, exclusion and placement; other fields provide a complete chain definition.
+        let retiring_dpu: carbide_uuid::machine::DpuMachineId =
+            "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid retiring DPU ID");
+        let sibling_dpu: carbide_uuid::machine::DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
+                .parse()
+                .expect("valid sibling DPU ID");
+        let cases = [
+            // NotIn alone accepts missing identity, so Exists must reject the cached Node.
+            ("missing identity", vec![retiring_dpu], None, true, false),
+            // Fresh active placement remains selectable before any retirement.
+            ("active DPU", vec![], Some(retiring_dpu), true, true),
+            // An old placement label cannot override this DPU's committed exclusion.
+            (
+                "excluded DPU",
+                vec![retiring_dpu],
+                Some(retiring_dpu),
+                true,
+                false,
+            ),
+            // Retirement on one DPU must leave the same service eligible on another.
+            (
+                "unexcluded sibling",
+                vec![retiring_dpu],
+                Some(sibling_dpu),
+                true,
+                true,
+            ),
+            // Identity does not replace the existing slot placement requirement.
+            (
+                "missing placement",
+                vec![retiring_dpu],
+                Some(sibling_dpu),
+                false,
+                false,
+            ),
+        ];
+        carbide_test_support::check_values(
+            cases.into_iter().map(
+                |(scenario, excluded_dpu_ids, node_identity, placed, expected)| {
+                    carbide_test_support::Check {
+                        scenario,
+                        input: (excluded_dpu_ids, node_identity, placed),
+                        expect: expected,
+                    }
+                },
+            ),
+            |(excluded_dpu_ids, node_identity, placed)| {
+                // Selector inputs drive matching; other fields provide a complete checked chain.
+                let chain = DetachedDpuServiceChainDefinition {
+                    name: "chain".to_owned(),
+                    namespace: TEST_NAMESPACE.to_owned(),
+                    labels: BTreeMap::new(),
+                    node_selector_labels: BTreeMap::from([(
+                        "slot-placement".to_owned(),
+                        "enabled".to_owned(),
+                    )]), // Retain slot placement alongside identity.
+                    excluded_dpu_ids, // Fence only these physical DPUs.
+                    selector_version: None,
+                    template_labels: BTreeMap::new(),
+                    interface_selectors: vec![BTreeMap::from([(
+                        "interface".to_owned(),
+                        "service".to_owned(),
+                    )])],
+                    service_mtu: 9_000,
+                };
+                let mut labels = BTreeMap::new();
+                if placed {
+                    labels.insert("slot-placement".to_owned(), "enabled".to_owned());
+                }
+                if let Some(identity) = node_identity {
+                    labels.insert(DPU_MACHINE_ID_LABEL.to_owned(), identity.to_string());
+                }
+
+                // Evaluate the checked CR's selector using Kubernetes label-matching semantics.
+                let spec = detached_dpu_service_chain_spec(&chain)
+                    .expect("convert checked chain specification");
+                let selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector =
+                    serde_json::from_value(spec["template"]["spec"]["nodeSelector"].clone())
+                        .expect("decode Node selector");
+                let selector =
+                    kube::core::Selector::try_from(selector).expect("valid Node selector");
+
+                // Every placement and identity requirement must hold before a Node receives a chain.
+                selector.matches(&labels)
+            },
+        );
+    }
+
+    /// Provides an owned chain definition so identity tests vary observed metadata and patch failures.
+    fn registration_chain_definition() -> DetachedDpuServiceChainDefinition {
+        DetachedDpuServiceChainDefinition {
+            name: "registration-chain".to_owned(),
+            namespace: TEST_NAMESPACE.to_owned(),
+            labels: BTreeMap::from([("owner".to_owned(), "service".to_owned())]),
+            node_selector_labels: BTreeMap::from([("slot".to_owned(), "enabled".to_owned())]),
+            excluded_dpu_ids: Vec::new(),
+            selector_version: None,
+            template_labels: BTreeMap::from([("owner".to_owned(), "service".to_owned())]),
+            interface_selectors: vec![
+                BTreeMap::from([("interface".to_owned(), "service".to_owned())]),
+                BTreeMap::from([("interface".to_owned(), "patch".to_owned())]),
+            ],
+            service_mtu: 9_000,
+        }
+    }
+
+    /// Repairs a partially created chain after a transient stamp failure while retaining exclusions,
+    /// so callers can recover without reopening the chain on a retiring DPU.
+    #[tokio::test]
+    async fn partial_chain_creation_retains_exclusions_until_uid_stamp_repair() {
+        // Build independent SDK and repository state for the failed creation and subsequent repair.
+        let mock = SdkMock::new();
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+            .build_without_resources()
+            .await
+            .expect("SDK");
+        // Only the excluded DPU and selector version drive recovery; other fields supply a valid chain.
+        let mut definition = registration_chain_definition();
+        definition.excluded_dpu_ids = vec![
+            "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("DPU ID"),
+        ];
+        definition.selector_version = Some(ConfigVersion::initial());
+        // Fail the first stamp PATCH with a transient ServiceUnavailable response.
+        *mock.chain_patch_error.write().unwrap() = Some(DpfError::KubeError(kube::Error::Api(
+            kube::core::Status::failure("temporary unavailable", "ServiceUnavailable")
+                .with_code(503)
+                .boxed(),
+        )));
+
+        // Create through the SDK before checking the failed stamp result.
+        let created = sdk.create_detached_dpu_service_chain(&definition).await;
+        assert!(
+            matches!(created, Err(DpfError::KubeError(kube::Error::Api(status))) if status.code == 503)
+        );
+        let partial = sdk
+            .get_detached_dpu_service_chain(&definition.name)
+            .await
+            .expect("read partial creation")
+            .expect("created chain persists");
+
+        // Failed stamping must retain the exclusion while leaving the missing UID stamp observable.
+        let selector = partial
+            .spec
+            .pointer("/template/spec/nodeSelector")
+            .expect("selector")
+            .clone();
+        assert!(
+            selector["matchExpressions"]
+                .as_array()
+                .expect("expressions")
+                .iter()
+                .any(|expression| expression["operator"] == "NotIn"
+                    && expression["values"] == json!([definition.excluded_dpu_ids[0].to_string()]))
+        );
+        assert!(
+            partial
+                .spec
+                .pointer("/template/metadata/labels")
+                .expect("template labels")
+                .get(SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL)
+                .is_none()
+        );
+
+        // Repair the observed object instead of replaying a create or discarding persisted desire.
+        let preconditions = partial
+            .delete_preconditions()
+            .expect("observed write identity");
+        let repaired = sdk
+            .patch_detached_dpu_service_chain(&definition, &preconditions)
+            .await
+            .expect("repair current UID stamp");
+        assert_eq!(repaired.uid, partial.uid);
+        let persisted = sdk
+            .get_detached_dpu_service_chain(&definition.name)
+            .await
+            .expect("read repaired chain")
+            .expect("chain remains");
+
+        // A fresh read must contain both UID stamps and retain the original excluded-DPU selector.
+        assert_eq!(persisted.spec, repaired.spec);
+        assert_eq!(
+            persisted.spec.pointer("/template/spec/nodeSelector"),
+            Some(&selector)
+        );
+        for metadata in ["/template/metadata", "/template/spec/template/metadata"] {
+            assert_eq!(
+                persisted.spec.pointer(metadata).expect("metadata")["labels"]
+                    .get(SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL),
+                Some(&json!(preconditions.uid))
+            );
+        }
+    }
+
+    /// Preserves genuine validation failures while making replaced or disappeared registrations
+    /// retryable, so an old UID test cannot permanently fail a newly recreated registration.
+    /// An advanced resourceVersion also requires a fresh observation before validation is terminal.
+    #[tokio::test]
+    async fn chain_validation_errors_are_conflicts_only_after_identity_changes() {
+        let cases = [
+            // Validation failure on the same observation remains terminal for unchanged desire.
+            ("same observed object", Some(("original", "1")), false),
+            // An intervening write invalidates the observation even while the UID remains current.
+            ("same object advanced", Some(("original", "2")), true),
+            // A failed old-UID test requires a new registration observation.
+            ("same-name replacement", Some(("replacement", "2")), true),
+            // Disappearance before the verification read cannot establish a validation failure.
+            ("object disappeared", None, true),
+        ];
+        carbide_test_support::check_cases_async(
+            cases
+                .into_iter()
+                .map(|(scenario, current, conflict)| carbide_test_support::Case {
+                    scenario,
+                    input: current,
+                    expect: Yields(conflict),
+                }),
+            |current| async move {
+                // Vary the current UID or resource version; the definition supplies a complete owned chain.
+                let mock = SdkMock::new();
+                let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+                    .build_without_resources()
+                    .await
+                    .expect("SDK");
+                let definition = registration_chain_definition();
+
+                // Store the current UID and resource version, or leave the disappeared object absent.
+                if let Some((uid, version)) = current {
+                    let mut resource =
+                        detached_dpu_service_chain_to_resource(&definition).expect("chain");
+                    resource.metadata.uid = Some(uid.to_owned());
+                    resource.metadata.resource_version = Some(version.to_owned());
+                    mock.service_chains
+                        .write()
+                        .unwrap()
+                        .insert(SdkMock::key(&resource), resource);
+                }
+
+                // Inject a 422 from PATCH, then let the SDK read the actual current metadata.
+                *mock.chain_patch_error.write().unwrap() =
+                    Some(DpfError::KubeError(kube::Error::Api(
+                        kube::core::Status::failure("validation rejected", "Invalid")
+                            .with_code(422)
+                            .boxed(),
+                    )));
+                let result = sdk
+                    .patch_detached_dpu_service_chain(
+                        &definition,
+                        &DpfResourcePreconditions {
+                            uid: "original".to_owned(),
+                            resource_version: "1".to_owned(),
+                        },
+                    )
+                    .await;
+
+                // Distinguish changed identity from validation failure without retrying the write.
+                assert_eq!(mock.chain_patch_requests.read().unwrap().len(), 1);
+                match result {
+                    Err(DpfError::PatchConflict { .. }) => Ok(true),
+                    Err(DpfError::KubeError(kube::Error::Api(status))) if status.code == 422 => {
+                        Ok(false)
+                    }
+                    other => Err(format!("unexpected patch result: {other:?}")),
+                }
+            },
+        )
+        .await;
+    }
+
     /// Verifies detached parents preserve specs, scoped observations, patch results, and delete
     /// preconditions.
     /// Scoped lists prevent cross-owner reconciliation, while delete preconditions preserve
     /// same-name replacements.
+    /// Both chain template annotations retain the durable selector version for remote observations.
+    /// Chain templates also carry their assigned management UID, and spec updates send both write preconditions.
     #[tokio::test]
     async fn detached_parent_lifecycle_preserves_specs_scoping_and_delete_preconditions() {
+        // Share one repository across both resource groups so scoped operations can prove isolation.
         let mock = SdkMock::new();
         let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
             .build_without_resources()
@@ -7191,11 +7420,14 @@ mod tests {
 
         // The owner-A chain carries two distinct ports and a nondefault MTU through checked
         // conversion.
-        let chain_a = DetachedDpuServiceChainDefinition {
+        let selector_version = ConfigVersion::initial();
+        let chain_definition = DetachedDpuServiceChainDefinition {
             name: "chain-a".to_string(),
             namespace: TEST_NAMESPACE.to_string(),
             labels: labels("a"),
             node_selector_labels: BTreeMap::from([("node".to_string(), "a".to_string())]),
+            excluded_dpu_ids: Vec::new(),
+            selector_version: Some(selector_version), // Carry the durable version through both templates.
             template_labels: BTreeMap::from([("template".to_string(), "a".to_string())]),
             interface_selectors: vec![labels("a"), labels("b")],
             service_mtu: 9_000,
@@ -7208,6 +7440,8 @@ mod tests {
             namespace: TEST_NAMESPACE.to_string(),
             labels: labels("b"),
             node_selector_labels: BTreeMap::from([("node".to_string(), "b".to_string())]),
+            excluded_dpu_ids: Vec::new(),
+            selector_version: None,
             template_labels: BTreeMap::from([("template".to_string(), "b".to_string())]),
             interface_selectors: vec![labels("b")],
             service_mtu: 1_500,
@@ -7275,8 +7509,9 @@ mod tests {
                 .pointer("/template/spec/template/spec/patch/peerBridge"),
             Some(&json!("br-svc-1"))
         );
+        // Create both chains before checking their assigned UID stamps and preserved specs.
         let observed_chain = sdk
-            .create_detached_dpu_service_chain(&chain_a)
+            .create_detached_dpu_service_chain(&chain_definition)
             .await
             .expect("create owner-a chain");
         sdk.create_detached_dpu_service_chain(&chain_b)
@@ -7284,7 +7519,9 @@ mod tests {
             .expect("create owner-b chain");
         assert_eq!(
             observed_chain.spec.pointer("/template/metadata/labels"),
-            Some(&json!({"template": "a"}))
+            Some(
+                &json!({"template": "a", SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL: "uid-chain-a"})
+            )
         );
         assert_eq!(
             observed_chain
@@ -7296,7 +7533,9 @@ mod tests {
             observed_chain
                 .spec
                 .pointer("/template/spec/template/metadata/labels"),
-            Some(&json!({"template": "a"}))
+            Some(
+                &json!({"template": "a", SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL: "uid-chain-a"})
+            )
         );
         assert_eq!(
             observed_chain
@@ -7311,7 +7550,37 @@ mod tests {
             }))
         );
 
-        // Seed API-assigned identities and finalizers so SDK observations drive safe deletion.
+        // Both template metadata blocks must carry the same durable selector version.
+        for metadata in ["/template/metadata", "/template/spec/template/metadata"] {
+            let annotations = observed_chain
+                .spec
+                .pointer(metadata)
+                .expect("template metadata")
+                .get("annotations")
+                .expect("selector version annotation");
+            assert_eq!(
+                annotations.get(SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION),
+                Some(&json!(selector_version.to_string()))
+            );
+        }
+
+        // Both creation stamps must use the assigned UID and the exact POST resource version.
+        {
+            let requests = mock.chain_patch_requests.read().unwrap();
+            assert_eq!(requests.len(), 2);
+            for (patch, uid) in requests.iter().zip(["uid-chain-a", "uid-chain-b"]) {
+                assert_eq!(
+                    patch[0],
+                    json!({"op": "test", "path": "/metadata/uid", "value": uid})
+                );
+                assert_eq!(
+                    patch[1],
+                    json!({"op": "replace", "path": "/metadata/resourceVersion", "value": "1"})
+                );
+            }
+        }
+
+        // Seed API-assigned identities and deletion timestamps so SDK observations drive safe deletion.
         {
             let mut interfaces = mock.service_interfaces.write().unwrap();
             let interface_a = interfaces
@@ -7330,7 +7599,7 @@ mod tests {
             let chain_a = chains
                 .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "chain-a"))
                 .expect("owner-a chain is retained by the mock");
-            chain_a.metadata.uid = Some("chain-uid".to_string());
+            chain_a.metadata.uid = Some("uid-chain-a".to_string());
             chain_a.metadata.resource_version = Some("9".to_string());
             chains
                 .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "chain-b"))
@@ -7369,7 +7638,7 @@ mod tests {
             .delete_preconditions()
             .expect("observed interface has complete deletion identity");
         let chain_a = chains.first().expect("owner-a chain is listed");
-        assert_eq!(chain_a.uid.as_deref(), Some("chain-uid"));
+        assert_eq!(chain_a.uid.as_deref(), Some("uid-chain-a"));
         assert_eq!(chain_a.resource_version.as_deref(), Some("9"));
         let chain_preconditions = chain_a
             .delete_preconditions()
@@ -7400,21 +7669,14 @@ mod tests {
             Some(&json!("dpf-operator/repaired"))
         );
 
-        let mut chain_spec = chain_a.spec.clone();
-        *chain_spec
-            .pointer_mut("/template/spec/template/spec/switches/0/serviceMTU")
-            .expect("chain carries its service MTU") = json!(1_500);
+        // Change the chain MTU to exercise spec replacement using the observed UID and resource version.
+        let mut repair_definition = chain_definition.clone();
+        repair_definition.service_mtu = 1_500;
         let patched_chain = sdk
-            .patch_detached_dpu_service_chain(
-                "chain-a",
-                json!([
-                    {"op": "test", "path": "/metadata/resourceVersion", "value": "9"},
-                    {"op": "replace", "path": "/spec", "value": chain_spec},
-                ]),
-            )
+            .patch_detached_dpu_service_chain(&repair_definition, &chain_preconditions)
             .await
             .expect("patch owner-a chain");
-        assert_eq!(patched_chain.uid.as_deref(), Some("chain-uid"));
+        assert_eq!(patched_chain.uid.as_deref(), Some("uid-chain-a"));
         assert_eq!(patched_chain.resource_version.as_deref(), Some("9"));
         assert_eq!(
             patched_chain
@@ -7490,13 +7752,19 @@ mod tests {
         );
     }
 
+    /// Declares DPU identity in cluster.nodeLabels for generic and Astra registration so DPF can
+    /// propagate the identity required by service-chain selectors.
     #[tokio::test]
     async fn test_register_dpu_device() {
         for (scenario, astra, server_name) in [
+            // Generic provisioning must declare Node identity without Astra values.
             ("generic", false, None),
+            // Astra must retain Node identity alongside an explicitly supplied server name.
             ("Astra with server name", true, Some("server-01")),
+            // An omitted server name must not suppress identity or Astra's empty-name fallback.
             ("Astra without server name", true, None),
         ] {
+            // Build the SDK and provisioning inputs, including credential-leak sentinels.
             let mock = SdkMock::new();
             let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
                 .build_without_resources()
@@ -7506,10 +7774,10 @@ mod tests {
                 id: None,
                 bmc_mac_address: "02:00:00:00:00:01".parse().unwrap(),
                 data: model::expected_machine::ExpectedMachineData {
-                    server_name: server_name.map(str::to_owned),
+                    server_name: server_name.map(str::to_owned), // Exercise Astra name and empty-name output.
                     interfaces: astra_declared_interfaces(),
-                    bmc_username: "fixture-user".to_string(),
-                    bmc_password: "fixture-password-must-not-leak".to_string(),
+                    bmc_username: "fixture-user".to_string(), // Detect username leakage into the DPUDevice.
+                    bmc_password: "fixture-password-must-not-leak".to_string(), // Detect password leakage.
                     ..Default::default()
                 },
             };
@@ -7520,14 +7788,31 @@ mod tests {
                     software_plane_route_prefix_len: 13,
                 },
             ));
-            sdk.register_dpu_device(test_dpu_device_info(), astra_provisioning_inputs)
-                .await
-                .unwrap();
+            // The DPU ID drives the Node label; remaining fields supply normal provisioning data.
+            let registration = test_dpu_device_info();
+            let expected_node_identity = registration.dpu_machine_id.clone();
 
+            // Register through the SDK to exercise the checked DPUDevice sent to Kubernetes.
+            sdk.register_dpu_device(registration, astra_provisioning_inputs)
+                .await
+                .expect("register DPU device");
+
+            // Read the stored resource to verify the declared Node identity and provisioning fields.
             let devices = DpuDeviceRepository::list(&mock, TEST_NAMESPACE)
                 .await
                 .unwrap();
             assert_eq!(devices.len(), 1, "{scenario}");
+            let declared_node_identity = devices[0]
+                .spec
+                .cluster
+                .as_ref()
+                .and_then(|cluster| cluster.node_labels.as_ref())
+                .and_then(|labels| labels.get(DPU_MACHINE_ID_LABEL));
+            assert_eq!(
+                declared_node_identity,
+                Some(&expected_node_identity),
+                "{scenario}"
+            );
             assert_eq!(devices[0].spec.serial_number, "SN123456", "{scenario}");
             assert!(matches!(
                 devices[0].spec.bmc_factory_reset_policy.as_ref(),
@@ -7544,6 +7829,7 @@ mod tests {
             } else {
                 assert!(devices[0].spec.values.is_none());
             }
+            // Node label propagation must not expose the ExpectedMachine's BMC credentials.
             let serialized = serde_json::to_string(&devices[0]).unwrap();
             assert!(!serialized.contains("fixture-user"));
             assert!(!serialized.contains("fixture-password-must-not-leak"));
@@ -8094,14 +8380,14 @@ mod tests {
         let device = &devices[0];
         let labels = device.metadata.labels.as_ref().unwrap();
 
-        assert_eq!(labels.get("test/device"), Some(&"true".to_string()));
+        assert_eq!(labels.get("test/device").map(String::as_str), Some("true"));
         assert_eq!(
-            labels.get("test/host-bmc-ip"),
-            Some(&"10.0.0.1".to_string())
+            labels.get("test/host-bmc-ip").map(String::as_str),
+            Some("10.0.0.1")
         );
         assert_eq!(
-            labels.get("test/dpu-machine-id"),
-            Some(&"dpu-bbb".to_string())
+            labels.get("test/dpu-machine-id").map(String::as_str),
+            Some("dpu-bbb")
         );
     }
 
@@ -8155,7 +8441,7 @@ mod tests {
         let node = &nodes[0];
         let labels = node.metadata.labels.as_ref().unwrap();
 
-        assert_eq!(labels.get("test/node"), Some(&"true".to_string()));
+        assert_eq!(labels.get("test/node").map(String::as_str), Some("true"));
     }
 
     #[tokio::test]
@@ -8275,6 +8561,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Ready),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,
@@ -8422,6 +8709,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Error),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,
@@ -9602,6 +9890,92 @@ mod tests {
             name_with_proxy, name_no_proxy,
             "proxy and no-proxy flavors must produce distinct names"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_dpu_flavor_fresh_with_registry_mirrors() {
+        let mock = SdkMock::new();
+        let config = InitDpfResourcesConfigBuilder::default()
+            .registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+                dial_timeout: None,
+            }])
+            .build()
+            .expect("registry mirror flavor test configuration must be valid");
+        let resolved = resolve_initialization_inventory(&config, None).unwrap();
+        let name = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
+            .await
+            .unwrap();
+
+        let stored = DpuFlavorRepository::get(&mock, &name, TEST_NAMESPACE)
+            .await
+            .unwrap()
+            .expect("created flavor should be retrievable");
+        assert!(
+            stored
+                .spec
+                .config_files
+                .unwrap_or_default()
+                .iter()
+                .any(|file| file.path == "/etc/containerd/certs.d/nvcr.io/hosts.toml"),
+            "the configured mirror must reach the created flavor"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_dpu_flavor_template_with_registry_mirrors() {
+        let mock = SdkMock::new();
+        let config = InitDpfResourcesConfigBuilder::default()
+            .deployment_scoped_service_interfaces(true)
+            .deployment_type(DpuDeploymentType::Bf4Astra)
+            .registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+                dial_timeout: None,
+            }])
+            .build()
+            .expect("Astra registry mirror test configuration must be valid");
+        let resolved = resolve_initialization_inventory(&config, None).unwrap();
+        let name = create_dpu_flavor_template(&mock, TEST_NAMESPACE, &config, &resolved)
+            .await
+            .unwrap();
+
+        let stored = DpuFlavorTemplateRepository::get(&mock, &name, TEST_NAMESPACE)
+            .await
+            .unwrap()
+            .expect("created flavor template should be retrievable");
+        assert!(
+            serde_json::to_string(&stored)
+                .unwrap()
+                .contains("/etc/containerd/certs.d/nvcr.io/hosts.toml"),
+            "the configured mirror must reach the created flavor template"
+        );
+    }
+
+    /// Verifies a malformed registry mirror fails `build()`, before initialization writes anything.
+    #[test]
+    fn initialization_rejects_malformed_registry_mirrors() {
+        let config =
+            InitDpfResourcesConfigBuilder::default().registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io/nvidia".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+                dial_timeout: None,
+            }]);
+
+        assert!(matches!(
+            config.build(),
+            Err(DpfError::ConfigError(message)) if message.contains("nvcr.io/nvidia")
+        ));
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
@@ -35,7 +36,7 @@ func TestSession_fetchDPUMachines(t *testing.T) {
 				assert.Equal(t, "/v2/org/acme/nico/dpu", r.URL.Path)
 				assert.Equal(t, test.site, r.URL.Query().Get("siteId"))
 				assert.Equal(t, "100", r.URL.Query().Get("pageSize"))
-				assert.Equal(t, fmt.Sprint(requests), r.URL.Query().Get("pageNumber"))
+				assert.Equal(t, strconv.Itoa(requests), r.URL.Query().Get("pageNumber"))
 				if requests == 1 {
 					machines := make([]map[string]string, 100)
 					for i := range machines {
@@ -151,7 +152,7 @@ func TestSession_fetchLabelKeys(t *testing.T) {
 				assert.Equal(t, "/v2/org/acme/nico/"+test.resource+"/label/key", r.URL.Path)
 				assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
 				assert.Equal(t, "100", r.URL.Query().Get("pageSize"))
-				assert.Equal(t, fmt.Sprint(requests), r.URL.Query().Get("pageNumber"))
+				assert.Equal(t, strconv.Itoa(requests), r.URL.Query().Get("pageNumber"))
 				if requests == 1 && test.wantCount > 100 {
 					keys := make([]string, 100)
 					for i := range keys {
@@ -165,7 +166,7 @@ func TestSession_fetchLabelKeys(t *testing.T) {
 			defer server.Close()
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 			session.Scope.SiteID = "site-1"
-			items, err := session.fetchLabelKeys(test.resource)
+			items, err := session.fetchLabelKeys(context.Background(), test.resource)
 			if test.wantError != "" {
 				require.ErrorContains(t, err, test.wantError)
 				return
@@ -226,7 +227,7 @@ func TestSession_fetchMachineChassis(t *testing.T) {
 						return
 					}
 					pages++
-					assert.Equal(t, fmt.Sprint(pages), r.URL.Query().Get("pageNumber"))
+					assert.Equal(t, strconv.Itoa(pages), r.URL.Query().Get("pageNumber"))
 					if pages == 1 {
 						endpoints := make([]map[string]interface{}, 100)
 						for i := range endpoints {
@@ -243,7 +244,7 @@ func TestSession_fetchMachineChassis(t *testing.T) {
 			defer server.Close()
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 			session.Scope.SiteID = "different-active-site"
-			items, err := session.fetchMachineChassis("machine-1")
+			items, err := session.fetchMachineChassis(context.Background(), "machine-1")
 			assert.Equal(t, test.wantEndpointRequests, endpointRequests)
 			assert.Equal(t, "different-active-site", session.Scope.SiteID)
 			if test.wantError != "" {

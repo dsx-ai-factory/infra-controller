@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,7 @@ use crate::sink::{
 pub struct LeakDetectorCollectorConfig {
     pub data_sink: Option<Arc<dyn DataSink>>,
     pub state_refresh_interval: Duration,
+    pub aggregate_detector_ids: AggregateDetectorIds,
 }
 
 pub struct LeakDetectorCollector<B: Bmc> {
@@ -43,11 +45,103 @@ pub struct LeakDetectorCollector<B: Bmc> {
     state: Option<LeakDetectorCollectorState>,
     data_sink: Option<Arc<dyn DataSink>>,
     state_refresh_interval: Duration,
+    aggregate_detector_ids: AggregateDetectorIds,
 }
 
 struct LeakDetectorCollectorState {
     detector_ids: Vec<ODataId>,
     last_detector_refresh: Instant,
+}
+
+/// Redfish `Id`s of aggregate leak detectors, which roll up the other
+/// detectors on their chassis.
+#[derive(Clone, Debug, Default)]
+pub struct AggregateDetectorIds(BTreeSet<String>);
+
+impl From<BTreeSet<String>> for AggregateDetectorIds {
+    fn from(ids: BTreeSet<String>) -> Self {
+        Self(ids)
+    }
+}
+
+impl AggregateDetectorIds {
+    /// Whether the last segment of `detector` is exactly a configured id.
+    fn matches(&self, detector: &ODataId) -> bool {
+        detector
+            .last_segment()
+            .is_some_and(|id| self.0.contains(id))
+    }
+
+    /// Splits one chassis's leak detectors into the ones to report and the
+    /// aggregates to ignore. Aggregates are ignored when the chassis also
+    /// exposes individual detectors, because a BMC can keep an aggregate
+    /// critical after the detectors it rolls up go offline. A chassis that
+    /// exposes only aggregates reports them.
+    fn split(&self, chassis_detectors: Vec<ODataId>) -> DiscoveredDetectors {
+        match chassis_detectors
+            .into_iter()
+            .partition::<Vec<_>, _>(|detector| self.matches(detector))
+        {
+            (aggregates, individual) if individual.is_empty() => DiscoveredDetectors {
+                reported: aggregates,
+                ignored_aggregates: Vec::new(),
+            },
+            (aggregates, individual) => DiscoveredDetectors {
+                reported: individual,
+                ignored_aggregates: aggregates,
+            },
+        }
+    }
+}
+
+/// What one pass read from the discovered leak detectors.
+#[derive(Default)]
+struct DetectorReads {
+    /// Detectors that were read.
+    detectors: Vec<Arc<LeakDetector>>,
+    /// Ids and errors of detectors that could not be read.
+    unreadable: Vec<(ODataId, String)>,
+    /// How many unreadable detectors failed because the BMC was unreachable.
+    connection_failures: usize,
+}
+
+impl DetectorReads {
+    /// The pass's health report, or `None` to keep the previous one. Each
+    /// unreadable detector is one of the report's alerts, so the previous
+    /// report is kept only when the BMC was unreachable and those connection
+    /// failures are all the pass has to say. A leak, an offline detector, or a
+    /// decode failure adds an alert of its own and publishes the report,
+    /// unreachable detectors included, so it cannot clear a leak on them.
+    fn into_report(self, context: &EventContext) -> Option<HealthReport> {
+        let report = build_health_report(self.detectors, &self.unreadable, context);
+        (self.connection_failures == 0 || report.alerts.len() > self.connection_failures)
+            .then_some(report)
+    }
+}
+
+/// Leak detectors found by discovery.
+#[derive(Default)]
+struct DiscoveredDetectors {
+    /// Detectors polled and reported each iteration.
+    reported: Vec<ODataId>,
+    /// Aggregate detectors left out because their chassis also exposes
+    /// individual detectors.
+    ignored_aggregates: Vec<ODataId>,
+}
+
+/// Combines per-chassis results into the endpoint's discovery result.
+impl FromIterator<DiscoveredDetectors> for DiscoveredDetectors {
+    fn from_iter<I: IntoIterator<Item = DiscoveredDetectors>>(chassis: I) -> Self {
+        chassis
+            .into_iter()
+            .fold(Self::default(), |mut endpoint, chassis| {
+                endpoint.reported.extend(chassis.reported);
+                endpoint
+                    .ignored_aggregates
+                    .extend(chassis.ignored_aggregates);
+                endpoint
+            })
+    }
 }
 
 impl<B> PeriodicCollector<B> for LeakDetectorCollector<B>
@@ -70,6 +164,7 @@ where
             state: None,
             data_sink: config.data_sink,
             state_refresh_interval: config.state_refresh_interval,
+            aggregate_detector_ids: config.aggregate_detector_ids,
         })
     }
 
@@ -108,14 +203,19 @@ where
 
         if needs_detector_refresh {
             match self.discover_leak_detectors().await {
-                Ok(detector_ids) => {
+                Ok(discovered) => {
                     tracing::info!(
-                        detector_count = detector_ids.len(),
+                        detector_count = discovered.reported.len(),
+                        ignored_aggregate_detectors = ?discovered
+                            .ignored_aggregates
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>(),
                         rack_id = self.event_context.rack_id().map(tracing::field::display),
                         "Leak detector discovery complete"
                     );
                     self.state = Some(LeakDetectorCollectorState {
-                        detector_ids,
+                        detector_ids: discovered.reported,
                         last_detector_refresh: Instant::now(),
                     });
                     refresh_triggered = true;
@@ -134,16 +234,14 @@ where
             }
         }
 
-        let (detectors, unreadable, connection_failures) = if let Some(state) = &self.state {
-            self.fetch_leak_detectors(&state.detector_ids).await
-        } else {
-            (Vec::new(), Vec::new(), 0)
+        let reads = match &self.state {
+            Some(state) => self.fetch_leak_detectors(&state.detector_ids).await,
+            None => DetectorReads::default(),
         };
-        let detector_count = detectors.len();
-        let fetch_failures = unreadable.len();
-        let report = build_health_report(detectors, &unreadable, &self.event_context);
+        let detector_count = reads.detectors.len();
+        let fetch_failures = reads.unreadable.len();
 
-        if should_publish(&report, fetch_failures, connection_failures) {
+        if let Some(report) = reads.into_report(&self.event_context) {
             self.emit_event(CollectorEvent::HealthReport(Arc::new(report)));
         }
 
@@ -154,13 +252,13 @@ where
         })
     }
 
-    async fn discover_leak_detectors(&self) -> Result<Vec<ODataId>, HealthError> {
+    async fn discover_leak_detectors(&self) -> Result<DiscoveredDetectors, HealthError> {
         let service_root = ServiceRoot::new(self.bmc.clone()).await?;
         let Some(chassis_collection) = service_root.chassis().await? else {
-            return Ok(Vec::new());
+            return Ok(DiscoveredDetectors::default());
         };
 
-        let mut detector_ids = Vec::new();
+        let mut chassis_detectors = Vec::new();
         for chassis in chassis_collection.members().await? {
             // These are optional Redfish navigation properties. Each link must
             // be fetched before the next one exists, so this stays as an
@@ -187,17 +285,22 @@ where
                 .await
                 .map_err(|error| HealthError::BmcError(Box::new(error)))?;
 
-            for leak_detector_ref in &leak_detector_collection.members {
-                detector_ids.push(leak_detector_ref.id().clone());
-            }
+            chassis_detectors.push(
+                leak_detector_collection
+                    .members
+                    .iter()
+                    .map(|leak_detector_ref| leak_detector_ref.id().clone())
+                    .collect(),
+            );
         }
 
-        Ok(detector_ids)
+        Ok(chassis_detectors
+            .into_iter()
+            .map(|detectors| self.aggregate_detector_ids.split(detectors))
+            .collect())
     }
 
-    /// Fetches every discovered detector, returning the ones that could be read,
-    /// the ids and errors of the ones that could not, and how many of those
-    /// failed because the BMC was unreachable.
+    /// Fetches every discovered detector.
     ///
     /// A detector the BMC serves in a shape this client cannot decode costs its
     /// own leak reporting instead of every other detector on the endpoint. It is
@@ -207,27 +310,22 @@ where
     /// the collector runtime as `fetch_failures`, which is the operator-visible
     /// signal that this endpoint is reporting on fewer detectors than it
     /// discovered.
-    async fn fetch_leak_detectors(
-        &self,
-        detector_ids: &[ODataId],
-    ) -> (Vec<Arc<LeakDetector>>, Vec<(ODataId, String)>, usize) {
-        let mut detectors = Vec::new();
-        let mut unreadable = Vec::new();
-        let mut connection_failures = 0;
+    async fn fetch_leak_detectors(&self, detector_ids: &[ODataId]) -> DetectorReads {
+        let mut reads = DetectorReads::default();
         for detector_id in detector_ids {
             match self.bmc.get::<LeakDetector>(detector_id).await {
-                Ok(detector) => detectors.push(detector),
+                Ok(detector) => reads.detectors.push(detector),
                 Err(error) => {
-                    if is_connection_bmc_source_error(&error) {
-                        connection_failures += 1;
-                    }
+                    reads.connection_failures +=
+                        usize::from(is_connection_bmc_source_error(&error));
                     tracing::warn!(?error, detector = %detector_id, "Failed to fetch leak detector");
-                    unreadable.push((detector_id.clone(), error.to_string()));
+                    reads
+                        .unreadable
+                        .push((detector_id.clone(), error.to_string()));
                 }
             }
         }
-
-        (detectors, unreadable, connection_failures)
+        reads
     }
 }
 
@@ -245,15 +343,26 @@ fn build_health_report(
             .status
             .as_ref()
             .and_then(|status| status.state.flatten());
-        if resource_state != Some(State::Enabled) {
-            tracing::warn!(
-                detector = %target,
-                leak_detector_state = ?detector.detector_state.flatten(),
-                leak_detector_resource_state = ?resource_state,
-                rack_id = context.rack_id().map(tracing::field::display),
-                "Leak detector resource state does not permit leak classification"
-            );
-            continue;
+        match resource_state {
+            Some(State::Enabled) => {}
+            // An offline detector cannot sense a leak. With its chassis's
+            // aggregate ignored, this alert is the only signal that the tray
+            // has lost leak coverage, and it keeps leak classification from
+            // reading the tray as dry.
+            Some(state @ (State::UnavailableOffline | State::StandbyOffline)) => {
+                alerts.push(offline_alert(target, state));
+                continue;
+            }
+            _ => {
+                tracing::warn!(
+                    detector = %target,
+                    leak_detector_state = ?detector.detector_state.flatten(),
+                    leak_detector_resource_state = ?resource_state,
+                    rack_id = context.rack_id().map(tracing::field::display),
+                    "Leak detector resource state does not permit leak classification"
+                );
+                continue;
+            }
         }
 
         match detector.detector_state.flatten() {
@@ -301,30 +410,25 @@ fn build_health_report(
     }
 }
 
-/// Whether to publish a pass's report. A pass whose only failures were the BMC
-/// being unreachable keeps the previous report unless it read a leak. Any other
-/// failure publishes it, unreachable detectors included, so the report cannot
-/// clear a leak on them.
-fn should_publish(
-    report: &HealthReport,
-    fetch_failures: usize,
-    connection_failures: usize,
-) -> bool {
-    connection_failures == 0
-        || connection_failures < fetch_failures
-        || report.alerts.iter().any(|alert| {
-            alert
-                .classifications
-                .contains(&Classification::LeakDetector)
-        })
-}
-
 fn detector_target(detector: &LeakDetector) -> String {
     detector
         .user_label
         .clone()
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| detector.odata_id().to_string())
+}
+
+fn offline_alert(target: String, state: State) -> HealthReportAlert {
+    HealthReportAlert {
+        attribution: None,
+        probe_id: Probe::LeakDetection,
+        message: format!(
+            "Leak detector '{target}' is offline: {}",
+            state.to_snake_case()
+        ),
+        target: Some(target),
+        classifications: vec![Classification::SensorFailure],
+    }
 }
 
 fn leak_alert(detector: &LeakDetector, target: String) -> HealthReportAlert {
@@ -349,6 +453,7 @@ mod tests {
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
+    use std::sync::Mutex;
 
     use axum::Router;
     use axum::extract::{OriginalUri, State};
@@ -356,9 +461,11 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use bmc_mock::test_support::TestBmc;
     use bmc_mock::test_support::axum_http_client::AxumRouterHttpClient;
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use mac_address::MacAddress;
     use nv_redfish::bmc_http::{BmcCredentials, CacheSettings};
+    use serde_json::json;
     use url::Url;
 
     use super::*;
@@ -368,6 +475,9 @@ mod tests {
 
     const DETECTORS_PATH: &str =
         "/redfish/v1/Chassis/MGX_BMC_0/ThermalSubsystem/LeakDetection/LeakDetectors";
+    const WIWYNN_CHASSIS_PATH: &str = "/redfish/v1/Chassis/Chassis_0";
+    const WIWYNN_DETECTORS_PATH: &str =
+        "/redfish/v1/Chassis/Chassis_0/ThermalSubsystem/LeakDetection/LeakDetectors";
 
     /// A detector body in the shape a real VR RTF switch BMC serves, with
     /// `ReactionDelaySeconds` interpolated verbatim so a caller chooses the
@@ -549,6 +659,47 @@ mod tests {
                     expect: expected_report(vec![], vec![]),
                 },
                 Check {
+                    scenario: "offline detectors report as sensor failures",
+                    input: vec![
+                        r#"{
+                            "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/UnavailableOffline",
+                            "Id": "UnavailableOffline",
+                            "Name": "Unavailable offline leak detector",
+                            "DetectorState": "Unavailable",
+                            "Status": { "State": "UnavailableOffline" }
+                        }"#,
+                        r#"{
+                            "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/StandbyOffline",
+                            "Id": "StandbyOffline",
+                            "Name": "Standby offline leak detector",
+                            "DetectorState": "Critical",
+                            "Status": { "State": "StandbyOffline" },
+                            "UserLabel": "Cold plate"
+                        }"#,
+                    ],
+                    expect: expected_report(
+                        vec![],
+                        vec![
+                            AlertSummary {
+                                probe_id: Probe::LeakDetection,
+                                target: Some(
+                                    "/redfish/v1/Chassis/System/LeakDetectors/UnavailableOffline"
+                                        .to_string(),
+                                ),
+                                message: "Leak detector '/redfish/v1/Chassis/System/LeakDetectors/UnavailableOffline' is offline: unavailable_offline".to_string(),
+                                classifications: vec![Classification::SensorFailure],
+                            },
+                            AlertSummary {
+                                probe_id: Probe::LeakDetection,
+                                target: Some("Cold plate".to_string()),
+                                message: "Leak detector 'Cold plate' is offline: standby_offline"
+                                    .to_string(),
+                                classifications: vec![Classification::SensorFailure],
+                            },
+                        ],
+                    ),
+                },
+                Check {
                     scenario: "missing and disabled resource states do not produce leak alerts",
                     input: vec![
                         r#"{
@@ -631,6 +782,96 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_detector_is_ignored_only_beside_individual_detectors() {
+        let on = |chassis: &str, names: &[&str]| -> Vec<String> {
+            names
+                .iter()
+                .map(|name| {
+                    format!(
+                        "/redfish/v1/Chassis/{chassis}/ThermalSubsystem/LeakDetection/LeakDetectors/{name}"
+                    )
+                })
+                .collect()
+        };
+        // input: each chassis's detectors; expect: (reported, ignored aggregates)
+        check_values(
+            [
+                Check {
+                    scenario: "an aggregate beside individual detectors is ignored",
+                    input: vec![on(
+                        "Chassis_0",
+                        &[
+                            "Chassis_0_LeakDetector_0_ColdPlate",
+                            "leakage_aggr",
+                            "Chassis_0_LeakDetector_0_Manifold",
+                        ],
+                    )],
+                    expect: (
+                        on(
+                            "Chassis_0",
+                            &[
+                                "Chassis_0_LeakDetector_0_ColdPlate",
+                                "Chassis_0_LeakDetector_0_Manifold",
+                            ],
+                        ),
+                        on("Chassis_0", &["leakage_aggr"]),
+                    ),
+                },
+                Check {
+                    scenario: "an aggregate that is the only detector is reported",
+                    input: vec![on("Chassis_0", &["leakage_aggr"])],
+                    expect: (on("Chassis_0", &["leakage_aggr"]), vec![]),
+                },
+                Check {
+                    scenario: "individual detectors on another chassis do not hide an aggregate",
+                    input: vec![
+                        on("Chassis_0", &["leakage_aggr"]),
+                        on(
+                            "Chassis_1",
+                            &["Chassis_1_LeakDetector_0_ColdPlate", "leakage_aggr"],
+                        ),
+                    ],
+                    expect: (
+                        [
+                            on("Chassis_0", &["leakage_aggr"]),
+                            on("Chassis_1", &["Chassis_1_LeakDetector_0_ColdPlate"]),
+                        ]
+                        .concat(),
+                        on("Chassis_1", &["leakage_aggr"]),
+                    ),
+                },
+                Check {
+                    scenario: "ids that differ from a configured aggregate id are individual detectors",
+                    input: vec![on(
+                        "Chassis_0",
+                        &["Leakage_Aggr", "leakage_aggr_1", "leakage_aggr"],
+                    )],
+                    expect: (
+                        on("Chassis_0", &["Leakage_Aggr", "leakage_aggr_1"]),
+                        on("Chassis_0", &["leakage_aggr"]),
+                    ),
+                },
+            ],
+            |chassis| {
+                let aggregate_ids =
+                    AggregateDetectorIds::from(BTreeSet::from(["leakage_aggr".to_string()]));
+                let discovered: DiscoveredDetectors = chassis
+                    .into_iter()
+                    .map(|detectors| {
+                        aggregate_ids.split(detectors.into_iter().map(ODataId::from).collect())
+                    })
+                    .collect();
+                let paths =
+                    |ids: Vec<ODataId>| ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+                (
+                    paths(discovered.reported),
+                    paths(discovered.ignored_aggregates),
+                )
+            },
+        );
+    }
+
+    #[test]
     fn unreadable_detectors_report_as_sensor_failures() {
         let readable = r#"{
             "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/OK",
@@ -678,36 +919,59 @@ mod tests {
             "DetectorState": "Critical",
             "Status": { "State": "Enabled" }
         }"#;
-        // input: (fetch failures, connection failures, whether a detector read a leak)
+        let offline = r#"{
+            "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/Offline",
+            "Id": "Offline",
+            "Name": "Offline leak detector",
+            "DetectorState": "Unavailable",
+            "Status": { "State": "UnavailableOffline" }
+        }"#;
+        // input: (unreadable detectors, of which connection failures, detector read)
         check_values(
             [
                 Check {
                     scenario: "a decode failure alone is published",
-                    input: (1, 0, false),
+                    input: (1, 0, None),
                     expect: true,
                 },
                 Check {
                     scenario: "connection failures alone keep the previous report",
-                    input: (2, 2, false),
+                    input: (2, 2, None),
                     expect: false,
                 },
                 Check {
                     scenario: "a decode failure is published alongside a connection failure",
-                    input: (2, 1, false),
+                    input: (2, 1, None),
                     expect: true,
                 },
                 Check {
                     scenario: "a leak read before the connection failed is published",
-                    input: (1, 1, true),
+                    input: (1, 1, Some(critical)),
+                    expect: true,
+                },
+                Check {
+                    scenario: "an offline detector is published alongside a connection failure",
+                    input: (1, 1, Some(offline)),
                     expect: true,
                 },
             ],
-            |(fetch_failures, connection_failures, leak)| {
-                let detectors = Vec::from_iter(leak.then(|| {
-                    Arc::new(serde_json::from_str(critical).expect("valid leak detector"))
-                }));
-                let report = build_health_report(detectors, &[], &context());
-                should_publish(&report, fetch_failures, connection_failures)
+            |(unreadable, connection_failures, read)| {
+                DetectorReads {
+                    detectors: Vec::from_iter(read.map(|json| {
+                        Arc::new(serde_json::from_str(json).expect("valid leak detector"))
+                    })),
+                    unreadable: (0..unreadable)
+                        .map(|index| {
+                            (
+                                ODataId::from(format!("{DETECTORS_PATH}/unreadable{index}")),
+                                "unreadable".to_string(),
+                            )
+                        })
+                        .collect(),
+                    connection_failures,
+                }
+                .into_report(&context())
+                .is_some()
             },
         );
     }
@@ -727,6 +991,19 @@ mod tests {
         }
     }
 
+    /// A BMC that serves each body at its path and answers 404 for anything else.
+    fn router_bmc(bodies: HashMap<String, String>) -> Arc<TestBmc> {
+        let router = Router::new()
+            .fallback(detector_response)
+            .with_state(Arc::new(bodies));
+        Arc::new(TestBmc::new(
+            AxumRouterHttpClient::new(router),
+            Url::parse("https://leak-detector-test.local").expect("test URL should parse"),
+            BmcCredentials::new("root".to_string(), "password".to_string()),
+            CacheSettings::with_capacity(8),
+        ))
+    }
+
     /// `LeakDetector_v1.xml` declares `ReactionDelaySeconds` as `Edm.Int64`, so
     /// the `0.0` that switch BMC firmware serves for it fails to decode. That is
     /// how a single detector body becomes unreadable in the field, and this
@@ -743,21 +1020,13 @@ mod tests {
                 )
             })
             .collect();
-        let router = Router::new()
-            .fallback(detector_response)
-            .with_state(Arc::new(bodies));
-        let bmc = Arc::new(TestBmc::new(
-            AxumRouterHttpClient::new(router),
-            Url::parse("https://leak-detector-test.local").expect("test URL should parse"),
-            BmcCredentials::new("root".to_string(), "password".to_string()),
-            CacheSettings::with_capacity(8),
-        ));
         let collector = LeakDetectorCollector::new_runner(
-            bmc,
+            router_bmc(bodies),
             Arc::new(test_endpoint(mac("42:9e:b1:bd:9d:dd"))),
             LeakDetectorCollectorConfig {
                 data_sink: None,
                 state_refresh_interval: Duration::from_secs(60),
+                aggregate_detector_ids: AggregateDetectorIds::default(),
             },
         )
         .expect("leak detector collector should build");
@@ -766,8 +1035,11 @@ mod tests {
             .iter()
             .map(|(id, _)| ODataId::from(format!("{DETECTORS_PATH}/{id}")))
             .collect();
-        let (fetched, unreadable, connection_failures) =
-            collector.fetch_leak_detectors(&detector_ids).await;
+        let DetectorReads {
+            detectors: fetched,
+            unreadable,
+            connection_failures,
+        } = collector.fetch_leak_detectors(&detector_ids).await;
 
         let fetched_ids: Vec<String> = fetched
             .iter()
@@ -787,5 +1059,213 @@ mod tests {
             "a detector this client cannot decode should be named, not dropped from the batch, \
              and is not a connection failure"
         );
+    }
+
+    #[derive(Default)]
+    struct ReportCapturingSink {
+        reports: Mutex<Vec<HealthReport>>,
+    }
+
+    impl DataSink for ReportCapturingSink {
+        fn sink_type(&self) -> &'static str {
+            "report_capturing_sink"
+        }
+
+        fn try_handle_event(
+            &self,
+            _context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
+            if let CollectorEvent::HealthReport(report) = event {
+                self.reports
+                    .lock()
+                    .expect("report lock should not be poisoned")
+                    .push(report.as_ref().clone());
+            }
+            Ok(())
+        }
+    }
+
+    /// The Redfish tree of the Wiwynn GB200 tray from #9199: both individual
+    /// leak detectors went offline while the BMC's `leakage_aggr` kept
+    /// reporting a critical leak.
+    fn wiwynn_tray_with_offline_detectors() -> HashMap<String, String> {
+        let thermal_subsystem = format!("{WIWYNN_CHASSIS_PATH}/ThermalSubsystem");
+        let leak_detection = format!("{thermal_subsystem}/LeakDetection");
+        let detector = |id: &str| format!("{WIWYNN_DETECTORS_PATH}/{id}");
+        let offline_detector = |id: &str| {
+            json!({
+                "@odata.id": detector(id),
+                "@odata.type": "#LeakDetector.v1_1_0.LeakDetector",
+                "Id": id,
+                "Name": id,
+                "DetectorState": "Unavailable",
+                "LeakDetectorType": "Moisture",
+                "Status": { "State": "UnavailableOffline" }
+            })
+        };
+        [
+            (
+                "/redfish/v1".to_string(),
+                json!({
+                    "@odata.id": "/redfish/v1",
+                    "@odata.type": "#ServiceRoot.v1_15_0.ServiceRoot",
+                    "Id": "RootService",
+                    "Name": "Root Service",
+                    "Chassis": { "@odata.id": "/redfish/v1/Chassis" },
+                    "Links": {
+                        "Sessions": { "@odata.id": "/redfish/v1/SessionService/Sessions" }
+                    }
+                }),
+            ),
+            (
+                "/redfish/v1/Chassis".to_string(),
+                json!({
+                    "@odata.id": "/redfish/v1/Chassis",
+                    "@odata.type": "#ChassisCollection.ChassisCollection",
+                    "Name": "Chassis Collection",
+                    "Members": [{ "@odata.id": WIWYNN_CHASSIS_PATH }]
+                }),
+            ),
+            (
+                WIWYNN_CHASSIS_PATH.to_string(),
+                json!({
+                    "@odata.id": WIWYNN_CHASSIS_PATH,
+                    "@odata.type": "#Chassis.v1_23_0.Chassis",
+                    "Id": "Chassis_0",
+                    "Name": "Chassis_0",
+                    "ChassisType": "RackMount",
+                    "ThermalSubsystem": { "@odata.id": thermal_subsystem }
+                }),
+            ),
+            (
+                thermal_subsystem.clone(),
+                json!({
+                    "@odata.id": thermal_subsystem,
+                    "@odata.type": "#ThermalSubsystem.v1_3_0.ThermalSubsystem",
+                    "Id": "ThermalSubsystem",
+                    "Name": "Thermal Subsystem",
+                    "LeakDetection": { "@odata.id": leak_detection }
+                }),
+            ),
+            (
+                leak_detection.clone(),
+                json!({
+                    "@odata.id": leak_detection,
+                    "@odata.type": "#LeakDetection.v1_1_0.LeakDetection",
+                    "Id": "LeakDetection",
+                    "Name": "Leak Detection",
+                    "LeakDetectors": { "@odata.id": WIWYNN_DETECTORS_PATH }
+                }),
+            ),
+            (
+                WIWYNN_DETECTORS_PATH.to_string(),
+                json!({
+                    "@odata.id": WIWYNN_DETECTORS_PATH,
+                    "@odata.type": "#LeakDetectorCollection.LeakDetectorCollection",
+                    "Name": "Leak Detector Collection",
+                    "Members": [
+                        { "@odata.id": detector("Chassis_0_LeakDetector_0_ColdPlate") },
+                        { "@odata.id": detector("leakage_aggr") },
+                        { "@odata.id": detector("Chassis_0_LeakDetector_0_Manifold") }
+                    ]
+                }),
+            ),
+            (
+                detector("Chassis_0_LeakDetector_0_ColdPlate"),
+                offline_detector("Chassis_0_LeakDetector_0_ColdPlate"),
+            ),
+            (
+                detector("Chassis_0_LeakDetector_0_Manifold"),
+                offline_detector("Chassis_0_LeakDetector_0_Manifold"),
+            ),
+            (
+                detector("leakage_aggr"),
+                json!({
+                    "@odata.id": detector("leakage_aggr"),
+                    "@odata.type": "#LeakDetector.v1_1_0.LeakDetector",
+                    "Id": "leakage_aggr",
+                    "Name": "leakage_aggr",
+                    "DetectorState": "Critical",
+                    "Status": { "Health": "Critical", "State": "Enabled" }
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(path, body)| (path, body.to_string()))
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn aggregate_beside_offline_detectors_raises_no_leak() {
+        let detector = |id: &str| format!("{WIWYNN_DETECTORS_PATH}/{id}");
+        let offline = |id: &str| AlertSummary {
+            probe_id: Probe::LeakDetection,
+            target: Some(detector(id)),
+            message: format!(
+                "Leak detector '{}' is offline: unavailable_offline",
+                detector(id)
+            ),
+            classifications: vec![Classification::SensorFailure],
+        };
+        // input: configured aggregate detector ids; expect: alerts of the one
+        // published report
+        check_cases_async(
+            [
+                Case {
+                    scenario: "the configured aggregate is ignored and the offline detectors are reported",
+                    input: BTreeSet::from(["leakage_aggr".to_string()]),
+                    expect: Yields(vec![
+                        offline("Chassis_0_LeakDetector_0_ColdPlate"),
+                        offline("Chassis_0_LeakDetector_0_Manifold"),
+                    ]),
+                },
+                Case {
+                    scenario: "with no aggregate ids configured the aggregate raises the false leak",
+                    input: BTreeSet::new(),
+                    expect: Yields(vec![
+                        offline("Chassis_0_LeakDetector_0_ColdPlate"),
+                        AlertSummary {
+                            probe_id: Probe::LeakDetection,
+                            target: Some(detector("leakage_aggr")),
+                            message: format!(
+                                "Leak detector '{}' reports critical",
+                                detector("leakage_aggr")
+                            ),
+                            classifications: vec![Classification::LeakDetector],
+                        },
+                        offline("Chassis_0_LeakDetector_0_Manifold"),
+                    ]),
+                },
+            ],
+            |aggregate_detector_ids| async move {
+                let sink = Arc::new(ReportCapturingSink::default());
+                let mut collector = LeakDetectorCollector::new_runner(
+                    router_bmc(wiwynn_tray_with_offline_detectors()),
+                    Arc::new(test_endpoint(mac("42:9e:b1:bd:9d:dd"))),
+                    LeakDetectorCollectorConfig {
+                        data_sink: Some(sink.clone()),
+                        state_refresh_interval: Duration::from_secs(60),
+                        aggregate_detector_ids: aggregate_detector_ids.into(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                collector
+                    .run_iteration()
+                    .await
+                    .map_err(|error| error.to_string())?;
+
+                let reports = std::mem::take(
+                    &mut *sink
+                        .reports
+                        .lock()
+                        .expect("report lock should not be poisoned"),
+                );
+                let [report] = <[HealthReport; 1]>::try_from(reports)
+                    .map_err(|reports| format!("expected one report, got {}", reports.len()))?;
+                Ok::<_, String>(ReportSummary::from(report).alerts)
+            },
+        )
+        .await;
     }
 }

@@ -14,25 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_resource_pool::ResourcePoolRegistry;
-use carbide_uuid::machine::{HostMachineId, MachineId, PredictedHostMachineId};
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
-use db::Transaction;
 use db::machine_interface::MachineInterfaces;
-use futures_util::StreamExt;
+use db::{Transaction, TransactionVending as _};
 use futures_util::future::join_all;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
-use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+use model::expected_machine::{
+    DpuLoopbackReservation, ExpectedMachine, ExpectedMachineData, HostDpuPolicy,
+};
 use model::hardware_info::HardwareInfo;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -53,7 +55,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::Config;
 use crate::IdentifiedManagedHost;
+use crate::bmc_endpoint_explorer::record_machine_identity;
 use crate::boot_interfaces::{initial_selection_source, zero_dpu_primary_mac};
+use crate::dpu_asn::PreparedDpuAsn;
 use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use crate::endpoint_exploration_report_ext::EndpointExplorationReportExt;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
@@ -70,6 +74,7 @@ pub(crate) use host_identification::ConfiguredIngestionCandidate;
 
 /// Creates machines from site-explorer managed-host reports.
 pub struct MachineCreator {
+    instrumentation: Instrumentation,
     database_connection: PgPool,
     config: Config,
     /// In-flight creations per `create_machines` call: the configured value,
@@ -83,11 +88,23 @@ pub struct MachineCreator {
     dpf_enabled_at_site: bool,
 }
 
+/// Keeps loopback reservations and prepared DPU allocations together so the
+/// creation transaction can recheck them under lock.
+struct HostDpuResources<'a> {
+    existing_host: Option<HostMachineId>,
+    reservations: Vec<DpuLoopbackReservation>,
+    reservations_by_dpu: HashMap<DpuMachineId, usize>,
+    loopbacks: Vec<PreparedDpuLoopback<'a>>,
+    asns: Vec<PreparedDpuAsn<'a>>,
+}
+
 impl MachineCreator {
     /// Creates a machine creator with an optional machine-information provider.
-    /// The registry selects DPU IPv4 backends for preparation outside entity
+    /// Events use `instrumentation`; retain its provider while the creator runs.
+    /// The registry selects loopback and ASN backends for preparation outside entity
     /// transactions. Direct calls have an uncancelled owner token; Site Explorer
     /// installs its shutdown token before starting production creation work.
+    #[allow(clippy::too_many_arguments)] // Creation dependencies and site policy are supplied together.
     pub fn new(
         database_connection: PgPool,
         config: Config,
@@ -96,12 +113,14 @@ impl MachineCreator {
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         dpf_enabled_at_site: bool,
+        instrumentation: Instrumentation,
     ) -> Self {
         let creation_concurrency = creation_concurrency(
             config.machine_creation_concurrency,
             db::machine_interface::admin_lock_admission_permits(),
         );
         Self {
+            instrumentation,
             database_connection,
             config,
             creation_concurrency,
@@ -201,7 +220,7 @@ impl MachineCreator {
     /// fallback.
     async fn ensure_racks_before_dispatch(&self, rack_ids: &[RackId]) {
         let result = async {
-            let mut txn = Transaction::begin(&self.database_connection).await?;
+            let mut txn = self.database_connection.txn_begin().await?;
             for rack_id in rack_ids {
                 crate::ensure_rack_exists(&mut txn, rack_id).await?;
             }
@@ -224,8 +243,9 @@ impl MachineCreator {
     ///
     /// Returns `true` only when new machines have been created.
     ///
-    /// Prepares missing DPU IPv4 loopbacks through the configured backend before
-    /// the machine transaction, then attaches them with the network config.
+    /// Prepares DPU loopbacks and ASNs through the configured allocators
+    /// before the machine transaction, then attaches them after interface writes.
+    /// ASN allocation failures remain nonfatal; existing remote ownership is reused.
     ///
     /// Requires a matching `expected_machine` entry.
     pub async fn create_managed_host(
@@ -250,6 +270,13 @@ impl MachineCreator {
     /// Records an observation for each attempted stage: admission, the creation
     /// transaction, and after-commit repair when a host was committed. Rejected
     /// preparation reaches none of those stages.
+    ///
+    /// Once the attempt holds its admission permit, `machine_creation_timeout`
+    /// bounds the transaction and the repair together. A transaction still
+    /// running at the deadline fails the attempt and discards its connection;
+    /// a repair still running then counts as a failed admin address
+    /// reconciliation of the created host.
+    #[tracing::instrument(skip_all, name = "ingest_managed_host")]
     async fn create_managed_host_with_selection(
         &self,
         explored_host: &ExploredManagedHost,
@@ -258,6 +285,12 @@ impl MachineCreator {
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
         pool: &PgPool,
     ) -> SiteExplorerResult<ManagedHostCreation> {
+        trace_propagation::MachineTraceAttributes {
+            bmc_ip: Some(explored_host.host_bmc_ip),
+            managed_host_bmc_ip: Some(explored_host.host_bmc_ip),
+            ..Default::default()
+        }
+        .record_on(&tracing::Span::current());
         let Some(expected_machine) = expected_machine else {
             tracing::warn!(
                 host_bmc_ip_address = %explored_host.host_bmc_ip,
@@ -271,24 +304,134 @@ impl MachineCreator {
             .iter()
             .map(|dpu| dpu.machine_id_if_valid_report())
             .collect::<Result<Vec<_>, _>>()?;
+        let existing_host = db::machine::DpuHostAssociations::load(pool, &dpu_ids)
+            .await?
+            .common_host_machine_id()?;
+        let host_dpu_policy = HostDpuPolicy::resolve(
+            Some(expected_machine.data.dpu_policy),
+            self.config.dpu_policy,
+        );
+        let reservations = if existing_host.is_some()
+            || (dpu_ids.is_empty() && !host_dpu_policy.expects_managed_dpus())
+        {
+            // Existing hosts ignore future ingestion intent. Nic
+            // and Ignore retain declarations without allocating loopbacks.
+            Vec::new()
+        } else {
+            db::expected_dpu_loopback_reservation::find_for_machine(
+                pool,
+                expected_machine.bmc_mac_address,
+            )
+            .await?
+        };
+        if dpu_ids.is_empty() && !reservations.is_empty() {
+            return Err(SiteExplorerError::internal(
+                "DPU loopback declarations exist but discovery reported no DPUs; defer creation"
+                    .to_string(),
+            ));
+        }
+        let mut reservations_by_dpu = HashMap::new();
+        for (index, reservation) in reservations.iter().enumerate() {
+            let matching = explored_host
+                .dpus
+                .iter()
+                .filter(|dpu| {
+                    dpu.report.dpu_oob_mac_address() == Some(reservation.dpu_oob_net0_mac_address)
+                })
+                .collect::<Vec<_>>();
+            let [dpu] = matching.as_slice() else {
+                let reported_macs = explored_host
+                    .dpus
+                    .iter()
+                    .filter_map(|dpu| dpu.report.dpu_oob_mac_address())
+                    .map(|mac| mac.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(SiteExplorerError::internal(format!(
+                    "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs; selected OS/admin MACs: [{reported_macs}]); defer creation",
+                    reservation.dpu_oob_net0_mac_address,
+                    matching.len()
+                )));
+            };
+            let id = dpu.machine_id_if_valid_report()?;
+            if reservations_by_dpu.insert(id, index).is_some() {
+                return Err(SiteExplorerError::internal(format!(
+                    "multiple loopback MAC declarations resolve to DPU {id}; defer creation"
+                )));
+            }
+        }
+
         // Resolve siblings together so later provider calls cannot age the
         // first reservation past its attachment deadline. `join_all` drains every
         // result and retains report order for Integrated assignment below.
         let preparations = join_all(dpu_ids.into_iter().map(|machine_id| {
-            PreparedDpuLoopback::prepare(
-                pool,
-                &self.resource_pool_registry,
-                &self.common_pools,
-                machine_id.into(),
-                &self.preparation_cancel_token,
-            )
+            let requested_loopback_v4 = reservations_by_dpu
+                .get(&machine_id)
+                .and_then(|&index| reservations[index].loopback_ipv4);
+            let requested_loopback_v6 = reservations_by_dpu
+                .get(&machine_id)
+                .and_then(|&index| reservations[index].loopback_ipv6);
+            async move {
+                // Erase the nested provider future's type here so tracing the
+                // creation does not exceed Rust's Send-check recursion limit.
+                let loopback = async {
+                    if existing_host.is_some() {
+                        // Existing hosts skip creation before attachment, so
+                        // they need no IPv6 preparation.
+                        PreparedDpuLoopback::prepare(
+                            pool,
+                            &self.resource_pool_registry,
+                            &self.common_pools,
+                            machine_id.into(),
+                            None,
+                            &self.preparation_cancel_token,
+                            self.instrumentation.clone(),
+                        )
+                        .await
+                    } else {
+                        PreparedDpuLoopback::prepare_with_ipv6(
+                            pool,
+                            &self.resource_pool_registry,
+                            &self.common_pools,
+                            machine_id.into(),
+                            requested_loopback_v4,
+                            requested_loopback_v6,
+                            &self.preparation_cancel_token,
+                            self.instrumentation.clone(),
+                        )
+                        .await
+                    }
+                }
+                .boxed();
+                tokio::join!(
+                    loopback,
+                    PreparedDpuAsn::prepare(
+                        pool,
+                        &self.resource_pool_registry,
+                        &self.common_pools,
+                        machine_id.into(),
+                        &self.preparation_cancel_token,
+                    ),
+                )
+            }
         }))
         .await;
-        let mut loopbacks = Vec::with_capacity(preparations.len());
+        let mut resources = HostDpuResources {
+            existing_host,
+            reservations,
+            reservations_by_dpu,
+            loopbacks: Vec::with_capacity(preparations.len()),
+            asns: Vec::with_capacity(preparations.len()),
+        };
         let mut preparation_error = None;
-        for preparation in preparations {
-            match preparation {
-                Ok(prepared) => loopbacks.push(prepared),
+        for (loopback, asn) in preparations {
+            match loopback {
+                Ok(prepared) => resources.loopbacks.push(prepared),
+                Err(error) if preparation_error.is_none() => preparation_error = Some(error),
+                Err(_) => {}
+            }
+            match asn {
+                Ok(prepared) => resources.asns.push(prepared),
                 Err(error) if preparation_error.is_none() => preparation_error = Some(error),
                 Err(_) => {}
             }
@@ -299,52 +442,90 @@ impl MachineCreator {
                 return Err(error.into());
             }
             let admission_start = Instant::now();
-            let has_provider_reservation = loopbacks
+            let needs_bounded_admission = resources
+                .loopbacks
                 .iter()
-                .any(PreparedDpuLoopback::has_provider_reservation);
+                .any(PreparedDpuLoopback::has_provider_reservation)
+                || resources
+                    .asns
+                    .iter()
+                    .any(PreparedDpuAsn::has_provider_reservation);
             let admission =
-                acquire_admin_admission(has_provider_reservation, &self.preparation_cancel_token)
+                acquire_admin_admission(needs_bounded_admission, &self.preparation_cancel_token)
                     .await;
             record_creation_stage(
                 ManagedHostCreationStage::AdmissionWait,
                 admission_start.elapsed(),
+                &self.instrumentation,
             );
             let admission = admission?;
+            // The deadline starts with the permit, so the admission wait does
+            // not shorten it.
+            let deadline = attempt_deadline(self.config.machine_creation_timeout);
             let transaction_start = Instant::now();
-            let creation = self
-                .create_managed_host_in_transaction(
-                    pool,
+            let creation = until(deadline, async {
+                // Dropped at the deadline, the session discards its connection
+                // instead of leaving it to the pool's release check, which
+                // waits for the unanswered statement without a timeout.
+                let mut session = db::DbSessionGuard::acquire(pool).await?;
+                let creation = Box::pin(self.create_managed_host_in_transaction(
+                    session.as_pgconn(),
                     explored_host,
                     report,
                     expected_machine,
                     primary_interface_selection,
-                    &loopbacks,
-                )
+                    &resources,
+                ))
                 .await;
+                session.return_to_pool();
+                creation
+            })
+            .await
+            .unwrap_or_else(|| {
+                Err(SiteExplorerError::internal(
+                    "managed host creation transaction exceeded machine_creation_timeout and was abandoned"
+                        .to_string(),
+                ))
+            });
             record_creation_stage(
                 ManagedHostCreationStage::Transaction,
                 transaction_start.elapsed(),
+                &self.instrumentation,
             );
-            Ok::<_, SiteExplorerError>((creation?, admission))
+            Ok::<_, SiteExplorerError>((creation?, admission, deadline))
         }
         .await;
         // Attached requests ignore cancellation. This also abandons a
         // preparation a concurrent writer made unnecessary before commit.
-        for prepared in &loopbacks {
+        // A transaction abandoned at the deadline is not rolled back first.
+        for prepared in &resources.loopbacks {
             if let Err(error) = prepared.cancel(pool).await {
                 tracing::error!(machine_id = %prepared.machine_id(), %error, "Could not save DPU loopback cancellation");
             }
         }
-        let (creation, _admin_admission) = creation?;
+        for prepared in &resources.asns {
+            if let Err(error) = prepared.cancel(pool).await {
+                tracing::error!(machine_id = %prepared.machine_id(), error = %error, "Could not save DPU ASN cancellation");
+            }
+        }
+        let (creation, _admin_admission, deadline) = creation?;
 
         if let ManagedHostCreation::Created { host_machine_id } = creation {
+            record_machine_identity(&host_machine_id.into(), Some(explored_host.host_bmc_ip));
             // Normalize host admin address ownership now that every DPU-backed
             // host interface is attached and the primary flags are committed.
             let repair_start = Instant::now();
-            reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
+            reconcile_host_admin_addresses_after_commit(
+                pool,
+                &host_machine_id,
+                deadline,
+                &self.instrumentation,
+            )
+            .await;
             record_creation_stage(
                 ManagedHostCreationStage::AfterCommitRepair,
                 repair_start.elapsed(),
+                &self.instrumentation,
             );
         }
 
@@ -379,23 +560,53 @@ impl MachineCreator {
         Ok(())
     }
 
-    /// Creates inventory in one transaction, holding admin segment locks in
-    /// allocation mode for new DPU-backed hosts. Existing hosts
+    /// Creates inventory in one transaction on `connection`, holding admin
+    /// segment locks in allocation mode for new DPU-backed hosts. Existing hosts
     /// cause a read-only rollback. After a new host commits, the caller
     /// normalizes its admin addresses.
     async fn create_managed_host_in_transaction(
         &self,
-        pool: &PgPool,
+        connection: &mut PgConnection,
         explored_host: &ExploredManagedHost,
         report: &mut EndpointExplorationReport,
         expected_machine: &ExpectedMachine,
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
-        loopbacks: &[PreparedDpuLoopback<'_>],
+        resources: &HostDpuResources<'_>,
     ) -> SiteExplorerResult<ManagedHostCreation> {
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
-        let mut txn = Transaction::begin(pool).await?;
-        for prepared in loopbacks {
+        let mut txn = Transaction::begin_inner(connection).await?;
+        let host_dpu_policy = HostDpuPolicy::resolve(
+            Some(expected_machine.data.dpu_policy),
+            self.config.dpu_policy,
+        );
+        if resources.existing_host.is_none()
+            && (!explored_host.dpus.is_empty() || host_dpu_policy.expects_managed_dpus())
+        {
+            // Preparation can call a provider outside this transaction. Fence
+            // all host intent before taking admin or interface locks so a
+            // concurrent edit retries instead of attaching stale reservations.
+            db::expected_dpu_loopback_reservation::lock_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?;
+            let reservations = db::expected_dpu_loopback_reservation::find_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?;
+            if reservations != resources.reservations {
+                return Err(SiteExplorerError::internal(
+                    "DPU loopback declarations changed during preparation; retry creation"
+                        .to_string(),
+                ));
+            }
+        }
+        for prepared in &resources.loopbacks {
+            prepared.check_identity(&mut txn).await?;
+        }
+        for prepared in &resources.asns {
             prepared.check_identity(&mut txn).await?;
         }
 
@@ -429,11 +640,17 @@ impl MachineCreator {
         }
 
         let host_associations = db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
+        let existing_host = host_associations.common_host_machine_id()?;
+        // An attempt that skipped ingestion intent must not become a creation.
+        if resources.existing_host.is_some() && resources.existing_host != existing_host {
+            return Err(SiteExplorerError::internal(
+                "DPU host attachments changed during preparation; retry creation".to_string(),
+            ));
+        }
 
-        if host_associations.common_host_machine_id()?.is_some() {
+        if existing_host.is_some() {
             // A stale creation candidate can already have an attached host.
-            // Validate the complete DPU set to avoid silently accepting partial
-            // or conflicting inventory, then leave existing state unchanged.
+            // The complete DPU set was validated above; leave existing state unchanged.
             txn.rollback().await?;
             return Ok(ManagedHostCreation::SkippedExisting);
         }
@@ -448,7 +665,10 @@ impl MachineCreator {
             // IPv4 allocation uses shared segment locks; force cleanup needs
             // them exclusively. Recheck after that fence and hold it through
             // creation, so an intervening create/delete cannot become absence.
-            for prepared in loopbacks {
+            for prepared in &resources.loopbacks {
+                prepared.check_identity(&mut txn).await?;
+            }
+            for prepared in &resources.asns {
                 prepared.check_identity(&mut txn).await?;
             }
         }
@@ -456,8 +676,11 @@ impl MachineCreator {
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
-            self
-                .create_dpu(&mut txn, dpu_report)
+            let reservation = resources
+                .reservations_by_dpu
+                .get(dpu_machine_id)
+                .map(|&index| &resources.reservations[index]);
+            self.create_dpu(&mut txn, dpu_report)
                 .await?
                 .ok_or_else(|| {
                     SiteExplorerError::internal(format!(
@@ -466,6 +689,21 @@ impl MachineCreator {
                     ))
                 })?;
 
+            // Creating a DPU leaves an already-owned interface alone. Before
+            // committing a reservation, require the same ownership as a restore.
+            if let Some(reservation) = reservation
+                && !db::machine_interface::dpu_owns_oob_mac(
+                    txn.as_pgconn(),
+                    dpu_machine_id,
+                    reservation.dpu_oob_net0_mac_address,
+                )
+                .await?
+            {
+                return Err(SiteExplorerError::internal(format!(
+                    "cannot verify ownership of loopback MAC {} for DPU {dpu_machine_id}; defer creation",
+                    reservation.dpu_oob_net0_mac_address,
+                )));
+            }
             let host_machine_id = self
                 .attach_dpu_to_host(&mut txn, &managed_host, dpu_report, machine_data)
                 .await?;
@@ -473,17 +711,19 @@ impl MachineCreator {
         }
 
         // Every host link exists before the machine-group configuration updates.
-        for prepared in loopbacks {
-            prepared.attach(&mut txn, true).await?;
+        for prepared in &resources.loopbacks {
+            prepared.attach(&mut txn).await?;
+        }
+        for prepared in &resources.asns {
+            prepared.attach(&mut txn).await?;
         }
 
         // Now since all DPUs are created, update host and DPUs state correctly.
-        let host_machine_id =
-            managed_host
-                .machine_id
-                .ok_or(SiteExplorerError::internal(format!(
-                    "Failed to get machine ID for host: {managed_host:#?}"
-                )))?;
+        let host_machine_id = managed_host.machine_id.ok_or_else(|| {
+            SiteExplorerError::internal(format!(
+                "Failed to get machine ID for host: {managed_host:#?}"
+            ))
+        })?;
 
         db::machine::update_state(
             &mut txn,
@@ -775,8 +1015,9 @@ impl MachineCreator {
     // configures it appropriately, returning the new `Machine`.
     // If the DPU already exists in the machines table, this is a no-op and returns `None`.
     //
-    // `db::machine::create` can persist pool-backed defaults on the new row.
-    // The full `network_config` reconciliation and version bump wait until
+    // Prepared IPv4, IPv6 and ASN resources attach after all interfaces have
+    // been written. The full network
+    // configuration and its group version bump wait until
     // `attach_dpu_to_host` wires the host link in `machine_interfaces`; only
     // then can `try_update_network_config` observe both siblings and keep their
     // versions equal.
@@ -806,6 +1047,10 @@ impl MachineCreator {
         predicted_machine_id: &MachineId,
         machine_data: Option<&ExpectedMachineData>,
     ) -> SiteExplorerResult<()> {
+        record_machine_identity(
+            predicted_machine_id,
+            managed_host.explored_host.bmc_info().ip,
+        );
         _ = db::machine::create(
             txn,
             Some(&self.common_pools),
@@ -854,15 +1099,20 @@ impl MachineCreator {
         Ok(false)
     }
 
-    // create_dpu_machine creates a machine for the DPU as specified by dpu_machine_id. Returns an Optional Machine indicating whether the function created a new machine (returns None if a machine already existed for this DPU).
-    // if an entry exists in the machines table with a machine ID which matches dpu_machine_id, a machine has already been created for this DPU. Returns None.
-    // if an entry doesnt exist in the machine table, the site explorer will add an entry in the machines table for the DPU and update its network config appropriately (allocating a loop ip address etc). Return the newly created machine.
+    // TODO(txn_held_across_await):
+    // There's a false positive with the way the function is rewritten by the tracing::instrument
+    // macro, the lint needs fixing to detect this.
+    #[allow(txn_held_across_await)]
+    #[tracing::instrument(skip_all, name = "ingest_dpu")]
+    // Prepared loopbacks and ASN attach after all host interfaces exist.
+    // An existing row needs no insertion.
     async fn create_dpu_machine(
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         let dpu_machine_id = explored_dpu.report.machine_id.as_ref().unwrap();
+        record_machine_identity(dpu_machine_id, explored_dpu.bmc_info().ip);
         match db::machine::find_one(&mut *txn, dpu_machine_id, MachineSearchConfig::default())
             .await?
         {
@@ -870,7 +1120,7 @@ impl MachineCreator {
             Some(_existing_machine) => Ok(None),
             None => match db::machine::create(
                 txn,
-                Some(&self.common_pools),
+                None,
                 dpu_machine_id,
                 ManagedHostState::Created,
                 None,
@@ -1047,6 +1297,7 @@ impl MachineCreator {
             SiteExplorerError::InvalidArgument(format!("hardware info missing: {e}"))
         })?;
 
+        record_machine_identity(&predicted_machine_id, explored_host.bmc_info().ip);
         let _host_machine = db::machine::create(
             txn,
             Some(&self.common_pools),
@@ -1149,7 +1400,7 @@ impl<'a> CreationRun<'a> {
             if attempt.created {
                 metrics.created_machines += 1;
             }
-            emit(attempt.event);
+            self.creator.instrumentation.emit(attempt.event);
             if !self.pass_interval.is_zero() && self.last_pass.elapsed() >= self.pass_interval {
                 pass_due = true;
             }
@@ -1267,28 +1518,68 @@ fn creation_finished_event(
     }
 }
 
-fn record_creation_stage(stage: ManagedHostCreationStage, latency: Duration) {
-    emit(ManagedHostCreationStageFinished { stage, latency });
+fn record_creation_stage(
+    stage: ManagedHostCreationStage,
+    latency: Duration,
+    instrumentation: &Instrumentation,
+) {
+    instrumentation.emit(ManagedHostCreationStageFinished { stage, latency });
 }
 
 /// Initializes host admin address ownership in its own transaction after
-/// managed-host creation commits.
+/// managed-host creation commits. The host reconciler repeats it for the
+/// hosts it revisits.
 ///
 /// `reconcile_admin_addresses_for_host` takes the admin segment advisory
 /// locks before any row lock when it has a repair to make, so it cannot run
 /// inside the managed-host transaction, which locks interface and machine
 /// rows first.
-async fn reconcile_host_admin_addresses_after_commit(
+///
+/// A repair still running at `deadline` is dropped and counted as failed. The
+/// host is left as it was, and the host reconciler retries the repair when it
+/// next revisits the host.
+pub(crate) async fn reconcile_host_admin_addresses_after_commit(
     pool: &PgPool,
     host_machine_id: &HostMachineId,
+    deadline: Option<tokio::time::Instant>,
+    instrumentation: &Instrumentation,
 ) {
-    if let Err(error) =
-        db::machine_interface::reconcile_admin_addresses_after_commit(pool, host_machine_id).await
-    {
-        emit(SiteExplorerHostAdminAddressReconcileFailed {
-            host_machine_id: *host_machine_id,
-            error: error.to_string(),
-        });
+    let repair = Box::pin(
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            pool,
+            host_machine_id,
+            instrumentation,
+        ),
+    );
+    let error = match until(deadline, repair).await {
+        Some(Ok(_)) => return,
+        Some(Err(error)) => error.to_string(),
+        None => {
+            "admin address repair exceeded machine_creation_timeout and was abandoned".to_string()
+        }
+    };
+    instrumentation.emit(SiteExplorerHostAdminAddressReconcileFailed {
+        host_machine_id: *host_machine_id,
+        error,
+    });
+}
+
+/// When an attempt that holds its admission permit from now on must have
+/// finished. `None`, no deadline, when `timeout` is too long to add to the
+/// current time, which configuration loading rules out.
+pub(crate) fn attempt_deadline(timeout: Duration) -> Option<tokio::time::Instant> {
+    tokio::time::Instant::now().checked_add(timeout)
+}
+
+/// Runs `work` until `deadline`. `None` when the deadline came first; `work`
+/// is then dropped.
+async fn until<T>(
+    deadline: Option<tokio::time::Instant>,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, work).await.ok(),
+        None => Some(work.await),
     }
 }
 
@@ -1299,9 +1590,111 @@ fn host_bmc_ips(host: &ExploredManagedHost) -> impl Iterator<Item = &IpAddr> {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_instrument::testing::MetricsCapture;
+    use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, Check, check_cases_async, check_values};
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+
+    /// `Ok` is how long the work ran before it returned; `Err` is how long it
+    /// ran before it was abandoned.
+    #[tokio::test(start_paused = true)]
+    async fn work_runs_until_the_attempt_deadline() {
+        let secs = Duration::from_secs;
+        // input: (machine_creation_timeout, how long the work takes)
+        check_cases_async(
+            [
+                Case {
+                    scenario: "work that returns before the deadline keeps its result",
+                    input: (secs(60), secs(59)),
+                    expect: Yields(secs(59)),
+                },
+                Case {
+                    scenario: "work still running at the deadline is abandoned then",
+                    input: (secs(60), secs(86_400)),
+                    expect: FailsWith(secs(60)),
+                },
+                // Configuration loading rejects the next two timeouts.
+                Case {
+                    scenario: "a zero timeout abandons the work at once instead of disabling the deadline",
+                    input: (Duration::ZERO, secs(86_400)),
+                    expect: FailsWith(Duration::ZERO),
+                },
+                Case {
+                    scenario: "a timeout too long to add to the current time sets no deadline instead of panicking",
+                    input: (Duration::MAX, secs(86_400)),
+                    expect: Yields(secs(86_400)),
+                },
+            ],
+            |(timeout, work_duration)| async move {
+                let start = tokio::time::Instant::now();
+                let work = tokio::time::sleep(work_duration);
+                match until(attempt_deadline(timeout), work).await {
+                    Some(()) => Ok(start.elapsed()),
+                    None => Err(start.elapsed()),
+                }
+            },
+        )
+        .await;
+    }
+
+    /// A repair whose statement never returns is abandoned at the deadline.
+    /// The call returns then without an error for its caller, counts one
+    /// failed reconciliation, and discards its connection.
+    #[sqlx_test]
+    async fn admin_address_repair_is_abandoned_at_the_deadline(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const TIMEOUT: Duration = Duration::from_secs(2);
+
+        let host_machine_id: HostMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [7; 32],
+            MachineType::Host,
+        )
+        .try_into()?;
+        let metrics = MetricsCapture::owned();
+        // The repair's first read of the host's interfaces waits on this lock.
+        let mut gate = pool.txn_begin().await?;
+        sqlx::query("LOCK TABLE machine_interfaces IN ACCESS EXCLUSIVE MODE")
+            .execute(gate.as_mut())
+            .await?;
+
+        let start = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            reconcile_host_admin_addresses_after_commit(
+                &pool,
+                &host_machine_id,
+                attempt_deadline(TIMEOUT),
+                metrics.instrumentation(),
+            ),
+        )
+        .await
+        .expect("the repair returns at its deadline");
+
+        assert!(
+            start.elapsed() >= TIMEOUT,
+            "the repair waits behind the lock until the deadline"
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+                &[]
+            ),
+            1.0
+        );
+        assert_eq!(
+            (pool.size() as usize).saturating_sub(pool.num_idle()),
+            1,
+            "the server still runs the abandoned read, yet only the lock holder's connection is checked out"
+        );
+        gate.rollback().await?;
+
+        Ok(())
+    }
 
     struct BudgetCase {
         cap: u64,

@@ -46,6 +46,7 @@ impl TestNetworkController {
             .database(
                 api.database_connection.clone(),
                 api.work_lock_manager_handle(),
+                api.instrumentation(),
             )
             .meter("carbide_machines", test_meter.meter())
             .processor_id(processor_id)

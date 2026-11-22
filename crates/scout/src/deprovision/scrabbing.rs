@@ -20,7 +20,7 @@ use std::str::FromStr;
 
 use ::rpc::forge as rpc;
 use carbide_host_support::hardware_enumeration::discovery_ibs;
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_uuid::machine::MachineId;
 use libmlx::firmware::operation::SupervisorConfig;
 use libmlx::runner::error::MlxRunnerError;
@@ -412,7 +412,7 @@ struct CleanupFailure {
     error: CarbideClientError,
 }
 
-async fn all_nvme_cleanup() -> Result<(), CarbideClientError> {
+async fn all_nvme_cleanup(instrumentation: &Instrumentation) -> Result<(), CarbideClientError> {
     let mut nvme_devicepaths: Vec<String> = Vec::new();
     if let Ok(paths) = fs::read_dir("/dev") {
         for entry in paths {
@@ -424,7 +424,7 @@ async fn all_nvme_cleanup() -> Result<(), CarbideClientError> {
                 continue;
             }
 
-            let nvmename = path.to_string_lossy().to_string();
+            let nvmename = path.to_string_lossy().into_owned();
             if NVME_DEV_RE.is_match(&nvmename) {
                 nvme_devicepaths.push(nvmename);
             }
@@ -447,6 +447,7 @@ async fn all_nvme_cleanup() -> Result<(), CarbideClientError> {
             let device = nvmename.clone();
             let span = tracing::info_span!("nvme_cleanup", device = %nvmename);
 
+            let instrumentation = instrumentation.clone();
             tokio::spawn(
                 async move {
                     let device_start = std::time::Instant::now();
@@ -455,7 +456,7 @@ async fn all_nvme_cleanup() -> Result<(), CarbideClientError> {
                     let result = clean_this_nvme(&nvmename).await;
                     let duration = device_start.elapsed();
 
-                    emit(ScoutStorageDeviceCleanup::from_result(
+                    instrumentation.emit(ScoutStorageDeviceCleanup::from_result(
                         StorageDeviceType::Nvme,
                         duration,
                         &result,
@@ -587,7 +588,7 @@ fn sysfs_symlink_basename(path: &std::path::Path) -> Option<String> {
     fs::canonicalize(path).ok().and_then(|target| {
         target
             .file_name()
-            .map(|name| name.to_string_lossy().to_string())
+            .map(|name| name.to_string_lossy().into_owned())
     })
 }
 
@@ -700,7 +701,7 @@ async fn clean_this_block_device(devpath: &str) -> Result<(), CarbideClientError
     }
 }
 
-async fn all_hdd_cleanup() -> Result<(), CarbideClientError> {
+async fn all_hdd_cleanup(instrumentation: &Instrumentation) -> Result<(), CarbideClientError> {
     let mut block_devicepaths: Vec<String> = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/block") {
         for entry in entries {
@@ -708,7 +709,7 @@ async fn all_hdd_cleanup() -> Result<(), CarbideClientError> {
                 Ok(o) => o,
                 Err(_) => continue,
             };
-            let devname = entry.file_name().to_string_lossy().to_string();
+            let devname = entry.file_name().to_string_lossy().into_owned();
             let devpath = format!("/dev/{devname}");
             if SD_DEV_RE.is_match(&devpath) {
                 if let Some(reason) = block_device_cleanup_skip_reason(&devname) {
@@ -740,6 +741,7 @@ async fn all_hdd_cleanup() -> Result<(), CarbideClientError> {
             let device = devpath.clone();
             let span = tracing::info_span!("hdd_cleanup", device = %devpath);
 
+            let instrumentation = instrumentation.clone();
             tokio::spawn(
                 async move {
                     let device_start = std::time::Instant::now();
@@ -748,7 +750,7 @@ async fn all_hdd_cleanup() -> Result<(), CarbideClientError> {
                     let result = clean_this_block_device(&devpath).await;
                     let duration = device_start.elapsed();
 
-                    emit(ScoutStorageDeviceCleanup::from_result(
+                    instrumentation.emit(ScoutStorageDeviceCleanup::from_result(
                         StorageDeviceType::HddSas,
                         duration,
                         &result,
@@ -1027,7 +1029,10 @@ async fn run_ib_mlxconfig(slot: &str, args: &[&str]) -> Result<(), MlxRunnerErro
     Ok(())
 }
 
-async fn do_cleanup(machine_id: &MachineId) -> CarbideClientResult<rpc::MachineCleanupInfo> {
+async fn do_cleanup(
+    machine_id: &MachineId,
+    instrumentation: &Instrumentation,
+) -> CarbideClientResult<rpc::MachineCleanupInfo> {
     let mut cleanup_result = rpc::MachineCleanupInfo {
         machine_id: Some(*machine_id),
         nvme: None,
@@ -1040,12 +1045,15 @@ async fn do_cleanup(machine_id: &MachineId) -> CarbideClientResult<rpc::MachineC
 
     // do nvme/hdd cleanup only if stdin is /dev/null. This is because we afraid to cleanup someone's drives.
     let stdin_link = match fs::read_link("/proc/self/fd/0") {
-        Ok(o) => o.to_string_lossy().to_string(),
+        Ok(o) => o.to_string_lossy().into_owned(),
         Err(_) => "None".to_string(),
     };
 
     if stdin_link == "/dev/null" {
-        let (nvme_result, hdd_result) = tokio::join!(all_nvme_cleanup(), all_hdd_cleanup());
+        let (nvme_result, hdd_result) = tokio::join!(
+            all_nvme_cleanup(instrumentation,),
+            all_hdd_cleanup(instrumentation,)
+        );
 
         match nvme_result {
             Ok(_) => {
@@ -1144,7 +1152,11 @@ async fn do_cleanup(machine_id: &MachineId) -> CarbideClientResult<rpc::MachineC
     Ok(cleanup_result)
 }
 
-pub(crate) async fn run(config: &Options, machine_id: &MachineId) -> CarbideClientResult<()> {
+pub(crate) async fn run(
+    config: &Options,
+    machine_id: &MachineId,
+    instrumentation: &Instrumentation,
+) -> CarbideClientResult<()> {
     tracing::info!("full deprovision starts.");
     if !platform::is_host() {
         tracing::info!("full deprovision skipped, we are not running on a host.");
@@ -1152,7 +1164,7 @@ pub(crate) async fn run(config: &Options, machine_id: &MachineId) -> CarbideClie
         return Ok(());
     }
     tracing::info!("Machine cleanup starting, we are running on a host.");
-    let info = do_cleanup(machine_id).await?;
+    let info = do_cleanup(machine_id, instrumentation).await?;
     let mut client = create_forge_client(config).await?;
     let request = tonic::Request::new(info);
     client.cleanup_machine_completed(request).await?;

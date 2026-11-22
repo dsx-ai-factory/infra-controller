@@ -65,9 +65,7 @@ async fn load_enabled_identity_for_well_known(
     api: &Api,
     org_id: &TenantOrganizationId,
 ) -> Result<TenantIdentityConfig, Status> {
-    let org_id_str = org_id.as_str().to_string();
     let cfg = api
-        .database_connection
         .with_txn(|txn| {
             let org_id = org_id.clone();
             Box::pin(async move {
@@ -80,7 +78,7 @@ async fn load_enabled_identity_for_well_known(
         Some(c) if c.enabled => Ok(c),
         _ => Err(CarbideError::NotFoundError {
             kind: "tenant_identity_config",
-            id: org_id_str,
+            id: org_id.as_str().to_string(),
         }
         .into()),
     }
@@ -170,7 +168,6 @@ pub(crate) async fn sign_machine_identity(
     let req = request.get_ref();
 
     let identity_row = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(
                 async move { tenant_identity_config::find_by_machine_id(txn, &machine_id).await },
@@ -193,10 +190,11 @@ pub(crate) async fn sign_machine_identity(
         decrypt_machine_identity_ciphertext(api.credential_manager.as_ref(), enc_key.as_str())
             .await
             .inspect_err(|e| {
-                carbide_instrument::emit(MachineIdentityStoredSecretDecryptionFailed::SigningKey {
-                    organization_id: identity_row.organization_id.to_string(),
-                    error: e.message().to_string(),
-                });
+                api.instrumentation
+                    .emit(MachineIdentityStoredSecretDecryptionFailed::SigningKey {
+                        organization_id: identity_row.organization_id.to_string(),
+                        error: e.message().to_string(),
+                    });
             })
             .map_err(|_| {
                 CarbideError::internal("stored signing key could not be decrypted".to_string())
@@ -242,7 +240,7 @@ pub(crate) async fn sign_machine_identity(
         )
         .await
         .inspect_err(|e| {
-            carbide_instrument::emit(
+            api.instrumentation.emit(
                 MachineIdentityStoredSecretDecryptionFailed::TokenDelegationAuth {
                     organization_id: identity_row.organization_id.to_string(),
                     error: e.message().to_string(),
@@ -263,6 +261,7 @@ pub(crate) async fn sign_machine_identity(
             &subject_jwt,
             &audiences,
             delegation_creds.as_ref(),
+            &api.instrumentation,
         )
         .await?;
         return Ok(Response::new(response));

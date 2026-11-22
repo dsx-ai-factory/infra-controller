@@ -5,6 +5,7 @@ package model
 
 import (
 	"errors"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
@@ -124,7 +125,7 @@ func (i APIExpectedMachineInterface) Validate() error {
 			cdbm.ExpectedInterfaceNetworkSegmentTypeUnderlay, cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband)),
 		validation.Field(&i.Role, validation.NilOrNotEmpty, validation.In(
 			cdbm.ExpectedInterfaceRoleUnspecified, cdbm.ExpectedInterfaceRoleHost, cdbm.ExpectedInterfaceRoleDpuOs,
-			cdbm.ExpectedInterfaceRoleDpuBmc, cdbm.ExpectedInterfaceRoleHostBmc)),
+			cdbm.ExpectedInterfaceRoleDpuBmc, cdbm.ExpectedInterfaceRoleHostBmc, cdbm.ExpectedInterfaceRoleDpuLoopback)),
 		validation.Field(&i.IPAllocation, validation.NilOrNotEmpty, validation.In(
 			cdbm.ExpectedInterfaceIPAllocationUnspecified, cdbm.ExpectedInterfaceIPAllocationDynamic,
 			cdbm.ExpectedInterfaceIPAllocationFixed, cdbm.ExpectedInterfaceIPAllocationRetained)),
@@ -241,9 +242,60 @@ func expectedMachineInterfacesToDB(interfaces []APIExpectedMachineInterface) []c
 	return result
 }
 
-// APIExpectedMachineInterfaces is an ordered replacement list of declarations.
-// Nil preserves the list on PATCH; an explicit empty list clears it.
+// APIExpectedMachineInterfaces is an ordered list of declarations. Nil preserves
+// the list on PATCH. Physical-only lists preserve the stored loopback subset
+// unless ReplaceDpuLoopbacks explicitly requests its replacement.
 type APIExpectedMachineInterfaces []APIExpectedMachineInterface
+
+// ToDBModelPreservingLoopbacks converts a replacement list for REST storage.
+// Nil preserves the entire PATCH list. Supplied loopbacks or replace=true replace
+// the loopback subset; otherwise stored loopbacks are retained. Callers must read
+// existing under their update lock and forward the original request to Core.
+func (interfaces APIExpectedMachineInterfaces) ToDBModelPreservingLoopbacks(existing []cdbm.ExpectedMachineInterface, replace bool) []cdbm.ExpectedMachineInterface {
+	result := expectedMachineInterfacesToDB(interfaces)
+	if result == nil {
+		return nil
+	}
+	for index := range result {
+		incoming := &result[index]
+		// Core recognizes an omitted loopback role only for an unchanged MAC
+		// and address, including equivalent textual IP and MAC spellings.
+		if incoming.Role == nil && incoming.MacAddress != nil && incoming.FixedIP != nil {
+			address, err := netip.ParseAddr(*incoming.FixedIP)
+			if err != nil {
+				continue
+			}
+			for _, stored := range existing {
+				if stored.Role == nil || *stored.Role != cdbm.ExpectedInterfaceRoleDpuLoopback || stored.MacAddress == nil || stored.FixedIP == nil {
+					continue
+				}
+				storedAddress, err := netip.ParseAddr(*stored.FixedIP)
+				if err != nil || address != storedAddress || *incoming.MacAddress != APIExpectedMachineInterfaceMacAddressIdentifier(*stored.MacAddress).ToDBModel() {
+					continue
+				}
+				incoming.Role = cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback)
+				if incoming.Primary != nil && !*incoming.Primary {
+					incoming.Primary = nil
+				}
+				if incoming.IPAllocation == nil {
+					incoming.IPAllocation = stored.IPAllocation
+				}
+				break
+			}
+		}
+		if incoming.Role != nil && *incoming.Role == cdbm.ExpectedInterfaceRoleDpuLoopback {
+			replace = true
+		}
+	}
+	if !replace {
+		for _, stored := range existing {
+			if stored.Role != nil && *stored.Role == cdbm.ExpectedInterfaceRoleDpuLoopback {
+				result = append(result, stored)
+			}
+		}
+	}
+	return result
+}
 
 // Validate checks each declaration and the cardinality constraints shared with Core.
 // Omitted roles may be inherited on PATCH, so Core validates their resolved values.
@@ -280,6 +332,12 @@ type APIHostLifecycleProfile struct {
 	// DisableLockdown, when true, skips locking down the server during host
 	// lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown *bool `json:"disableLockdown"`
+	// RetainHBNConfigOnBoot, when true, designates the machine to retain HBN
+	// config on boot even if NICo is unavailable. The
+	// machine must declare a DPU BMC and a DPU OS interface, and the host BMC
+	// and both DPU interfaces must then use a fixed or retained IP allocation. When
+	// omitted, the existing value is preserved.
+	RetainHBNConfigOnBoot *bool `json:"retainHbnConfigOnBoot"`
 }
 
 // ToDBModel converts the API profile into its DB model form. A nil receiver
@@ -288,7 +346,10 @@ func (p *APIHostLifecycleProfile) ToDBModel() cdbm.HostLifecycleProfile {
 	if p == nil {
 		return cdbm.HostLifecycleProfile{}
 	}
-	return cdbm.HostLifecycleProfile{DisableLockdown: p.DisableLockdown}
+	return cdbm.HostLifecycleProfile{
+		DisableLockdown:       p.DisableLockdown,
+		RetainHBNConfigOnBoot: p.RetainHBNConfigOnBoot,
+	}
 }
 
 // ToDBModelPtr converts the API profile into a DB model pointer, returning nil
@@ -307,10 +368,13 @@ func (p *APIHostLifecycleProfile) ToDBModelPtr() *cdbm.HostLifecycleProfile {
 // NewAPIHostLifecycleProfile builds the API profile from its DB model form,
 // returning nil when no setting is present so the field is omitted in responses.
 func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecycleProfile {
-	if p.DisableLockdown == nil {
+	if !p.HasSetFields() {
 		return nil
 	}
-	return &APIHostLifecycleProfile{DisableLockdown: p.DisableLockdown}
+	return &APIHostLifecycleProfile{
+		DisableLockdown:       p.DisableLockdown,
+		RetainHBNConfigOnBoot: p.RetainHBNConfigOnBoot,
+	}
 }
 
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
@@ -329,6 +393,11 @@ type APIExpectedMachineCreateRequest struct {
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
 	// Interfaces are expected host NIC declarations forwarded to Core.
 	Interfaces APIExpectedMachineInterfaces `json:"interfaces"`
+	// ReplaceDpuLoopbacks explicitly replaces the loopback subset, including
+	// clearing it when interfaces contains no loopbacks. True requires a non-null
+	// interfaces list. Without supplied loopbacks, omitted, null, or false
+	// preserves the stored loopback subset.
+	ReplaceDpuLoopbacks *bool `json:"replaceDpuLoopbacks"`
 	// SkuId is the optional UUID for an SKU
 	SkuID *string `json:"skuId"`
 	// RackID is the optional rack identifier
@@ -353,6 +422,10 @@ type APIExpectedMachineCreateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// RetainBmcCredentials, when true, makes Site Explorer keep the BMC's
+	// factory-default credentials instead of rotating them. Omission or null
+	// stores false, the same as omitting --bmc-retain-credentials from nico-admin-cli.
+	RetainBmcCredentials *bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -368,20 +441,22 @@ func (emcr *APIExpectedMachineCreateRequest) InterfacesToDBModel() []cdbm.Expect
 // Validate ensure the values passed in request are acceptable
 func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 	err := validation.ValidateStruct(emcr,
-		validation.Field(&emcr.Interfaces),
+		validation.Field(&emcr.Interfaces,
+			validation.When(emcr.ReplaceDpuLoopbacks != nil && *emcr.ReplaceDpuLoopbacks,
+				validation.NotNil.Error("must be non-null when replaceDpuLoopbacks is true"))),
 		validation.Field(&emcr.SiteID,
 			validation.When(emcr.SiteID != "", validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&emcr.BmcMacAddress,
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.MAC),
 		validation.Field(&emcr.DefaultBmcUsername,
-			validation.Length(0, 16).Error("BMC username must be 16 characters or less")),
+			validation.RuneLength(0, 255).Error("BMC username must be 255 characters or less")),
 		validation.Field(&emcr.DefaultBmcPassword,
-			validation.Length(0, 20).Error("BMC password must be 20 characters or less")),
+			validation.RuneLength(0, 255).Error("BMC password must be 255 characters or less")),
 		validation.Field(&emcr.ChassisSerialNumber,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Chassis serial number consists only of whitespace"),
-			validation.Length(1, 32).Error("Chassis serial number must be 32 characters or less")),
+			validation.RuneLength(1, 32).Error("Chassis serial number must be 32 characters or less")),
 		validation.Field(&emcr.SkuID,
 			validation.NilOrNotEmpty.Error("SkuID cannot be empty")),
 		validation.Field(&emcr.RackID,
@@ -430,9 +505,15 @@ type APIExpectedMachineUpdateRequest struct {
 	ChassisSerialNumber *string `json:"chassisSerialNumber"`
 	// FallbackDPUSerialNumbers is the serial numbers of the expected machine's fallback DPUs
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
-	// Interfaces replaces the complete interface list when non-nil. An omitted
-	// or null field preserves it, while an explicit empty list clears it.
+	// Interfaces replaces physical declarations when non-nil. Omitted or null
+	// preserves the list; loopbacks require supplied loopback declarations or
+	// ReplaceDpuLoopbacks to replace their subset.
 	Interfaces APIExpectedMachineInterfaces `json:"interfaces"`
+	// ReplaceDpuLoopbacks explicitly replaces the loopback subset, including
+	// clearing it when interfaces contains no loopbacks. True requires a non-null
+	// interfaces list. Without supplied loopbacks, omitted, null, or false
+	// preserves the stored loopback subset.
+	ReplaceDpuLoopbacks *bool `json:"replaceDpuLoopbacks"`
 	// SkuId is the optional UUID for an SKU
 	SkuID *string `json:"skuId"`
 	// RackID is the optional rack identifier
@@ -458,6 +539,10 @@ type APIExpectedMachineUpdateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// RetainBmcCredentials, when non-nil, replaces whether Site Explorer keeps
+	// the BMC's factory-default credentials. Changing it does not rotate or
+	// restore stored credentials; a later BMC factory reset uses the new value.
+	RetainBmcCredentials *bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -486,7 +571,9 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	}
 
 	err := validation.ValidateStruct(emur,
-		validation.Field(&emur.Interfaces),
+		validation.Field(&emur.Interfaces,
+			validation.When(emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks,
+				validation.NotNil.Error("must be non-null when replaceDpuLoopbacks is true"))),
 		validation.Field(&emur.BmcMacAddress,
 			validation.NilOrNotEmpty.Error("BmcMacAddress cannot be empty"),
 			validation.When(emur.BmcMacAddress != nil && *emur.BmcMacAddress != "",
@@ -495,17 +582,17 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("BMC Username cannot be empty"),
 			validation.When(emur.DefaultBmcUsername != nil && *emur.DefaultBmcUsername != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Username consists only of whitespace")),
-			validation.Length(1, 16).Error("BMC Username must be 1-16 characters")),
+			validation.RuneLength(1, 255).Error("BMC Username must be 1-255 characters")),
 		validation.Field(&emur.DefaultBmcPassword,
 			validation.NilOrNotEmpty.Error("BMC Password cannot be empty"),
 			validation.When(emur.DefaultBmcPassword != nil && *emur.DefaultBmcPassword != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Password consists only of whitespace")),
-			validation.Length(1, 20).Error("BMC Password must be 1-20 characters")),
+			validation.RuneLength(1, 255).Error("BMC Password must be 1-255 characters")),
 		validation.Field(&emur.ChassisSerialNumber,
 			validation.NilOrNotEmpty.Error("Chassis Serial Number cannot be empty"),
 			validation.When(emur.ChassisSerialNumber != nil && *emur.ChassisSerialNumber != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("Chassis Serial Number consists only of whitespace")),
-			validation.Length(1, 32).Error("Chassis Serial Number must be 1-32 characters")),
+			validation.RuneLength(1, 32).Error("Chassis Serial Number must be 1-32 characters")),
 		validation.Field(&emur.SkuID,
 			validation.NilOrNotEmpty.Error("SkuID cannot be empty")),
 		validation.Field(&emur.RackID,
@@ -551,7 +638,11 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 	if emur.ServerName != nil {
 		resource.ServerName = cutil.GetPtrIfNotZero(*emur.ServerName)
 	}
+	if emur.RetainBmcCredentials != nil {
+		resource.BmcRetainCredentials = emur.RetainBmcCredentials
+	}
 	if emur.Interfaces != nil {
+		resource.ReplaceDpuLoopbacks = emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks
 		resource.HostNics = make([]*corev1.ExpectedHostNic, 0, len(emur.Interfaces))
 		for _, expectedInterface := range emur.Interfaces {
 			resource.HostNics = append(resource.HostNics, expectedInterface.ToDBModel().ToProto())
@@ -578,7 +669,9 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_retain_credentials", Present: emur.RetainBmcCredentials != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
+			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.retain_hbn_config_on_boot", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.RetainHBNConfigOnBoot != nil},
 		),
 	}
 }
@@ -629,6 +722,8 @@ type APIExpectedMachine struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
 	IsDpfEnabled bool `json:"isDpfEnabled"`
+	// RetainBmcCredentials indicates whether Site Explorer keeps the BMC's factory-default credentials
+	RetainBmcCredentials bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
 	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -668,6 +763,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
 		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
+		RetainBmcCredentials:     dibp.RetainsBmcCredentials(),
 		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),
 		Created:                  dibp.Created,

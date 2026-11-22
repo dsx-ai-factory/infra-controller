@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use bmc_drivers::{Drivers, Rule, Rules};
 use bmc_vendor::BMCVendor;
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
-use carbide_dpf::types::{DpfProxyDetails, DpuDeploymentType};
+use carbide_dpf::types::{DpfProxyDetails, DpfRegistryMirror, DpuDeploymentType};
 use carbide_firmware::FirmwareConfig;
 use carbide_firmware::defaults::{
     BF2_BMC_VERSION, BF2_CEC_VERSION, BF2_NIC_VERSION, BF2_UEFI_VERSION, BF3_BMC_VERSION,
@@ -118,6 +118,30 @@ where
     Option::<String>::deserialize(deserializer)?
         .map(|value| duration_str::parse_chrono(&value).map_err(serde::de::Error::custom))
         .transpose()
+}
+
+fn deserialize_optional_std_duration<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::time::Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| duration_str::parse(&value).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+fn serialize_optional_std_duration<S>(
+    duration: &Option<std::time::Duration>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match duration {
+        None => serializer.serialize_none(),
+        Some(duration) => as_std_duration(duration, serializer),
+    }
 }
 
 /// nico-api configuration file content
@@ -272,8 +296,12 @@ pub struct CarbideConfig {
     /// FNN prefixes installed as floating blackhole routes in every VPC VRF.
     ///
     /// When omitted, this inherits `site_fabric_prefixes`, includes every retained tenant root,
-    /// and retains removed operator-managed roots until their VpcPrefixes and VPC-attached direct
-    /// NetworkPrefixes are hard-deleted. An explicit list is authoritative. Under mutual isolation,
+    /// and retains removed operator roots through exact VpcPrefix references, contained VpcPrefixes
+    /// without parentage, or contained VPC-attached direct NetworkPrefixes. A direct prefix retains
+    /// retiring roots while its segment exists and no Ready operator root fully covers it, including
+    /// during draining. Adding or restoring that coverage releases the retiring roots without deleting
+    /// the segment. VpcPrefix references remain until hard deletion.
+    /// An explicit list is authoritative. Under mutual isolation,
     /// each new tenant root requires an equal or broader explicit route. Startup and FNN DPU
     /// responses check the same coverage, including unused and Deleting tenant roots. Version
     /// output does not add tenant roots or check their coverage.
@@ -397,8 +425,9 @@ pub struct CarbideConfig {
     /// (e.g., "prod" or "fake").
     pub dpu_ipmi_tool_impl: Option<String>,
 
-    /// Number of retries when IPMI returns an error during
-    /// DPU reboot.
+    /// Total process attempts per command for the production IPMI tool; defaults to three.
+    /// Zero starts no process and returns an invalid-retry error. Queued instance
+    /// reboots use one bounded attempt independently of this legacy setting.
     pub dpu_ipmi_reboot_attempts: Option<u32>,
 
     /// Number of consecutive HTTP 401/403 responses from a BMC before the
@@ -464,6 +493,9 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub scout_boot_interface_correction_enabled: bool,
 
+    #[serde(default)]
+    pub maintenance_end_boot_config_recheck_enabled: bool,
+
     /// `ib_fabrics` defines the InfiniBand fabrics managed by the site.
     /// When `ib_config.enabled` is true, v2.4 accepts at most one fabric,
     /// named `default`. Each fabric accepts `backend` and `remote_pool`
@@ -514,6 +546,10 @@ pub struct CarbideConfig {
     /// misbehaves before a release adds a rule for it.
     #[serde(default)]
     pub bmc_driver_rules: Vec<Rule>,
+
+    /// Which client BMC operations moved to the driver system run through.
+    #[serde(default)]
+    pub bmc_backend: BmcBackend,
 
     /// Deprecated compatibility key. This setting no longer affects runtime
     /// behavior; keep accepting it temporarily so existing site files can be
@@ -985,17 +1021,17 @@ pub struct CarbideConfig {
     #[serde(default = "default_to_true")]
     pub enable_admin_ui: bool,
 
-    /// External tool links surfaced in the admin web UI's "Tools"
-    /// sidebar. Each entry's `name` must be unique. The section is
-    /// hidden when the list is empty.
+    /// Links shown in the admin web UI. They are hidden by default.
     #[serde(default)]
-    pub web_ui_sidebar_tools: Vec<ToolLink>,
+    pub web_ui: WebUiConfig,
 
-    /// URL template for the "Logs" link on machine and endpoint detail
-    /// pages. The placeholder `{search}` is replaced with the machine ID
-    /// or BMC IP. When empty, the Logs link is hidden.
-    #[serde(default)]
-    pub web_ui_logs_link_template: String,
+    /// Old name for `web_ui.sidebar_tools`, kept so startup can warn about its use.
+    #[serde(default, rename = "web_ui_sidebar_tools", skip_serializing)]
+    pub deprecated_web_ui_sidebar_tools: Option<Vec<ToolLink>>,
+
+    /// Old name for `web_ui.logs_link_template`, kept so startup can warn about its use.
+    #[serde(default, rename = "web_ui_logs_link_template", skip_serializing)]
+    pub deprecated_web_ui_logs_link_template: Option<String>,
 
     /// In-memory log history for the admin web live log viewer
     /// (`/admin/logs`): how much recent log data to keep for
@@ -1080,6 +1116,16 @@ pub struct ApiAdmissionControlConfig {
     )]
     pub pending_timeout: std::time::Duration,
 
+    /// Maximum time an admitted request may execute its handler. Must cover the
+    /// longest legitimate unary RPC served by nico-api, including twice
+    /// `certificates.cert_manager.request_timeout_secs` when cert-manager is enabled.
+    #[serde(
+        default = "default_api_admission_max_execution_time",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub max_execution_time: std::time::Duration,
+
     /// How long empty client scheduling state remains cached.
     #[serde(
         default = "default_api_admission_client_idle_timeout",
@@ -1103,6 +1149,13 @@ pub struct ApiAdmissionServiceLimitsConfig {
         serialize_with = "as_std_duration"
     )]
     pub pending_timeout: std::time::Duration,
+    /// Overrides the global `max_execution_time` for this service when set.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_std_duration",
+        serialize_with = "serialize_optional_std_duration"
+    )]
+    pub max_execution_time: Option<std::time::Duration>,
 }
 
 impl Default for ApiAdmissionControlConfig {
@@ -1114,6 +1167,7 @@ impl Default for ApiAdmissionControlConfig {
             max_work_in_flight_per_client: default_api_admission_max_work_in_flight_per_client(),
             max_pending_per_client: default_api_admission_max_pending_per_client(),
             pending_timeout: default_api_admission_pending_timeout(),
+            max_execution_time: default_api_admission_max_execution_time(),
             client_idle_timeout: default_api_admission_client_idle_timeout(),
             service_limits: BTreeMap::new(),
         }
@@ -1134,6 +1188,7 @@ impl ApiAdmissionControlConfig {
             self.max_work_in_flight_per_client,
             self.max_pending_per_client,
             self.pending_timeout,
+            self.max_execution_time,
             self.client_idle_timeout,
         )
         .map(Some)
@@ -1154,6 +1209,7 @@ impl ApiAdmissionControlConfig {
                 limits.max_work_in_flight,
                 limits.max_pending,
                 limits.pending_timeout,
+                limits.max_execution_time.unwrap_or(self.max_execution_time),
                 self.max_work_in_flight,
                 self.max_pending,
             )
@@ -1239,6 +1295,18 @@ pub struct CredentialFileSourceConfig {
         serialize_with = "as_std_duration"
     )]
     pub poll_interval: std::time::Duration,
+}
+
+/// The client BMC operations run through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmcBackend {
+    /// libredfish clients.
+    #[default]
+    Libredfish,
+    /// The drivers selected for each BMC by `bmc_driver_rules` and the
+    /// compiled rules.
+    Drivers,
 }
 
 /// Read precedence and mutation policy for site UFM credentials.
@@ -1613,6 +1681,21 @@ impl PerObjectStateMetricObjectType {
             Self::IbPartition => "ib_partition",
         }
     }
+}
+
+/// Settings for admin web UI links, grouped under `[web_ui]`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiConfig {
+    /// External links in the Tools sidebar. Names must be unique and URLs must
+    /// use HTTP or HTTPS. An empty list hides the section.
+    #[serde(default)]
+    pub sidebar_tools: Vec<ToolLink>,
+
+    /// URL template for Logs links on machine and endpoint detail pages.
+    /// `{search}` is replaced with the machine ID or BMC IP. An empty string hides the link.
+    #[serde(default)]
+    pub logs_link_template: String,
 }
 
 /// One external tool link rendered in the admin web UI's "Tools"
@@ -2019,6 +2102,18 @@ pub struct DpfConfig {
     /// Enables DPF deployment.
     #[serde(default)]
     pub enabled: bool,
+    /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
+    /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
+    /// Selects HBN and DTS `service.nameSource`: `dpuService` when true, otherwise `release`.
+    /// Enable only with DPF 30.0 rc.4 or newer and HBN, DTS, and NICo chart versions
+    /// that support this naming scheme.
+    /// This site-wide value overrides per-service Helm values and is read at startup.
+    #[serde(default, rename = "multiClusterSupport")]
+    pub multi_cluster_support: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage on all DPF deployments.
+    /// Changing this setting generates new flavors and can reprovision existing DPUs.
+    #[serde(default)]
+    pub enable_pci_switch_emulation: bool,
     /// Opts the DPF namespace into deployment-scoped DPUServiceInterfaces.
     /// BF3 sites (including BF3 GB200) and generic BF4 use the default
     /// unscoped mode; BF4 Astra requires this to be enabled. When enabled, initialization
@@ -2078,6 +2173,16 @@ pub struct DpfConfig {
     /// configured to route outbound HTTPS traffic through the specified proxy.
     #[serde(default)]
     pub proxy: Option<DpfProxyDetails>,
+    /// Containerd registry mirrors for the DPU. Each `[[dpf.registry_mirrors]]` entry adds
+    /// `/etc/containerd/certs.d/<upstream>/hosts.toml` to every deployment's DPUFlavor, so the
+    /// DPU pulls that registry's images from the mirror first and falls back to the upstream
+    /// registry. containerd on the DPU reads the files only when its registry `config_path`
+    /// includes `/etc/containerd/certs.d`, which is the default from containerd 2.2.
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning every DPU at the
+    /// site.
+    #[serde(default)]
+    pub registry_mirrors: Vec<DpfRegistryMirror>,
     /// `bf.cfg` lines appended to every deployment's DPUFlavor `bfcfgParameters`.
     ///
     /// Each entry is passed through verbatim; NICo applies no quoting or interpretation. The
@@ -2105,6 +2210,8 @@ impl Default for DpfConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            multi_cluster_support: false,
+            enable_pci_switch_emulation: false,
             deployment_scoped_service_interfaces: false,
             pf_total_sf_reserved: default_dpf_pf_total_sf_reserved(),
             dpu_service_sync_enabled: default_to_true(),
@@ -2113,6 +2220,7 @@ impl Default for DpfConfig {
             services: Box::default(),
             extra_services: Box::default(),
             proxy: None,
+            registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             deployments: DpfDeploymentsConfig::default(),
         }
@@ -2466,6 +2574,8 @@ pub struct DpfServiceConfig {
     pub docker_image_pull_secret: Option<String>,
     /// Chart-native values deep-merged over NICo's generated template values.
     /// Tables merge recursively. Scalars and arrays replace generated values.
+    /// For HBN and DTS, `multiClusterSupport` overrides `service.nameSource` after merging:
+    /// `dpuService` when enabled, or `release` when disabled or omitted.
     #[serde(default)]
     pub extra_helm_values: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -3714,6 +3824,50 @@ impl CarbideConfig {
         )
     }
 
+    /// Reject an admission deadline that would drop a cert-manager issuance before its
+    /// cleanup runs. Issuance and cleanup each wait up to `request_timeout_secs`, and a
+    /// dropped handler leaves its CertificateRequest behind. Internal services can reach
+    /// issuance through `DiscoverMachine` and `CreateCredential`, so each service
+    /// `max_execution_time` override must cover it as well.
+    pub fn validate_admission_covers_cert_manager(&self) -> eyre::Result<()> {
+        let admission = &self.api_admission_control;
+        if !admission.enabled {
+            return Ok(());
+        }
+        let Some(cert_manager) = self.certificates.cert_manager_config()? else {
+            return Ok(());
+        };
+        let required =
+            std::time::Duration::from_secs(cert_manager.request_timeout_secs).saturating_mul(2);
+        let overrides = admission
+            .service_limits
+            .iter()
+            .filter_map(|(service_id, limits)| {
+                limits.max_execution_time.map(|deadline| {
+                    (
+                        format!(
+                            "api_admission_control.service_limits.{service_id}.max_execution_time"
+                        ),
+                        deadline,
+                    )
+                })
+            });
+        let deadlines = std::iter::once((
+            "api_admission_control.max_execution_time".to_string(),
+            admission.max_execution_time,
+        ))
+        .chain(overrides);
+        for (field, deadline) in deadlines {
+            eyre::ensure!(
+                deadline >= required,
+                "{field} ({deadline:?}) must be at least twice \
+                 certificates.cert_manager.request_timeout_secs ({}s) when cert-manager is enabled",
+                cert_manager.request_timeout_secs,
+            );
+        }
+        Ok(())
+    }
+
     /// Returns an error when two `tools` entries share a `name`,
     /// since names are used as stable identifiers (e.g. `name = "grafana"`
     /// is referenced by the per-machine "Logs" deep link).
@@ -3721,7 +3875,7 @@ impl CarbideConfig {
     /// `https` scheme.
     pub fn validate_web_ui_sidebar_tools(&self) -> eyre::Result<()> {
         let mut seen = std::collections::HashSet::new();
-        for tool in &self.web_ui_sidebar_tools {
+        for tool in &self.web_ui.sidebar_tools {
             if !seen.insert(tool.name.as_str()) {
                 return Err(eyre::eyre!(
                     "duplicate tools entry with name = {:?}; tool names must be unique",
@@ -4366,6 +4520,13 @@ const fn default_api_admission_max_work_in_flight_per_client() -> usize {
 
 const fn default_api_admission_max_pending_per_client() -> usize {
     64
+}
+
+const fn default_api_admission_max_execution_time() -> std::time::Duration {
+    // Matches the Rust client's request timeout. That client sends no `grpc-timeout`, so a
+    // shorter default would cut off admin-cli, Scout and DPU agent calls the client still waits on.
+    // Keep in sync with the cert-manager deadline in the nico-api chart's config template.
+    std::time::Duration::from_secs(300)
 }
 
 const fn default_api_admission_pending_timeout() -> std::time::Duration {
@@ -5019,7 +5180,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
             metrics_endpoint: value
                 .metrics_endpoint
                 .map(|x| x.to_string())
-                .unwrap_or("NA".to_string()),
+                .unwrap_or_else(|| "NA".to_string()),
             database_url: value.database_url,
             max_database_connections: value.max_database_connections,
             enable_ip_fabric: value.ib_config.unwrap_or_default().enabled,
@@ -5054,7 +5215,9 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .keys()
                 .cloned()
                 .collect_vec(),
-            dpu_ipmi_tool_impl: value.dpu_ipmi_tool_impl.unwrap_or("Not Set".to_string()),
+            dpu_ipmi_tool_impl: value
+                .dpu_ipmi_tool_impl
+                .unwrap_or_else(|| "Not Set".to_string()),
             dpu_ipmi_reboot_attempt: value.dpu_ipmi_reboot_attempts.unwrap_or_default(),
             initial_domain_name: value.initial_domain_name,
             sitename: value.sitename,
@@ -5796,6 +5959,7 @@ path = "credentials.yaml"
             tenant_keyset_id: None,
             network_virtualization_type: VpcVirtualizationType::Fnn,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             vni: None,
             routing_profile_type: routing_profile_type.map(str::to_string),
@@ -6610,6 +6774,7 @@ path = "credentials.yaml"
             polling_bios_setup_stuck_threshold: Duration::minutes(15),
             boot_interface_observation_interval: Duration::hours(2),
             full_lockdown_recovery_enabled: true,
+            instance_reboot_queue_enabled: true,
         };
 
         let config_str = serde_json::to_string(&input).unwrap();
@@ -6661,6 +6826,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::hours(2),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -6687,6 +6853,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::minutes(10),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -6822,7 +6989,7 @@ path = "credentials.yaml"
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
-        config.web_ui_sidebar_tools = vec![ToolLink {
+        config.web_ui.sidebar_tools = vec![ToolLink {
             name: "evil".to_string(),
             display_name: "Evil".to_string(),
             url: BAD_URL.to_string(),
@@ -7046,7 +7213,7 @@ path = "credentials.yaml"
     #[test]
     fn api_admission_control_only_validates_bounds_when_enabled() {
         type ZeroOut = fn(&mut ApiAdmissionControlConfig);
-        let cases: [(&str, ZeroOut); 6] = [
+        let cases: [(&str, ZeroOut); 7] = [
             ("max_work_in_flight", |config| config.max_work_in_flight = 0),
             ("max_pending", |config| config.max_pending = 0),
             ("max_work_in_flight_per_client", |config| {
@@ -7057,6 +7224,9 @@ path = "credentials.yaml"
             }),
             ("pending_timeout", |config| {
                 config.pending_timeout = std::time::Duration::ZERO
+            }),
+            ("max_execution_time", |config| {
+                config.max_execution_time = std::time::Duration::ZERO
             }),
             ("client_idle_timeout", |config| {
                 config.client_idle_timeout = std::time::Duration::ZERO
@@ -7070,6 +7240,7 @@ path = "credentials.yaml"
             max_work_in_flight_per_client: 0,
             max_pending_per_client: 0,
             pending_timeout: std::time::Duration::ZERO,
+            max_execution_time: std::time::Duration::from_secs(120),
             client_idle_timeout: std::time::Duration::ZERO,
             service_limits: BTreeMap::new(),
         };
@@ -7121,6 +7292,155 @@ path = "credentials.yaml"
         assert_api_admission_semaphore_bound("max_work_in_flight", |config, value| {
             config.max_work_in_flight = value;
         });
+    }
+
+    /// The default admission deadline covers cert-manager's default issuance plus cleanup. A
+    /// longer cert-manager timeout, or a shorter service override, is rejected only while
+    /// admission and either cert-manager backend are enabled.
+    #[test]
+    fn validate_admission_covers_cert_manager_issuance_and_cleanup() {
+        struct Case {
+            name: &'static str,
+            admission_enabled: bool,
+            use_cert_manager: bool,
+            use_cert_manager_ufm: bool,
+            request_timeout_secs: u64,
+            service_deadline_secs: Option<u64>,
+            rejected_field: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "exactly twice the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 150,
+                service_deadline_secs: None,
+                rejected_field: None,
+            },
+            Case {
+                name: "over half the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 151,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "UFM backend alone",
+                admission_enabled: true,
+                use_cert_manager: false,
+                use_cert_manager_ufm: true,
+                request_timeout_secs: 151,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "service override below twice the timeout",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 150,
+                service_deadline_secs: Some(299),
+                rejected_field: Some(
+                    "api_admission_control.service_limits.site-agent.max_execution_time",
+                ),
+            },
+            Case {
+                name: "cert-manager disabled",
+                admission_enabled: true,
+                use_cert_manager: false,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 600,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
+            },
+            Case {
+                name: "admission disabled",
+                admission_enabled: false,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 600,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
+            },
+        ];
+
+        for case in cases {
+            let mut config: CarbideConfig = Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .extract()
+                .unwrap();
+            config.api_admission_control.enabled = case.admission_enabled;
+            config.certificates.use_cert_manager = case.use_cert_manager;
+            config.certificates.use_cert_manager_ufm = case.use_cert_manager_ufm;
+            config.certificates.cert_manager = Some(cert_manager::Config {
+                request_timeout_secs: case.request_timeout_secs,
+                ..Default::default()
+            });
+            if let Some(secs) = case.service_deadline_secs {
+                config.api_admission_control.service_limits.insert(
+                    "site-agent".to_string(),
+                    ApiAdmissionServiceLimitsConfig {
+                        max_work_in_flight: 1,
+                        max_pending: 1,
+                        pending_timeout: std::time::Duration::from_secs(1),
+                        max_execution_time: Some(std::time::Duration::from_secs(secs)),
+                    },
+                );
+            }
+
+            let result = config.validate_admission_covers_cert_manager();
+            match case.rejected_field {
+                None => result.unwrap_or_else(|error| panic!("{}: {error}", case.name)),
+                Some(field) => {
+                    let error = result.expect_err(case.name).to_string();
+                    let timeout = format!("request_timeout_secs ({}s)", case.request_timeout_secs);
+                    assert!(
+                        error.starts_with(&format!("{field} (")) && error.contains(&timeout),
+                        "{}: unexpected error: {error}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn api_admission_control_parses_max_execution_time_overrides() {
+        let config = toml::from_str::<ApiAdmissionControlConfig>(
+            r#"
+            max_execution_time = "45s"
+
+            [service_limits.site-agent]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            max_execution_time = "300s"
+
+            [service_limits.flow]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            "#,
+        )
+        .expect("admission config parses");
+
+        assert_eq!(
+            config.max_execution_time,
+            std::time::Duration::from_secs(45)
+        );
+        assert_eq!(
+            config.service_limits["site-agent"].max_execution_time,
+            Some(std::time::Duration::from_secs(300))
+        );
+        // An omitted override inherits the global value when limits are built.
+        assert_eq!(config.service_limits["flow"].max_execution_time, None);
+        config
+            .admission_limits()
+            .expect("overrides are valid")
+            .expect("admission is enabled");
     }
 
     #[test]
@@ -7281,6 +7601,7 @@ path = "credentials.yaml"
                 max_work_in_flight_per_client: 8,
                 max_pending_per_client: 64,
                 pending_timeout: std::time::Duration::from_secs(5),
+                max_execution_time: std::time::Duration::from_secs(300),
                 client_idle_timeout: std::time::Duration::from_secs(5 * 60),
                 service_limits: BTreeMap::new(),
             }
@@ -7289,6 +7610,7 @@ path = "credentials.yaml"
         assert_eq!(config.dhcpv6_server_preference, None);
         assert!(!config.allow_insecure_discovery);
         assert!(!config.scout_boot_interface_correction_enabled);
+        assert!(!config.maintenance_end_boot_config_recheck_enabled);
         assert!(config.route_servers.is_empty());
         assert!(config.tls.is_none());
         assert!(config.auth.is_none());
@@ -7589,6 +7911,8 @@ path = "credentials.yaml"
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
             ("{{ .Values.tracing.enabled }}", "false"),
+            // Twice the `requestTimeoutSecs` value rendered above.
+            ("{{ $certDeadline }}", "240"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
@@ -9013,6 +9337,85 @@ sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
     }
 
     #[test]
+    fn dpf_registry_mirrors_parse_from_an_array_of_tables() {
+        // (upstream, mirror, override_path, server, ca_pem, dial_timeout) of every parsed entry.
+        type Entry = (
+            String,
+            String,
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let parse = |body: &str| -> Result<Vec<Entry>, ()> {
+            let config = toml::from_str::<DpfConfig>(body).map_err(drop)?;
+            Ok(config
+                .registry_mirrors
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.upstream,
+                        m.mirror,
+                        m.override_path,
+                        m.server,
+                        m.ca_pem,
+                        m.dial_timeout,
+                    )
+                })
+                .collect())
+        };
+
+        scenarios!(
+            run = |body: &str| parse(body);
+
+            "absent key defaults to no mirrors" {
+                "enabled = true\n" => Yields(vec![]),
+            }
+
+            "only upstream and mirror are required" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com\"\n" => Yields(vec![(
+                    "nvcr.io".to_string(),
+                    "https://registry.example.com".to_string(),
+                    false,
+                    None,
+                    None,
+                    None,
+                )]),
+            }
+
+            "every field is carried through" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com/v2/nvcr-cache\"\n\
+                 override_path = true\n\
+                 server = \"https://nvcr.io\"\n\
+                 ca_pem = \"-----BEGIN CERTIFICATE-----\"\n\
+                 dial_timeout = \"5s\"\n" => Yields(vec![(
+                    "nvcr.io".to_string(),
+                    "https://registry.example.com/v2/nvcr-cache".to_string(),
+                    true,
+                    Some("https://nvcr.io".to_string()),
+                    Some("-----BEGIN CERTIFICATE-----".to_string()),
+                    Some("5s".to_string()),
+                )]),
+            }
+
+            "missing mirror is rejected" {
+                "[[registry_mirrors]]\nupstream = \"nvcr.io\"\n" => Fails,
+            }
+
+            "unknown key is rejected" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com\"\n\
+                 skip_verify = true\n" => Fails,
+            }
+        );
+    }
+
+    #[test]
     fn deployment_bfcfg_parameters_append_to_the_site_wide_list() {
         // Append, not override, so a deployment setting its own parameter keeps the site-wide
         // list rather than replacing it.
@@ -9825,6 +10228,19 @@ helm_repo_url = "oci://registry.example.test/doca"
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
         }
+    }
+
+    #[test]
+    fn dpf_pci_switch_emulation_is_opt_in() {
+        assert!(!DpfConfig::default().enable_pci_switch_emulation);
+        value_scenarios!(
+            run = |input: &str| toml::from_str::<DpfConfig>(input).unwrap().enable_pci_switch_emulation;
+            "PCI switch emulation" {
+                "" => false,
+                "enable_pci_switch_emulation = false" => false,
+                "enable_pci_switch_emulation = true" => true,
+            }
+        );
     }
 
     #[test]

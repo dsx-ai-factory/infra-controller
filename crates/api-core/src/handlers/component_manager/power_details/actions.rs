@@ -129,15 +129,18 @@ fn describe(
     action
 }
 
-/// `machine_operation` preserves chassis targeting and the recorded shutdown mode.
+/// `machine_operation` preserves chassis targeting and the recorded shutdown/restart mode.
 fn machine_operation(operation: &MachineMaintenanceOperation) -> rpc::ComponentPowerAction {
     let (operation, graceful, chassis_id) = match operation {
         MachineMaintenanceOperation::PowerOn => (Operation::PowerOn, None, None),
         MachineMaintenanceOperation::PowerOff { graceful } => {
             (Operation::PowerOff, Some(*graceful), None)
         }
-        MachineMaintenanceOperation::Reset => (Operation::Reset, None, None),
+        MachineMaintenanceOperation::Reset { graceful } => {
+            (Operation::Reset, Some(*graceful), None)
+        }
         MachineMaintenanceOperation::Reboot => (Operation::Reset, Some(true), None),
+        MachineMaintenanceOperation::AcPowercycle { .. } => (Operation::AcPowercycle, None, None),
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             (Operation::ChassisReset, None, Some(chassis_id.clone()))
         }
@@ -155,7 +158,7 @@ fn switch_operation(operation: &SwitchMaintenanceOperation) -> Option<rpc::Compo
     let (operation, graceful) = match operation {
         SwitchMaintenanceOperation::PowerOn => (Operation::PowerOn, None),
         SwitchMaintenanceOperation::PowerOff { graceful } => (Operation::PowerOff, Some(*graceful)),
-        SwitchMaintenanceOperation::Reset => (Operation::Reset, None),
+        SwitchMaintenanceOperation::Reset { graceful } => (Operation::Reset, Some(*graceful)),
         SwitchMaintenanceOperation::ReconfigureCertificate => return None,
     };
     Some(rpc::ComponentPowerAction {
@@ -192,6 +195,7 @@ mod tests {
     #[test]
     fn machine_actions_keep_replacements_and_legacy_metadata() {
         let admitted = MachineMaintenanceRequest {
+            action_id: None,
             requested_at: "2026-10-01T00:00:00Z".parse().unwrap(),
             initiator: "operator".into(),
             operation: MachineMaintenanceOperation::PowerOff { graceful: false },
@@ -309,11 +313,13 @@ mod tests {
     fn switch_and_shelf_actions_keep_replacements_and_legacy_shutdowns() {
         let requested_at = "2026-10-01T00:00:00Z".parse().unwrap();
         let switch_request = SwitchMaintenanceRequest {
+            action_id: None,
             requested_at,
             initiator: "operator".into(),
             operation: SwitchMaintenanceOperation::PowerOff { graceful: false },
         };
         let shelf_request = PowerShelfMaintenanceRequest {
+            action_id: None,
             requested_at,
             initiator: "operator".into(),
             operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
@@ -442,10 +448,20 @@ mod tests {
             [
                 // Whole-component reset must not invent a chassis selector.
                 Check {
-                    scenario: "component reset",
-                    input: MachineMaintenanceOperation::Reset,
+                    scenario: "forced component reset",
+                    input: MachineMaintenanceOperation::Reset { graceful: false },
                     expect: rpc::ComponentPowerAction {
                         operation: Operation::Reset as i32,
+                        graceful: Some(false),
+                        ..Default::default()
+                    },
+                },
+                Check {
+                    scenario: "graceful component reset",
+                    input: MachineMaintenanceOperation::Reset { graceful: true },
+                    expect: rpc::ComponentPowerAction {
+                        operation: Operation::Reset as i32,
+                        graceful: Some(true),
                         ..Default::default()
                     },
                 },
@@ -455,6 +471,16 @@ mod tests {
                     expect: rpc::ComponentPowerAction {
                         operation: Operation::Reset as i32,
                         graceful: Some(true),
+                        ..Default::default()
+                    },
+                },
+                Check {
+                    scenario: "AC power cycle",
+                    input: MachineMaintenanceOperation::AcPowercycle {
+                        state: Default::default(),
+                    },
+                    expect: rpc::ComponentPowerAction {
+                        operation: Operation::AcPowercycle as i32,
                         ..Default::default()
                     },
                 },
@@ -480,6 +506,7 @@ mod tests {
     #[test]
     fn switch_actions_exclude_certificate_requests_in_both_positions() {
         let certificate = SwitchMaintenanceRequest {
+            action_id: None,
             requested_at: "2026-10-01T00:00:00Z".parse().unwrap(),
             initiator: "operator".into(),
             operation: SwitchMaintenanceOperation::ReconfigureCertificate,
@@ -488,6 +515,7 @@ mod tests {
         let reset = rpc::ComponentPowerAction {
             status: Status::Active as i32,
             operation: Operation::Reset as i32,
+            graceful: Some(false),
             requested_at: Some(certificate.requested_at.into()),
             initiator: Some("operator".into()),
             ..Default::default()
@@ -510,7 +538,7 @@ mod tests {
                     scenario: "pending reset",
                     input: (
                         SwitchMaintenanceOperation::ReconfigureCertificate,
-                        SwitchMaintenanceOperation::Reset,
+                        SwitchMaintenanceOperation::Reset { graceful: false },
                     ),
                     expect: vec![rpc::ComponentPowerAction {
                         status: Status::Pending as i32,
@@ -522,10 +550,13 @@ mod tests {
                 Check {
                     scenario: "active reset",
                     input: (
-                        SwitchMaintenanceOperation::Reset,
+                        SwitchMaintenanceOperation::Reset { graceful: true },
                         SwitchMaintenanceOperation::ReconfigureCertificate,
                     ),
-                    expect: vec![reset],
+                    expect: vec![rpc::ComponentPowerAction {
+                        graceful: Some(true),
+                        ..reset
+                    }],
                 },
             ],
             |(active, pending)| {

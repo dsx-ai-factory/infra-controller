@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
+use model::expected_machine::HostDpuPolicy;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
@@ -37,8 +38,10 @@ mod machine_creator;
 mod power_shelf_creator;
 mod switch_creator;
 
-pub(super) use machine_creator::ConfiguredIngestionCandidate;
 pub use machine_creator::MachineCreator;
+pub(super) use machine_creator::{
+    ConfiguredIngestionCandidate, attempt_deadline, reconcile_host_admin_addresses_after_commit,
+};
 pub use power_shelf_creator::PowerShelfCreator;
 pub use switch_creator::SwitchCreator;
 
@@ -55,6 +58,9 @@ pub struct Config {
     /// How often the switch and power shelf pass runs while hosts are still
     /// being created; zero disables the extra passes.
     pub switch_and_power_shelf_pass_interval: Duration,
+    /// Deadline of one managed host creation attempt once it holds its
+    /// admission permit.
+    pub machine_creation_timeout: Duration,
     /// Whether power shelf creation is enabled at runtime.
     pub create_power_shelves: Arc<AtomicBool>,
     /// Maximum number of power shelves created in one run.
@@ -65,6 +71,8 @@ pub struct Config {
     pub switches_created_per_run: u64,
     /// Whether host interfaces can use IPv6-only admin segments.
     pub admin_fnn_enabled: bool,
+    /// Site policy inherited by hosts without an explicit Nic or Ignore policy.
+    pub dpu_policy: Option<HostDpuPolicy>,
     /// How long retained boot interfaces remain applicable; `None` means forever.
     pub retained_boot_interface_window: Option<chrono::Duration>,
 }
@@ -87,6 +95,7 @@ impl InventoryCreator {
         self.machine_creator.preparation_cancel_token = cancel_token;
     }
 
+    #[allow(clippy::too_many_arguments)] // The creator shares its parent's dependencies.
     pub(super) fn new(
         database_connection: PgPool,
         config: Config,
@@ -95,6 +104,7 @@ impl InventoryCreator {
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         dpf_enabled_at_site: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
             machine_creator: MachineCreator::new(
@@ -105,6 +115,7 @@ impl InventoryCreator {
                 rack_profiles,
                 machine_info_provider,
                 dpf_enabled_at_site,
+                instrumentation,
             ),
             power_shelf_creator: PowerShelfCreator::new(
                 database_connection.clone(),

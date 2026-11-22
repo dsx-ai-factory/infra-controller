@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -602,15 +603,19 @@ func TestGeneratedCommand_SensitiveNestedAndArrayBodiesRedactHistory(t *testing.
 	for _, name := range []string{
 		"dpu-extension-service create",
 		"expected-machine batch-create",
+		"rack firmware",
+		"rack firmware-all",
+		"tray firmware",
+		"tray firmware-all",
 	} {
-		info := requireGeneratedInfo(t, name)
-		assert.True(t, generatedCommandHasSensitiveBody(info), name)
-
 		command := requireTUICommand(t, name)
 		assert.True(t, command.Sensitive, name)
 		commandMap := map[string]Command{name: command}
-		got := commandHistoryLine(name+` --data '{"password":"secret"}'`, commandMap, []Command{command})
-		assert.Equal(t, name+" <redacted>", got)
+		for _, field := range []string{"authenticationData", "downloadCredentials"} {
+			line := fmt.Sprintf(`%s --data '{%q:{"shared":"synthetic-secret"}}'`, name, field)
+			got := commandHistoryLine(line, commandMap, []Command{command})
+			assert.Equal(t, name+" <redacted>", got)
+		}
 	}
 }
 
@@ -1098,7 +1103,7 @@ func TestFetchAllocationConstraints_UsesIDWhenDisplayPartsAreEmpty(t *testing.T)
 	defer server.Close()
 	session := &Session{Client: appcli.NewClient(server.URL, "acme", "token", nil, false)}
 
-	items, err := session.fetchAllocationConstraints("allocation-1")
+	items, err := session.fetchAllocationConstraints(context.Background(), "allocation-1")
 
 	require.NoError(t, err)
 	require.Len(t, items, 1)

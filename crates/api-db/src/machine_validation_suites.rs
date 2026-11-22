@@ -104,7 +104,7 @@ pub async fn save(
     req.supported_platforms = req
         .supported_platforms
         .iter()
-        .map(|p| re.replace_all(p, "_").to_string().to_ascii_lowercase())
+        .map(|p| re.replace_all(p, "_").to_ascii_lowercase())
         .collect();
 
     let description = req.description.unwrap_or_default();
@@ -208,7 +208,7 @@ pub async fn update(
     payload.supported_platforms = payload
         .supported_platforms
         .iter()
-        .map(|p| re.replace_all(p, "_").to_string().to_ascii_lowercase())
+        .map(|p| re.replace_all(p, "_").to_ascii_lowercase())
         .collect();
 
     // Match prior behavior: any update without an explicit `verified` forces re-verification.

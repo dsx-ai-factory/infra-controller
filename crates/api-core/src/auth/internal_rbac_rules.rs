@@ -73,6 +73,7 @@ impl InternalRBACRules {
         x.perm("DeleteDomain", vec![]);
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
+        x.perm("CancelVpcCreation", vec![SiteAgent]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
@@ -367,7 +368,7 @@ impl InternalRBACRules {
         x.perm("AdminForceDeleteSwitch", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionSwitch",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm(
             "AdminForceDeletePowerShelf",
@@ -723,9 +724,14 @@ impl InternalRBACRules {
             "GetNetworkSecurityGroupAttachments",
             vec![ForgeAdminCLI, SiteAgent],
         );
+        x.perm("CreateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDhcpOptionSetIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDhcpOptionSetsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetDesiredFirmwareVersions",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, Flow, SiteHealthProbe],
         );
         x.perm("UpsertHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
@@ -781,7 +787,10 @@ impl InternalRBACRules {
         x.perm("SetBmcRootPassword", vec![ForgeAdminCLI]);
         x.perm("ProbeBmcVendor", vec![ForgeAdminCLI]);
         x.perm("SetFirmwareUpdateTimeWindow", vec![ForgeAdminCLI, Flow]);
-        x.perm("ListHostFirmware", vec![ForgeAdminCLI, Flow]);
+        x.perm(
+            "ListHostFirmware",
+            vec![ForgeAdminCLI, Flow, SiteHealthProbe],
+        );
         x.perm("EnableInfiniteBoot", vec![ForgeAdminCLI]);
         x.perm("IsInfiniteBootEnabled", vec![ForgeAdminCLI]);
         x.perm("Lockdown", vec![ForgeAdminCLI]);
@@ -839,12 +848,12 @@ impl InternalRBACRules {
             "ListMachineAttestationStatuses",
             vec![ForgeAdminCLI, SiteAgent],
         );
-        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
+        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm(
             "FindPowerShelfIds",
@@ -857,7 +866,7 @@ impl InternalRBACRules {
         x.perm("CreatePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionPowerShelf",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm("DeletePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
@@ -983,11 +992,11 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
-        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("GetExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
-        x.perm("FindExpectedNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("CreateNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("DeleteNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1117,6 +1126,7 @@ impl InternalRBACRules {
         x.perm("DeleteComputeAllocation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ComponentPowerControl", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentPowerDetails", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetComponentFirmwareDetails", vec![ForgeAdminCLI, Flow]);
         x.perm("ComponentReset", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentResetStatus", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentInventory", vec![ForgeAdminCLI, Flow]);
@@ -1459,7 +1469,7 @@ mod rbac_rule_tests {
         }
     }
 
-    /// Component power details and reset operations belong to operator and
+    /// Component power/firmware details and reset operations belong to operator and
     /// Flow callers; unrelated device and site services must remain denied.
     #[test]
     fn component_operator_permissions() {
@@ -1474,27 +1484,28 @@ mod rbac_rule_tests {
                         "nico-cli-client".into(),
                         None,
                     )),
-                    expect: [true; 4],
+                    expect: [true; 5],
                 },
                 Check {
                     scenario: "Flow may access component operations",
                     input: Principal::SpiffeServiceIdentifier("nico-flow".into()),
-                    expect: [true, true, true, false],
+                    expect: [true, true, true, true, false],
                 },
                 Check {
                     scenario: "site agent has no operator access",
                     input: Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
-                    expect: [false; 4],
+                    expect: [false; 5],
                 },
                 Check {
                     scenario: "machine identity has no operator access",
                     input: Principal::SpiffeMachineIdentifier("host".into()),
-                    expect: [false; 4],
+                    expect: [false; 5],
                 },
             ],
             |principal| {
                 [
                     "GetComponentPowerDetails",
+                    "GetComponentFirmwareDetails",
                     "ComponentReset",
                     "GetComponentResetStatus",
                     "GetRmsJobStatus",
@@ -1596,6 +1607,24 @@ mod rbac_rule_tests {
         ));
     }
 
+    #[test]
+    fn probe_catalog_read_permissions() {
+        let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".into());
+        for (method, allowed) in [
+            ("Version", true),
+            ("GetDesiredFirmwareVersions", true),
+            ("ListHostFirmware", true),
+            ("SetFirmwareUpdateTimeWindow", false),
+            ("UpsertHostFirmwareConfig", false),
+            ("DeleteHostFirmwareConfig", false),
+        ] {
+            assert_eq!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
+                allowed,
+                "{method}"
+            );
+        }
+    }
     /// Compact machine states belong to the admin CLI, not MaT or the site probe.
     #[test]
     fn find_machine_states_by_ids_permissions() {
@@ -1654,16 +1683,37 @@ mod rbac_rule_tests {
         let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
         let unrelated_service = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
 
+        // Cancellation can return an existing VPC's full configuration. Creation
+        // permission alone must not grant Machineatron that read access.
+        assert!(!InternalRBACRules::allowed_from_static(
+            "CancelVpcCreation",
+            &[Principal::SpiffeServiceIdentifier(
+                "machine-a-tron".to_string()
+            )],
+        ));
+
         // REST authorizes the caller before proxying these methods to Core as the site agent.
         for method in [
+            "CancelVpcCreation",
+            "CreateAttestationProfile",
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
+            "DecommissionPowerShelf",
+            "DecommissionSwitch",
+            "DeleteAttestationProfile",
             "DeleteSku",
+            "FailAttestation",
+            "GetAttestation",
+            "GetAttestationCoverage",
+            "GetAttestationProfile",
             "GetCredentialRotationStatus",
             "InsertPowerShelfHealthReport",
             "InsertRackHealthReport",
             "InsertSwitchHealthReport",
+            "ListAttestation",
+            "ListAttestationProfiles",
+            "ListMachineAttestationStatuses",
             "ListMachineHealthReports",
             "ListPowerShelfHealthReports",
             "ListRackHealthReports",
@@ -1673,7 +1723,10 @@ mod rbac_rule_tests {
             "RemoveSwitchHealthReport",
             "ReplaceSku",
             "RotateCredential",
+            "TriggerMachineAttestation",
+            "UpdateAttestationProfile",
             "UpdateSkuMetadata",
+            "WaiveAttestation",
         ] {
             assert!(
                 InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent)),
@@ -1756,7 +1809,7 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn expected_nvlink_domain_inventory_allows_admin_and_flow() {
+    fn nvlink_domain_inventory_allows_admin_and_flow() {
         use carbide_test_support::{Check, check_values};
 
         let principals = [
@@ -1767,11 +1820,11 @@ mod rbac_rule_tests {
         ];
         check_values(
             [
-                "CreateExpectedNvLinkDomain",
-                "DeleteExpectedNvLinkDomain",
-                "GetExpectedNvLinkDomain",
-                "FindExpectedNvLinkDomainIds",
-                "FindExpectedNvLinkDomainsByIds",
+                "CreateNvLinkDomain",
+                "DeleteNvLinkDomain",
+                "GetNvLinkDomain",
+                "FindNvLinkDomainIds",
+                "FindNvLinkDomainsByIds",
             ]
             .map(|method| Check {
                 scenario: method,
@@ -2120,10 +2173,9 @@ mod rbac_rule_tests {
             let line = line?;
             let line = line.trim();
             if line.starts_with("rpc") {
-                let mut name = line.strip_prefix("rpc").unwrap_or("why").trim().to_string();
+                let name = line.strip_prefix("rpc").unwrap_or("why").trim();
                 let offset = name.find("(").unwrap_or(name.len());
-                name.replace_range(offset.., "");
-                messages.push(name.trim().to_string());
+                messages.push(name[..offset].trim().to_string());
             }
         }
         if messages.is_empty() {

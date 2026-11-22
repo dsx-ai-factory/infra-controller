@@ -79,7 +79,7 @@ impl FirmwareConfigSnapshot {
             .cloned();
         tracing::debug!(
             %key,
-            firmware = ?ret,
+            found = ret.is_some(),
             "Firmware config lookup completed",
         );
         ret
@@ -152,10 +152,9 @@ impl FirmwareConfig {
         {
             // Fake configs to merge for unit tests
             for ovrd in &self.test_overrides {
-                if let Err(err) = self.merge_from_string(&mut data, ovrd.clone()) {
+                if self.merge_from_string(&mut data, ovrd.clone()).is_err() {
                     tracing::error!(
-                        override_config = %ovrd,
-                        error = %err,
+                        error_category = "invalid_metadata",
                         "Failed to merge test firmware override",
                     );
                 }
@@ -216,10 +215,17 @@ impl FirmwareConfig {
                     continue;
                 }
             };
-            if let Err(e) = self.merge_from_string(map, metadata) {
+            if let Err(error) = self.merge_from_string(map, metadata) {
+                // TOML errors can quote signed artifact URLs. The numeric byte
+                // span locates the failure without logging its message or source.
+                let span = error
+                    .downcast_ref::<toml::de::Error>()
+                    .and_then(|error| error.span());
                 tracing::error!(
                     metadata_directory = ?dir.path(),
-                    error = %e,
+                    error_category = "invalid_metadata",
+                    error_byte_start = span.as_ref().map(|span| span.start as u64),
+                    error_byte_end = span.as_ref().map(|span| span.end as u64),
                     "Failed to merge firmware metadata",
                 );
             }

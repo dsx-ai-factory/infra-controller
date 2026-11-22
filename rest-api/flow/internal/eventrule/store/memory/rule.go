@@ -4,7 +4,7 @@
 package memory
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,7 +50,7 @@ func (s *Store) List(
 		}
 	}
 	slices.SortFunc(rules, func(a, b *eventrule.Rule) int {
-		return cmp.Compare(a.ID.String(), b.ID.String())
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 
 	total := len(rules)

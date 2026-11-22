@@ -34,10 +34,10 @@ async fn test_health_of_nonexisting_machine(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool).await;
     let app = make_test_app(&env.test_harness);
 
-    // Health page for Machine which was never ingested
-    verify_health_page_not_found(
+    // Health tab for Machine which was never ingested
+    verify_health_tab_not_found(
         &app,
-        "/admin/machine/fm100ht09g4atrqgjb0b83b2to1qa1hfugks9mhutb0umcng1rkr54vliqg/health",
+        "/admin/machine/fm100ht09g4atrqgjb0b83b2to1qa1hfugks9mhutb0umcng1rkr54vliqg",
     )
     .await;
 
@@ -69,7 +69,7 @@ async fn test_health_of_nonexisting_machine(pool: sqlx::PgPool) {
             .is_empty()
     );
 
-    verify_health_page_not_found(&app, &format!("/admin/machine/{host_machine_id}/health")).await;
+    verify_health_tab_not_found(&app, &format!("/admin/machine/{host_machine_id}")).await;
 
     let response = app
         .oneshot(
@@ -96,14 +96,18 @@ async fn test_health_of_nonexisting_components(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool).await;
     let app = make_test_app(&env.test_harness);
 
-    for path in [
-        "/admin/rack/missing-rack/health",
-        "/admin/power-shelf/ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0/health",
-        "/admin/switch/sw100ntjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0/health",
-        "/admin/nvlink-domain/00000000-0000-0000-0000-000000000001/health",
+    for detail_path in [
+        "/admin/rack/missing-rack",
+        "/admin/power-shelf/ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0",
+        "/admin/switch/sw100ntjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0",
     ] {
-        verify_health_page_not_found(&app, path).await;
+        verify_health_tab_not_found(&app, detail_path).await;
     }
+    verify_health_page_not_found(
+        &app,
+        "/admin/nvlink-domain/00000000-0000-0000-0000-000000000001/health",
+    )
+    .await;
 }
 
 #[crate::sqlx_test]
@@ -230,6 +234,8 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
     let mh = env.create_ready_managed_host(1).await.0;
     let host_machine_id = mh.host.id;
     let dpu_machine_id = mh.dpu(0).id;
+    let host_machine_id_text = host_machine_id.to_string();
+    let dpu_machine_id_text = dpu_machine_id.to_string();
 
     let merge_payload = r#"{
         "mode": "Merge",
@@ -248,20 +254,14 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
             }]
         }
     }"#;
-    post_machine_health_report(
-        &app,
-        &dpu_machine_id.to_string(),
-        "add-report",
-        merge_payload,
-    )
-    .await;
+    post_machine_health_report(&app, &dpu_machine_id_text, "add-report", merge_payload).await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(dpu_aggregate_health.contains("dpu merge web health"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(host_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(host_aggregate_health.contains("dpu merge web health"));
@@ -283,22 +283,16 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
             }]
         }
     }"#;
-    post_machine_health_report(
-        &app,
-        &dpu_machine_id.to_string(),
-        "add-report",
-        replace_payload,
-    )
-    .await;
+    post_machine_health_report(&app, &dpu_machine_id_text, "add-report", replace_payload).await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(dpu_aggregate_health.contains("DpuReplaceWebHealth"));
     assert!(dpu_aggregate_health.contains("dpu replace web health"));
     assert!(!dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!dpu_aggregate_health.contains("dpu merge web health"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(host_aggregate_health.contains("DpuReplaceWebHealth"));
     assert!(host_aggregate_health.contains("dpu replace web health"));
@@ -307,38 +301,38 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
 
     post_machine_health_report(
         &app,
-        &dpu_machine_id.to_string(),
+        &dpu_machine_id_text,
         "remove-report",
         r#"{"source":"web-dpu-replace-health-test"}"#,
     )
     .await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!dpu_aggregate_health.contains("DpuReplaceWebHealth"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(host_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!host_aggregate_health.contains("DpuReplaceWebHealth"));
 
     post_machine_health_report(
         &app,
-        &dpu_machine_id.to_string(),
+        &dpu_machine_id_text,
         "remove-report",
         r#"{"source":"web-dpu-merge-health-test"}"#,
     )
     .await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(!dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!dpu_aggregate_health.contains("DpuReplaceWebHealth"));
     assert!(!dpu_health.contains("web-dpu-merge-health-test"));
     assert!(!dpu_health.contains("web-dpu-replace-health-test"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(!host_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!host_aggregate_health.contains("DpuReplaceWebHealth"));
@@ -354,27 +348,8 @@ async fn test_health_of_rack(pool: sqlx::PgPool) {
         .await
         .id;
 
-    let response = app
-        .clone()
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/rack/{rack_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
-    assert!(body.contains("Rack Health"));
-    assert!(body.contains("Health Report Management"));
+    let body = get_health_tab(&app, &format!("/admin/rack/{rack_id}")).await;
+    assert!(body.contains("Add Health Report"));
     assert!(body.contains("Health History"));
     assert!(body.contains(&format!("/admin/rack/{rack_id}/health-history")));
 
@@ -409,25 +384,7 @@ async fn test_health_of_rack(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let response = app
-        .clone()
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/rack/{rack_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
+    let body = get_health_tab(&app, &format!("/admin/rack/{rack_id}")).await;
     assert!(body.contains("web-rack-health-test"));
     assert!(body.contains("rack web health"));
 
@@ -445,24 +402,7 @@ async fn test_health_of_rack(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let response = app
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/rack/{rack_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
+    let body = get_health_tab(&app, &format!("/admin/rack/{rack_id}")).await;
     assert!(!body.contains("web-rack-health-test"));
 }
 
@@ -472,27 +412,8 @@ async fn test_health_of_switch(pool: sqlx::PgPool) {
     let app = make_test_app(&env.test_harness);
     let switch_id = env.test_harness.create_switch(1, 1).await.id;
 
-    let response = app
-        .clone()
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/switch/{switch_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
-    assert!(body.contains("Switch Health"));
-    assert!(body.contains("Health Report Management"));
+    let body = get_health_tab(&app, &format!("/admin/switch/{switch_id}")).await;
+    assert!(body.contains("Add Health Report"));
     assert!(body.contains("Health History"));
     assert!(body.contains(&format!("/admin/switch/{switch_id}/health-history")));
 
@@ -527,25 +448,7 @@ async fn test_health_of_switch(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let response = app
-        .clone()
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/switch/{switch_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
+    let body = get_health_tab(&app, &format!("/admin/switch/{switch_id}")).await;
     assert!(body.contains("web-switch-health-test"));
     assert!(body.contains("switch web health"));
 
@@ -563,24 +466,7 @@ async fn test_health_of_switch(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let response = app
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/switch/{switch_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
+    let body = get_health_tab(&app, &format!("/admin/switch/{switch_id}")).await;
     assert!(!body.contains("web-switch-health-test"));
 }
 
@@ -594,27 +480,8 @@ async fn test_health_of_power_shelf(pool: sqlx::PgPool) {
         .await
         .id;
 
-    let response = app
-        .clone()
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/power-shelf/{power_shelf_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
-    assert!(body.contains("Power Shelf Health"));
-    assert!(body.contains("Health Report Management"));
+    let body = get_health_tab(&app, &format!("/admin/power-shelf/{power_shelf_id}")).await;
+    assert!(body.contains("Add Health Report"));
     assert!(body.contains("Health History"));
     assert!(body.contains(&format!(
         "/admin/power-shelf/{power_shelf_id}/health-history"
@@ -653,25 +520,7 @@ async fn test_health_of_power_shelf(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let response = app
-        .clone()
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/power-shelf/{power_shelf_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
+    let body = get_health_tab(&app, &format!("/admin/power-shelf/{power_shelf_id}")).await;
     assert!(body.contains("web-power-shelf-health-test"));
     assert!(body.contains("power shelf web health"));
 
@@ -691,24 +540,7 @@ async fn test_health_of_power_shelf(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let response = app
-        .oneshot(
-            web_request_builder()
-                .uri(format!("/admin/power-shelf/{power_shelf_id}/health"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    let body = String::from_utf8_lossy(&body_bytes);
+    let body = get_health_tab(&app, &format!("/admin/power-shelf/{power_shelf_id}")).await;
     assert!(!body.contains("web-power-shelf-health-test"));
 }
 
@@ -873,25 +705,37 @@ async fn post_machine_health_report_with_request_context(
 }
 
 async fn get_machine_health_page(app: &axum::Router, machine_id: &str) -> String {
+    get_health_tab(app, &format!("/admin/machine/{machine_id}")).await
+}
+
+/// Checks that the old `<detail>/health` URL redirects to the detail page's
+/// Health tab, then returns the detail page.
+async fn get_health_tab(app: &axum::Router, detail_path: &str) -> String {
+    assert_redirects_to_health_tab(app, detail_path).await;
+    get_page(app, detail_path).await
+}
+
+async fn assert_redirects_to_health_tab(app: &axum::Router, detail_path: &str) {
     let response = app
         .clone()
         .oneshot(
             web_request_builder()
-                .uri(format!("/admin/machine/{machine_id}/health"))
+                .uri(format!("{detail_path}/health"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Empty response body?")
-        .to_bytes();
-    String::from_utf8_lossy(&body_bytes).into_owned()
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "{detail_path}/health"
+    );
+    assert_eq!(
+        response.headers()["location"],
+        format!("{detail_path}?tab=health").as_str(),
+        "{detail_path}/health"
+    );
 }
 
 async fn post_nvlink_domain_health_report(
@@ -959,6 +803,13 @@ async fn get_nvlink_domain_health_list(app: &axum::Router) -> String {
     String::from_utf8_lossy(&body_bytes).into_owned()
 }
 
+/// The old health URL still redirects, and the detail page reports the missing
+/// object without a Health tab.
+async fn verify_health_tab_not_found(app: &axum::Router, detail_path: &str) {
+    assert_redirects_to_health_tab(app, detail_path).await;
+    verify_health_page_not_found(app, detail_path).await;
+}
+
 async fn verify_health_page_not_found(app: &axum::Router, path: &str) {
     let response = app
         .clone()
@@ -974,16 +825,18 @@ async fn verify_health_page_not_found(app: &axum::Router, path: &str) {
         .expect("Empty response body?")
         .to_bytes();
     let body = String::from_utf8_lossy(&body_bytes);
-    assert!(!body.contains("Health Report Management"));
+    assert!(!body.contains("Add Health Report"));
 }
 
+/// The current alerts at the top of the health panel, before report management.
 fn aggregate_health_section(body: &str) -> &str {
+    let start = body.find("<h2 id=\"health_view\">").unwrap_or(0);
     let active_reports_start = body
         .find("<h2>Active Health Reports</h2>")
         .unwrap_or(usize::MAX);
     let management_start = body
-        .find("<h2>Health Report Management</h2>")
+        .find("<h2>Add Health Report</h2>")
         .unwrap_or(usize::MAX);
     let end = active_reports_start.min(management_start).min(body.len());
-    &body[..end]
+    &body[start..end.max(start)]
 }

@@ -57,7 +57,12 @@ pub struct PowerShelfConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PowerShelfStatus {
     pub shelf_name: String,
-    pub power_state: String,   // "on", "off", "standby"
+    /// Last saved power state. The power-shelf state controller writes `on`,
+    /// `off`, `poweringon`, `poweringoff`, `paused`, `reset`, or `unknown`.
+    /// Skipped or failed polls and component-manager responses without a state
+    /// leave the saved value unchanged. An explicit `unknown` is an observation.
+    /// `PowerShelf::status` is `None` until an observation is saved.
+    pub power_state: String,
     pub health_status: String, // "ok", "warning", "critical"
 }
 
@@ -219,11 +224,23 @@ pub enum PowerShelfMaintenanceOperation {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct PowerShelfMaintenanceRequest {
+    /// Durable CM action reference, retained by admitted controller state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: PowerShelfMaintenanceOperation,
+}
+
+// Log correlation is not request identity: legacy controllers may omit it.
+impl PartialEq for PowerShelfMaintenanceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_at == other.requested_at
+            && self.initiator == other.initiator
+            && self.operation == other.operation
+    }
 }
 
 /// Set by an external entity (typically rack maintenance) to request power-shelf
@@ -638,6 +655,7 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let request = |operation| PowerShelfMaintenanceRequest {
+            action_id: None,
             requested_at: now,
             initiator: "operator (TICKET-1)".to_string(),
             operation,
@@ -866,8 +884,8 @@ mod tests {
 
     #[test]
     fn status_round_trips_through_json() {
-        // PowerShelfStatus round-trips across each power/health string the field is
-        // documented to hold, plus empty strings.
+        // `PowerShelfStatus` round-trips representative power and health strings,
+        // including `standby` and empty strings accepted by the stored format.
         scenarios!(
             run = |status: PowerShelfStatus| {
                 let serialized = serde_json::to_string(&status).map_err(drop)?;

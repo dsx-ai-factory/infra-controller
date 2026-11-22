@@ -19,7 +19,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ::db::{DatabaseError, Transaction};
+use ::db::db_read::PgPoolReader;
+use ::db::{DatabaseError, TransactionVending as _};
 use config_version::Versioned;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use opentelemetry::KeyValue;
@@ -55,8 +56,8 @@ const MISSING_OBJECT_STATE: &str = "object_state";
 /// The `StateProcessor` is responsible for executing the state handler functions
 /// for all objects where state handling is requested.
 pub(super) struct StateProcessor<IO: StateControllerIO> {
-    /// A database connection pool that can be used for additional queries
-    pub(super) pool: sqlx::PgPool,
+    /// Database used for controller transactions
+    pub(super) database: super::ControllerDatabase,
     pub(super) handler_services: Arc<<IO::ContextObjects as StateHandlerContextObjects>::Services>,
     pub(super) io: Arc<IO>,
     pub(super) state_handler: Arc<
@@ -146,7 +147,7 @@ pub(super) struct StatsSinceLastLog {
     num_deleted_queued_objects: usize,
     /// The amount of objects which have been queued again for statehandling
     num_requeued_objects: usize,
-    /// The aggregated sqlx metrics at the last time logs had been emitted
+    /// SQL totals accumulated across iterations since the last log
     db_query_metrics: SqlxQueryDataAggregation,
 }
 
@@ -224,7 +225,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             component = IO::LOG_SPAN_CONTROLLER_NAME,
         );
 
-        async {
+        let result = async {
             let run_metrics = ProcessorIterationMetrics::default();
 
             let num_dispatched_tasks = self.dequeue_and_dispatch_object_handling_tasks().await?;
@@ -242,7 +243,6 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             self.finalize_completed_objects().await?;
 
             self.emit_metrics_if_necessary();
-            self.emit_periodic_log_if_necessary();
 
             if let Some(emitter) = self.metric_emitter.as_ref() {
                 emitter.emit_run_counters_and_histograms(&run_metrics);
@@ -254,7 +254,11 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             })
         }
         .instrument(iteration_span.clone())
-        .await
+        .await;
+
+        // Collect SQL activity even when the iteration exits early with an error.
+        iteration_span.in_scope(|| self.emit_periodic_log_if_necessary());
+        result
     }
 
     /// Periodically calculates aggregate metrics for all objects that have been processed
@@ -315,6 +319,17 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
     }
 
     fn emit_periodic_log_if_necessary(&mut self) {
+        // Apply the latest db metrics to self.stats_since_last_log now while
+        // we have them, whether we're logging them or not.
+        let iteration_metrics = sqlx_query_tracing::fetch_and_update_current_span_attributes();
+        let db_metrics = &mut self.stats_since_last_log.db_query_metrics;
+        db_metrics.num_queries += iteration_metrics.num_queries;
+        db_metrics.total_rows_affected += iteration_metrics.total_rows_affected;
+        db_metrics.total_rows_returned += iteration_metrics.total_rows_returned;
+        db_metrics.total_query_duration = db_metrics
+            .total_query_duration
+            .saturating_add(iteration_metrics.total_query_duration);
+
         let now = std::time::Instant::now();
         if now
             < self
@@ -326,14 +341,11 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         }
 
         self.last_log_time = now;
-        let db_query_metrics = sqlx_query_tracing::fetch_and_update_current_span_attributes();
-
         let stats = std::mem::take(&mut self.stats_since_last_log);
-        let db_metrics_since_last_query = db_query_metrics.diff(&stats.db_query_metrics);
-        self.stats_since_last_log.db_query_metrics = db_query_metrics;
+        let db_metrics_since_last_log = stats.db_query_metrics;
 
         if let Some(emitter) = self.metric_emitter.as_ref() {
-            emitter.emit_db_ops_metrics(&db_metrics_since_last_query, IO::LOG_SPAN_CONTROLLER_NAME);
+            emitter.emit_db_ops_metrics(&db_metrics_since_last_log, IO::LOG_SPAN_CONTROLLER_NAME);
         }
 
         tracing::info!(
@@ -343,11 +355,11 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             dispatched_task_count = stats.num_dispatched_tasks,
             requeued_object_count = stats.num_requeued_objects,
             errored_task_count = stats.num_errored_tasks,
-            sql_query_count = db_metrics_since_last_query.num_queries,
-            sql_affected_row_count = db_metrics_since_last_query.total_rows_affected,
-            sql_returned_row_count = db_metrics_since_last_query.total_rows_returned,
+            sql_query_count = db_metrics_since_last_log.num_queries,
+            sql_affected_row_count = db_metrics_since_last_log.total_rows_affected,
+            sql_returned_row_count = db_metrics_since_last_log.total_rows_returned,
             sql_total_query_duration_microseconds =
-                db_metrics_since_last_query.total_query_duration.as_micros(),
+                db_metrics_since_last_log.total_query_duration.as_micros(),
             "state_processor",
         );
     }
@@ -436,7 +448,11 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let deadline = tokio::time::Instant::now() + self.iteration_config.max_object_handling_time;
         let capacity = capacity.min(u32::MAX as usize) as u32;
         let objects = tokio::time::timeout_at(deadline, async {
-            let mut txn = self.pool.begin().await?;
+            let mut txn = self
+                .database
+                .txn_begin()
+                .await
+                .map_err(IterationError::from_transaction)?;
             let queued = db::acquire_queued_objects(
                 &mut txn,
                 IO::DB_QUEUED_OBJECTS_TABLE_NAME,
@@ -445,7 +461,9 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                 self.iteration_config.max_object_handling_time * 3,
             )
             .await?;
-            txn.commit().await?;
+            txn.commit()
+                .await
+                .map_err(IterationError::from_transaction)?;
             Ok::<_, IterationError>(queued)
         })
         .await
@@ -499,7 +517,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         deadline: tokio::time::Instant,
     ) {
         let cloned_object_id = object_id.clone();
-        let pool = self.pool.clone();
+        let database = self.database.clone();
         let services = self.handler_services.as_ref().clone();
         let io = self.io.clone();
         let handler = self.state_handler.clone();
@@ -513,7 +531,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                 async move {
                     let metrics = process_object(
                         cloned_object_id.clone(),
-                        pool,
+                        database,
                         services,
                         io,
                         handler,
@@ -552,7 +570,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
         // Replace completed claims with requested follow-up entries in one transaction so a failed
         // commit cannot lose queued work.
-        let mut txn = Transaction::begin(&self.pool).await?;
+        let mut txn = self.database.txn_begin().await?;
         let num_deleted = db::delete_queued_objects(
             &mut txn,
             IO::DB_QUEUED_OBJECTS_TABLE_NAME,
@@ -669,7 +687,7 @@ pub(super) enum IterationError {
 #[allow(clippy::too_many_arguments)]
 async fn process_object<IO: StateControllerIO>(
     object_id: IO::ObjectId,
-    pool: sqlx::PgPool,
+    database: super::ControllerDatabase,
     mut services: <IO::ContextObjects as StateHandlerContextObjects>::Services,
     io: Arc<IO>,
     handler: Arc<
@@ -704,17 +722,14 @@ async fn process_object<IO: StateControllerIO>(
                 state: String::new(),
             });
         }
-        let mut txn = pool.begin().await?;
         let mut snapshot = io
-            .load_object_state(&mut txn, &object_id)
+            .load_object_state(&mut PgPoolReader::from(database.pool.clone()), &object_id)
             .await?
             .ok_or_else(|| StateHandlerError::MissingData {
                 object_id: object_id.to_string(),
                 missing: MISSING_OBJECT_STATE,
             })?;
-        let controller_state = io
-            .load_controller_state(&mut txn, &object_id, &snapshot)
-            .await?;
+        let controller_state = io.load_controller_state(&object_id, &snapshot).await?;
         metrics.common.initial_state = Some(controller_state.value.clone());
         metrics.common.state_entered_at = Some(controller_state.version.timestamp());
         // Unwrap uses a very large duration as default to show something is wrong
@@ -729,14 +744,11 @@ async fn process_object<IO: StateControllerIO>(
 
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline,
             services: &mut services,
             metrics: &mut metrics.specific,
             pending_db_writes: &mut pending_db_writes,
         };
-
-        // Commit the transaction now, since we don't want to leave a txn open
-        // throughout handle_object_state.
-        txn.commit().await?;
 
         let handler_output = handler
             .handle_object_state(&object_id, &mut snapshot, &controller_state.value, &mut ctx)
@@ -750,11 +762,16 @@ async fn process_object<IO: StateControllerIO>(
                 let mut txn = if let Some(txn) = outcome.take_transaction() {
                     txn
                 } else {
-                    pool.begin().await?
+                    database
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?
                 };
                 if let Err(e) = pending_db_writes.apply_all(&mut txn).await {
                     if matches!(e, StateHandlerError::IterationInvalidated { .. }) {
-                        txn.rollback().await?;
+                        txn.rollback()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         return Err(e);
                     }
                     // If there's an error running the writes, count that as the handler outcome
@@ -764,7 +781,13 @@ async fn process_object<IO: StateControllerIO>(
                 }
             }
             Err(e @ StateHandlerError::IterationInvalidated { .. }) => return Err(e),
-            Err(e) => (Err(e), pool.begin().await?),
+            Err(e) => (
+                Err(e),
+                database
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?,
+            ),
         };
 
         let mut next_state = None;
@@ -799,7 +822,9 @@ async fn process_object<IO: StateControllerIO>(
             {
                 // The state transition did not apply, so roll back the handler's
                 // other writes too, including queued observations.
-                txn.rollback().await?;
+                txn.rollback()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 return Err(error);
             }
             io.persist_state_history(&mut txn, &object_id, new_version, next)
@@ -834,14 +859,21 @@ async fn process_object<IO: StateControllerIO>(
                 io.persist_outcome(&mut txn, &object_id, db_outcome).await?;
             }
 
-            txn.commit().await.map_err(StateHandlerError::from)?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
         } else if !matches!(handler_outcome, Ok(StateHandlerOutcome::Deleted { .. })) {
             // Whatever is the reason, outcome must be stored in db.
             let _ = txn.rollback().await;
-            let mut txn = pool.begin().await?;
+            let mut txn = database
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             let db_outcome = PersistentStateHandlerOutcome::from_result(handler_outcome.as_ref());
             io.persist_outcome(&mut txn, &object_id, db_outcome).await?;
-            txn.commit().await.map_err(StateHandlerError::from)?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
         }
 
         // Only emit the next state as metric if the transaction was actually
@@ -1085,7 +1117,7 @@ fn emit_object_metrics_as_log<IO: StateControllerIO>(iteration_metrics: &Iterati
 
         states.insert(full_state_name.clone(), state_metrics.num_objects);
         if state_metrics.num_objects_above_sla > 0 {
-            states_above_sla.insert(full_state_name.clone(), state_metrics.num_objects_above_sla);
+            states_above_sla.insert(full_state_name, state_metrics.num_objects_above_sla);
         }
     }
 
@@ -1134,6 +1166,15 @@ impl<T: 'static> JoinMany<T> for JoinSet<T> {
             results
         } else {
             vec![]
+        }
+    }
+}
+
+impl IterationError {
+    fn from_transaction(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::Sqlx(error) => Self::TransactionError(error.source),
+            error => Self::from(error),
         }
     }
 }

@@ -18,6 +18,7 @@ use carbide_uuid::DbTable;
 use model::attestation::SecretAkPub;
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[cfg(test)]
@@ -59,7 +60,7 @@ pub async fn delete(txn: &mut PgConnection, secret: &Vec<u8>) -> DatabaseResult<
 }
 
 pub async fn get_by_secret(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     secret: &Vec<u8>,
 ) -> DatabaseResult<Option<SecretAkPub>> {
     let query = format!(
@@ -69,7 +70,7 @@ pub async fn get_by_secret(
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(secret.as_slice())
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }

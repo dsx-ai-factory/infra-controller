@@ -4,12 +4,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -225,7 +225,7 @@ func (f credentialRotationHandlerFixture) post(t *testing.T, handle echo.Handler
 	require.NoError(t, err)
 
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)

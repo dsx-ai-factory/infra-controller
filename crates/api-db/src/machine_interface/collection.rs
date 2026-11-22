@@ -23,9 +23,9 @@ use model::machine::{
 };
 use model::machine_boot_interface::{MachineBootInterface, canonical_redfish_boot_interface_id};
 use model::predicted_machine_interface::PredictedMachineInterface;
-use sqlx::PgConnection;
 
 use crate::DatabaseResult;
+use crate::db_read::DbReader;
 
 /// A machine's non-BMC interfaces and pending interface predictions.
 /// Every real row is retained, including same-MAC rows in different segments.
@@ -37,14 +37,17 @@ pub struct MachineInterfaces {
 }
 
 impl MachineInterfaces {
-    /// Loads both collections in the caller's transaction with one query per table.
+    /// Loads both collections with one query per table.
     /// Missing machines produce empty collections. Selection methods perform no I/O.
-    pub async fn load(txn: &mut PgConnection, machine_id: &MachineId) -> DatabaseResult<Self> {
+    pub async fn load<DB>(conn: &mut DB, machine_id: &MachineId) -> DatabaseResult<Self>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         let mut interfaces_by_machine =
-            crate::machine_interface::find_by_machine_ids(txn, &[*machine_id]).await?;
+            crate::machine_interface::find_by_machine_ids(&mut *conn, &[*machine_id]).await?;
         let interfaces = interfaces_by_machine.remove(machine_id).unwrap_or_default();
         let predictions =
-            crate::predicted_machine_interface::find_by_machine_id(txn, machine_id).await?;
+            crate::predicted_machine_interface::find_by_machine_id(conn, machine_id).await?;
         Ok(Self {
             interfaces,
             predictions,
@@ -131,6 +134,7 @@ mod tests {
     use model::predicted_machine_interface::NewPredictedMachineInterface;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Scope both tables to one owner without collapsing same-MAC segment rows.
     #[crate::sqlx_test]
@@ -147,7 +151,7 @@ mod tests {
         let owner = id(0x41);
         let other = id(0x42);
         let mac = |suffix| MacAddress::new([0x02, 0, 0, 0, 0x41, suffix]);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for machine_id in [owner, other] {
             crate::machine::create(
                 txn.as_mut(),

@@ -88,7 +88,7 @@ async fn dual_stack_pages_show_all_prefixes_and_count_segments(pool: sqlx::PgPoo
         let segment_id = segment.id.expect("created segment has an ID");
         pages.push(PageCase {
             uri: format!("/admin/ipam/{}/segment/{segment_id}", case.route),
-            expected: vec!["<td>Prefixes</td>", case.prefixes[0], case.prefixes[1]],
+            expected: vec!["<dt>Prefixes</dt>", case.prefixes[0], case.prefixes[1]],
         });
     }
 

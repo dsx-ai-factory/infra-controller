@@ -32,6 +32,8 @@ use uuid::Uuid;
 
 use super::{list, load};
 use crate::ConditionalWrite::Applied;
+use crate::TransactionVending as _;
+use crate::db_read::PgPoolReader;
 use crate::resource_pool::{allocate, allocate_exact, populate, release, stats};
 use crate::test_support::postgres::wait_for_blocked_query;
 
@@ -312,7 +314,7 @@ async fn integrated_transaction_rollback_restores_inventory_and_allocation_recor
     let limit = NonZeroU16::new(1).unwrap();
     let mut connection = pool.acquire().await?;
     populate(&inventory, &mut connection, vec![1_i64], true).await?;
-    let mut allocation = pool.begin().await?;
+    let mut allocation = pool.txn_begin().await?;
     allocate_exact(&inventory, &mut allocation, OwnerType::Machine, "owner", 1).await?;
     let rolled_back = list(allocation.as_mut(), inventory.name(), None, limit)
         .await?
@@ -324,7 +326,7 @@ async fn integrated_transaction_rollback_restores_inventory_and_allocation_recor
 
     allocate_exact(&inventory, &mut connection, OwnerType::Machine, "owner", 1).await?;
     let retained = list(&pool, inventory.name(), None, limit).await?.remove(0);
-    let mut deletion = pool.begin().await?;
+    let mut deletion = pool.txn_begin().await?;
     assert_eq!(
         release(&inventory, &mut deletion, 1, OwnerType::Machine, "owner").await?,
         Applied(())
@@ -368,7 +370,7 @@ async fn integrated_release_waits_for_reallocation_and_removes_its_record(
 
     // Reusing the same owner means a waiting release still matches the new
     // allocation. Its receipt must be removed along with that inventory claim.
-    let mut reallocation = pool.begin().await?;
+    let mut reallocation = pool.txn_begin().await?;
     assert_eq!(
         release(
             &inventory,
@@ -393,7 +395,12 @@ async fn integrated_release_waits_for_reallocation_and_removes_its_record(
         .await?;
     let release = release(&inventory, &mut connection, 1, OwnerType::Machine, "owner");
     let commit_reallocation = async {
-        wait_for_blocked_query(&pool, reallocation_pid, "UPDATE resource_pool").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            reallocation_pid,
+            "UPDATE resource_pool",
+        )
+        .await;
         reallocation.commit().await?;
         Ok::<_, eyre::Report>(())
     };

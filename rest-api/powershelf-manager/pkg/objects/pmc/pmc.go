@@ -4,6 +4,7 @@
 package pmc
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"regexp"
@@ -122,7 +123,7 @@ func (pmc *PMC) SetVendor(v vendor.VendorCode) error {
 func (pmc *PMC) Patch(to PMC) bool {
 	patched := false
 
-	if strings.Compare(pmc.MAC.String(), to.MAC.String()) == 0 {
+	if bytes.Equal(pmc.MAC, to.MAC) {
 		if to.IP != nil && !pmc.IP.Equal(to.IP) {
 			pmc.IP = to.IP
 			patched = true

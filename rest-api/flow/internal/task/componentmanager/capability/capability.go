@@ -15,6 +15,7 @@ import (
 type Capability string
 
 const (
+	CapabilityComponentReset           Capability = "ComponentReset"
 	CapabilityInjectExpectation        Capability = "InjectExpectation"
 	CapabilityPowerControl             Capability = "PowerControl"
 	CapabilityPowerStatus              Capability = "PowerStatus"
@@ -82,7 +83,7 @@ func (c Capability) String() string {
 // Valid reports whether c is one of the known component manager capabilities.
 func (c Capability) Valid() bool {
 	switch c {
-	case CapabilityInjectExpectation,
+	case CapabilityComponentReset, CapabilityInjectExpectation,
 		CapabilityPowerControl,
 		CapabilityPowerStatus,
 		CapabilityFirmwareControl,

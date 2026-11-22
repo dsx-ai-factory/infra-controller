@@ -22,8 +22,8 @@ use carbide_uuid::infiniband::IBPartitionId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, Row};
 
 use crate::StateSla;
 use crate::controller_outcome::PersistentStateHandlerOutcome;
@@ -41,6 +41,11 @@ pub struct IbPartitionSearchFilter {
     pub tenant_org_id: Option<String>,
     pub name: Option<String>,
 }
+
+/// `PKEY_ALLOCATION_SLOT` identifies a partition's PKey in saved allocation
+/// requests. Creation and cleanup must use the same slot to retain ownership
+/// across metadata changes and controller restarts.
+pub const PKEY_ALLOCATION_SLOT: &str = "pkey";
 
 /// Represents an InfiniBand Partition Key
 /// Partition Keys are 16 bit values valid up to a value of 0x7fff
@@ -70,7 +75,7 @@ impl serde::Serialize for PartitionKey {
     where
         S: serde::Serializer,
     {
-        self.to_string().serialize(s)
+        s.collect_str(self)
     }
 }
 
@@ -79,11 +84,7 @@ impl<'de> serde::Deserialize<'de> for PartitionKey {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-        let str_value = String::deserialize(deserializer)?;
-        let version =
-            PartitionKey::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(version)
+        crate::deserialize_from_str(deserializer)
     }
 }
 
@@ -110,7 +111,7 @@ impl FromStr for PartitionKey {
         // construction path agrees on what a valid pkey is.
         match u16::from_str_radix(p, base) {
             Ok(v) => PartitionKey::try_from(v),
-            Err(_e) => Err(InvalidPartitionKeyError(pkey.to_string())),
+            Err(_e) => Err(InvalidPartitionKeyError(pkey)),
         }
     }
 }
@@ -127,7 +128,7 @@ impl TryFrom<&String> for PartitionKey {
     type Error = InvalidPartitionKeyError;
 
     fn try_from(pkey: &String) -> Result<Self, Self::Error> {
-        PartitionKey::try_from(pkey.to_string())
+        PartitionKey::from_str(pkey)
     }
 }
 
@@ -135,7 +136,7 @@ impl TryFrom<&str> for PartitionKey {
     type Error = InvalidPartitionKeyError;
 
     fn try_from(pkey: &str) -> Result<Self, Self::Error> {
-        PartitionKey::try_from(pkey.to_string())
+        PartitionKey::from_str(pkey)
     }
 }
 
@@ -243,14 +244,18 @@ struct IbPartitionMtuFallback {
     raw_mtu: i32,
 }
 
-/// Keeps SQL NULL `pkey` values unset and rejects invalid PKey, rate-limit,
-/// and service-level integers with a `sqlx::Error::ColumnDecode` containing
-/// the column and original error. In the scalar `mtu` column, `2048` and `4096`
-/// decode as `2` and `4`; canonical `2` and `4` are unchanged. Other integers
-/// use the default MTU (`4`) and emit `ib_partition_mtu_fallback` on every
-/// decode that reaches the fallback, even if a later field fails validation.
-impl<'r> FromRow<'r, PgRow> for IBPartition {
-    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+impl IBPartition {
+    /// Keeps SQL NULL `pkey` values unset and rejects invalid PKey, rate-limit,
+    /// and service-level integers with a `sqlx::Error::ColumnDecode` containing
+    /// the column and original error. In the scalar `mtu` column, `2048` and `4096`
+    /// decode as `2` and `4`; canonical `2` and `4` are unchanged. Other integers
+    /// use the default MTU (`4`) and emit `ib_partition_mtu_fallback` on every
+    /// decode that reaches the fallback, even if a later field fails validation.
+    /// Records fallback through the supplied instrumentation.
+    pub fn from_row(
+        row: &PgRow,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> Result<Self, sqlx::Error> {
         let controller_state: sqlx::types::Json<IBPartitionControllerState> =
             row.try_get("controller_state")?;
         let state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
@@ -298,7 +303,7 @@ impl<'r> FromRow<'r, PgRow> for IBPartition {
                     2 | 2048 => IBMtu(2),
                     4 | 4096 => IBMtu(4),
                     raw_mtu => {
-                        carbide_instrument::emit(IbPartitionMtuFallback {
+                        instrumentation.emit(IbPartitionMtuFallback {
                             ib_partition_id: id,
                             raw_mtu,
                         });
@@ -663,6 +668,54 @@ mod tests {
                 "15" => Fails,
             }
         );
+    }
+
+    #[test]
+    fn partition_key_json_errors_match_former_string_decoder() {
+        struct FormerPartitionKey {
+            _key: PartitionKey,
+        }
+
+        impl<'de> Deserialize<'de> for FormerPartitionKey {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                String::deserialize(deserializer)?
+                    .parse::<PartitionKey>()
+                    .map(|key| Self { _key: key })
+                    .map_err(|error| serde::de::Error::custom(error.to_string()))
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct FormerStatus {
+            #[serde(rename = "pkey")]
+            _pkey: Option<FormerPartitionKey>,
+        }
+
+        fn decode_error<T: serde::de::DeserializeOwned>(json: &str) -> String {
+            serde_json::from_str::<T>(json)
+                .err()
+                .expect("invalid partition key should fail")
+                .to_string()
+        }
+
+        type DecodeFailure = fn(&str) -> String;
+        let cases: [(&str, &str, DecodeFailure, DecodeFailure); 2] = [
+            (
+                "scalar key",
+                r#""nope""#,
+                decode_error::<PartitionKey>,
+                decode_error::<FormerPartitionKey>,
+            ),
+            (
+                "nested status key",
+                r#"{"pkey":"nope"}"#,
+                decode_error::<IBPartitionStatus>,
+                decode_error::<FormerStatus>,
+            ),
+        ];
+        for (scenario, json, current, former) in cases {
+            assert_eq!(current(json), former(json), "{scenario}");
+        }
     }
 
     // ---- IBPartitionControllerState: serde (tagged, lowercase) -------------

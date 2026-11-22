@@ -81,7 +81,7 @@ pub async fn upsert(
 /// consuming `take_by_mac` is the one production flows use; this read is
 /// for inspection (and test assertions).
 pub async fn find_by_mac(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: MacAddress,
     window: Option<chrono::Duration>,
 ) -> Result<Option<String>, DatabaseError> {
@@ -91,7 +91,7 @@ pub async fn find_by_mac(
     sqlx::query_scalar(query)
         .bind(mac_address)
         .bind(window.map(|w| w.num_seconds()))
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -172,6 +172,7 @@ mod tests {
     use sqlx::PgConnection;
 
     use super::{delete_expired, find_by_mac, find_records_by_macs, take_by_mac, upsert};
+    use crate::TransactionVending as _;
 
     fn mac(last: u8) -> MacAddress {
         MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, last])
@@ -194,7 +195,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn upsert_then_find_by_mac_returns_the_retained_id(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
             .await
@@ -213,7 +214,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn upsert_keeps_the_newest_id_for_a_mac(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(txn.as_mut(), mac(1), "NIC.Slot.1-1").await.unwrap();
         upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
@@ -232,7 +233,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn take_by_mac_returns_the_id_and_consumes_the_row(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
             .await
@@ -253,7 +254,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_by_mac_filters_records_aged_past_the_window(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
             .await
@@ -287,7 +288,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn take_by_mac_withholds_a_stale_id_but_still_consumes_the_row(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(txn.as_mut(), mac(1), "NIC.Slot.7-1-1")
             .await
@@ -307,7 +308,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn delete_expired_sweeps_only_aged_rows_and_noops_without_a_window(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(txn.as_mut(), mac(1), "NIC.Slot.1-1").await.unwrap(); // fresh
         upsert(txn.as_mut(), mac(2), "NIC.Slot.2-1").await.unwrap();
@@ -336,7 +337,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_records_by_macs_returns_every_match_including_stale(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let recorded_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
             .fetch_one(txn.as_mut())
             .await

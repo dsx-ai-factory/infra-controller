@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -181,7 +182,7 @@ func validateGeneratedSiteSelections(s *Session, info appcli.GeneratedCommandInf
 // Walk schema-declared fields so opaque labels or payloads named "siteId"
 // are not mistaken for resource references. This also covers bulk requests.
 func generatedBodySiteIDs(body json.RawMessage, fields []appcli.GeneratedCommandBodyFormField) ([]string, error) {
-	body = json.RawMessage(strings.TrimSpace(string(body)))
+	body = bytes.TrimSpace(body)
 	if len(body) > 0 && body[0] == '[' {
 		var items []json.RawMessage
 		err := json.Unmarshal(body, &items)

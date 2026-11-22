@@ -21,6 +21,8 @@
 //! [`SnapshotSink`](crate::snapshot::SnapshotSink).
 
 pub(crate) mod devices;
+pub(crate) mod fixture;
+pub(crate) mod nico_config;
 pub(crate) mod rest_instances;
 pub(crate) mod rest_inventory;
 

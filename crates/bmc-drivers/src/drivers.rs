@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use bmc_platform::{
     Accounts, Attestation, Bios, BmcControl, BootOrder, Capability, Console, Dpu, Firmware,
-    Lockdown, PlatformIdentity, Power, SecureBoot, Storage, SuperNic,
+    Lockdown, PlatformError, PlatformIdentity, Power, SecureBoot, Storage, SuperNic,
 };
 use nv_redfish::core::{ActionError, Bmc};
 use thiserror::Error;
@@ -193,6 +193,7 @@ drivers! {
         HpeIloPower = "hpe-ilo-power" => power::hpe::ilo::IloPower,
         LenovoXccPower = "lenovo-xcc-power" => power::lenovo::xcc::XccPower,
         LiteOnPowerShelfPower = "liteon-power-shelf-power" => power::liteon::power_shelf::LiteOnPowerShelfPower,
+        NvidiaBlueFieldPower = "nvidia-bluefield-power" => power::nvidia::bluefield::BlueFieldPower,
         NvidiaBlueField4Power = "nvidia-bluefield4-power" => power::nvidia::bluefield4::BlueField4Power,
         NvidiaGh200Power = "nvidia-gh200-power" => power::nvidia::openbmc::Gh200Power,
         NvidiaOpenBmcPower = "nvidia-openbmc-power" => power::nvidia::openbmc::OpenBmcPower,
@@ -456,6 +457,15 @@ pub enum CatalogError {
         capability: Capability,
         id: PluginId,
     },
+}
+
+/// Every variant leaves the capability without a driver on this BMC. Startup
+/// validation rejects rules naming the wrong or an unknown driver, and the
+/// runtime logs the specific cause when it binds.
+impl From<CatalogError> for PlatformError {
+    fn from(_: CatalogError) -> Self {
+        Self::Unsupported
+    }
 }
 
 #[cfg(test)]

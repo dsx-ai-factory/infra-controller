@@ -193,12 +193,33 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 		}
 	}
 
-	// Get all machines for Site to allow faster lookups
 	mDAO := cdbm.NewMachineDAO(mm.dbSession)
 
+	// The deletion sweep only considers Machines that existed before this page is applied.
+	// A Machine created later is absent from the Site's inventory without being missing.
+	var siteMachineIDs []string
+	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
+		siteMachineIDs, err = mDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Machine IDs for Site from DB")
+			return err
+		}
+	}
+
+	// Look up only the Machines this page reports. Pages run concurrently, so loading the whole
+	// Site here would make each page's memory grow with the Site's Machine count.
+	pageMachineIDs := []string{}
+	for _, machineInfo := range machineInventory.Machines {
+		if machineInfo.GetMachine().GetId().GetId() != "" {
+			pageMachineIDs = append(pageMachineIDs, machineInfo.GetMachine().GetId().GetId())
+		}
+	}
+
 	filterInput := cdbm.MachineFilterInput{
-		SiteIDs:        []uuid.UUID{site.ID},
-		IncludeDeleted: true,
+		SiteIDs:         []uuid.UUID{site.ID},
+		MachineIDs:      pageMachineIDs,
+		IncludeDeleted:  true,
+		ExcludeMetadata: true,
 	}
 
 	existingMachines, _, err := mDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
@@ -465,38 +486,12 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			}
 
 			if wasDeleted {
-				// The initial inventory lookup may predate another restore and deletion attempt.
-				// Recheck under the row lock before clearing either deletion or quarantine state.
-				existingCloudMachine, err = mDAO.GetByIDWithDeleted(ctx, txn, existingCloudMachine.ID, true)
-				if err != nil {
-					slogger.Error().Err(err).Msg("failed to lock Machine for inventory restoration")
-					_ = txn.Rollback()
-					continue
-				}
-				wasDeleted = existingCloudMachine.Deleted != nil
-				if wasDeleted && site.IsTimeWithinStaleInventoryThreshold(*existingCloudMachine.Deleted) {
-					_ = txn.Rollback()
-					continue
-				}
-			}
-
-			if wasDeleted {
-				// Older writers can soft-delete a row while its Core attempt is unresolved.
-				// A tombstone alone must not release that deletion fence.
-				deletionComplete := existingCloudMachine.IsForceDeletionRequested &&
-					existingCloudMachine.IsForceDeletionComplete && existingCloudMachine.ForceDeletionWorkflowID == nil
-				if existingCloudMachine.IsForceDeletionQuarantined() && !deletionComplete {
-					slogger.Warn().Msg("not restoring Machine with unresolved forced deletion")
-					_ = txn.Rollback()
-					continue
-				}
 				// Restored Machines bypass the staleness check below, since Clear writes the
 				// row this reconcile is about to populate.
 				existingCloudMachine, err = mDAO.Clear(ctx, txn, cdbm.MachineClearInput{
-					MachineID:               existingCloudMachine.ID,
-					Deleted:                 true,
-					Updated:                 &reconcileStamp,
-					ForceDeletionWorkflowID: true,
+					MachineID: existingCloudMachine.ID,
+					Deleted:   true,
+					Updated:   &reconcileStamp,
 				})
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to clear soft-delete timestamp for Machine")
@@ -511,16 +506,6 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 					txn.RollbackWithLog(ctx, slogger)
 					continue
 				}
-			}
-
-			// A retained deletion record belongs to its owners. Present inventory may
-			// predate completion and must not restore usability or erase associations.
-			if !wasDeleted && existingCloudMachine.IsForceDeletionQuarantined() {
-				terr := txn.Rollback()
-				if terr != nil {
-					slogger.Error().Err(terr).Msg("failed to rollback retained Machine inventory transaction")
-				}
-				continue
 			}
 
 			// If the machine was updated at all since this inventory was received, we
@@ -563,13 +548,6 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Status:                &machineStatus,
 				IsMissingOnSite:       cwutil.GetPtr(false),
 				Updated:               &reconcileStamp,
-			}
-
-			if wasDeleted {
-				// Deliberate REST cleanup releases the retained marker. A subsequent
-				// authoritative reappearance can restore the Machine normally.
-				updateInput.IsForceDeletionRequested = cwutil.GetPtr(false)
-				updateInput.IsForceDeletionComplete = cwutil.GetPtr(false)
 			}
 
 			_, serr := mDAO.Update(ctx, txn, updateInput)
@@ -798,13 +776,23 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 	// Set Machine status to error for any machines found in DB but not found in the Site Agent reported inventory
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
 	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
-		for _, existingMachine := range existingMachines {
-			if existingMachine.Deleted != nil {
-				continue
+		missingMachineIDs := []string{}
+		for _, machineID := range siteMachineIDs {
+			if !reportedMachineIDMap[machineID] {
+				missingMachineIDs = append(missingMachineIDs, machineID)
 			}
+		}
 
-			_, found := reportedMachineIDMap[existingMachine.ID]
-			if found {
+		missingMachines, _, merr := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: missingMachineIDs, ExcludeMetadata: true}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if merr != nil {
+			logger.Error().Err(merr).Msg("failed to retrieve missing Machines from DB")
+			return merr
+		}
+
+		for _, existingMachine := range missingMachines {
+			// A Machine created within the inventory interval, such as by the next cycle's first page,
+			// can be absent from an inventory the Site collected before it existed.
+			if site.IsTimeWithinStaleInventoryThreshold(existingMachine.Created) {
 				continue
 			}
 
@@ -812,7 +800,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			slogger := logger.With().Str("Machine ID", existingMachine.ID).Logger()
 
 			status := cdbm.MachineStatusError
-			statusMessage := "Machine is missing on Site"
+			statusMessage := cdbm.MachineStatusMissingOnSiteMessage
 
 			// Update machine status/create status detail if it doesn't have this error recorded already
 			if status == existingMachine.Status {
@@ -1238,7 +1226,7 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = cdbm.MachineStatusReadyMessage
 		case controllerMachineStatePrefixForceDeletion:
 			machineStatus = cdbm.MachineStatusInitializing
-			statusMessage = "Machine is being force deleted"
+			statusMessage = cdbm.MachineStatusForceDeletionMessage
 		case controllerMachineStatePrefixDecommissioning:
 			if controllerMachineSubstate == controllerMachineDecommissioningSubstateDecommissioned {
 				machineStatus = cdbm.MachineStatusDecommissioned
@@ -1269,7 +1257,7 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			}
 		case controllerMachineStateMissing:
 			machineStatus = cdbm.MachineStatusError
-			statusMessage = "Machine is missing on Site"
+			statusMessage = cdbm.MachineStatusMissingOnSiteMessage
 		default:
 			logger.Warn().Str("Machine State", controllerMachine.State).Msg("Received unrecognized Machine state from Site Controller")
 			machineStatus = cdbm.MachineStatusUnknown

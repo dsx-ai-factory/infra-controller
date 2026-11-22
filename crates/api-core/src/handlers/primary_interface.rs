@@ -346,7 +346,7 @@ pub(super) async fn update_primary_interface_from_scout(
         });
     };
     let candidate_interface_id = comparison.candidate_interface_id();
-    comparison.emit(&host_machine_id);
+    comparison.emit(&api.instrumentation, &host_machine_id);
 
     // Then, stop before taking update locks unless this report can drive enabled reconciliation.
     let source_is_replaceable = machine
@@ -466,7 +466,7 @@ async fn select_primary_interface_from_scout<'a>(
     // Site Explorer plans it while holding the admin segments, and this transaction holds them
     // exclusively, so the read below is stable.
     let has_primary_prediction =
-        db::predicted_machine_interface::find_by_machine_id(txn, &host_machine_id)
+        db::predicted_machine_interface::find_by_machine_id(&mut *txn, &host_machine_id)
             .await?
             .iter()
             .any(|prediction| prediction.primary_interface);

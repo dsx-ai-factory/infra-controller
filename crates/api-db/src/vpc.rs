@@ -14,21 +14,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::HashMap;
 use std::ops::DerefMut;
 
 use carbide_uuid::DbTable;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
+use model::dns::DnsZone;
 use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, PowerResourceGroupUpdate, UpdateVpc, UpdateVpcVirtualization,
     Vpc, VpcStatus,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter, network_segment, vpc};
 use crate::db_read::DbReader;
+use crate::dns::zone::DbDnsZone;
 use crate::{DatabaseError, DatabaseResult};
+
+pub mod creation;
 
 #[cfg(test)]
 mod test_explicit_columns;
@@ -75,8 +80,8 @@ pub async fn persist(
         "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
-                slaac_enabled)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                slaac_enabled, dhcp_option_set_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING {}",
         Vpc::db_table_columns(),
     );
@@ -95,6 +100,7 @@ pub async fn persist(
         .bind(sqlx::types::Json(&status))
         .bind(value.power_resource_group)
         .bind(value.slaac_enabled)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
@@ -254,7 +260,34 @@ pub async fn find_by_id_including_deleted(
     .pop())
 }
 
-pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
+/// Returns the private DNS zone of each live VPC in `vpc_ids` that holds one,
+/// keyed by VPC id.
+pub async fn find_private_dns_zones_by_vpc_ids(
+    txn: impl DbReader<'_>,
+    vpc_ids: &[VpcId],
+) -> Result<HashMap<VpcId, DnsZone>, DatabaseError> {
+    let query = format!(
+        "SELECT {} FROM dns_zones
+         WHERE vpc_id = ANY($1) AND EXISTS (
+             SELECT 1 FROM vpcs WHERE vpcs.id = dns_zones.vpc_id AND vpcs.deleted IS NULL)",
+        DbDnsZone::db_table_columns()
+    );
+    let rows = sqlx::query_as::<_, DbDnsZone>(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(vpc_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(&query, e))?;
+
+    let mut zones = HashMap::new();
+    for row in rows {
+        if let Some(vpc_id) = row.vpc_id {
+            zones.insert(vpc_id, DnsZone::try_from(row)?);
+        }
+    }
+    Ok(zones)
+}
+
+pub async fn find_by_vni(conn: impl DbReader<'_>, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
     let query = format!(
         "SELECT {} from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL",
         Vpc::db_table_columns(),
@@ -262,7 +295,7 @@ pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, D
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vni)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -328,7 +361,7 @@ pub async fn change_routing_profile(
 /// Serializes configured VPC insertion for one name across startup instances.
 /// Recheck the name after taking this transaction-scoped lock. API-created
 /// VPCs can still share names and do not participate in this startup-only lock.
-pub async fn lock_initial_name(txn: &mut PgTransaction<'_>, name: &str) -> DatabaseResult<()> {
+pub async fn lock_initial_name(txn: &mut crate::Transaction<'_>, name: &str) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock(hashtextextended('initial-vpc:' || $1, 0))";
     sqlx::query(query)
         .bind(name)
@@ -372,32 +405,17 @@ pub async fn find_by_segment(
 /// If the VPC was already deleted, this returns Ok(`None`), even if historical
 /// records still reference it.
 ///
-/// Use an explicit transaction to keep the VPC row locked from the reference
-/// checks until the deletion is committed or rolled back.
+/// Callers that coordinate VPC-attached child mutations must acquire
+/// [`VpcRowLock::Mutation`] on this VPC before calling this function.
 pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>, DatabaseError> {
-    // Domain creation takes the same lock, so it cannot add a reference
-    // between the checks below and the deletion.
-    let vpcs = find_by_with_lock(
-        &mut *txn,
-        ObjectColumnFilter::One(IdColumn, &id),
-        VpcRowLock::Mutation,
-    )
-    .await?;
-    if vpcs.is_empty() {
-        return Ok(None);
-    }
-
-    // A VPC cannot be deleted while it owns a live domain.
-    let domain_query = "SELECT EXISTS(SELECT 1 FROM domains WHERE vpc_id=$1 AND deleted IS NULL)";
-    let has_domains: bool = sqlx::query_scalar(domain_query)
+    let active_vpc_query = "SELECT EXISTS(SELECT 1 FROM vpcs WHERE id=$1 AND deleted IS NULL)";
+    let is_active: bool = sqlx::query_scalar(active_vpc_query)
         .bind(id)
         .fetch_one(&mut *txn)
         .await
-        .map_err(|error| DatabaseError::query(domain_query, error))?;
-    if has_domains {
-        return Err(DatabaseError::FailedPrecondition(format!(
-            "VPC {id} cannot be deleted while live DNS domains reference it"
-        )));
+        .map_err(|e| DatabaseError::query(active_vpc_query, e))?;
+    if !is_active {
+        return Ok(None);
     }
 
     // Block deletion while any active or soft-deleted prefix row still
@@ -429,7 +447,8 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
         )));
     }
 
-    let instance_config_reference_count = crate::instance::count_vpc_references(txn, &id).await?;
+    let instance_config_reference_count =
+        crate::instance::count_vpc_references(&mut *txn, &id).await?;
     if instance_config_reference_count > 0 {
         return Err(DatabaseError::FailedPrecondition(format!(
             "VPC {id} cannot be deleted while {instance_config_reference_count} instance network configurations still reference it"
@@ -481,6 +500,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 labels=$5::json,
                 routing_profile_overrides=COALESCE($6::jsonb, routing_profile_overrides),
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
+                dhcp_option_set_id=$11,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
             RETURNING {}",
@@ -510,6 +530,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
         .bind(power_resource_group)
         .bind(value.id)
         .bind(current_version)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await;
 
@@ -529,9 +550,9 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
 
 pub async fn update_virtualization(
     value: &UpdateVpcVirtualization,
-    // Note: This is a PgTransaction, not a PgConnection, because we will be doing table locking,
+    // Note: This is a crate::Transaction, not a PgConnection, because we will be doing table locking,
     // which must happen in a transaction.
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<Vpc> {
     let query = format!(
         "UPDATE vpcs
@@ -639,6 +660,7 @@ pub async fn increment_vpc_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn routing_profile_migration_preserves_rows_and_active_vni_uniqueness(
@@ -700,7 +722,7 @@ mod tests {
     async fn try_delete_ignores_references_to_already_deleted_vpc(pool: sqlx::PgPool) {
         let vpc_id = VpcId::new();
         let machine_id = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query(
             "INSERT INTO vpcs (id, name, version, deleted) \
              VALUES ($1, 'already-deleted-vpc', 'V1-T0', NOW())",
@@ -727,5 +749,52 @@ mod tests {
 
         assert!(try_delete(txn.as_mut(), vpc_id).await.unwrap().is_none());
         txn.rollback().await.unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn find_private_dns_zones_by_vpc_ids_skips_deleted_vpcs(pool: sqlx::PgPool) {
+        // Two live VPCs and a soft-deleted VPC each hold a zone.
+        let (live, deleted, unrequested) = (VpcId::new(), VpcId::new(), VpcId::new());
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, version, deleted) VALUES \
+                 ($1, 'live', 'V1-T0', NULL), ($2, 'deleted', 'V1-T0', NOW()), \
+                 ($3, 'unrequested', 'V1-T0', NULL)",
+        )
+        .bind(live)
+        .bind(deleted)
+        .bind(unrequested)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO dns_zones \
+                 (vpc_id, name, primary_ns, contact, serial, minimum, soa_ttl, default_ttl) \
+             VALUES \
+                 ($1, 'live.example', 'ns.other.test', 'admin.other.test', 7, 30, 900, 60), \
+                 ($2, 'deleted.example', 'ns.other.test', 'admin.other.test', 7, 30, 900, 60), \
+                 ($3, 'unrequested.example', 'ns.other.test', 'admin.other.test', 7, 30, 900, 60)",
+        )
+        .bind(live)
+        .bind(deleted)
+        .bind(unrequested)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let zones = find_private_dns_zones_by_vpc_ids(&pool, &[live, deleted])
+            .await
+            .unwrap();
+
+        // Only the requested live VPC's zone is returned, with each column in its field.
+        assert_eq!(zones.keys().collect::<Vec<_>>(), [&live]);
+        let zone = &zones[&live];
+        assert_eq!(zone.name.as_str(), "live.example.");
+        assert_eq!(zone.vpc_id, Some(live));
+        assert_eq!(
+            zone.soa.to_string(),
+            "ns.other.test. admin.other.test. 7 3600 3600 604800 30"
+        );
+        assert_eq!(zone.soa.ttl.0, 900);
+        assert_eq!(zone.default_ttl.map(|ttl| ttl.as_secs()), Some(60));
     }
 }

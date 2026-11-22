@@ -15,19 +15,20 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use carbide_instrument::{Event, LabelValue, Outcome, emit};
+use carbide_instrument::{Event, LabelValue, Outcome};
+use carbide_tls::client_config::ClientCert;
 use carbide_utils::cmd::TokioCmd;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::machine_validation::MachineValidationId;
 use chrono::Utc;
-use forge_tls::client_config::ClientCert;
-use rpc::forge_tls_client;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_tls_client;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -518,8 +519,8 @@ impl MachineValidation {
     }
     pub(crate) async fn create_forge_client(
         &self,
-    ) -> Result<forge_tls_client::ForgeClientT, MachineValidationError> {
-        let client_config = ForgeClientConfig::new(
+    ) -> Result<carbide_tls_client::CarbideClientT, MachineValidationError> {
+        let client_config = CarbideClientConfig::new(
             self.options.root_ca.clone(),
             Some(ClientCert {
                 cert_path: self.options.client_cert.clone(),
@@ -528,7 +529,7 @@ impl MachineValidation {
         );
         let api_config = ApiConfig::new(&self.options.api, &client_config);
 
-        let client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+        let client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
             .await
             .map_err(|err| MachineValidationError::Generic(err.to_string()))?;
         Ok(client)
@@ -586,6 +587,7 @@ impl MachineValidation {
         self,
         validation_id: MachineValidationId,
         test_id: String,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(MACHINE_VALIDATION_HEARTBEAT_INTERVAL);
@@ -600,7 +602,7 @@ impl MachineValidation {
                         trace!(machine_validation_id = %validation_id, test_id = %test_id, "sent machine validation heartbeat")
                     }
                     Ok(false) => {
-                        emit(MachineValidationHeartbeatFailed::rejected(
+                        instrumentation.emit(MachineValidationHeartbeatFailed::rejected(
                             MachineValidationHeartbeatStage::Periodic,
                             validation_id,
                             test_id,
@@ -608,7 +610,7 @@ impl MachineValidation {
                         return;
                     }
                     Err(e) => {
-                        emit(MachineValidationHeartbeatFailed::rpc(
+                        instrumentation.emit(MachineValidationHeartbeatFailed::rpc(
                             MachineValidationHeartbeatStage::Periodic,
                             validation_id,
                             test_id.clone(),
@@ -704,7 +706,7 @@ impl MachineValidation {
             "Executing machine validation command",
         );
         TokioCmd::new("sh")
-            .args(vec!["-c".to_string(), command_string])
+            .args(["-c", &command_string])
             .timeout(DEFAULT_TIMEOUT)
             .output_with_timeout()
             .await
@@ -921,6 +923,7 @@ impl MachineValidation {
         test: &rpc::forge::MachineValidationTest,
         in_context: String,
         validation_id: MachineValidationId,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> MachineValidationExecution {
         let mut mc_result = rpc::forge::MachineValidationResult {
             test_id: Some(test.test_id.clone()),
@@ -944,7 +947,7 @@ impl MachineValidation {
             ),
             Ok(false) => {
                 let now = Utc::now();
-                emit(MachineValidationHeartbeatFailed::rejected(
+                instrumentation.emit(MachineValidationHeartbeatFailed::rejected(
                     MachineValidationHeartbeatStage::Initial,
                     validation_id,
                     test.test_id.clone(),
@@ -956,17 +959,19 @@ impl MachineValidation {
                 mc_result.exit_code = 0;
                 return MachineValidationExecution::without_heartbeat(mc_result);
             }
-            Err(e) => emit(MachineValidationHeartbeatFailed::rpc(
+            Err(e) => instrumentation.emit(MachineValidationHeartbeatFailed::rpc(
                 MachineValidationHeartbeatStage::Initial,
                 validation_id,
                 test.test_id.clone(),
                 e,
             )),
         }
-        let heartbeat = MachineValidationHeartbeatGuard::new(
-            self.clone()
-                .spawn_machine_validation_heartbeat(validation_id, test.test_id.clone()),
-        );
+        let heartbeat =
+            MachineValidationHeartbeatGuard::new(self.clone().spawn_machine_validation_heartbeat(
+                validation_id,
+                test.test_id.clone(),
+                instrumentation.clone(),
+            ));
         if test.external_config_file.is_some() {
             let file_name = test.external_config_file.clone().unwrap_or_default();
             match self
@@ -991,14 +996,14 @@ impl MachineValidation {
 
         // Check pre_condition
         if test.pre_condition.is_some() {
-            match TokioCmd::new(test.pre_condition.clone().unwrap_or("/bin/true".to_owned()))
+            match TokioCmd::new(test.pre_condition.as_deref().unwrap_or("/bin/true"))
                 .timeout(DEFAULT_TIMEOUT)
-                .env("CONTEXT".to_owned(), in_context.clone())
+                .env("CONTEXT", in_context.as_str())
                 .env(
-                    "MACHINE_VALIDATION_RUN_ID".to_owned(),
-                    validation_id.to_string(),
+                    "MACHINE_VALIDATION_RUN_ID",
+                    validation_id.to_string().as_str(),
                 )
-                .env("MACHINE_ID".to_owned(), machine_id.to_string())
+                .env("MACHINE_ID", machine_id.to_string().as_str())
                 .output_with_timeout()
                 .await
             {
@@ -1032,15 +1037,15 @@ impl MachineValidation {
                 command_string = format!("chroot /host /bin/bash -c \"{command_string}\"");
             }
             let _ = self
-                .pull_container(&test.img_name.clone().unwrap_or_default())
+                .pull_container(test.img_name.as_deref().unwrap_or_default())
                 .await;
-            let ctr_arg = test.container_arg.clone().unwrap_or("".to_string());
+            let ctr_arg = test.container_arg.as_deref().unwrap_or_default();
             command_string = format!(
                 "ctr run --rm --privileged --no-pivot \
                 --mount type=bind,src=/,dst=/host,options=rbind:rw {} \
                 {} runner {}",
                 ctr_arg,
-                test.img_name.clone().unwrap_or_default(),
+                test.img_name.as_deref().unwrap_or_default(),
                 command_string
             );
         };
@@ -1059,25 +1064,27 @@ impl MachineValidation {
                     validation_id.to_string(),
                 );
                 envs.insert("MACHINE_ID".to_owned(), machine_id.to_string());
-                let env_vars = envs
-                    .iter()
-                    .map(|(key, value)| format!("{key}={value}"))
-                    .collect::<Vec<String>>()
-                    .join("\n");
+                let mut env_vars = String::new();
+                for (index, (key, value)) in envs.iter().enumerate() {
+                    if index > 0 {
+                        env_vars.push('\n');
+                    }
+                    write!(env_vars, "{key}={value}").expect("writing to a String cannot fail");
+                }
                 file.write_all(env_vars.as_bytes()).expect("write failed");
             }
             Err(_) => error!("Failed to create file"),
         }
 
         let command_result = TokioCmd::new("sh")
-            .args(vec!["-c".to_string(), command_string])
+            .args(["-c", &command_string])
             .timeout(test.timeout.unwrap_or(7200).try_into().unwrap())
-            .env("CONTEXT".to_owned(), in_context.clone())
+            .env("CONTEXT", in_context.as_str())
             .env(
-                "MACHINE_VALIDATION_RUN_ID".to_owned(),
-                validation_id.to_string(),
+                "MACHINE_VALIDATION_RUN_ID",
+                validation_id.to_string().as_str(),
             )
-            .env("MACHINE_ID".to_owned(), machine_id.to_string())
+            .env("MACHINE_ID", machine_id.to_string().as_str())
             .output_with_timeout()
             .await;
 
@@ -1143,6 +1150,7 @@ impl MachineValidation {
         context: String,
         validation_id: MachineValidationId,
         run_item: PluginRunItem,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> MachineValidationExecution {
         let mut result = rpc::forge::MachineValidationResult {
             test_id: Some(test.test_id.clone()),
@@ -1162,7 +1170,7 @@ impl MachineValidation {
                         .entrypoint
                         .iter()
                         .skip(1)
-                        .cloned()
+                        .map(String::as_str)
                         .collect::<Vec<_>>()
                         .join(" ")
                 })
@@ -1186,17 +1194,19 @@ impl MachineValidation {
                 result.std_err = "Machine validation heartbeat was rejected because run or attempt is no longer active".to_owned();
                 return MachineValidationExecution::without_heartbeat(result);
             }
-            Err(error) => emit(MachineValidationHeartbeatFailed::rpc(
+            Err(error) => instrumentation.emit(MachineValidationHeartbeatFailed::rpc(
                 MachineValidationHeartbeatStage::Initial,
                 validation_id,
                 test.test_id.clone(),
                 error,
             )),
         }
-        let heartbeat = MachineValidationHeartbeatGuard::new(
-            self.clone()
-                .spawn_machine_validation_heartbeat(validation_id, test.test_id.clone()),
-        );
+        let heartbeat =
+            MachineValidationHeartbeatGuard::new(self.clone().spawn_machine_validation_heartbeat(
+                validation_id,
+                test.test_id.clone(),
+                instrumentation.clone(),
+            ));
 
         let started_at = Utc::now();
         let attempt_started = Instant::now();
@@ -1485,6 +1495,12 @@ impl MachineValidation {
         Some((sender, task))
     }
 
+    /// Runs validation with the supplied Event destination.
+    /// Retain its provider until execution and its heartbeat tasks finish.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserve the explicit validation identity and execution options when adding per-run telemetry"
+    )]
     pub async fn run(
         self,
         machine_id: &MachineId,
@@ -1493,6 +1509,7 @@ impl MachineValidation {
         validation_id: MachineValidationId,
         execute_tests_sequentially: bool,
         machine_validation_filter: MachineValidationFilter,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> Result<(), MachineValidationError> {
         if tests.iter().any(|test| test.plugin.is_none()) {
             self.clone().get_container_auth_config().await?;
@@ -1527,6 +1544,7 @@ impl MachineValidation {
                                     context.to_string(),
                                     validation_id,
                                     run_item.clone(),
+                                    instrumentation,
                                 )
                                 .await
                         }
@@ -1562,6 +1580,7 @@ impl MachineValidation {
                             &test,
                             context.to_string(),
                             validation_id,
+                            instrumentation,
                         )
                         .await
                 };
@@ -1570,7 +1589,7 @@ impl MachineValidation {
                 if let Some(heartbeat) = heartbeat {
                     heartbeat.stop().await;
                 }
-                emit(MachineValidationResultPersistenceFinished::from_result(
+                instrumentation.emit(MachineValidationResultPersistenceFinished::from_result(
                     validation_id,
                     test.test_id.clone(),
                     test.name.clone(),
@@ -1586,6 +1605,7 @@ impl MachineValidation {
 
 #[cfg(test)]
 mod tests {
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
     use carbide_uuid::machine::{MachineIdSource, MachineType};
@@ -1633,38 +1653,46 @@ mod tests {
         const RPC_ERROR: &str = "Forge API unavailable";
 
         let machine_validation_id = MachineValidationId::nil();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| match case {
             InstrumentationCase::HeartbeatRejected(stage) => {
-                emit(MachineValidationHeartbeatFailed::rejected(
-                    stage,
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                ));
+                metrics
+                    .instrumentation()
+                    .emit(MachineValidationHeartbeatFailed::rejected(
+                        stage,
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                    ));
             }
             InstrumentationCase::HeartbeatRpc(stage) => {
-                emit(MachineValidationHeartbeatFailed::rpc(
-                    stage,
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                    RPC_ERROR,
-                ));
+                metrics
+                    .instrumentation()
+                    .emit(MachineValidationHeartbeatFailed::rpc(
+                        stage,
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                        RPC_ERROR,
+                    ));
             }
             InstrumentationCase::Persistence(Outcome::Ok) => {
-                emit(MachineValidationResultPersistenceFinished::from_result(
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                    TEST_NAME.to_string(),
-                    &Result::<(), &str>::Ok(()),
-                ));
+                metrics.instrumentation().emit(
+                    MachineValidationResultPersistenceFinished::from_result(
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                        TEST_NAME.to_string(),
+                        &Result::<(), &str>::Ok(()),
+                    ),
+                );
             }
             InstrumentationCase::Persistence(Outcome::Error) => {
-                emit(MachineValidationResultPersistenceFinished::from_result(
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                    TEST_NAME.to_string(),
-                    &Result::<(), &str>::Err(RPC_ERROR),
-                ));
+                metrics.instrumentation().emit(
+                    MachineValidationResultPersistenceFinished::from_result(
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                        TEST_NAME.to_string(),
+                        &Result::<(), &str>::Err(RPC_ERROR),
+                    ),
+                );
             }
         });
 

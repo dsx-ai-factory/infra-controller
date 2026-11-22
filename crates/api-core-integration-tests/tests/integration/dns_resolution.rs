@@ -83,7 +83,6 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
             default_ttl: None,
-            vpc_id: None,
         }))
         .await
         .expect("valid DNS test fixture")
@@ -100,7 +99,6 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
             .create_domain(Request::new(CreateDomainRequest {
                 name: name.to_string(),
                 default_ttl: None,
-                vpc_id: None,
             }))
             .await
             .expect_err("reverse domain writes are rejected");
@@ -138,57 +136,6 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
     );
 }
 
-// Older clients and the legacy adapter omit vpc_id, so updates must keep the
-// stored owner. Supplying a different owner must fail.
-#[sqlx_test]
-async fn test_update_domain_preserves_vpc_ownership(pool: PgPool) {
-    use rpc::dns::{CreateDomainRequest, UpdateDomainRequest};
-
-    let env = TestHarness::builder(pool).build().await;
-    let vpc_id = env.network_controller().create_vpc("dns-owner").await;
-    let api = env.api();
-    let created = api
-        .create_domain(Request::new(CreateDomainRequest {
-            name: "owned.example".to_string(),
-            vpc_id: Some(vpc_id),
-            default_ttl: None,
-        }))
-        .await
-        .expect("create VPC-owned domain")
-        .into_inner();
-    assert_eq!(created.vpc_id, Some(vpc_id));
-
-    let updated = api
-        .update_domain(Request::new(UpdateDomainRequest {
-            domain: Some(rpc::dns::Domain {
-                vpc_id: None,
-                default_ttl: Some(600),
-                ..created
-            }),
-        }))
-        .await
-        .expect("update without changing the owner")
-        .into_inner();
-    assert_eq!(updated.vpc_id, Some(vpc_id));
-
-    let other_vpc = env.network_controller().create_vpc("dns-other").await;
-    let error = api
-        .update_domain(Request::new(UpdateDomainRequest {
-            domain: Some(rpc::dns::Domain {
-                vpc_id: Some(other_vpc),
-                ..updated
-            }),
-        }))
-        .await
-        .expect_err("ownership cannot be reassigned");
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
-    assert!(
-        error.message().contains("VPC ownership"),
-        "expected the ownership rejection, got: {}",
-        error.message()
-    );
-}
-
 // UpdateDomain treats an empty or unchanged name and an absent default_ttl as
 // "keep the stored value", and both Create and Update reject a TTL outside
 // 30..=86400 with INVALID_ARGUMENT before anything is written.
@@ -202,7 +149,6 @@ async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
             default_ttl: Some(600),
-            vpc_id: None,
         }))
         .await
         .expect("create domain with a default TTL")
@@ -237,7 +183,6 @@ async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: "short-ttl.example".to_string(),
             default_ttl: Some(5),
-            vpc_id: None,
         }))
         .await
         .expect_err("TTL below the floor on create");
@@ -356,14 +301,15 @@ async fn test_dns(pool: PgPool) {
         managed_host.first_dpu().id.into(),
     ];
     for machine_id in &machine_ids {
-        let mut txn = env.db_txn().await;
-
         // First, check the BMC record by querying the MachineTopology
         // data for the current machine ID.
         tracing::info!(machine_id = %machine_id, subdomain = %DNS_BMC_SUBDOMAIN, "Checking BMC record");
-        let topologies = db::machine_topology::find_by_machine_ids(&mut txn, &[*machine_id])
-            .await
-            .unwrap();
+        let topologies = db::machine_topology::find_by_machine_ids(
+            &env.api().database_connection,
+            &[*machine_id],
+        )
+        .await
+        .unwrap();
         let topology = &topologies.get(machine_id).unwrap()[0];
         let bmc_record = api
             .lookup_record(Request::new(
@@ -391,9 +337,12 @@ async fn test_dns(pool: PgPool) {
         // And now check the ADM (Admin IP) record by querying the
         // MachineInterface data for the given machineID.
         tracing::info!(machine_id = %machine_id, subdomain = %DNS_ADM_SUBDOMAIN, "Checking ADM record");
-        let interface = db::machine_interface::get_machine_interface_primary(machine_id, &mut txn)
-            .await
-            .unwrap();
+        let interface = db::machine_interface::get_machine_interface_primary(
+            machine_id,
+            &env.api().database_connection,
+        )
+        .await
+        .unwrap();
         let adm_record = api
             .lookup_record(Request::new(
                 rpc::protos::dns::DnsResourceRecordLookupRequest {
@@ -416,7 +365,6 @@ async fn test_dns(pool: PgPool) {
             adm_record.records[0].qtype, "A",
             "ADM record should have qtype A"
         );
-        txn.rollback().await.unwrap();
     }
 
     // Database should ultimately have 10 rows:

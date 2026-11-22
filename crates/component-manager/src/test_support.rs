@@ -8,6 +8,7 @@ use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -65,7 +66,7 @@ pub(crate) fn test_switch_id(label: &str) -> SwitchId {
 pub(crate) async fn seed_test_data(
     pool: &PgPool,
 ) -> (RackId, PowerShelfId, PowerShelfId, SwitchId, SwitchId) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
 
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let rack_profile_id = RackProfileId::new(TEST_RACK_PROFILE_ID);
@@ -252,7 +253,7 @@ async fn seed_bmc_interface(
     .bind(segment_id)
     .bind(mac)
     .bind(hostname)
-    .bind(machine_id.to_string())
+    .bind(machine_id)
     .fetch_one(&mut *txn)
     .await
     .expect("failed to create BMC machine interface");

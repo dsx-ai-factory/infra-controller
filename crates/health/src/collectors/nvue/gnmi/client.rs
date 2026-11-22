@@ -2338,9 +2338,13 @@ mod tests {
             rest: Configurable::Disabled,
             gnmi: Configurable::Enabled(gnmi),
         });
-        let mut context =
-            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics.clone(), Arc::new(config))
-                .unwrap();
+        let mut context = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics.clone(),
+            Arc::new(config),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .unwrap();
         let source = Arc::new(StaticEndpointSource::new(vec![endpoint]));
         let shard = ShardManager {
             shard: 0,
@@ -3133,17 +3137,19 @@ mod tests {
                 },
             ],
             |config| {
-                nvue_subscribe_paths(&config)
-                    .into_iter()
-                    .map(|path| {
-                        path.elem
-                            .into_iter()
-                            .map(|elem| elem.name)
-                            .collect::<Vec<_>>()
-                            .join("/")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",")
+                let mut names = String::new();
+                for (path_index, path) in nvue_subscribe_paths(&config).into_iter().enumerate() {
+                    if path_index > 0 {
+                        names.push(',');
+                    }
+                    for (element_index, element) in path.elem.into_iter().enumerate() {
+                        if element_index > 0 {
+                            names.push('/');
+                        }
+                        names.push_str(&element.name);
+                    }
+                }
+                names
             },
         );
     }
@@ -3162,14 +3168,14 @@ mod tests {
             paths
                 .into_iter()
                 .map(|path| {
-                    format!(
-                        "/{}",
-                        path.elem
-                            .into_iter()
-                            .map(|element| element.name)
-                            .collect::<Vec<_>>()
-                            .join("/")
-                    )
+                    let mut name = String::from("/");
+                    for (index, element) in path.elem.into_iter().enumerate() {
+                        if index > 0 {
+                            name.push('/');
+                        }
+                        name.push_str(&element.name);
+                    }
+                    name
                 })
                 .collect::<Vec<_>>()
         };

@@ -26,10 +26,11 @@ use model::machine::HostMachine;
 use model::network_segment::NetworkSegmentType;
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
-/// Allocate IP's for this network config, filling the InstanceInterfaceConfigs with the newly
-/// allocated IP's.
+/// Fills a workload network configuration with resources using
+/// [`crate::instance_address::allocate`]'s segment admission and reuse rules.
 pub async fn with_allocated_ips(
     value: InstanceNetworkConfig,
     txn: &mut PgConnection,
@@ -42,11 +43,11 @@ pub async fn with_allocated_ips(
 /// Batch find host_inband segments for multiple machines and return a map.
 /// This allows efficient batch processing in batch_allocate_instances.
 pub async fn batch_get_inband_segments_by_machine_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
 ) -> DatabaseResult<HashMap<HostMachineId, Vec<NetworkSegmentId>>> {
     crate::network_segment::batch_find_ids_by_machine_ids(
-        txn,
+        conn,
         machine_ids,
         Some(NetworkSegmentType::HostInband),
     )

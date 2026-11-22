@@ -19,9 +19,11 @@
 //! version selected before dispatch. Saved jobs use their persisted version;
 //! older jobs without one finish enrollment without claiming a site version.
 
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
+use db::TransactionVending as _;
 use db::credential_rotation::CredentialRotationType::HostUefi;
 use db::credential_rotation::device_rotation_status;
 use model::machine::{
@@ -84,7 +86,7 @@ async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
     // The controller reads the vendor from Scout discovery, not exploration.
     let mut hardware_info = mh.host.hardware_info();
     hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true)
         .await
         .unwrap();
@@ -117,6 +119,62 @@ async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
             applies,
         );
     }
+}
+
+/// A Partial status must trigger unlock/reboot before password setup.
+#[sqlx_test]
+async fn lenovo_ami_platform_setup_unlocks_and_reboots_before_password_setup(pool: PgPool) {
+    let mut env = Env::builder(pool.clone()).build().await;
+    let mh = setup_host_with_vendor(&env, bmc_vendor::BMCVendor::LenovoAMI).await;
+    // Start locked so the final state proves that the unlock call ran.
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    mh.advance_state(ManagedHostState::HostInit {
+        machine_state: MachineState::WaitingForPlatformConfiguration { retry_count: 0 },
+    })
+    .await;
+    env.redfish_sim
+        .set_next_lockdown_status(libredfish::Status::build_fake_partial());
+    let checkpoint = env.redfish_sim.timepoint();
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForLockdown {
+                lockdown_info: LockdownInfo {
+                    state: LockdownState::SetLockdown,
+                    mode: LockdownMode::Disable,
+                },
+            },
+        }
+    );
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForLockdown {
+                lockdown_info: LockdownInfo {
+                    state: LockdownState::TimeWaitForDPUDown,
+                    mode: LockdownMode::Disable,
+                },
+            },
+        }
+    );
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&checkpoint)
+            .all_hosts()
+            .contains(&RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ))
+    );
 }
 
 /// A client-creation failure while setting the ingestion BIOS password is
@@ -181,9 +239,8 @@ async fn enrollment_keeps_the_version_sent_while_a_new_target_is_published(pool:
     let mh = setup_host(&env).await;
     let mac = mh.host.machine().await.status.bmc_info.mac.unwrap();
     {
-        let mut conn = pool.acquire().await.unwrap();
         assert!(
-            device_rotation_status(&mut conn, HostUefi, mac)
+            device_rotation_status(&pool, HostUefi, mac)
                 .await
                 .unwrap()
                 .is_none(),
@@ -231,8 +288,7 @@ async fn enrollment_keeps_the_version_sent_while_a_new_target_is_published(pool:
     }
     let machine = mh.host.machine().await;
     assert!(machine.bios_password_set_time.is_some());
-    let mut conn = pool.acquire().await.unwrap();
-    let status = device_rotation_status(&mut conn, HostUefi, mac)
+    let status = device_rotation_status(&pool, HostUefi, mac)
         .await
         .unwrap()
         .unwrap();
@@ -290,8 +346,7 @@ async fn saved_setup_records_the_selected_version_or_an_unknown_legacy_version(p
         env.run_single_iteration().await;
 
         let machine = mh.host.machine().await;
-        let mut conn = pool.acquire().await.unwrap();
-        let status = device_rotation_status(&mut conn, HostUefi, mac)
+        let status = device_rotation_status(&pool, HostUefi, mac)
             .await
             .unwrap()
             .expect("a completed job must enroll the host even if its version is unknown");

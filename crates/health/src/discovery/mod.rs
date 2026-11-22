@@ -31,6 +31,7 @@ pub use context::DiscoveryLoopContext;
 pub(crate) use context::load_nmxc_schema_override;
 pub use iteration::run_discovery_iteration;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::HealthError;
@@ -57,9 +58,9 @@ pub(crate) struct DiscoveryShutdown {
 pub(crate) trait DiscoveryIteration: Send {
     async fn run_once(&mut self) -> Result<(), HealthError>;
 
-    /// Stops every collector this iteration owns; called once, after the loop
-    /// observes cancellation.
-    async fn shutdown(&mut self) -> DiscoveryShutdown {
+    /// Stops every collector this iteration owns, abandoning those still
+    /// running at `deadline`; called once, after the loop returns.
+    async fn shutdown(&mut self, _deadline: Instant) -> DiscoveryShutdown {
         DiscoveryShutdown::default()
     }
 }
@@ -71,15 +72,17 @@ pub(crate) trait DiscoveryIteration: Send {
 /// cadence to `interval`. Collector mode transitions wake the loop before the
 /// scheduled delay expires.
 ///
-/// Cancellation breaks the loop before the next pass and drains collectors
-/// through [`DiscoveryIteration::shutdown`].
-pub(crate) async fn run_discovery_loop(
+/// Cancellation breaks the loop before the next pass and returns `iteration`,
+/// so the caller can run [`DiscoveryIteration::shutdown`] within its own
+/// shutdown deadline.
+pub(crate) async fn run_discovery_loop<I: DiscoveryIteration>(
     interval: Duration,
     backoff_config: BackoffConfig,
     collector_transition_notify: Arc<Notify>,
     cancel_token: CancellationToken,
-    mut iteration: impl DiscoveryIteration,
-) -> DiscoveryShutdown {
+    mut iteration: I,
+    instrumentation: carbide_instrument::Instrumentation,
+) -> I {
     let mut backoff = ExponentialBackoff::new(&backoff_config);
 
     loop {
@@ -89,7 +92,10 @@ pub(crate) async fn run_discovery_loop(
             result = iteration.run_once() => result,
         };
 
-        managed_loop::record_iteration(LoopManager::HealthDiscovery, &result);
+        instrumentation.emit(managed_loop::ManagedLoopIteration::from_result(
+            LoopManager::HealthDiscovery,
+            &result,
+        ));
         let delay = match result {
             Ok(()) => {
                 backoff.reset();
@@ -106,13 +112,11 @@ pub(crate) async fn run_discovery_loop(
         }
     }
 
-    iteration.shutdown().await
+    iteration
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use carbide_instrument::testing::MetricsCapture;
 
     use super::*;
@@ -149,7 +153,10 @@ mod tests {
     /// asserted windows.
     #[tokio::test(start_paused = true)]
     async fn discovery_loop_retries_failures_and_resets_backoff() {
-        let metrics = MetricsCapture::start();
+        let setup =
+            metrics_endpoint::new_metrics_setup("discovery-loop-test", "forge-system", false)
+                .unwrap();
+        let metrics = MetricsCapture::for_registry(&setup.registry);
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
         let collector_transition_notify = Arc::new(Notify::new());
 
@@ -169,6 +176,7 @@ mod tests {
                 calls: 0,
                 times: times_tx,
             },
+            setup.instrumentation,
         ));
 
         let mut times = Vec::new();
@@ -216,7 +224,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn collector_transition_wakes_discovery_before_the_normal_interval() {
-        let _metrics = MetricsCapture::start();
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
         let collector_transition_notify = Arc::new(Notify::new());
 
@@ -230,6 +237,7 @@ mod tests {
                 calls: 0,
                 times: times_tx,
             },
+            carbide_instrument::Instrumentation::noop(),
         ));
 
         let first_iteration = times_rx.recv().await.expect("first iteration should run");
@@ -246,31 +254,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cancellation_stops_the_loop_and_runs_shutdown_once() {
-        let _metrics = MetricsCapture::start();
+    async fn cancellation_stops_the_loop_and_returns_the_iteration() {
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
-        let shutdowns = Arc::new(AtomicUsize::new(0));
-
-        struct CountingShutdown {
-            inner: ScriptedIteration,
-            shutdowns: Arc<AtomicUsize>,
-        }
-
-        #[async_trait]
-        impl DiscoveryIteration for CountingShutdown {
-            async fn run_once(&mut self) -> Result<(), HealthError> {
-                self.inner.run_once().await
-            }
-
-            async fn shutdown(&mut self) -> DiscoveryShutdown {
-                self.shutdowns.fetch_add(1, Ordering::SeqCst);
-                DiscoveryShutdown {
-                    closed: 1,
-                    timed_out: 0,
-                }
-            }
-        }
-
         let cancel_token = CancellationToken::new();
 
         let loop_task = tokio::spawn(run_discovery_loop(
@@ -278,23 +263,19 @@ mod tests {
             BackoffConfig::default(),
             Arc::new(Notify::new()),
             cancel_token.clone(),
-            CountingShutdown {
-                inner: ScriptedIteration {
-                    script: vec![true],
-                    calls: 0,
-                    times: times_tx,
-                },
-                shutdowns: shutdowns.clone(),
+            ScriptedIteration {
+                script: vec![true],
+                calls: 0,
+                times: times_tx,
             },
+            carbide_instrument::Instrumentation::noop(),
         ));
 
         times_rx.recv().await.expect("first iteration runs");
         cancel_token.cancel();
 
-        let shutdown = loop_task.await.expect("loop task joins after cancel");
+        let iteration = loop_task.await.expect("loop task joins after cancel");
 
-        assert_eq!(shutdown.closed, 1);
-        assert_eq!(shutdown.timed_out, 0);
-        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(iteration.calls, 1);
     }
 }

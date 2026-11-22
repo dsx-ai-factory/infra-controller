@@ -17,20 +17,22 @@
 
 //! Handler for [`ManagedHostState::Maintenance`].
 
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use bmc_platform::{PlatformError, ResetType};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
 use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
 use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayResult};
-use db::machine as db_machine;
+use db::{TransactionVending as _, machine as db_machine};
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
-    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
+    AcPowercycleState, DisableOnboardNicsState, FailureCause, FailureDetails, FailureSource,
+    HostMachine, MachineMaintenanceOperation, MachineMaintenanceRequest, ManagedHostState,
+    ManagedHostStateSnapshot, StateMachineArea,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -69,31 +71,42 @@ pub(super) async fn handle_maintenance(
         ));
     }
 
-    match operation {
-        MachineMaintenanceOperation::PowerOn => {
-            handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
-        }
-        MachineMaintenanceOperation::PowerOff { graceful } => {
-            handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
-        }
-        MachineMaintenanceOperation::Reset => {
-            handle_reset(host_machine_id, mh_snapshot, request, ctx).await
-        }
-        MachineMaintenanceOperation::Reboot => {
-            invoke_power_operation(
-                host_machine_id,
-                mh_snapshot,
-                request,
-                ctx,
-                PowerAction::GracefulRestart,
-                "Reboot",
-            )
-            .await
-        }
-        MachineMaintenanceOperation::ChassisReset { chassis_id } => {
-            handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
-        }
-    }
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        request.and_then(|request| request.action_id),
+        async {
+            match operation {
+                MachineMaintenanceOperation::PowerOn => {
+                    handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
+                }
+                MachineMaintenanceOperation::PowerOff { graceful } => {
+                    handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
+                }
+                MachineMaintenanceOperation::Reset { graceful } => {
+                    handle_reset(host_machine_id, mh_snapshot, request, ctx, *graceful).await
+                }
+                MachineMaintenanceOperation::Reboot => {
+                    invoke_power_operation(
+                        host_machine_id,
+                        mh_snapshot,
+                        request,
+                        ctx,
+                        PowerAction::GracefulRestart,
+                    )
+                    .await
+                }
+                MachineMaintenanceOperation::AcPowercycle { state } => {
+                    handle_ac_powercycle(host_machine_id, mh_snapshot, request, ctx, state).await
+                }
+                MachineMaintenanceOperation::ChassisReset { chassis_id } => {
+                    handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id)
+                        .await
+                }
+            }
+        },
+    )
+    .await
 }
 
 async fn handle_power_on(
@@ -103,15 +116,7 @@ async fn handle_power_on(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!(machine_id = %host_machine_id, "Machine maintenance: PowerOn");
-    invoke_power_operation(
-        host_machine_id,
-        mh_snapshot,
-        request,
-        ctx,
-        PowerAction::On,
-        "PowerOn",
-    )
-    .await
+    invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, PowerAction::On).await
 }
 
 async fn handle_power_off(
@@ -127,15 +132,7 @@ async fn handle_power_off(
         PowerAction::ForceOff
     };
     tracing::info!(machine_id = %host_machine_id, graceful, "Machine maintenance: PowerOff");
-    invoke_power_operation(
-        host_machine_id,
-        mh_snapshot,
-        request,
-        ctx,
-        action,
-        "PowerOff",
-    )
-    .await
+    invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, action).await
 }
 
 async fn handle_reset(
@@ -143,17 +140,64 @@ async fn handle_reset(
     mh_snapshot: &ManagedHostStateSnapshot,
     request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    tracing::info!(machine_id = %host_machine_id, "Machine maintenance: Reset");
-    invoke_power_operation(
-        host_machine_id,
-        mh_snapshot,
-        request,
-        ctx,
-        PowerAction::ForceRestart,
-        "Reset",
-    )
-    .await
+    let action = if graceful {
+        PowerAction::GracefulRestart
+    } else {
+        PowerAction::ForceRestart
+    };
+    tracing::info!(machine_id = %host_machine_id, graceful, "Machine maintenance: Reset");
+    invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, action).await
+}
+
+async fn handle_ac_powercycle(
+    host_machine_id: &HostMachineId,
+    snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    state: &AcPowercycleState,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    use super::onboard_nics;
+    let next = match state {
+        AcPowercycleState::PowerCycle => {
+            return invoke_power_operation(
+                host_machine_id,
+                snapshot,
+                request,
+                ctx,
+                PowerAction::AcPowercycle,
+            )
+            .await;
+        }
+        AcPowercycleState::DisableOnboardNics { state } => {
+            match onboard_nics::advance(state, snapshot, ctx).await? {
+                onboard_nics::Progress::Wait => {
+                    return Ok(StateHandlerOutcome::wait(
+                        onboard_nics::WAIT_REASON.to_string(),
+                    ));
+                }
+                onboard_nics::Progress::Next(state) => {
+                    AcPowercycleState::DisableOnboardNics { state }
+                }
+                onboard_nics::Progress::Complete => {
+                    return finish_maintenance(
+                        host_machine_id,
+                        request,
+                        ctx,
+                        ManagedHostState::Ready,
+                    )
+                    .await;
+                }
+            }
+        }
+    };
+    Ok(StateHandlerOutcome::transition(
+        ManagedHostState::Maintenance {
+            operation: MachineMaintenanceOperation::AcPowercycle { state: next },
+            request: request.cloned(),
+        },
+    ))
 }
 
 async fn handle_chassis_reset(
@@ -195,15 +239,14 @@ async fn handle_chassis_reset(
         "Machine maintenance: ChassisReset",
     );
 
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-
-    redfish_client
-        .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
-        .await
-        .map_err(|error| redfish_error("chassis_reset", error))?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+    async {
+        bmc.power()?
+            .chassis_reset(chassis_id, ResetType::ForceRestart)
+            .await
+    }
+    .await
+    .map_err(|error: PlatformError| platform_error("chassis_reset", error))?;
 
     tracing::info!(
         machine_id = %host_machine_id,
@@ -220,13 +263,12 @@ async fn invoke_power_operation(
     request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     action: PowerAction,
-    operation_label: &'static str,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine = &mh_snapshot.host_snapshot;
 
     let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
         StateHandlerError::GenericError(eyre::eyre!(
-            "machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
+            "machine {host_machine_id} maintenance ({action:?}): component manager not configured"
         ))
     })?;
 
@@ -238,9 +280,23 @@ async fn invoke_power_operation(
     .await
     .map_err(|cause| {
         StateHandlerError::GenericError(eyre::eyre!(
-            "machine {host_machine_id} maintenance ({operation_label}): {cause}"
+            "machine {host_machine_id} maintenance ({action:?}): {cause}"
         ))
     })?;
+
+    // An AC Powercycle of Vera Rubin Compute Trays enables all onboard NICs even after we disable
+    // them as part of ingesting the compute trays. Resolve cleanup before issuing the command
+    // so a failed platform check cannot cause a successfully issued AC cycle to be repeated.
+    let restore_onboard_nics =
+        if action == PowerAction::AcPowercycle && mh_snapshot.has_managed_dpus() {
+            let bmc = ctx.services.connect_bmc(machine).await?;
+            let bmc_control = bmc.bmc_control().map_err(|error| {
+                platform_error("controls_host_management_network_access", error.into())
+            })?;
+            super::onboard_nics::isolate(&bmc_control, mh_snapshot).await?
+        } else {
+            false
+        };
 
     match component_manager
         .compute_tray
@@ -257,9 +313,24 @@ async fn invoke_power_operation(
             });
 
             if result.success {
+                if restore_onboard_nics {
+                    return Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::Maintenance {
+                            operation: MachineMaintenanceOperation::AcPowercycle {
+                                state: AcPowercycleState::DisableOnboardNics {
+                                    state: DisableOnboardNicsState::ConfigureOnboardNics {
+                                        enable: true,
+                                    },
+                                },
+                            },
+                            request: request.cloned(),
+                        },
+                    ));
+                }
+
                 tracing::info!(
                     machine_id = %host_machine_id,
-                    operation = operation_label,
+                    operation = ?action,
                     backend = component_manager.compute_tray.name(),
                     "Machine power control succeeded; returning host to Ready"
                 );
@@ -272,25 +343,25 @@ async fn invoke_power_operation(
                 .unwrap_or_else(|| "power control failed".into());
             tracing::warn!(
                 machine_id = %host_machine_id,
-                operation = operation_label,
+                operation = ?action,
                 backend = component_manager.compute_tray.name(),
                 summary = %summary,
                 "Machine power control returned a non-success result",
             );
             Err(StateHandlerError::GenericError(eyre::eyre!(
-                "machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
+                "machine {host_machine_id} maintenance ({action:?}): power control failed: {summary}"
             )))
         }
         Err(error) => {
             tracing::warn!(
                 machine_id = %host_machine_id,
-                operation = operation_label,
+                operation = ?action,
                 backend = component_manager.compute_tray.name(),
                 error = %error,
                 "Machine power control transport error",
             );
             let context = format!(
-                "machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
+                "machine {host_machine_id} maintenance ({action:?}): power control failed: {error}"
             );
             Err(StateHandlerError::GenericError(
                 eyre::Report::new(error).wrap_err(context),
@@ -362,7 +433,12 @@ async fn finish_maintenance(
         return Ok(StateHandlerOutcome::transition(next_state));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     if let db::ConditionalWrite::NotApplied(reason) =
         db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id, request).await?
     {

@@ -30,6 +30,7 @@ use component_manager::compute_tray_manager::{
 use component_manager::error::ComponentManagerError;
 use component_manager::mock::{MockNvSwitchManager, MockPowerShelfManager};
 use component_manager::types::FirmwareUpdateOptions;
+use db::TransactionVending as _;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
@@ -58,6 +59,7 @@ struct BlockedPowerStateCall {
 pub(crate) struct ReconciliationComputeTrayManager {
     outcome: Mutex<BackendOutcome>,
     actions: Mutex<Vec<PowerAction>>,
+    trace_ids: Mutex<Vec<Option<trace_propagation::correlation::TraceId>>>,
     blocked: Mutex<Option<BlockedPowerStateCall>>,
 }
 
@@ -66,6 +68,7 @@ impl ReconciliationComputeTrayManager {
         Self {
             outcome: Mutex::new(BackendOutcome::Success),
             actions: Mutex::new(Vec::new()),
+            trace_ids: Mutex::new(Vec::new()),
             blocked: Mutex::new(None),
         }
     }
@@ -96,6 +99,10 @@ impl ComputeTrayManager for ReconciliationComputeTrayManager {
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
         self.actions.lock().unwrap().push(action);
+        self.trace_ids
+            .lock()
+            .unwrap()
+            .push(trace_propagation::correlation::current_id());
         let blocked = self.blocked.lock().unwrap().take();
         if let Some(blocked) = blocked {
             blocked.entered.send(()).unwrap();
@@ -176,8 +183,10 @@ fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
         MachineMaintenanceOperation::PowerOn => PowerAction::On,
         MachineMaintenanceOperation::PowerOff { graceful: true } => PowerAction::GracefulShutdown,
         MachineMaintenanceOperation::PowerOff { graceful: false } => PowerAction::ForceOff,
-        MachineMaintenanceOperation::Reset => PowerAction::ForceRestart,
-        MachineMaintenanceOperation::Reboot => PowerAction::GracefulRestart,
+        MachineMaintenanceOperation::Reset { graceful: false } => PowerAction::ForceRestart,
+        MachineMaintenanceOperation::AcPowercycle { .. } => PowerAction::AcPowercycle,
+        MachineMaintenanceOperation::Reset { graceful: true }
+        | MachineMaintenanceOperation::Reboot => PowerAction::GracefulRestart,
         MachineMaintenanceOperation::ChassisReset { .. } => {
             unreachable!("chassis resets do not use the compute-tray backend")
         }
@@ -327,7 +336,7 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
         MachineMaintenanceOperation::PowerOn,
         MachineMaintenanceOperation::PowerOff { graceful: true },
         MachineMaintenanceOperation::PowerOff { graceful: false },
-        MachineMaintenanceOperation::Reset,
+        MachineMaintenanceOperation::Reset { graceful: false },
     ] {
         for entry_state in [EntryState::Ready, EntryState::Failed] {
             for backend_outcome in [
@@ -432,7 +441,12 @@ async fn failed_power_operations_retry_after_controller_restart(pool: PgPool) {
             "RMS power operation timed out",
         ),
         (
-            MachineMaintenanceOperation::Reset,
+            MachineMaintenanceOperation::Reset { graceful: false },
+            BackendOutcome::TransportFailure,
+            "test transport failure",
+        ),
+        (
+            MachineMaintenanceOperation::Reset { graceful: true },
             BackendOutcome::TransportFailure,
             "test transport failure",
         ),
@@ -443,9 +457,28 @@ async fn failed_power_operations_retry_after_controller_restart(pool: PgPool) {
         ),
     ] {
         let action = expected_action(operation.clone());
-        enter_requested_state(&env, &host, operation, EntryState::Ready).await;
+        let trace_id = trace_propagation::correlation::TraceId::generate();
+        backend.trace_ids.lock().unwrap().clear();
+        trace_propagation::correlation::scope(
+            trace_id,
+            enter_requested_state(&env, &host, operation, EntryState::Ready),
+        )
+        .await;
         env.run_single_iteration().await;
         let entered = host.host.machine().await;
+        let ManagedHostState::Maintenance {
+            request: Some(ref admitted),
+            ..
+        } = entered.state.value
+        else {
+            panic!("maintenance request must be persisted before execution");
+        };
+        assert_eq!(
+            db::cm_action::trace_id(&pool, admitted.action_id)
+                .await
+                .unwrap(),
+            Some(trace_id)
+        );
         backend.set_outcome(failure);
         env.run_single_iteration().await;
         let failed = host.host.machine().await;
@@ -468,6 +501,10 @@ async fn failed_power_operations_retry_after_controller_restart(pool: PgPool) {
         assert_eq!(completed.state.value, ManagedHostState::Ready);
         assert!(completed.machine_maintenance_requested.is_none());
         assert_eq!(backend.take_actions(), vec![action]);
+        assert_eq!(
+            *backend.trace_ids.lock().unwrap(),
+            vec![Some(trace_id), Some(trace_id)]
+        );
         env.run_single_iteration().await;
         assert!(backend.take_actions().is_empty());
     }
@@ -507,7 +544,7 @@ fn precondition_cases() -> Vec<Case<(MachineMaintenanceOperation, EntryState), O
         MachineMaintenanceOperation::PowerOn,
         MachineMaintenanceOperation::PowerOff { graceful: true },
         MachineMaintenanceOperation::PowerOff { graceful: false },
-        MachineMaintenanceOperation::Reset,
+        MachineMaintenanceOperation::Reset { graceful: false },
     ] {
         for entry_state in [EntryState::Ready, EntryState::Failed] {
             cases.push(Case {
@@ -834,7 +871,7 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
         enter_requested_state(&env, &host, operation.clone(), EntryState::Ready).await;
         env.run_single_iteration().await;
         if legacy {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             db::machine::update_state(
                 &mut txn,
                 &host.host.id,

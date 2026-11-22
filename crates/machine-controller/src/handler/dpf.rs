@@ -23,12 +23,15 @@
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 
+use bmc_platform::{PowerState, ResetType};
 use carbide_dpf::{
     DpfError, DpuDeploymentType, DpuFailureObservation, DpuPhase, DpuPhaseObservation,
     dpu_node_cr_name,
 };
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
-use libredfish::SystemPowerControl;
+use db::TransactionVending as _;
+use itertools::Itertools;
 use model::expected_machine::ExpectedMachine;
 use model::machine::{
     DpfState, DpuInitState, DpuMachine, DpuReprovisionStates, FailureCause, FailureDetails,
@@ -39,14 +42,15 @@ use state_controller::state_handler::{
     ExternalServiceError, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
+use super::handler_host_power_control;
 use super::helpers::{DpuInitStateHelper, ManagedHostStateHelper, ReprovisionStateHelper};
-use super::{handler_host_power_control, host_power_state};
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::DpfOperations;
 use crate::dpf::deployment::{
     DEPLOYMENT_MIGRATION_SOURCE, DEPLOYMENT_MIGRATION_TARGET, consistent_deployment_type,
     deployment_types_for_host,
 };
+use crate::redfish::power_state;
 
 /// Keep suppression and the controller transition in the same transaction, including
 /// exits through reset, restart, and failure handling outside the DPF handlers.
@@ -635,17 +639,14 @@ async fn handle_dpf_handle_reboot(
         ));
     }
 
-    let power_state = {
-        let redfish_client = ctx
-            .services
-            .create_redfish_client_from_machine(&state.host_snapshot)
-            .await?;
-        host_power_state(redfish_client.as_ref()).await?
-    };
+    let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+    let power_state = power_state(&bmc)
+        .await
+        .map_err(|e| platform_error("get_power_state", e))?;
 
     match op {
         PerformPowerOperation::Off => {
-            if power_state == libredfish::PowerState::Off {
+            if power_state == Some(PowerState::Off) {
                 let next = transition_all_dpus_to_dpf_state(
                     DpfState::HandleReboot {
                         op: PerformPowerOperation::On,
@@ -660,7 +661,7 @@ async fn handle_dpf_handle_reboot(
                     retry_count,
                     "Host did not power off; retrying ForceOff"
                 );
-                handler_host_power_control(state, ctx, SystemPowerControl::ForceOff).await?;
+                handler_host_power_control(state, ctx, ResetType::ForceOff).await?;
                 let next = transition_all_dpus_to_dpf_state(
                     DpfState::HandleReboot {
                         op: PerformPowerOperation::Off,
@@ -681,7 +682,7 @@ async fn handle_dpf_handle_reboot(
             }
         }
         PerformPowerOperation::On => {
-            if power_state == libredfish::PowerState::On {
+            if power_state == Some(PowerState::On) {
                 dpf_sdk
                     .reboot_complete(node_name)
                     .await
@@ -701,7 +702,7 @@ async fn handle_dpf_handle_reboot(
                         "Host did not power on; retrying On"
                     );
                 }
-                handler_host_power_control(state, ctx, SystemPowerControl::On).await?;
+                handler_host_power_control(state, ctx, ResetType::On).await?;
                 let next = transition_all_dpus_to_dpf_state(
                     DpfState::HandleReboot {
                         op: PerformPowerOperation::On,
@@ -867,7 +868,7 @@ async fn handle_dpf_waiting_for_ready(
         .await
         .map_err(dpf_error)?
     {
-        handler_host_power_control(state, ctx, SystemPowerControl::ForceOff).await?;
+        handler_host_power_control(state, ctx, ResetType::ForceOff).await?;
         let next = transition_all_dpus_to_dpf_state(
             DpfState::HandleReboot {
                 op: PerformPowerOperation::Off,
@@ -1058,7 +1059,12 @@ async fn handle_dpf_reprovisioning(
         )?;
 
         let outcome = StateHandlerOutcome::transition(next);
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &state.host_snapshot.id)
             .await?;
         return Ok(outcome.with_txn(txn));
@@ -1112,9 +1118,9 @@ pub(super) async fn handle_dpf_state(
                 .dpu_snapshots
                 .iter()
                 .zip(&deployment_types)
-                .map(|(dpu, deployment_type)| format!("{}={deployment_type:?}", dpu.id))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .format_with(", ", |(dpu, deployment_type), f| {
+                    f(&format_args!("{}={deployment_type:?}", dpu.id))
+                });
             let error = format!("{error}: {selections}");
 
             return Ok(dpf_deployment_selection_failed(state, error.as_str()));

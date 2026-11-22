@@ -191,6 +191,18 @@ pub enum CarbideError {
     #[error("resource pool database error: {0}")]
     ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
 
+    /// Pool growth committed, but contention left IPv6 loopback backfill incomplete.
+    #[error("resource pool growth committed; IPv6 loopback backfill is busy")]
+    Ipv6LoopbackBackfillContended {
+        /// The original database error that stopped backfill.
+        #[source]
+        source: Box<DatabaseError>,
+    },
+
+    /// Discovery released its rejected transaction after database contention.
+    #[error("{0}")]
+    DiscoveryContended(String),
+
     /// A remote allocation could not complete; its saved request may need cleanup.
     #[error(transparent)]
     RemoteResourcePool(Box<RemoteResourcePoolError>),
@@ -293,6 +305,17 @@ pub enum CarbideError {
     #[error("{operation} timed out")]
     ResourcePoolDeadlineExceeded {
         /// The local step whose wait budget expired, such as `DPU admin lock admission`.
+        operation: &'static str,
+    },
+
+    /// A reserved MLX command's local database or reply wait expired.
+    #[error(
+        "{operation} timed out for {machine_id}; any saved command remains unresolved until its exact result is recorded"
+    )]
+    MlxCommandDeadlineExceeded {
+        /// Scout targeted by the command.
+        machine_id: carbide_uuid::machine::MachineId,
+        /// The bounded database phase or reply wait.
         operation: &'static str,
     },
 
@@ -483,7 +506,7 @@ impl From<DatabaseError> for CarbideError {
             }
             DatabaseError::ResourcePoolError(e) => e.into(),
             DatabaseError::RpcUuidConversionError(e) => RpcUuidConversionError(e),
-            DatabaseError::Sqlx(e) => DBError(e),
+            DatabaseError::Sqlx(e) => DBError(*e),
             DatabaseError::TenantError(e) => TenantError(e),
             DatabaseError::UuidConversionError(e) => UuidConversionError(e),
             DatabaseError::MaxOneInterfaceAssociation => MaxOneInterfaceAssociation,
@@ -592,9 +615,21 @@ impl OperatorError for CarbideError {
             | CarbideError::TenantSitePrefixQuotaExceeded { .. }
             | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
-            CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
+            CarbideError::UnavailableError(_)
+            | CarbideError::DiscoveryContended(_)
+            | CarbideError::Ipv6LoopbackBackfillContended { .. } => ErrorCode::nico(Api, 503),
             CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
-            CarbideError::ResourcePoolDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
+            CarbideError::ResourcePoolDeadlineExceeded { .. }
+            | CarbideError::MlxCommandDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
+            CarbideError::ResourcePoolRegistration(error) => ErrorCode::nico(
+                Api,
+                match registration_status_code(error) {
+                    tonic::Code::FailedPrecondition => 412,
+                    tonic::Code::Unavailable => 503,
+                    tonic::Code::DeadlineExceeded => 504,
+                    _ => 500,
+                },
+            ),
             CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
                 Api,
                 match remote_resource_pool_status_code(error) {
@@ -624,6 +659,18 @@ impl OperatorError for CarbideError {
             }
             CarbideError::RedfishError(_) | CarbideError::RedfishClientCreation { .. } => {
                 Some("Check BMC reachability, credentials, and Redfish service health.")
+            }
+            CarbideError::Ipv6LoopbackBackfillContended { .. } => Some(
+                "Pool growth has committed. Check the current pool configuration and remaining IPv6 \
+                 loopback assignments before retrying the same growth request after database \
+                 contention clears.",
+            ),
+            CarbideError::ResourcePoolRegistration(_) => Some(
+                "A pool definition may already be saved or acknowledged. Retry the same growth input \
+                 after the reported problem clears. Different input cannot replace a pending definition.",
+            ),
+            CarbideError::DiscoveryContended(_) => {
+                Some("Retry discovery with a fresh request after database contention clears.")
             }
             CarbideError::UnavailableError(_) => Some(
                 "A dependent NICo service is temporarily unavailable. Retry the same request \
@@ -732,6 +779,29 @@ fn remote_resource_pool_status_code(error: &RemoteResourcePoolError) -> tonic::C
     }
 }
 
+/// Registration retries reuse saved input, including after a lost acknowledgement.
+/// Provider credentials and configuration belong to NICo, not the API caller.
+fn registration_status_code(error: &RegistrationError) -> tonic::Code {
+    match error {
+        RegistrationError::Conflict => tonic::Code::FailedPrecondition,
+        RegistrationError::DeadlineExceeded
+        | RegistrationError::Provider(GrpcResourcePoolError::DeadlineExceeded) => {
+            tonic::Code::DeadlineExceeded
+        }
+        RegistrationError::Provider(GrpcResourcePoolError::Rpc(status))
+            if status.code() == tonic::Code::DeadlineExceeded =>
+        {
+            tonic::Code::DeadlineExceeded
+        }
+        RegistrationError::Provider(
+            GrpcResourcePoolError::Busy
+            | GrpcResourcePoolError::Connect(_)
+            | GrpcResourcePoolError::Rpc(_),
+        ) => tonic::Code::Unavailable,
+        _ => tonic::Code::Internal,
+    }
+}
+
 impl From<CarbideError> for tonic::Status {
     /// Maps errors to gRPC responses and operator metadata.
     /// `DBError` uses fixed `Internal` text and `nico-error-text`; the original
@@ -773,6 +843,15 @@ impl From<CarbideError> for tonic::Status {
             e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
             CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
             CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
+            CarbideError::Ipv6LoopbackBackfillContended { source } => {
+                tracing::error!(error = %source, "IPv6 loopback backfill contention");
+                Status::unavailable(error.to_string())
+            }
+            CarbideError::DiscoveryContended(message) => Status::unavailable(message),
+            CarbideError::ResourcePoolRegistration(registration) => Status::new(
+                registration_status_code(registration),
+                registration.to_string(),
+            ),
             CarbideError::RemoteResourcePool(remote) => {
                 Status::new(remote_resource_pool_status_code(remote), remote.to_string())
             }
@@ -804,6 +883,9 @@ impl From<CarbideError> for tonic::Status {
             }
             CarbideError::ResourcePoolDeadlineExceeded { operation } => {
                 Status::deadline_exceeded(format!("{operation} timed out"))
+            }
+            error @ CarbideError::MlxCommandDeadlineExceeded { .. } => {
+                Status::deadline_exceeded(error.to_string())
             }
             CarbideError::PermissionDeniedError(msg) => Status::permission_denied(msg),
             CarbideError::AlreadyInProgress(msg) => Status::already_exists(msg),
@@ -991,6 +1073,29 @@ fn database_domain_status_messages_are_preserved() {
     );
 }
 
+#[tokio::test]
+async fn ipv6_backfill_contention_logs_the_original_database_cause() {
+    let source = DatabaseError::query(
+        "SELECT private_column FROM private_table",
+        sqlx::Error::protocol("private backfill diagnostic"),
+    );
+    let diagnostic = source.to_string();
+    let (status, logs) = carbide_instrument::testing::capture_logs_async(async {
+        tonic::Status::from(CarbideError::Ipv6LoopbackBackfillContended {
+            source: Box::new(source),
+        })
+    })
+    .await;
+
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(!status.message().contains("private"));
+    assert!(logs.iter().any(|log| {
+        log.level == tracing::Level::ERROR
+            && log.message == "IPv6 loopback backfill contention"
+            && log.field("error") == Some(diagnostic.as_str())
+    }));
+}
+
 #[test]
 fn test_dhcp_error_maps_to_resource_exhausted_status() {
     let err = CarbideError::DhcpError(DhcpError::PrefixExhausted(
@@ -1098,6 +1203,8 @@ fn missing_allocation_range_preserves_status_through_wrappers() {
 fn resource_pool_errors_preserve_status() {
     use carbide_test_support::{Check, check_values};
 
+    let registration_mitigation = "A pool definition may already be saved or acknowledged. Retry the same growth input after the reported problem clears. Different input cannot replace a pending definition.";
+
     check_values(
         [
             Check {
@@ -1165,6 +1272,35 @@ fn resource_pool_errors_preserve_status() {
                     tonic::Code::DeadlineExceeded,
                     "NICO-API-504".to_owned(),
                     None,
+                ),
+            },
+            Check {
+                scenario: "a competing definition requires the original growth input",
+                input: CarbideError::from(RegistrationError::Conflict),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    Some(registration_mitigation.to_owned()),
+                ),
+            },
+            Check {
+                scenario: "definition acknowledgement can outlive the caller deadline",
+                input: CarbideError::from(RegistrationError::DeadlineExceeded),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    Some(registration_mitigation.to_owned()),
+                ),
+            },
+            Check {
+                scenario: "an unavailable registration provider preserves retry status",
+                input: CarbideError::from(RegistrationError::Provider(GrpcResourcePoolError::Rpc(
+                    tonic::Status::unavailable("provider unavailable").into(),
+                ))),
+                expect: (
+                    tonic::Code::Unavailable,
+                    "NICO-API-503".to_owned(),
+                    Some(registration_mitigation.to_owned()),
                 ),
             },
             Check {

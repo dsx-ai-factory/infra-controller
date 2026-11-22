@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -64,15 +64,20 @@ pub struct IBFabricManagerImpl {
     /// credentials, endpoint, or on-disk TLS material change; see there for
     /// the full policy.
     rest_clients: ClientCache<String, u64, Arc<dyn IBFabric>>,
+    /// Directory containing the SPIFFE certificate files selected by an empty
+    /// UFM credential. Fixed for the manager's lifetime.
+    spiffe_cert_dir: PathBuf,
 }
 
 /// Fingerprint of everything a REST client is built from by value: the
 /// resolved endpoint and the fabric's credentials. Changed credentials (secret
 /// rotation) produce a new fingerprint and therefore a rebuilt client. A
 /// manager's endpoints are fixed for its lifetime, but the endpoint is hashed
-/// too so the fingerprint covers every by-value input. Certificate material
-/// selected by the credentials lives on disk rather than in them, so the
-/// client cache tracks its rotation separately by modification time.
+/// too so the fingerprint covers every by-value input. The SPIFFE certificate
+/// directory is a fixed path, not an input, so it is not hashed.
+/// Certificate material selected by the credentials lives on disk rather than
+/// in them, so the client cache tracks its rotation separately by modification
+/// time.
 fn fabric_client_fingerprint(endpoint: &str, credentials: &Credentials) -> u64 {
     let mut hasher = DefaultHasher::new();
     endpoint.hash(&mut hasher);
@@ -166,6 +171,7 @@ pub fn create_ib_fabric_manager(
         mock_fabric,
         disable_fabric,
         rest_clients: ClientCache::new(log_tls_material_event),
+        spiffe_cert_dir: PathBuf::from(rest::SPIFFE_CERT_DIR),
     })
 }
 
@@ -181,11 +187,12 @@ impl IBFabricManager for IBFabricManagerImpl {
     /// reads the fabric's credentials from the secret manager -- so rotations
     /// are picked up promptly -- but the client is rebuilt only when that read
     /// returns different credentials, or the fabric's endpoint resolves
-    /// differently, than the cached client was built from. Credentials that
-    /// select certificate authentication name TLS material on disk rather
-    /// than containing it, so a rebuild also happens once any of those files
-    /// is newer than the cached client (certificate rotation), unless another
-    /// is unreadable, such as one missing mid-rotation.
+    /// differently, than the cached client was built from. An empty credential
+    /// selects certificate authentication, whose TLS material is the SPIFFE
+    /// files on disk rather than part of the credential, so a rebuild also
+    /// happens once any of those files is newer than the cached client
+    /// (certificate rotation), unless another is unreadable, such as one
+    /// missing mid-rotation.
     /// [`ClientCache::get_or_build`] owns that lifecycle. Between rebuilds all
     /// callers share one client, whose HTTP pool keeps connections warm across
     /// monitor passes. (`Disable` and `Mock` hand out process-wide shared
@@ -240,14 +247,9 @@ impl IBFabricManager for IBFabricManagerImpl {
                 };
                 // Resolve the auth method once and build from that resolution,
                 // so the client loads exactly the on-disk material (if any)
-                // this call watches for rotation. The resolution stays out of
-                // the fingerprint: while a credential's certificate directory
-                // is briefly missing, the credential resolves to a token with
-                // no material to watch, so a cached certificate client is kept
-                // rather than replaced. A client built during such a gap uses
-                // the path as its token until the directory's files are newer
-                // than it or the credential changes.
-                let auth_method = rest::auth_method(&auth);
+                // this call watches for rotation. Authentication selection
+                // depends only on the credential, which the fingerprint covers.
+                let auth_method = rest::auth_method(&auth, &self.spiffe_cert_dir);
                 let tls_material: Vec<&Path> = match &auth_method {
                     rest::AuthMethod::Cert(cert) => vec![
                         Path::new(&cert.ca_crt),
@@ -276,6 +278,8 @@ mod tests {
     use carbide_secrets::SecretsError;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async, scenarios};
+    use opentelemetry::global;
+    use ufm_mock::{UfmAuthToken, UfmMock, UfmMockConfig};
 
     use super::*;
 
@@ -482,6 +486,117 @@ mod tests {
         create_ib_fabric_manager(reader, config).unwrap()
     }
 
+    /// Verifies manager-built token clients authenticate real mock requests,
+    /// including unchanged directory-shaped tokens and rejected stale credentials.
+    #[tokio::test]
+    async fn manager_token_authentication_works_with_the_ufm_mock() {
+        #[derive(Debug, PartialEq)]
+        enum RequestOutcome {
+            Accepted,
+            AuthenticationFailed,
+        }
+
+        let existing_dir = tempfile::tempdir().expect("temp dir");
+        let existing_path = existing_dir.path().to_string_lossy().into_owned();
+        check_cases_async(
+            [
+                // An ordinary token accepted by UFM must authenticate the request.
+                Case {
+                    scenario: "accepted ordinary token",
+                    input: ("accepted-token".to_string(), "accepted-token".to_string()),
+                    expect: Yields(RequestOutcome::Accepted),
+                },
+                // An existing directory path must be sent unchanged as an accepted token.
+                Case {
+                    scenario: "accepted existing directory path token",
+                    input: (existing_path.clone(), existing_path),
+                    expect: Yields(RequestOutcome::Accepted),
+                },
+                // A stale directory credential must surface UFM's authentication rejection.
+                Case {
+                    scenario: "rejected stale credential",
+                    input: ("stale-credential".to_string(), "accepted-token".to_string()),
+                    expect: Yields(RequestOutcome::AuthenticationFailed),
+                },
+            ],
+            |(credential, accepted_token)| async move {
+                let auth_token =
+                    UfmAuthToken::new(accepted_token).map_err(|error| error.to_string())?;
+                let ufm_mock = UfmMock::new(
+                    &UfmMockConfig::default(),
+                    &auth_token,
+                    &global::meter("ib-fabric-manager-token-authentication-test"),
+                )
+                .map_err(|error| error.to_string())?;
+                let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .map_err(|error| format!("bind UFM mock: {error}"))?;
+                let address = listener
+                    .local_addr()
+                    .map_err(|error| format!("read UFM mock address: {error}"))?;
+                let server =
+                    tokio::spawn(async move { axum::serve(listener, ufm_mock.router()).await });
+                let config = IBFabricManagerConfig {
+                    manager_type: IBFabricManagerType::Rest,
+                    endpoints: HashMap::from([(
+                        "f1".to_string(),
+                        vec![format!("http://{address}")],
+                    )]),
+                    ..Default::default()
+                };
+                let manager = create_ib_fabric_manager(
+                    Arc::new(SwappableCredentialReader::new(&credential)),
+                    config,
+                )
+                .map_err(|error| format!("create manager: {error}"))?;
+                let client = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("create client: {error}"))?;
+
+                let result = client.versions().await;
+                server.abort();
+                match result {
+                    Ok(_) => Ok(RequestOutcome::Accepted),
+                    Err(error) if error.to_string().contains("HTTP error code 401") => {
+                        Ok(RequestOutcome::AuthenticationFailed)
+                    }
+                    Err(error) => Err(format!("unexpected request failure: {error}")),
+                }
+            },
+        )
+        .await;
+    }
+
+    /// Verifies a production manager resolves an empty credential to the fixed
+    /// SPIFFE files, because default authentication must not depend on disk state.
+    #[test]
+    fn production_manager_resolves_the_default_spiffe_material() {
+        let config = IBFabricManagerConfig {
+            manager_type: IBFabricManagerType::Rest,
+            ..Default::default()
+        };
+        let manager =
+            create_ib_fabric_manager(Arc::new(SwappableCredentialReader::new("")), config)
+                .expect("create manager");
+
+        assert_eq!(
+            manager.spiffe_cert_dir,
+            PathBuf::from(rest::SPIFFE_CERT_DIR)
+        );
+        let rest::AuthMethod::Cert(cert) = rest::auth_method("", &manager.spiffe_cert_dir) else {
+            panic!("empty credential must select certificate authentication");
+        };
+        assert_eq!(
+            [cert.ca_crt, cert.tls_key, cert.tls_crt],
+            [
+                format!("{}/ca.crt", rest::SPIFFE_CERT_DIR),
+                format!("{}/tls.key", rest::SPIFFE_CERT_DIR),
+                format!("{}/tls.crt", rest::SPIFFE_CERT_DIR),
+            ]
+        );
+    }
+
     struct BlockedUfmCredentialReader;
 
     #[async_trait]
@@ -499,6 +614,20 @@ mod tests {
         }
     }
 
+    struct FailingCredentialReader;
+
+    #[async_trait]
+    impl CredentialReader for FailingCredentialReader {
+        async fn get_credentials(
+            &self,
+            _key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            Err(SecretsError::GenericError(eyre::eyre!(
+                "simulated credential read failure"
+            )))
+        }
+    }
+
     #[tokio::test]
     async fn blocked_ufm_credential_is_a_configuration_error() {
         let manager = rest_manager(Arc::new(BlockedUfmCredentialReader));
@@ -511,6 +640,76 @@ mod tests {
 
         assert!(matches!(error, IbError::CredentialConfigurationError(_)));
         assert!(error.to_string().contains("credentials.ufm_source"));
+    }
+
+    /// Verifies each remaining REST setup failure keeps its error variant and
+    /// useful context, so callers can distinguish endpoint and credential failures.
+    #[tokio::test]
+    async fn rest_client_setup_failures_preserve_their_context() {
+        #[derive(Clone, Copy, Debug)]
+        enum FailureCase {
+            MissingEndpoint,
+            CredentialReadFailure,
+            MissingCredential,
+        }
+
+        check_cases_async(
+            [
+                // An unknown fabric must report that its endpoint is missing.
+                Case {
+                    scenario: "fabric endpoint is not configured",
+                    input: (FailureCase::MissingEndpoint, "ib_fabric_endpoint not found"),
+                    expect: Yields(("not-found", true)),
+                },
+                // A general secret-manager failure must remain an internal client-creation error.
+                Case {
+                    scenario: "credential reader fails",
+                    input: (
+                        FailureCase::CredentialReadFailure,
+                        "Cannot create UFM client: secret manager error",
+                    ),
+                    expect: Yields(("internal", true)),
+                },
+                // An absent credential must explain that the key or token was not set.
+                Case {
+                    scenario: "credential is absent",
+                    input: (
+                        FailureCase::MissingCredential,
+                        "vault key not found or token is not set",
+                    ),
+                    expect: Yields(("internal", true)),
+                },
+            ],
+            |(case, stable_message)| async move {
+                let (manager, fabric_name) = match case {
+                    FailureCase::MissingEndpoint => (
+                        rest_manager(Arc::new(SwappableCredentialReader::new("token"))),
+                        "missing-fabric",
+                    ),
+                    FailureCase::CredentialReadFailure => {
+                        (rest_manager(Arc::new(FailingCredentialReader)), "f1")
+                    }
+                    FailureCase::MissingCredential => {
+                        (rest_manager(Arc::new(NoopCredentialReader)), "f1")
+                    }
+                };
+                let error = manager
+                    .new_client(fabric_name)
+                    .await
+                    .err()
+                    .ok_or_else(|| format!("{case:?} unexpectedly built a client"))?;
+                let (variant, message) = match error {
+                    IbError::NotFoundError { kind, id } => {
+                        ("not-found", format!("{kind} not found: {id}"))
+                    }
+                    IbError::Internal { message } => ("internal", message),
+                    error => return Err(format!("unexpected error variant: {error}")),
+                };
+
+                Ok::<_, String>((variant, message.contains(stable_message)))
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -546,6 +745,59 @@ mod tests {
         );
     }
 
+    /// Verifies switching between token and certificate authentication rebuilds
+    /// the client, because the credential change must replace the cached method.
+    #[tokio::test]
+    async fn changed_auth_method_rebuilds_the_rest_client() {
+        check_cases_async(
+            [
+                // Switching from a token to an empty password selects certificate authentication.
+                Case {
+                    scenario: "token to certificate authentication",
+                    input: ("token-a", ""),
+                    expect: Yields((true, true, true)),
+                },
+                // Switching from an empty password to a token selects token authentication.
+                Case {
+                    scenario: "certificate to token authentication",
+                    input: ("", "token-a"),
+                    expect: Yields((true, true, true)),
+                },
+            ],
+            |(initial_credential, changed_credential)| async move {
+                let dir = cert_material_dir();
+                let reader = Arc::new(SwappableCredentialReader::new(initial_credential));
+                let mut manager = rest_manager(reader.clone());
+                manager.spiffe_cert_dir = dir.path().to_path_buf();
+
+                let before = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("first build: {error}"))?;
+                let before_again = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("first reuse: {error}"))?;
+                let reused_before_change = Arc::ptr_eq(&before, &before_again);
+
+                reader.rotate(changed_credential);
+                let after = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("rebuild: {error}"))?;
+                let rebuilt = !Arc::ptr_eq(&before, &after);
+                let after_again = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("rebuilt reuse: {error}"))?;
+                let reused_after_change = Arc::ptr_eq(&after, &after_again);
+
+                Ok::<_, String>((reused_before_change, rebuilt, reused_after_change))
+            },
+        )
+        .await;
+    }
+
     #[test]
     fn fingerprint_covers_the_endpoint() {
         let credentials = SwappableCredentialReader::credentials("token-a");
@@ -575,7 +827,7 @@ mod tests {
         );
     }
 
-    /// Certificate-auth credentials name a directory of material files. The
+    /// Certificate authentication loads a directory of material files. The
     /// staleness check only reads mtimes, but building the client opens all
     /// three files and insists the key parses as a PEM private key, so give it
     /// minimal PEM armor (the DER payload is never validated: the empty cert
@@ -592,10 +844,58 @@ mod tests {
         dir
     }
 
+    /// Builds a certificate-auth manager against temporary SPIFFE material so
+    /// rotation can be tested without using the process-wide default files.
     fn cert_manager(dir: &tempfile::TempDir) -> IBFabricManagerImpl {
-        rest_manager(Arc::new(SwappableCredentialReader::new(
-            dir.path().to_str().expect("utf-8 temp path"),
-        )))
+        let mut manager = rest_manager(Arc::new(SwappableCredentialReader::new("")));
+        manager.spiffe_cert_dir = dir.path().to_path_buf();
+        manager
+    }
+
+    /// Verifies missing SPIFFE material names the absent file and fails client
+    /// creation, so certificate authentication cannot silently become token authentication.
+    #[tokio::test]
+    async fn missing_cert_material_fails_with_the_file_name() {
+        check_cases_async(
+            [
+                // A missing trust root must identify the CA certificate.
+                Case {
+                    scenario: "missing CA certificate",
+                    input: "ca.crt",
+                    expect: Yields(()),
+                },
+                // A missing client certificate must identify the identity certificate.
+                Case {
+                    scenario: "missing client certificate",
+                    input: "tls.crt",
+                    expect: Yields(()),
+                },
+                // A missing private key must identify the client key.
+                Case {
+                    scenario: "missing client key",
+                    input: "tls.key",
+                    expect: Yields(()),
+                },
+            ],
+            |missing| async move {
+                let dir = cert_material_dir();
+                std::fs::remove_file(dir.path().join(missing))
+                    .map_err(|error| format!("remove {missing}: {error}"))?;
+                let manager = cert_manager(&dir);
+
+                let error = manager
+                    .new_client("f1")
+                    .await
+                    .err()
+                    .ok_or_else(|| format!("missing {missing} unexpectedly built a client"))?;
+                let message = error.to_string();
+                if !message.contains(missing) {
+                    return Err(format!("error does not name {missing}: {message}"));
+                }
+                Ok::<_, String>(())
+            },
+        )
+        .await;
     }
 
     /// Each certificate file the credentials select is watched: rotating any
@@ -604,16 +904,19 @@ mod tests {
     async fn newer_cert_material_rebuilds_the_client() {
         check_cases_async(
             [
+                // Rotating the trust root must rebuild the TLS configuration.
                 Case {
                     scenario: "rotated CA certificate",
                     input: "ca.crt",
                     expect: Yields((true, true)),
                 },
+                // Rotating the private key must rebuild the client identity.
                 Case {
                     scenario: "rotated client key",
                     input: "tls.key",
                     expect: Yields((true, true)),
                 },
+                // Rotating the client certificate must rebuild the client identity.
                 Case {
                     scenario: "rotated client certificate",
                     input: "tls.crt",

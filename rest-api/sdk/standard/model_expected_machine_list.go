@@ -22,7 +22,7 @@ import (
 // checks if the ExpectedMachineList type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedMachineList{}
 
-// ExpectedMachineList Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+// ExpectedMachineList Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; omitted machines are deleted, and an empty array clears the set. For retained BMC MACs, each entry replaces physical interfaces while preserving stored loopbacks unless its interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true.
 type ExpectedMachineList struct {
 	// ID of the Site whose Expected Machines should be replaced
 	SiteId string `json:"siteId"`

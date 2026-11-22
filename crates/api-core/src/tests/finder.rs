@@ -19,6 +19,7 @@ use common::api_fixtures::{
     FIXTURE_DHCP_RELAY_ADDRESS, TestEnv, create_managed_host, create_managed_host_with_config,
     create_test_env,
 };
+use db::TransactionVending as _;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::IpType;
 use rpc::forge::forge_server::Forge;
@@ -101,7 +102,7 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     .await;
 
     let dpu_machine_id = mh.dpu().id;
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let (mut network_config, version) =
         db::machine::get_network_config(txn.as_mut(), &dpu_machine_id)
             .await?
@@ -161,7 +162,7 @@ async fn test_ip_finder_returns_every_duplicate_overlay_address_owner(
     let env = create_test_env(db_pool.clone()).await;
     let address = "10.20.30.40".parse().unwrap();
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let owners = [
         common::overlay_address::seed_overlay_address_owner(
             txn.as_mut(),
@@ -331,12 +332,7 @@ async fn test_identify_uuid(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     );
 
     // VPC
-    let mut txn = db_pool
-        .clone()
-        .begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    let segment = db::network_segment::find_by_name(&mut txn, "TENANT")
+    let segment = db::network_segment::find_by_name(&db_pool.clone(), "TENANT")
         .await
         .unwrap();
     let req = rpc::forge::IdentifyUuidRequest {
@@ -553,7 +549,7 @@ async fn test_static_bmc_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Re
     let static_ip: IpAddr = "10.178.160.100".parse().unwrap();
     let bmc_mac = "AA:BB:CC:DD:EE:99".parse().unwrap();
 
-    let mut txn = db_pool.begin().await.unwrap();
+    let mut txn = db_pool.txn_begin().await.unwrap();
     db::machine_interface::preallocate_bmc_machine_interface(
         txn.as_mut(),
         bmc_mac,
@@ -607,7 +603,7 @@ async fn test_static_data_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::R
     let nvos_mac = "AA:BB:CC:DD:EE:98".parse().unwrap();
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
-    let mut txn = db_pool.begin().await.unwrap();
+    let mut txn = db_pool.txn_begin().await.unwrap();
     db::machine_interface::preallocate_machine_interface(txn.as_mut(), nvos_mac, static_ip, None)
         .await
         .expect("preallocate static NVOS Data interface");

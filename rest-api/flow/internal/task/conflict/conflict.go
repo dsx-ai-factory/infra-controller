@@ -49,6 +49,8 @@ import (
 // in the same PR after assessing which operations it cannot coexist with.
 var builtinRule = &Rule{ //nolint
 	ConflictingPairs: []Entry{
+		// NVOS and SDN factory resets disrupt the rack fabric and must not overlap another task.
+		{A: OperationSpec{OperationType: string(taskcommon.TaskTypeComponentReset)}, B: OperationSpec{OperationType: "*"}},
 		// PowerShelf power ops block all power ops on the rack: cutting
 		// power to a shelf affects every component.
 		{
@@ -337,6 +339,11 @@ func (r *Resolver) HasConflict(
 	}
 
 	return builtinRule.Conflicts(incoming, activeTasks), nil
+}
+
+// Conflicts reports whether two tasks conflict under the built-in hardware policy.
+func Conflicts(incoming, existing *taskdef.Task) bool {
+	return builtinRule.Conflicts(incoming, []*taskdef.Task{existing})
 }
 
 // HasScheduleConflict reports whether the incoming operation would conflict

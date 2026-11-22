@@ -5,11 +5,13 @@ package core
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,6 +69,9 @@ type HTTPService struct {
 	// CertFile, KeyFile are used if TLS is required.
 	// They point to the corresponding files.
 	CertFile, KeyFile string
+
+	// TLSConfig configures TLS negotiation, including optional client certificates.
+	TLSConfig *tls.Config
 
 	// for internal use
 	isTLS bool
@@ -160,6 +165,7 @@ func (s *HTTPService) Start(ctx context.Context) (net.Listener, error) {
 
 	server := &http.Server{
 		Handler:      s.Router,
+		TLSConfig:    s.TLSConfig,
 		ReadTimeout:  s.ReadTimeout,
 		WriteTimeout: s.WriteTimeout,
 		IdleTimeout:  s.IdleTimeout,
@@ -555,8 +561,11 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 			w := getRRW(rw)
 			defer func() {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
-				for _, count := range counts {
-					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
+				if len(counts) > 0 {
+					statusCode := strconv.Itoa(w.statusCode)
+					for _, count := range counts {
+						count.WithLabelValues(r.URL.Path, r.Method, statusCode).Inc()
+					}
 				}
 				// Return the writer back to the pool
 				putRRW(w)

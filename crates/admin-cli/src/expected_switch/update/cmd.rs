@@ -16,8 +16,8 @@
  */
 
 use eyre::WrapErr;
+use rpc::carbide_api_client::expected_switch_update_mask;
 use rpc::forge::{ExpectedSwitch, ExpectedSwitchRequest, PatchExpectedSwitchRequest};
-use rpc::forge_api_client::expected_switch_update_mask;
 
 use super::args::Args;
 use crate::rpc::{ApiClient, maybe_unimplemented};

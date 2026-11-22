@@ -16,8 +16,11 @@
  */
 use std::default::Default;
 
+use carbide_instrument::testing::MetricsCapture;
 use common::api_fixtures::create_test_env;
-use db::{self};
+use db::{
+    TransactionVending as _, {self},
+};
 use mac_address::MacAddress;
 use model::expected_machine::{
     BmcIpAllocationType, ExpectedInterfaceIpAllocation, ExpectedInterfaceRole, ExpectedMachine,
@@ -34,7 +37,7 @@ use crate::tests::common;
 use crate::tests::common::postgres::wait_for_blocked_query;
 
 async fn create_fixture_expected_machines(pool: &sqlx::PgPool) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     for (bmc_mac_address, serial_number, fallback_dpu_serial_numbers) in [
         ("0a:0b:0c:0d:0e:0f", "VVG121GG", vec![]),
         ("1a:1b:1c:1d:1e:1f", "VVG121GH", vec![]),
@@ -737,6 +740,7 @@ async fn test_add_expected_machine_dpu_serials(pool: sqlx::PgPool) {
         replace_host_nics: false,
         host_lifecycle_profile: None,
         server_name: None,
+        replace_dpu_loopbacks: false,
         #[allow(deprecated)]
         dpf_enabled: true,
     };
@@ -1407,8 +1411,8 @@ async fn test_batch_create_missing_id(pool: sqlx::PgPool) {
 async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
-    let id1 = Uuid::new_v4();
-    let id2 = Uuid::new_v4();
+    let id1 = Uuid::from_u128(1);
+    let id2 = Uuid::from_u128(2);
 
     // Create initial machines
     let create_req = rpc::forge::BatchExpectedMachineOperationRequest {
@@ -1443,6 +1447,7 @@ async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::
                     }),
                     bmc_mac_address: "AA:BB:CC:DD:EE:12".to_string(),
                     bmc_username: "admin1_updated".to_string(),
+                    bmc_ip_address: Some("192.0.2.240".to_string()),
                     bmc_password: "pass1_updated".to_string(),
                     chassis_serial_number: "SERIAL-012".to_string(),
                     metadata: Some(rpc::forge::Metadata::default()),
@@ -1464,6 +1469,7 @@ async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::
         accept_partial_results: false,
     };
 
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let result = env
         .api
         .update_expected_machines(tonic::Request::new(update_req))
@@ -1471,6 +1477,22 @@ async fn test_batch_update_expected_machines_all_or_nothing_failure(pool: sqlx::
 
     // Should fail
     assert!(result.is_err());
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_static_address_preallocations_total",
+            &[("outcome", "created")]
+        ),
+        0.0,
+        "the earlier preallocation must not be counted when the batch rolls back",
+    );
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&env.pool, "AA:BB:CC:DD:EE:12".parse().unwrap())
+            .await
+            .unwrap();
+    assert!(
+        interfaces.is_empty(),
+        "the earlier preallocation must roll back"
+    );
 
     // Verify first machine was NOT updated (transaction rollback)
     let get_req1 = rpc::forge::ExpectedMachineRequest {
@@ -1545,6 +1567,7 @@ async fn test_batch_update_expected_machines_partial_results(pool: sqlx::PgPool)
                     }),
                     bmc_mac_address: "AA:BB:CC:DD:EE:14".to_string(),
                     bmc_username: "admin1_updated".to_string(),
+                    bmc_ip_address: Some("192.0.2.240".to_string()),
                     bmc_password: "pass1_updated".to_string(),
                     chassis_serial_number: "SERIAL-014".to_string(),
                     metadata: Some(rpc::forge::Metadata::default()),
@@ -1577,6 +1600,7 @@ async fn test_batch_update_expected_machines_partial_results(pool: sqlx::PgPool)
         accept_partial_results: true,
     };
 
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     let response = env
         .api
         .update_expected_machines(tonic::Request::new(update_req))
@@ -1588,6 +1612,23 @@ async fn test_batch_update_expected_machines_partial_results(pool: sqlx::PgPool)
     assert!(results[0].success, "First update should succeed");
     assert!(!results[1].success, "Second update should fail");
     assert!(results[2].success, "Third update should succeed");
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_static_address_preallocations_total",
+            &[("outcome", "created")]
+        ),
+        1.0,
+        "the committed preallocation must be counted once despite a later failed item",
+    );
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&env.pool, "AA:BB:CC:DD:EE:14".parse().unwrap())
+            .await
+            .unwrap();
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(
+        interfaces[0].addresses,
+        vec!["192.0.2.240".parse::<std::net::IpAddr>().unwrap()]
+    );
 
     // Verify first machine was updated
     let get_req1 = rpc::forge::ExpectedMachineRequest {
@@ -1694,7 +1735,7 @@ async fn test_concurrent_older_client_update_preserves_interface_fields(
             }))
             .await?;
 
-        let mut blocker = env.pool.begin().await?;
+        let mut blocker = env.pool.txn_begin().await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
@@ -1808,7 +1849,7 @@ async fn test_concurrent_replace_all_preserves_latest_interface_fields(
         }))
         .await?;
 
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -2433,9 +2474,8 @@ async fn test_expected_machine_update_fixed_interface_single_batch_parity(
                 .await?;
         }
 
-        let mut txn = env.pool.begin().await?;
         let interfaces =
-            db::machine_interface::find_by_mac_address(&mut *txn, interface_mac).await?;
+            db::machine_interface::find_by_mac_address(&env.pool, interface_mac).await?;
         assert_eq!(interfaces.len(), 1, "case: {case}");
         assert_eq!(
             interfaces[0].interface_type,
@@ -2446,14 +2486,13 @@ async fn test_expected_machine_update_fixed_interface_single_batch_parity(
         assert_eq!(interfaces[0].addresses, vec![fixed_ip], "case: {case}",);
 
         let addresses =
-            db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+            db::machine_interface_address::find_for_interface(&env.pool, interfaces[0].id).await?;
         assert_eq!(addresses.len(), 1, "case: {case}");
         assert_eq!(
             addresses[0].allocation_type,
             model::allocation_type::AllocationType::Static,
             "case: {case}",
         );
-        txn.rollback().await?;
     }
 
     Ok(())
@@ -2545,6 +2584,7 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
             ..Default::default()
         };
 
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
         let result = if case.use_batch {
             env.api
                 .update_expected_machines(tonic::Request::new(
@@ -2583,10 +2623,24 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
             result?;
         }
 
+        for (outcome, expected) in [
+            ("error", if case.explicit_policy { 1.0 } else { 0.0 }),
+            ("created", if case.explicit_policy { 0.0 } else { 1.0 }),
+        ] {
+            assert_eq!(
+                metrics.counter_delta(
+                    "carbide_static_address_preallocations_total",
+                    &[("outcome", outcome)]
+                ),
+                expected,
+                "case: {}, outcome: {outcome}",
+                case.name,
+            );
+        }
+
         let expected_interface_count = if case.explicit_policy { 0 } else { 1 };
-        let mut txn = env.pool.begin().await?;
         let interfaces =
-            db::machine_interface::find_by_mac_address(&mut *txn, interface_mac).await?;
+            db::machine_interface::find_by_mac_address(&env.pool, interface_mac).await?;
         assert_eq!(
             interfaces.len(),
             expected_interface_count,
@@ -2595,14 +2649,13 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
         );
         if let Some(interface) = interfaces.first() {
             assert_eq!(interface.addresses, vec![fixed_ip], "case: {}", case.name,);
-            let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+            let static_assignments = db::network_segment::static_assignments(&env.pool).await?;
             assert_eq!(
                 interface.segment_id, static_assignments.id,
                 "case: {}",
                 case.name,
             );
         }
-        txn.rollback().await?;
 
         let stored = env
             .api
@@ -2643,7 +2696,7 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
         }))
         .await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let interface = db::machine_interface::find_or_create_observed_machine_interface(
         &mut txn,
         None,
@@ -2683,9 +2736,7 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
         .update_expected_machine(tonic::Request::new(update))
         .await?;
 
-    let mut txn = env.pool.begin().await?;
-    let updated = db::machine_interface::find_one(txn.as_mut(), interface.id).await?;
-    txn.rollback().await?;
+    let updated = db::machine_interface::find_one(&env.pool, interface.id).await?;
     assert_eq!(
         updated.interface_type,
         model::machine_interface::InterfaceType::Bmc,
@@ -2699,7 +2750,7 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
     // interface. This also needs to hold on upgraded sites that do not have
     // the newer static-assignments anchor.
     let external_ip: std::net::IpAddr = "203.0.113.211".parse()?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
     db::network_segment::final_delete(static_assignments.id, &mut txn).await?;
     assert!(
@@ -2733,9 +2784,7 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
         .into_inner();
     assert_eq!(expected.bmc_ip_address, Some(external_ip.to_string()));
 
-    let mut txn = env.pool.begin().await?;
-    let unchanged = db::machine_interface::find_one(txn.as_mut(), interface.id).await?;
-    txn.rollback().await?;
+    let unchanged = db::machine_interface::find_one(&env.pool, interface.id).await?;
     assert_eq!(unchanged.addresses, vec![configured_ip]);
 
     Ok(())
@@ -2879,8 +2928,7 @@ async fn test_add_with_host_nic_fixed_ip_creates_interface(
         }
     }
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, nic_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, nic_mac).await?;
     assert_eq!(
         interfaces.len(),
         1,
@@ -2894,7 +2942,7 @@ async fn test_add_with_host_nic_fixed_ip_creates_interface(
     }
 
     let addrs =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&env.pool, interfaces[0].id).await?;
     assert_eq!(addrs.len(), 2);
     assert!(
         addrs.iter().all(
@@ -3042,13 +3090,13 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
         match change {
             Change::Dynamic | Change::RemoveInterface => {
                 let mut update: rpc::forge::ExpectedMachine = captured.clone().into();
+                let mac_address = declaration.mac_address.unwrap().to_string();
                 if matches!(change, Change::Dynamic) {
                     let interface = update
                         .host_nics
                         .iter_mut()
                         .find(|interface| {
-                            interface.mac_address
-                                == Some(declaration.mac_address.unwrap().to_string())
+                            interface.mac_address.as_deref() == Some(mac_address.as_str())
                         })
                         .expect("the update should contain the expected interface");
                     interface.ip_allocation =
@@ -3056,7 +3104,7 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
                     interface.fixed_ip = None;
                 } else {
                     update.host_nics.retain(|interface| {
-                        interface.mac_address != Some(declaration.mac_address.unwrap().to_string())
+                        interface.mac_address.as_deref() != Some(mac_address.as_str())
                     });
                     update.replace_host_nics = true;
                 }
@@ -3172,7 +3220,7 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
 
         // Stop application at the actual address write, after it has checked
         // the ExpectedMachine. The configuration lock must still be held.
-        let mut blocker = env.pool.begin().await?;
+        let mut blocker = env.pool.txn_begin().await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
@@ -3200,10 +3248,13 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         .await;
 
         let mut update: rpc::forge::ExpectedMachine = captured.into();
+        let expected_mac_address = mac_address.to_string();
         let interface = update
             .host_nics
             .iter_mut()
-            .find(|interface| interface.mac_address == Some(mac_address.to_string()))
+            .find(|interface| {
+                interface.mac_address.as_deref() == Some(expected_mac_address.as_str())
+            })
             .expect("the update should contain the host interface");
         interface.ip_allocation = Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32);
         interface.fixed_ip = None;
@@ -3228,17 +3279,15 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
                 .expect("both application and configuration tasks should finish")??;
         }
 
-        let mut txn = env.pool.begin().await?;
-        let interface = db::machine_interface::find_by_mac_address(&mut *txn, mac_address)
+        let interface = db::machine_interface::find_by_mac_address(&env.pool, mac_address)
             .await?
             .pop()
             .expect("the initial Fixed allocation should create its interface");
         let addresses =
-            db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
-        let updated = db::expected_machine::find_by_id(&mut *txn, id)
+            db::machine_interface_address::find_for_interface(&env.pool, interface.id).await?;
+        let updated = db::expected_machine::find_by_id(&env.pool, id)
             .await?
             .expect("the updated expected machine should exist");
-        txn.rollback().await?;
         assert_eq!(addresses.len(), 1, "case: {case}");
         assert_eq!(addresses[0].address, fixed_ip, "case: {case}");
         assert_eq!(
@@ -3343,13 +3392,11 @@ async fn test_dhcp_discover_preallocates_bmc_ip_for_unknown_mac(
         .await?;
 
     // Add no longer preallocates -- the row should be absent until DHCPDISCOVER fires.
-    let mut txn = env.db_txn().await;
-    let before = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac).await?;
+    let before = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert!(
         before.is_empty(),
         "add does not preallocate inline; the interface should only appear after discover()"
     );
-    txn.commit().await?;
 
     let bmc_mac_str = bmc_mac.to_string();
     let response = env
@@ -3369,8 +3416,7 @@ async fn test_dhcp_discover_preallocates_bmc_ip_for_unknown_mac(
         "BMC DHCP should serve the configured bmc_ip_address, not a dynamic-pool allocation"
     );
 
-    let mut txn = env.db_txn().await;
-    let after = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac).await?;
+    let after = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert_eq!(after.len(), 1, "interface should be created by discover()");
     assert!(
         after[0].addresses.contains(&bmc_ip.parse().unwrap()),
@@ -3418,17 +3464,15 @@ async fn test_dhcp_discover_preallocates_host_nic_fixed_ip_for_unknown_mac(
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let before = db::machine_interface::find_by_mac_address(txn.as_mut(), nic_mac).await?;
+    let before = db::machine_interface::find_by_mac_address(&env.pool, nic_mac).await?;
     assert!(
         before.is_empty(),
         "add does not preallocate inline; the interface should only appear after discover()"
     );
-    txn.commit().await?;
 
     // Fixed preallocation needs an exclusive segment lock. Two requests that
     // first acquire shared locks would deadlock when both try to upgrade.
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_network_segments_exclusive(
         &mut gate,
         std::slice::from_ref(&env.admin_segment()),
@@ -3467,8 +3511,7 @@ async fn test_dhcp_discover_preallocates_host_nic_fixed_ip_for_unknown_mac(
         "host NIC re-DHCP should serve the configured fixed_ip"
     );
 
-    let mut txn = env.db_txn().await;
-    let after = db::machine_interface::find_by_mac_address(txn.as_mut(), nic_mac).await?;
+    let after = db::machine_interface::find_by_mac_address(&env.pool, nic_mac).await?;
     assert_eq!(after.len(), 1, "interface should be created by discover()");
     assert_eq!(
         after[0].interface_type,
@@ -3621,8 +3664,7 @@ async fn test_dhcp_honors_primary_host_nic(
         .await?;
 
     // Verify the created machine_interface is flagged primary=true.
-    let mut txn = env.pool.begin().await?;
-    let ifaces = db::machine_interface::find_by_mac_address(&mut *txn, primary_mac).await?;
+    let ifaces = db::machine_interface::find_by_mac_address(&env.pool, primary_mac).await?;
     assert_eq!(ifaces.len(), 1);
     assert!(
         ifaces[0].primary_interface,
@@ -3692,8 +3734,7 @@ async fn test_dhcp_marks_non_primary_mac_as_non_primary(
         )
         .await?;
 
-    let mut txn = env.pool.begin().await?;
-    let ifaces = db::machine_interface::find_by_mac_address(&mut *txn, other_mac).await?;
+    let ifaces = db::machine_interface::find_by_mac_address(&env.pool, other_mac).await?;
     assert_eq!(ifaces.len(), 1);
     assert!(
         !ifaces[0].primary_interface,
@@ -3873,9 +3914,8 @@ async fn test_declared_primary_survives_dhcp_arrival_order(
             .await?;
     }
 
-    let mut txn = env.pool.begin().await?;
-    let primary = db::machine_interface::find_by_mac_address(&mut *txn, primary_mac).await?;
-    let other = db::machine_interface::find_by_mac_address(&mut *txn, other_mac).await?;
+    let primary = db::machine_interface::find_by_mac_address(&env.pool, primary_mac).await?;
+    let other = db::machine_interface::find_by_mac_address(&env.pool, other_mac).await?;
     assert_eq!(primary.len(), 1);
     assert_eq!(other.len(), 1);
     assert!(
@@ -4561,7 +4601,7 @@ async fn test_host_bmc_compatibility_drift_is_read_and_healed(
         .await?;
 
     // Simulate an older writer that knows only the compatibility columns.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut drifted = db::expected_machine::find_by_id(&mut *txn, id)
         .await?
         .expect("expected machine should exist");
@@ -4603,8 +4643,7 @@ async fn test_host_bmc_compatibility_drift_is_read_and_healed(
         }))
         .await?;
 
-    let mut txn = env.pool.begin().await?;
-    let healed = db::expected_machine::find_by_id(&mut *txn, id)
+    let healed = db::expected_machine::find_by_id(&env.pool, id)
         .await?
         .expect("expected machine should exist");
     let nested = healed
@@ -4723,11 +4762,9 @@ async fn test_host_bmc_updates_preserve_and_reset_compatibility_fixed(
 
         apply_update(update(None)).await?;
 
-        let mut txn = env.pool.begin().await?;
-        let preserved = db::expected_machine::find_by_id(&mut *txn, id)
+        let preserved = db::expected_machine::find_by_id(&env.pool, id)
             .await?
             .expect("expected machine should exist");
-        txn.rollback().await?;
         let preserved_host_bmc = preserved
             .data
             .interfaces
@@ -4757,11 +4794,9 @@ async fn test_host_bmc_updates_preserve_and_reset_compatibility_fixed(
         )))
         .await?;
 
-        let mut txn = env.pool.begin().await?;
-        let reset = db::expected_machine::find_by_id(&mut *txn, id)
+        let reset = db::expected_machine::find_by_id(&env.pool, id)
             .await?
             .expect("expected machine should exist");
-        txn.rollback().await?;
         assert_eq!(
             reset.data.bmc_ip_allocation,
             BmcIpAllocationType::Auto,
@@ -4911,9 +4946,10 @@ async fn test_create_missing_from_preallocates_interfaces(
         },
     };
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     crate::handlers::expected_machine::create_missing_from(
         &mut txn,
+        &env.api.common_pools,
         std::slice::from_ref(&machine),
     )
     .await?;
@@ -4922,11 +4958,9 @@ async fn test_create_missing_from_preallocates_interfaces(
     // Run the same effective-interface path as Site Explorer. The legacy BMC
     // address is intentionally outside every managed prefix, so its inferred
     // HostBmc declaration must retain the static-assignments fallback.
-    let mut txn = env.pool.begin().await?;
-    let stored = db::expected_machine::find_by_bmc_mac_address(&mut *txn, bmc_mac)
+    let stored = db::expected_machine::find_by_bmc_mac_address(&env.pool, bmc_mac)
         .await?
         .expect("expected machine should exist");
-    txn.rollback().await?;
     carbide_site_explorer::try_apply_expected_interface(
         &env.pool,
         &stored,
@@ -4944,9 +4978,8 @@ async fn test_create_missing_from_preallocates_interfaces(
             .await;
     }
 
-    let mut txn = env.pool.begin().await?;
     for (mac, expected_ip) in [(bmc_mac, bmc_ip), (nic_mac, host_ip)] {
-        let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+        let interfaces = db::machine_interface::find_by_mac_address(&env.pool, mac).await?;
         assert_eq!(
             interfaces.len(),
             1,
@@ -4963,19 +4996,432 @@ async fn test_create_missing_from_preallocates_interfaces(
                 model::machine_interface::InterfaceType::Bmc,
             );
             assert!(!interfaces[0].primary_interface);
-            let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+            let static_assignments = db::network_segment::static_assignments(&env.pool).await?;
             assert_eq!(interfaces[0].segment_id, static_assignments.id);
         }
     }
 
     // Re-running create_missing_from with the same input must be a no-op (idempotent).
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     crate::handlers::expected_machine::create_missing_from(
         &mut txn,
+        &env.api.common_pools,
         std::slice::from_ref(&machine),
     )
     .await?;
     txn.commit().await?;
 
     Ok(())
+}
+
+fn dpu_loopback_reservation(
+    mac: &str,
+    v4: Option<&str>,
+    v6: Option<&str>,
+) -> Vec<rpc::forge::ExpectedInterface> {
+    let addresses = v4.into_iter().chain(v6).map(Some).collect::<Vec<_>>();
+    let addresses = if addresses.is_empty() {
+        vec![None]
+    } else {
+        addresses
+    };
+    addresses
+        .into_iter()
+        .map(|ip| rpc::forge::ExpectedInterface {
+            mac_address: Some(mac.to_string()),
+            role: Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32),
+            ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed as i32),
+            fixed_ip: ip.map(str::to_string),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn expected_machine_with_reservations(
+    bmc_mac_address: &str,
+    chassis_serial_number: &str,
+    reservations: Vec<Vec<rpc::forge::ExpectedInterface>>,
+) -> rpc::forge::ExpectedMachine {
+    rpc::forge::ExpectedMachine {
+        bmc_mac_address: bmc_mac_address.to_string(),
+        bmc_username: "ADMIN".into(),
+        bmc_password: "PASS".into(),
+        chassis_serial_number: chassis_serial_number.to_string(),
+        is_dpf_enabled: Some(true),
+        host_nics: reservations.into_iter().flatten().collect(),
+        replace_dpu_loopbacks: true,
+        ..Default::default()
+    }
+}
+
+/// The add handler rejects request-shape errors in a reservation set before any
+/// pool lookup: a reservation with no address, an empty MAC, or a MAC/family or
+/// address repeated within the request.
+#[crate::sqlx_test()]
+async fn add_rejects_malformed_dpu_loopback_reservations(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+
+    let cases: [(&str, Vec<Vec<rpc::forge::ExpectedInterface>>); 4] = [
+        (
+            "reservation with no address",
+            vec![dpu_loopback_reservation("02:00:00:00:00:01", None, None)],
+        ),
+        (
+            "empty MAC",
+            vec![dpu_loopback_reservation("   ", Some("192.0.2.10"), None)],
+        ),
+        (
+            "duplicate MAC and family in request",
+            vec![
+                dpu_loopback_reservation("02:00:00:00:00:01", Some("192.0.2.10"), None),
+                dpu_loopback_reservation("02:00:00:00:00:01", Some("192.0.2.11"), None),
+            ],
+        ),
+        (
+            "duplicate ipv4 in request",
+            vec![
+                dpu_loopback_reservation("02:00:00:00:00:01", Some("192.0.2.10"), None),
+                dpu_loopback_reservation("02:00:00:00:00:02", Some("192.0.2.10"), None),
+            ],
+        ),
+    ];
+
+    for (case, reservations) in cases {
+        let machine =
+            expected_machine_with_reservations("3A:3B:3C:3D:3E:3F", "VVG121GI", reservations);
+        let err = env
+            .api
+            .add_expected_machine(tonic::Request::new(machine))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "case: {case}");
+    }
+}
+
+/// A reserved address must exist in the matching pool, sit in the
+/// non-auto-assign partition, and be free; a free requestable value is
+/// accepted, and re-submitting the identical reservation stays a no-op even
+/// while the pool value is still free.
+#[crate::sqlx_test()]
+async fn dpu_loopback_reservation_pool_membership(pool: sqlx::PgPool) {
+    use std::net::IpAddr;
+
+    use model::resource_pool::OwnerType;
+    use model::test_support::machine_snapshot::dpu_machine_id;
+
+    let env = create_test_env(pool.clone()).await;
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    // One requestable free value, one auto-assign value, one value already
+    // allocated to a different owner.
+    let free: IpAddr = "192.0.2.10".parse().unwrap();
+    let auto_assign: IpAddr = "192.0.2.20".parse().unwrap();
+    let taken: IpAddr = "192.0.2.30".parse().unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![free, taken], false)
+        .await
+        .unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![auto_assign], true)
+        .await
+        .unwrap();
+    let owner = dpu_machine_id(1).to_string();
+    db::resource_pool::allocate_exact(loopback_pool, &mut txn, OwnerType::Machine, &owner, taken)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    // A value outside the pool is rejected as invalid.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:01",
+            "VVG12101",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:03",
+                Some("198.51.100.1"),
+                None,
+            )],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // An auto-assignable value cannot be explicitly reserved.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:02",
+            "VVG12102",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:04",
+                Some("192.0.2.20"),
+                None,
+            )],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // A value already allocated to another DPU is a precondition failure.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:03",
+            "VVG12103",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:05",
+                Some("192.0.2.30"),
+                None,
+            )],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    // A free, requestable value is accepted.
+    env.api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:04",
+            "VVG12104",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:06",
+                Some("192.0.2.10"),
+                None,
+            )],
+        )))
+        .await
+        .expect("a free requestable value must be accepted");
+
+    // A fresh reservation would now fail ownership validation, but replaying
+    // unchanged intent does not revalidate or reassign the live address.
+    let mut txn = pool.txn_begin().await.unwrap();
+    db::resource_pool::allocate_exact(loopback_pool, &mut txn, OwnerType::Machine, &owner, free)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    env.api
+        .update_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:04",
+            "VVG12104",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:06",
+                Some("192.0.2.10"),
+                None,
+            )],
+        )))
+        .await
+        .expect("re-submitting an unchanged reservation must be a no-op");
+}
+
+/// Build a minimal model `ExpectedMachine` (as the `expected_machines.json`
+/// import deserializes) carrying a single DPU loopback reservation.
+fn model_expected_machine_with_reservation(
+    bmc_mac_address: &str,
+    serial_number: &str,
+    reservation: model::expected_machine::DpuLoopbackReservation,
+) -> ExpectedMachine {
+    ExpectedMachine {
+        id: None,
+        bmc_mac_address: bmc_mac_address.parse().unwrap(),
+        data: ExpectedMachineData {
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            serial_number: serial_number.into(),
+            interfaces: reservation.interfaces().collect(),
+            ..Default::default()
+        },
+    }
+}
+
+/// The `expected_machines.json` startup import (`create_missing_from`) runs the
+/// same reservation pool-membership validation as the RPC write paths, so a
+/// reserved address outside its pool is rejected at import rather than persisted
+/// for DPU discovery to fail on later; a free requestable value still imports.
+/// The three rejection reasons themselves are covered at the shared-helper layer
+/// by `dpu_loopback_reservation_pool_membership`.
+#[crate::sqlx_test()]
+async fn create_missing_from_validates_reservation_pool_membership(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool.clone()).await;
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    // Seed one free, requestable loopback value.
+    let free: std::net::IpAddr = "192.0.2.10".parse()?;
+    let mut txn = pool.txn_begin().await?;
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![free], false).await?;
+    txn.commit().await?;
+
+    // An address outside the pool must be rejected at import, not deferred.
+    let outside_pool = model_expected_machine_with_reservation(
+        "1A:1B:1C:1D:1E:01",
+        "VVG12101",
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: "02:00:00:00:00:03".parse().unwrap(),
+            loopback_ipv4: Some("198.51.100.1".parse()?),
+            loopback_ipv6: None,
+        },
+    );
+    let mut txn = pool.txn_begin().await?;
+    let error = crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&outside_pool),
+    )
+    .await
+    .expect_err("an address outside the pool must be rejected at import");
+    assert!(matches!(error, CarbideError::InvalidArgument(_)));
+    txn.rollback().await?;
+
+    // A free, requestable value imports successfully.
+    let valid = model_expected_machine_with_reservation(
+        "1A:1B:1C:1D:1E:02",
+        "VVG12102",
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: "02:00:00:00:00:04".parse().unwrap(),
+            loopback_ipv4: Some("192.0.2.10".parse()?),
+            loopback_ipv6: None,
+        },
+    );
+    let mut txn = pool.txn_begin().await?;
+    crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&valid),
+    )
+    .await
+    .expect("a free requestable value must import");
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// All replacement endpoints preserve an older client's omitted loopbacks and
+/// clear them only when the current client supplies explicit replacement intent.
+#[crate::sqlx_test]
+async fn dpu_loopback_interface_update_compatibility(pool: sqlx::PgPool) {
+    let env = create_test_env(pool.clone()).await;
+    let ip: std::net::IpAddr = "198.51.100.20".parse().unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![ip],
+        false,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    #[derive(Clone, Copy, Debug)]
+    enum Operation {
+        Update,
+        Batch,
+        ReplaceAll,
+    }
+    for operation in [Operation::Update, Operation::Batch, Operation::ReplaceAll] {
+        let mut input = expected_machine_with_reservations(
+            "02:00:00:00:01:01",
+            "LOOPBACK-HOST",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:20",
+                Some("198.51.100.20"),
+                None,
+            )],
+        );
+        input.id = Some(Uuid::new_v4().into());
+        env.api
+            .replace_all_expected_machines(tonic::Request::new(ExpectedMachineList {
+                expected_machines: vec![input.clone()],
+            }))
+            .await
+            .unwrap();
+        let api = &env.api;
+        let apply = |replacement: rpc::forge::ExpectedMachine| async move {
+            match operation {
+                Operation::Update => api
+                    .update_expected_machine(tonic::Request::new(replacement))
+                    .await
+                    .map(|_| ()),
+                Operation::Batch => {
+                    let response = api
+                        .update_expected_machines(tonic::Request::new(
+                            rpc::forge::BatchExpectedMachineOperationRequest {
+                                expected_machines: Some(ExpectedMachineList {
+                                    expected_machines: vec![replacement],
+                                }),
+                                accept_partial_results: false,
+                            },
+                        ))
+                        .await?
+                        .into_inner();
+                    assert!(response.results[0].success);
+                    Ok(())
+                }
+                Operation::ReplaceAll => api
+                    .replace_all_expected_machines(tonic::Request::new(ExpectedMachineList {
+                        expected_machines: vec![replacement],
+                    }))
+                    .await
+                    .map(|_| ()),
+            }
+        };
+        let read = || async {
+            env.api
+                .get_expected_machine(tonic::Request::new(ExpectedMachineRequest {
+                    bmc_mac_address: input.bmc_mac_address.clone(),
+                    id: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+        };
+        let before = read().await;
+        let mut conflicting = input.clone();
+        conflicting.replace_dpu_loopbacks = false;
+        conflicting.host_nics = vec![rpc::forge::ExpectedInterface {
+            mac_address: Some("02:00:00:00:00:20".to_string()),
+            role: Some(rpc::forge::ExpectedInterfaceRole::Host as i32),
+            ..Default::default()
+        }];
+        assert_eq!(
+            apply(conflicting).await.unwrap_err().code(),
+            tonic::Code::InvalidArgument,
+            "{operation:?}: validate physical interfaces with retained loopbacks"
+        );
+        assert_eq!(
+            read().await,
+            before,
+            "{operation:?}: rejected update is atomic"
+        );
+
+        for replace in [false, true] {
+            let mut replacement = input.clone();
+            replacement.host_nics.clear();
+            replacement.replace_dpu_loopbacks = replace;
+            apply(replacement).await.unwrap();
+            let stored = read().await;
+            assert_eq!(
+                stored
+                    .host_nics
+                    .iter()
+                    .filter(
+                        |i| i.role == Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32)
+                    )
+                    .count(),
+                usize::from(!replace),
+                "{operation:?}, replace={replace}"
+            );
+            let json: serde_json::Value = sqlx::query_scalar(
+                "SELECT host_nics FROM expected_machines WHERE bmc_mac_address = $1",
+            )
+            .bind(input.bmc_mac_address.parse::<MacAddress>().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(
+                !json.to_string().contains("dpu_loopback"),
+                "child table is the sole persisted source"
+            );
+        }
+    }
 }

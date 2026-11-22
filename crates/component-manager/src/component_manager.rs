@@ -5,13 +5,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_runtime::DriverConnector;
 use carbide_rack::firmware_object::rack_maintenance_access_token_key;
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use db::{ObjectColumnFilter, WithTransaction};
+use db::{ObjectColumnFilter, TransactionVending, WithTransaction};
 use librms::RmsApi;
 use model::machine::{HostMachine, MachineMaintenanceOperation};
 use model::rack::{MaintenanceActivity, MaintenanceScope, RackState};
@@ -113,7 +114,7 @@ pub struct RackMaintenanceAccessToken<'a> {
 /// This is a free function because the API supports rack maintenance even when
 /// no `ComponentManager` backend is configured.
 pub async fn request_rack_maintenance_via_state_controller(
-    db_pool: &PgPool,
+    transactions: &(impl TransactionVending + Sync),
     rack_id: &RackId,
     scope: MaintenanceScope,
     eligibility: RackMaintenanceEligibility,
@@ -122,7 +123,7 @@ pub async fn request_rack_maintenance_via_state_controller(
     let rack_id = rack_id.clone();
     let transaction_rack_id = rack_id.clone();
 
-    let result = db_pool
+    let result = transactions
         .with_txn(|txn| {
             Box::pin(async move {
                 if !db::rack::lock_for_update(txn.as_mut(), &transaction_rack_id)
@@ -173,18 +174,38 @@ pub async fn request_rack_maintenance_via_state_controller(
                         components: vec![],
                         force_update: false,
                     });
+                let reset_nvos_job = (scope.is_full_rack() || !scope.switch_ids.is_empty())
+                    && (reset_firmware_upgrade_job
+                        || scope.should_run(&MaintenanceActivity::NvosUpdate {
+                            config_json: String::new(),
+                        }));
                 let mut accepted_scope = scope;
                 accepted_scope.requested_at = Some(chrono::Utc::now());
                 let mut config = rack.config;
-                config.maintenance_requested = Some(accepted_scope.clone());
-                db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
+                config.maintenance_requested = Some(accepted_scope);
+                let updated = db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
                     .await
                     .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
+                // Compensation must compare the exact persisted request, including
+                // the action identity assigned by the database layer.
+                let accepted_scope = updated.config.maintenance_requested.ok_or_else(|| {
+                    ComponentManagerError::Internal(
+                        "rack update did not retain the accepted maintenance request".into(),
+                    )
+                })?;
 
                 // Preserve the operator API's existing behavior, and keep this
                 // reset atomic with accepting the maintenance request.
                 if reset_firmware_upgrade_job {
                     db::rack::update_firmware_upgrade_job(txn.as_mut(), &transaction_rack_id, None)
+                        .await
+                        .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
+                }
+
+                // Like hardware job reset, this shares the acceptance transaction.
+                // A later BMC-only request must not inherit an older NVOS failure.
+                if reset_nvos_job {
+                    db::rack::update_nvos_update_job(txn.as_mut(), &transaction_rack_id, None)
                         .await
                         .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
                 }
@@ -219,9 +240,12 @@ pub async fn request_rack_maintenance_via_state_controller(
             )
             .await
     {
-        let recovery =
-            recover_rack_maintenance_after_credential_failure(db_pool, &rack_id, accepted_scope)
-                .await;
+        let recovery = recover_rack_maintenance_after_credential_failure(
+            transactions,
+            &rack_id,
+            accepted_scope,
+        )
+        .await;
         return Err(ComponentManagerError::Internal(match recovery {
             Ok(recovery) => format!(
                 "failed to store rack maintenance access token: {error}; recovery: {recovery:?}"
@@ -244,13 +268,13 @@ enum RackMaintenanceCredentialRecovery {
 }
 
 async fn recover_rack_maintenance_after_credential_failure(
-    db_pool: &PgPool,
+    transactions: &(impl TransactionVending + Sync),
     rack_id: &RackId,
     scheduled_scope: &MaintenanceScope,
 ) -> Result<RackMaintenanceCredentialRecovery, ComponentManagerError> {
     let rack_id = rack_id.clone();
     let scheduled_scope = scheduled_scope.clone();
-    let result = db_pool
+    let result = transactions
         .with_txn(|txn| {
             Box::pin(async move {
                 if !db::rack::lock_for_update(txn.as_mut(), &rack_id)
@@ -307,7 +331,7 @@ async fn recover_rack_maintenance_after_credential_failure(
 impl ComponentManager {
     pub async fn request_switch_maintenance_via_state_controller(
         &self,
-        db_pool: &PgPool,
+        transactions: &(impl TransactionVending + Sync),
         switch_ids: &[SwitchId],
         operation: SwitchMaintenanceOperation,
         initiator: &str,
@@ -321,11 +345,11 @@ impl ComponentManager {
 
         let switch_ids = switch_ids.to_vec();
         let initiator = initiator.to_string();
-        db_pool
+        transactions
             .with_txn(|txn| {
                 Box::pin(async move {
                     let existing = db::switch::find_by(
-                        txn,
+                        txn.as_mut(),
                         db::ObjectColumnFilter::List(db::switch::IdColumn, &switch_ids),
                     )
                     .await
@@ -373,7 +397,7 @@ impl ComponentManager {
 
     pub async fn request_machine_maintenance_via_state_controller(
         &self,
-        db_pool: &PgPool,
+        transactions: &(impl TransactionVending + Sync),
         machine_ids: &[HostMachineId],
         operation: MachineMaintenanceOperation,
         initiator: &str,
@@ -387,7 +411,7 @@ impl ComponentManager {
 
         let machine_ids = machine_ids.to_vec();
         let initiator = initiator.to_string();
-        db_pool
+        transactions
             .with_txn(|txn| {
                 Box::pin(async move {
                     let existing = db::machine::find(
@@ -739,7 +763,13 @@ impl ComponentManager {
 /// Unknown backend names are rejected at config-deserialization time by the
 /// backend enums. When any backend uses RMS, `rack_profiles` must contain the
 /// product-family and vendor data required to build RMS node descriptors before
-/// startup continues.
+/// startup continues. Both Core and RMS compute backends require a Redfish pool
+/// supporting direct authentication; RMS uses it to delegate compute AC cycles.
+/// Backend Events use `instrumentation`; retain its provider until backends stop.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend factory keeps the site runtime dependencies explicit"
+)]
 pub async fn build_component_manager(
     config: &ComponentManagerConfig,
     rack_profiles: RackProfileConfig,
@@ -747,6 +777,8 @@ pub async fn build_component_manager(
     rms_switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: Option<PgPool>,
     redfish_pool: Option<Arc<dyn RedfishClientPool>>,
+    driver_connector: Option<Arc<DriverConnector>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<ComponentManager, ComponentManagerError> {
     validate_rms_backend_rack_profiles(config, &rack_profiles)?;
 
@@ -761,7 +793,12 @@ pub async fn build_component_manager(
                 )
             })?;
             Arc::new(
-                crate::nsm::NsmSwitchBackend::connect(&endpoint.url, endpoint.tls.as_ref()).await?,
+                crate::nsm::NsmSwitchBackend::connect(
+                    &endpoint.url,
+                    endpoint.tls.as_ref(),
+                    instrumentation.clone(),
+                )
+                .await?,
             )
         }
         NvSwitchBackend::Rms => {
@@ -781,6 +818,7 @@ pub async fn build_component_manager(
                 db,
                 rack_profiles.clone(),
                 config.nvos_password_rotation_enabled,
+                instrumentation.clone(),
             ))
         }
         NvSwitchBackend::Mock => Arc::new(crate::mock::MockNvSwitchManager::default()),
@@ -795,8 +833,12 @@ pub async fn build_component_manager(
                 )
             })?;
             Arc::new(
-                crate::psm::PsmPowerShelfBackend::connect(&endpoint.url, endpoint.tls.as_ref())
-                    .await?,
+                crate::psm::PsmPowerShelfBackend::connect(
+                    &endpoint.url,
+                    endpoint.tls.as_ref(),
+                    instrumentation.clone(),
+                )
+                .await?,
             )
         }
         PowerShelfBackend::Rms => {
@@ -816,6 +858,7 @@ pub async fn build_component_manager(
                 db,
                 rack_profiles.clone(),
                 config.nvos_password_rotation_enabled,
+                instrumentation.clone(),
             ))
         }
         PowerShelfBackend::Mock => Arc::new(crate::mock::MockPowerShelfManager),
@@ -833,13 +876,26 @@ pub async fn build_component_manager(
                     "compute_tray_backend is 'rms' but database pool is not configured".into(),
                 )
             })?;
-            Arc::new(crate::rms::RmsBackend::new(
-                client,
-                rms_switch_system_image_client.clone(),
-                db,
-                rack_profiles.clone(),
-                config.nvos_password_rotation_enabled,
-            ))
+            let pool = redfish_pool.clone().ok_or_else(|| {
+                ComponentManagerError::InvalidArgument(
+                    "compute_tray_backend is 'rms' but Redfish client pool is not configured"
+                        .into(),
+                )
+            })?;
+            Arc::new(
+                crate::rms::RmsBackend::new(
+                    client,
+                    rms_switch_system_image_client.clone(),
+                    db.clone(),
+                    rack_profiles.clone(),
+                    config.nvos_password_rotation_enabled,
+                    instrumentation,
+                )
+                .with_core_compute_manager(
+                    crate::core_compute_manager::CoreComputeTrayManager::new(pool)
+                        .with_driver_connector(driver_connector.clone(), db),
+                ),
+            )
         }
         ComputeBackend::Core => {
             let pool = redfish_pool.ok_or_else(|| {
@@ -848,9 +904,16 @@ pub async fn build_component_manager(
                         .into(),
                 )
             })?;
-            Arc::new(crate::core_compute_manager::CoreComputeTrayManager::new(
-                pool,
-            ))
+            let mut manager = crate::core_compute_manager::CoreComputeTrayManager::new(pool);
+            if driver_connector.is_some() {
+                let db = db.clone().ok_or_else(|| {
+                    ComponentManagerError::InvalidArgument(
+                        "bmc_backend is 'drivers' but database pool is not configured".into(),
+                    )
+                })?;
+                manager = manager.with_driver_connector(driver_connector, db);
+            }
+            Arc::new(manager)
         }
         ComputeBackend::Mock => Arc::new(crate::mock::MockComputeTrayManager),
     };
@@ -1132,7 +1195,7 @@ mod tests {
 
     async fn create_rack_in_state(pool: &PgPool, state: RackState) -> RackId {
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let rack = db::rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None)
             .await
             .unwrap();
@@ -1155,15 +1218,11 @@ mod tests {
     }
 
     async fn load_rack(pool: &PgPool, rack_id: &RackId) -> model::rack::Rack {
-        let mut conn = pool.acquire().await.unwrap();
-        db::rack::find_by(
-            conn.as_mut(),
-            ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
-        )
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
+        db::rack::find_by(pool, ObjectColumnFilter::One(db::rack::IdColumn, rack_id))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
     }
 
     fn nmx_scope() -> MaintenanceScope {
@@ -1198,9 +1257,17 @@ mod tests {
         let requested_at = scheduled
             .requested_at
             .expect("acceptance stamps the request time");
+        let action_id = scheduled.action_id.expect("acceptance retains log context");
+        assert!(
+            db::cm_action::trace_id(&pool, Some(action_id))
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             scheduled,
             MaintenanceScope {
+                action_id: Some(action_id),
                 requested_at: Some(requested_at),
                 ..scope.clone()
             },
@@ -1209,7 +1276,7 @@ mod tests {
         // Exact retries are idempotent, including after the rack state has
         // moved on. A different request is busy and cannot replace it.
         let rack = load_rack(&pool, &ready_rack).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
             db::rack::try_update_controller_state(
                 txn.as_mut(),
@@ -1258,6 +1325,7 @@ mod tests {
                 .config
                 .maintenance_requested,
             Some(MaintenanceScope {
+                action_id: Some(action_id),
                 requested_at: Some(requested_at),
                 ..scope
             }),
@@ -1368,12 +1436,22 @@ mod tests {
         // Firmware bookkeeping is cleared in the same transaction that
         // accepts a firmware maintenance request.
         let firmware_rack = create_rack_in_state(&pool, RackState::Ready).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::rack::update_firmware_upgrade_job(
             txn.as_mut(),
             &firmware_rack,
             Some(&FirmwareUpgradeJob {
                 job_id: Some("stale-job".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        db::rack::update_nvos_update_job(
+            txn.as_mut(),
+            &firmware_rack,
+            Some(&model::rack::NvosUpdateJob {
+                status: Some("failed".into()),
                 ..Default::default()
             }),
         )
@@ -1409,7 +1487,13 @@ mod tests {
 
         // Soft-deleted racks cannot accept new maintenance work.
         let deleted_rack = create_rack_in_state(&pool, RackState::Ready).await;
-        let mut txn = pool.begin().await.unwrap();
+        assert!(
+            load_rack(&pool, &firmware_rack)
+                .await
+                .nvos_update_job
+                .is_none()
+        );
+        let mut txn = pool.txn_begin().await.unwrap();
         db::rack::mark_as_deleted(&deleted_rack, txn.as_mut())
             .await
             .unwrap();
@@ -1460,6 +1544,14 @@ mod tests {
                 .maintenance_requested
                 .is_none()
         );
+        let actions: (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE completed_at IS NULL) FROM cm_actions WHERE rack_id = $1",
+        )
+        .bind(&credential_failure_rack)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(actions, (1, 0), "compensation retires the accepted action");
     }
 
     fn rms_rack_profiles(profile: RackProfile) -> RackProfileConfig {
@@ -1499,9 +1591,18 @@ mod tests {
             ..Default::default()
         };
 
-        let cm = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap();
+        let cm = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(cm.nv_switch.name(), "mock-nsm");
         assert_eq!(cm.power_shelf.name(), "mock-psm");
@@ -1529,6 +1630,8 @@ mod tests {
             None,
             Some(db),
             None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("RMS switch backend should build");
@@ -1559,9 +1662,18 @@ mod tests {
             ..Default::default()
         };
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1575,9 +1687,18 @@ mod tests {
             ..Default::default()
         };
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1598,9 +1719,18 @@ mod tests {
 
         assert_eq!(config.compute_tray_backend, ComputeBackend::Rms);
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(
             err,
@@ -1618,8 +1748,17 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            build_component_manager(&config, Default::default(), None, None, None, None).await;
+        let result = build_component_manager(
+            &config,
+            Default::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
         let Err(error) = result else {
             panic!("missing RMS rack profiles should be rejected");
         };
@@ -1643,7 +1782,17 @@ mod tests {
             ..Default::default()
         };
 
-        let result = build_component_manager(&config, rack_profiles, None, None, None, None).await;
+        let result = build_component_manager(
+            &config,
+            rack_profiles,
+            None,
+            None,
+            None,
+            None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
         let Err(error) = result else {
             panic!("missing RMS vendor should be rejected");
         };

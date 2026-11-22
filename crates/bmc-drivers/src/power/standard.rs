@@ -6,7 +6,7 @@
 //! Standard Redfish power control.
 
 use async_trait::async_trait;
-use bmc_platform::{DriverOutcome, OpCx, PlatformError, Power, Quirk};
+use bmc_platform::{BootProgress, DriverOutcome, OpCx, PlatformError, Power, Quirk};
 use nv_redfish::core::{ActionError, Bmc};
 use nv_redfish::resource::{PowerState, ResetType};
 
@@ -35,9 +35,28 @@ where
             .ok_or(PlatformError::NoContent)
     }
 
+    async fn boot_progress(&self, cx: &OpCx<'_, B>) -> Result<Option<BootProgress>, PlatformError> {
+        let system = cx.system().await?.raw();
+        Ok(system
+            .boot_progress
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(|progress| BootProgress {
+                last_state: progress.last_state.flatten(),
+                oem_last_state: progress.oem_last_state.clone().flatten(),
+            }))
+    }
+
     /// Standard Redfish offers no AC power cycle.
     async fn ac_power_cycle_supported(&self, _cx: &OpCx<'_, B>) -> Result<bool, PlatformError> {
         Ok(false)
+    }
+
+    fn may_use_ipmi_restart(&self, cx: &OpCx<'_, B>, reset_type: ResetType) -> bool {
+        matches!(
+            reset_type,
+            ResetType::ForceRestart | ResetType::GracefulRestart
+        ) && cx.has_quirk(Quirk::RedfishRestartCutsDpuPower)
     }
 
     async fn set(
@@ -48,11 +67,7 @@ where
         match reset_type {
             // Platforms with an AC power cycle implement it in their own driver.
             ResetType::FullPowerCycle => Err(PlatformError::Unsupported),
-            ResetType::ForceRestart | ResetType::GracefulRestart
-                if cx.has_quirk(Quirk::RedfishRestartCutsDpuPower) =>
-            {
-                cx.ipmi_restart().await
-            }
+            action if self.may_use_ipmi_restart(cx, action) => cx.ipmi_restart().await,
             other => already_satisfied_is_complete(
                 other,
                 cx.system()
@@ -110,12 +125,13 @@ fn already_satisfied_is_complete(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
-    use bmc_platform::{IpmiOps, PlatformIdentity, SystemIdentity};
+    use bmc_platform::{PlatformIdentity, SystemIdentity};
     use serde_json::json;
 
     use super::*;
+    use crate::test_support::RecordingIpmi;
 
     #[tokio::test]
     async fn standard_reset_posts_to_the_selected_systems_advertised_action() {
@@ -177,23 +193,6 @@ mod tests {
                 completes,
                 "{reset_type:?}"
             );
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingIpmi {
-        power_resets: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl IpmiOps for RecordingIpmi {
-        async fn bmc_cold_reset(&self) -> Result<(), PlatformError> {
-            Ok(())
-        }
-
-        async fn chassis_power_reset(&self) -> Result<(), PlatformError> {
-            self.power_resets.fetch_add(1, Ordering::SeqCst);
-            Ok(())
         }
     }
 

@@ -135,8 +135,7 @@ The optional `--expiry` accepts a duration such as `30min` or `1h`, defaults to 
 cannot exceed `60h`. After expiry, the server restores its startup filter on the next
 15-minute reset check. A filter with span directives cannot be evaluated by target alone,
 so nico-api enables payload encoding and redaction
-even if the filter ultimately suppresses the audit record. For `nico-admin-cli rms`, set
-`RUST_LOG=rms_rpc_audit=debug`; the records go to stderr.
+even if the filter ultimately suppresses the audit record.
 
 Bodies are redacted before being attached to a span or log: credentials, passwords, tokens,
 URLs, arbitrary attributes, config values, error text, embedded JSON, and binary fields are
@@ -157,9 +156,8 @@ duration) metrics are unchanged. Readiness probes carry trace headers but do not
 their own body audit record. Raw tonic clients and streaming RPCs
 are outside the decoded observer; RMS's V1/V2 service definitions contain only unary RPCs.
 
-`nico-admin-cli rms` installs the same policy and emits DEBUG audit logs through its own
-subscriber, but does not export nico-api OTLP spans. Without a configured propagator and
-active OpenTelemetry context, transport injection is a no-op. API spans follow the existing
+Without a configured propagator and active OpenTelemetry context, transport injection is a
+no-op. API spans follow the existing
 endpoint and enabled flag. An RMS RPC without a local parent is an eligible trace root;
 child RPCs inherit their parent's sampling decision. Rack reconciliation adds
 a rack span under the state processor's existing trace root.
@@ -240,7 +238,7 @@ DPS stays one trace across the proxy hop (issue
   span's W3C context is injected on the BMC leg. The inbound headers are dropped before the upstream
   request is assembled — `trace_propagation::is_propagated_header` asks the configured propagator
   which headers are its own — so the BMC parents under the proxy's span rather than the caller's.
-- **Egress to nico-api (gRPC).** Credential lookup uses the shared `ForgeApiClient`, which already
+- **Egress to nico-api (gRPC).** Credential lookup uses the shared `CarbideApiClient`, which already
   wraps the transport with `TraceInjectService`.
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
@@ -287,7 +285,7 @@ routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled 
   and uses any inbound `traceparent` or `tracestate` header as its parent.
   - A booting node cannot send those headers, so most requests span starts a new trace.
   - A request from another traced service continues that service's trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which wraps its transport
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which wraps its transport
   with `TraceInjectService` and sends the trace context on every request. No per-call code is
   needed.
 - **Resource / tracer:** `service.name = nico-pxe`, tracer name `nico-pxe`.
@@ -324,7 +322,7 @@ Two separate programs serve DHCP, and both use the shared setup in
 - **Each packet starts a new trace.** A DHCP client sends no `traceparent`, so there is
   no inbound context to continue. Spans opened inside that root span, including the outbound gRPC
   call, join the same trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which sends the trace
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which sends the trace
   context on every request, so a DHCP trace continues into nico-api.
 - **Hook logging is unchanged.** The hook logs through Kea's logger, and installing span export
   does not add log lines or route them through `RUST_LOG`.
@@ -358,7 +356,7 @@ Two separate programs serve DHCP, and both use the shared setup in
   produce a span.
 - **Trace roots.** An SSH client cannot send a `traceparent` header, so each operation span starts a
   new trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which wraps its transport
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which wraps its transport
   with `TraceInjectService` and sends the trace context on every request, so tenant public key
   validation and instance ID lookups appear in the same trace as the operation that triggered them.
 - **Resource / tracer:** `service.name = nico-ssh-console-rs`, tracer name
@@ -410,7 +408,7 @@ Propagation is automatic on ingress but opt-in on egress. Keep the following in 
   for you.
 - **New outbound gRPC client (tonic/hyper):** wrap its channel/service with
   `trace_propagation::TraceInjectService` at construction. Better yet, build through an existing shared
-  client that already wraps the transport (see `crates/rpc/src/forge_tls_client.rs`).
+  client that already wraps the transport (see `crates/rpc/src/carbide_tls_client.rs`).
 - **New outbound HTTP client (`reqwest`):** build it through the `reqwest-tracing` middleware instead of using a
   bare `reqwest::Client`. The wrapped client injects the current `traceparent` and `tracestate` into every request
   automatically, so there is no per-call code:
@@ -877,7 +875,8 @@ charts take an `extraEnv` map of names to values and render it into the containe
 workflow chart also takes `cloudWorker.extraEnv` and `siteWorker.extraEnv`, merged over the shared
 map with the worker's keys winning. `extraEnv` cannot override a variable the chart sets itself,
 which is `CONFIG_FILE_PATH` and, on the workers, `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE`.
-Rendering fails if it tries.
+Rendering fails if it tries. The one exception is the `GOMEMLIMIT` that the workflow chart derives
+from each worker's memory limit, which a `GOMEMLIMIT` key in `extraEnv` replaces.
 
 ```yaml
 nico-rest-api:

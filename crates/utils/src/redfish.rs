@@ -59,7 +59,7 @@ pub fn redfish_basic_authorization_context(
     (authorization, sensitive_values)
 }
 
-/// Logs the diagnostic fields shared by HTTP failures from both Redfish clients.
+/// Logs HTTP failure fields with a bounded, sanitized DMTF message.
 ///
 /// The complete response body and DMTF `MessageArgs` are deliberately excluded.
 /// Only a bounded message extracted from the DMTF error envelope is recorded,
@@ -417,7 +417,7 @@ fn truncate_redfish_error_message(mut message: String) -> String {
 
 /// Masks the union of all sensitive-value matches, including overlapping ones,
 /// without retaining a range for every occurrence.
-fn mask_all<'a>(text: &str, sensitive_values: impl IntoIterator<Item = &'a str>) -> String {
+pub fn mask_all<'a>(text: &str, sensitive_values: impl IntoIterator<Item = &'a str>) -> String {
     let sensitive_values = sensitive_values
         .into_iter()
         .filter(|value| !value.is_empty())

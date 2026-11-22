@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -193,7 +194,7 @@ func testReplaceAllExpectedRackGroupsHandlerConcurrentRequests(t *testing.T) {
 		if marshalErr != nil {
 			return nil, marshalErr
 		}
-		req := httptest.NewRequest(http.MethodPut, "/v2/org/test/nico/expected-rack-group/all", strings.NewReader(string(body)))
+		req := httptest.NewRequest(http.MethodPut, "/v2/org/test/nico/expected-rack-group/all", bytes.NewReader(body))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		req = req.WithContext(requestCtx)
 		rec := httptest.NewRecorder()
@@ -369,7 +370,7 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 				user.OrgData = cdbm.OrgData{"other": cdbm.Org{Name: "other", Roles: []string{"FORGE_PROVIDER_ADMIN"}}}
 				_, _, _ = testExpectedRackSetupTestData(t, session, "other")
 			}
-			method, body := http.MethodPost, fmt.Sprintf(`{"siteId":%q,"rackGroupId":"new","topology":"new","protocol":"NVLINK_V6","racks":[{"rackId":"rack-01","members":[{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"}]},{"rackId":"rack-02","members":[]}]}`, site.ID.String())
+			method, body := http.MethodPost, fmt.Sprintf(`{"siteId":%q,"rackGroupId":"new","topology":"new","protocol":"NVLINK_V6","racks":[{"rackId":"rack-01","members":[{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01","cartridgeIndex":0}]},{"rackId":"rack-02","members":[]}]}`, site.ID.String())
 			status := http.StatusCreated
 			var handle func(echo.Context) error
 			switch workflowName {

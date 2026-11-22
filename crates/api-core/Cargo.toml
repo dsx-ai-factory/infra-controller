@@ -30,6 +30,9 @@ name = "carbide_api_core"
 cert-manager = { path = "../cert-manager" }
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 bmc-drivers = { path = "../bmc-drivers" }
+bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
+bmc-runtime = { path = "../bmc-runtime" }
 bmc-explorer = { path = "../bmc-explorer" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model", default-features = false }
@@ -74,7 +77,7 @@ carbide-site-explorer = { path = "../site-explorer" }
 carbide-spdm-controller = { path = "../spdm-controller" }
 carbide-state-controller-common = { path = "../state-controller-common" }
 carbide-switch-controller = { path = "../switch-controller" }
-carbide-utils = { path = "../utils", features = ["sqlx"] }
+carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-vpc-prefix-controller = { path = "../vpc-prefix-controller" }
@@ -214,13 +217,13 @@ carbide-version = { path = "../version" }
 
 [dev-dependencies]
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
-carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
@@ -236,6 +239,7 @@ carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-resource-pool-api = { path = "../resource-pool-api", features = [
   "test-support",
 ] }
+carbide-rms-mock = { path = "../rms-mock", features = ["test-support"] }
 carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }

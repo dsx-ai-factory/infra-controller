@@ -61,6 +61,9 @@ use crate::state_history::StateHistoryRecord;
 /// convert it into a Machine.
 #[derive(Serialize, Deserialize)]
 pub struct MachineSnapshotPgJson {
+    /// Absent on older snapshots and NULL before any tracked hardware command.
+    #[serde(default)]
+    pub hardware_dispatch: Option<crate::hardware_dispatch::HardwareDispatch>,
     pub id: MachineId,
     pub rack_id: Option<RackId>,
     pub created: DateTime<Utc>,
@@ -94,6 +97,8 @@ pub struct MachineSnapshotPgJson {
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
     #[serde(default)]
     pub spx_multiplane: Option<MachineSpxMultiplane>,
+    #[serde(default)]
+    pub maintenance_action_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub decommission_requested: bool,
     #[serde(default)]
@@ -270,7 +275,10 @@ fn decode_boot_interface_status_observation(
 
 impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
     type Error = sqlx::Error;
-    fn try_from(value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
+    fn try_from(mut value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
+        if let Some(pending) = value.machine_maintenance_requested.as_mut() {
+            pending.action_id = value.maintenance_action_id;
+        }
         let hardware_info = value
             .topology
             .into_iter()
@@ -369,6 +377,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
                 maintenance_start_time,
             },
             status: MachineStatus {
+                hardware_dispatch: value.hardware_dispatch,
                 interfaces: value.interfaces,
                 boot_interface_status_observation,
                 hardware_info,

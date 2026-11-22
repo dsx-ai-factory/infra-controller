@@ -27,6 +27,7 @@ repository.workspace = true
 # [local-dependencies]
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-instrument = { path = "../instrument" }
 carbide-resource-pool-api = { path = "../resource-pool-api" }
 carbide-utils = { path = "../utils" }
 trace-propagation = { path = "../trace-propagation" }

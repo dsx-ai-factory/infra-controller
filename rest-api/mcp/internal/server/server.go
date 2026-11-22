@@ -31,6 +31,9 @@ import (
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
 )
 
+// toolReadTimeout bounds all REST attempts together while leaving room after the REST workflow wait.
+const toolReadTimeout = 55 * time.Second
+
 // BuildServer constructs an *mcp.Server with one tool registered for
 // every GET operation in the supplied OpenAPI spec. Tool names follow
 // the SDD: nico_<snake_case(operationId)>. Each tool handler builds a
@@ -59,13 +62,15 @@ func BuildServer(specData []byte, opts Options) (*mcp.Server, error) {
 	}, nil)
 
 	paths := doc.Paths.Map()
+	tools := map[string]bool{}
 	for _, path := range sortedPaths(paths) {
 		item := paths[path]
 		if item.Get == nil || item.Get.OperationID == "" {
 			continue
 		}
-		registerGET(server, path, item, opts)
+		tools[registerGET(server, path, item, opts)] = true
 	}
+	server.AddReceivingMiddleware(opts.Metrics.toolCallMiddleware(tools))
 	return server, nil
 }
 
@@ -97,7 +102,8 @@ func NewHandler(server *mcp.Server) http.Handler {
 }
 
 // ServeFlags returns the full flag set for the standalone nico-mcp server
-// binary. The server-specific flags (listen, path, shutdown-timeout) sit
+// binary. The server-specific flags (listen, path, shutdown-timeout,
+// metrics-listen) sit
 // alongside the connection flags (base-url, org, api-name, token, debug).
 // The dynamically-generated CLI exposes the latter as
 // root-level flags, but nico-mcp is a single-purpose binary with no parent
@@ -122,6 +128,11 @@ func ServeFlags() []urfave.Flag {
 			Usage:   "graceful shutdown timeout when SIGINT/SIGTERM arrives",
 			EnvVars: []string{"NICO_MCP_SHUTDOWN_TIMEOUT"},
 			Value:   10 * time.Second,
+		},
+		&urfave.StringFlag{
+			Name:    "metrics-listen",
+			Usage:   "address:port to serve Prometheus metrics on at /metrics (metrics are not served when empty)",
+			EnvVars: []string{"NICO_MCP_METRICS_LISTEN"},
 		},
 		&urfave.StringFlag{
 			Name:    "base-url",
@@ -163,52 +174,78 @@ func Run(c *urfave.Context, specData []byte) error {
 		return fmt.Errorf("building MCP server: %w", err)
 	}
 
-	listen := c.String("listen")
-	path := c.String("path")
-	if path == "" || path[0] != '/' {
-		return fmt.Errorf("invalid --path %q: must be non-empty and start with '/'", path)
+	servers, err := newServers(c, server, opts)
+	if err != nil {
+		return err
 	}
 	shutdownTimeout := c.Duration("shutdown-timeout")
 
-	mux := http.NewServeMux()
-	if err := registerHandler(mux, path, NewHandler(server)); err != nil {
-		return err
+	errCh := make(chan error, len(servers))
+	for _, httpServer := range servers {
+		go func() {
+			errCh <- httpServer.ListenAndServe()
+		}()
 	}
-
-	httpServer := &http.Server{
-		Addr:              listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-
-	opts.Log.Infof("nico-mcp: listening on %s, MCP at %s (stateless, JSONResponse)", listen, path)
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- httpServer.ListenAndServe()
-	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
+	// A listener that stops on its own, such as a port already in use, ends the
+	// process instead of leaving it half-served.
+	var runErr error
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("http server: %w", err)
+			runErr = fmt.Errorf("http server: %w", err)
 		}
-		return nil
 	case sig := <-sigCh:
 		opts.Log.Infof("nico-mcp: received %s, shutting down", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := httpServer.Shutdown(ctx); err != nil {
-			return fmt.Errorf("graceful shutdown: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	for _, httpServer := range servers {
+		if err := httpServer.Shutdown(ctx); err != nil && runErr == nil {
+			runErr = fmt.Errorf("graceful shutdown: %w", err)
 		}
-		return nil
+	}
+	return runErr
+}
+
+// newServers returns the MCP server and, when --metrics-listen is set, a
+// second server that serves only Prometheus metrics.
+func newServers(c *urfave.Context, server *mcp.Server, opts Options) ([]*http.Server, error) {
+	listen := c.String("listen")
+	path := c.String("path")
+	if path == "" || path[0] != '/' {
+		return nil, fmt.Errorf("invalid --path %q: must be non-empty and start with '/'", path)
+	}
+
+	mux := http.NewServeMux()
+	if err := registerHandler(mux, path, opts.Metrics.instrumentHTTP(NewHandler(server))); err != nil {
+		return nil, err
+	}
+
+	servers := []*http.Server{newHTTPServer(listen, mux)}
+	opts.Log.Infof("nico-mcp: listening on %s, MCP at %s (stateless, JSONResponse)", listen, path)
+	if metricsListen := c.String("metrics-listen"); metricsListen != "" {
+		servers = append(servers, newMetricsServer(metricsListen, opts.Metrics))
+		opts.Log.Infof("nico-mcp: serving Prometheus metrics on %s at %s", metricsListen, metricsPath)
+	}
+	return servers, nil
+}
+
+// newHTTPServer leaves five seconds to write a JSON tool error after a slow
+// request body and the complete REST read budget have used their allowances.
+func newHTTPServer(listen string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              listen,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -218,7 +255,8 @@ func sortedPaths(paths map[string]*openapi3.PathItem) []string {
 	return slices.Sorted(maps.Keys(paths))
 }
 
-func registerGET(server *mcp.Server, path string, item *openapi3.PathItem, opts Options) {
+// registerGET adds the tool for one GET operation and returns its name.
+func registerGET(server *mcp.Server, path string, item *openapi3.PathItem, opts Options) string {
 	op := item.Get
 	h := &NicoOpenApiHandler{}
 	allParams := mergeParameters(item, op)
@@ -234,24 +272,44 @@ func registerGET(server *mcp.Server, path string, item *openapi3.PathItem, opts 
 	}
 
 	mcp.AddTool(server, tool, func(ctx context.Context, req *mcp.CallToolRequest, in map[string]any) (*mcp.CallToolResult, any, error) {
-		var cfg resolvedConfig
-		if err := cfg.FromCallConfig(in, req, opts); err != nil {
-			return errorResult(err), nil, nil
-		}
-		client := appcli.NewClient(cfg.BaseURL, cfg.Org, cfg.Token, opts.Log, opts.Debug)
-		client.HTTPClient.CheckRedirect = sameOriginRedirectPolicy
-		client.APIName = cfg.APIName
-
-		pathParams, queryParams, err := splitArgs(in, allParams)
-		if err != nil {
-			return errorResult(err), nil, nil
-		}
-		body, respHeader, err := client.Do(http.MethodGet, path, pathParams, queryParams, nil)
-		if err != nil {
-			return errorResult(err), nil, nil
-		}
-		return jsonResult(body, respHeader), nil, nil
+		return callGET(ctx, req, in, tool.Name, path, allParams, opts), nil, nil
 	})
+	return tool.Name
+}
+
+// callGET resolves the per-call configuration and runs the REST read for one
+// tool call. Every failure comes back as a tool error result.
+func callGET(ctx context.Context, req *mcp.CallToolRequest, in map[string]any, tool, path string, allParams []*openapi3.Parameter, opts Options) *mcp.CallToolResult {
+	var cfg resolvedConfig
+	if err := cfg.FromCallConfig(in, req, opts); err != nil {
+		opts.Metrics.observeConfigError(err)
+		return errorResult(err)
+	}
+	client := appcli.NewClient(cfg.BaseURL, cfg.Org, cfg.Token, opts.Log, opts.Debug)
+	client.HTTPClient.CheckRedirect = sameOriginRedirectPolicy
+	client.APIName = cfg.APIName
+	client.RequestNotify = func(event appcli.RequestEvent) {
+		opts.Metrics.observeRESTRequest(tool, event)
+	}
+
+	pathParams, queryParams, err := splitArgs(in, allParams)
+	if err != nil {
+		return errorResult(err)
+	}
+	return readGET(ctx, client, path, pathParams, queryParams)
+}
+
+// readGET bounds retries with a child context. The SDK keeps its parent context
+// alive to serialize the tool error after the REST read deadline expires.
+func readGET(ctx context.Context, client *appcli.Client, path string, pathParams, queryParams map[string]string) *mcp.CallToolResult {
+	readCtx, cancel := context.WithTimeout(ctx, toolReadTimeout)
+	defer cancel()
+
+	body, header, err := client.DoWithContext(readCtx, http.MethodGet, path, pathParams, queryParams, nil)
+	if err != nil {
+		return errorResult(err)
+	}
+	return jsonResult(body, header)
 }
 
 // sameOriginRedirectPolicy preserves net/http's redirect limit and the original
@@ -434,5 +492,6 @@ func buildServeOptions(c *urfave.Context) Options {
 		Token:   c.String("token"),
 		Debug:   c.Bool("debug"),
 		Log:     log,
+		Metrics: NewMetrics(),
 	}
 }

@@ -546,7 +546,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("The Site: %v where this Instance is being created is not in Registered state", vpc.SiteID.String()))
+		logger.Warn().Msgf("The Site: %v where this Instance is being created is not in Registered state", vpc.SiteID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where this Instance is being created is not in Registered state", nil)
 	}
 	if apiErr := util.ValidateSitePowerManagement(site.Config, apiRequest.PowerProfile); apiErr != nil {
@@ -684,7 +684,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
 			}
 			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				logger.Warn().Msgf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
 			}
 		}
@@ -750,27 +750,27 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 			subnet, ok := subnetIDMap[subnetID]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request data is not found in DB", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request data is not found in DB", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request data is not found in DB", subnetID), nil)
 			}
 
 			if subnet.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request is not owned by Tenant", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request is not owned by Tenant", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request is not owned by Tenant", subnetID), nil)
 			}
 
 			if subnet.ControllerNetworkSegmentID == nil || subnet.Status != cdbm.SubnetStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request data is not in Ready state", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request data is not in Ready state", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request data is not in Ready state", subnetID), nil)
 			}
 
 			if subnet.VpcID != vpc.ID {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request does not match with VPC", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request does not match with VPC", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request does not match with VPC", subnetID), nil)
 			}
 
 			if vpc.NetworkVirtualizationType != nil && *vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", vpc.ID))
+				logger.Warn().Msgf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", vpc.ID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", vpc.ID), nil)
 			}
 
@@ -800,17 +800,17 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 			vpcPrefix, ok := vpcPrefixIDMap[vpcPrefixID]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request data is not found in DB", vpcPrefixID))
+				logger.Warn().Msgf("VPC Prefix: %v specified in request data is not found in DB", vpcPrefixID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request data is not found in DB", vpcPrefixID), nil)
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixID))
+				logger.Warn().Msgf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixID), nil)
 			}
 
 			if vpcPrefix.SiteID != site.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixID))
+				logger.Warn().Msgf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixID), nil)
 			}
 
@@ -851,7 +851,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", vpc.ID))
+				logger.Warn().Msgf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", vpc.ID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", vpc.ID), nil)
 			}
 
@@ -884,7 +884,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			interfaceVpcID := uuid.MustParse(*ifc.VpcID)
 			interfaceVpc := interfaceVpcIDMap[interfaceVpcID]
 			if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", vpc.ID))
+				logger.Warn().Msgf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", vpc.ID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", vpc.ID), nil)
 			}
 
@@ -994,18 +994,18 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 		des, ok := desIDMap[desID]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("DPU Extension Service: %v specified in request data is not found in DB", desID))
+			logger.Warn().Msgf("DPU Extension Service: %v specified in request data is not found in DB", desID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("DPU Extension Service: %v specified in request data is not found in DB", desID), nil)
 		}
 
 		if des.TenantID != tenant.ID {
 			logger.Warn().Str("Tenant ID", tenant.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to current Tenant")
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID), nil)
 		}
 
 		if des.SiteID != site.ID {
 			logger.Warn().Str("Site ID", site.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to Site")
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID), nil)
 		}
 
 		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
@@ -1020,7 +1020,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 		}
 		if !versionFound {
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Version: %s was not found for DPU Extension Service: %s", apiDesd.Version, desID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Version: %s was not found for DPU Extension Service: %s", apiDesd.Version, desID), nil)
 		}
 	}
 	// End validating DPU Extension Service Deployments
@@ -1098,8 +1098,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 		skg, ok := sshKeyGroupIDMap[skgID]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("SSH Key Group: %v specified in request data is not found in DB", skgID))
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SSH Key Group: %s specified in request data was not found in DB", skgID.String()), nil)
+			logger.Warn().Msgf("SSH Key Group: %v specified in request data is not found in DB", skgID)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SSH Key Group: %s specified in request data was not found in DB", skgID), nil)
 		}
 
 		if skg.TenantID != tenant.ID {
@@ -1110,8 +1110,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		// Verify if SSH Key Group Site Association exists
 		_, ok = skgSiteAssociationIDMap[skg.ID]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("SSH Key Group: %s specified in request data is not associated with the Site where Instance is being created", skgID.String()))
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SSH Key Group: %s specified in request data is not associated with the Site where Instance is being created", skgID.String()), nil)
+			logger.Warn().Msgf("SSH Key Group: %s specified in request data is not associated with the Site where Instance is being created", skgID)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SSH Key Group: %s specified in request data is not associated with the Site where Instance is being created", skgID), nil)
 		}
 	}
 
@@ -1269,11 +1269,6 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			// the Ready status check, not just health - consider renaming the parameter later.
 			if apiRequest.AllowUnhealthyMachine != nil {
 				allowUnhealthyMachine = *apiRequest.AllowUnhealthyMachine
-			}
-
-			// A retained deletion record is unavailable even with an unhealthy override.
-			if machine.IsForceDeletionQuarantined() {
-				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has a force-deletion request and cannot be used for a new Instance", machine.ID), nil)
 			}
 
 			// Check if Machine is missing on site
@@ -1551,17 +1546,17 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				}
 
 				if ibp.SiteID != site.ID {
-					logger.Warn().Msg(fmt.Sprintf("InfiniBandPartition: %v specified in request does not match with Instance Site", ibp.ID))
+					logger.Warn().Msgf("InfiniBandPartition: %v specified in request does not match with Instance Site", ibp.ID)
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("InfiniBand Partition: %v specified in request does not match with Instance Site", ibp.ID), nil)
 				}
 
 				if ibp.TenantID != tenant.ID {
-					logger.Warn().Msg(fmt.Sprintf("InfiniBandPartition: %v specified in request is not owned by Tenant", ibp.ID))
+					logger.Warn().Msgf("InfiniBandPartition: %v specified in request is not owned by Tenant", ibp.ID)
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("InfiniBand Partition: %v specified in request is not owned by Tenant", ibp.ID), nil)
 				}
 
 				if ibp.ControllerIBPartitionID == nil || ibp.Status != cdbm.InfiniBandPartitionStatusReady {
-					logger.Warn().Msg(fmt.Sprintf("InfiniBandPartition: %v specified in request data is not in Ready state", ibp.ID))
+					logger.Warn().Msgf("InfiniBandPartition: %v specified in request data is not in Ready state", ibp.ID)
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("InfiniBand Partition: %v specified in request data is not in Ready state", ibp.ID), nil)
 				}
 
@@ -1677,17 +1672,17 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				} else {
 					// Validate NVLink Logical Partition only if it's not the default
 					if nvllp.SiteID != site.ID {
-						logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request does not match with Instance Site", nvllp.ID))
+						logger.Warn().Msgf("NVLink Logical Partition: %v specified in request does not match with Instance Site", nvllp.ID)
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request does not match with Instance Site", nvllp.ID), nil)
 					}
 
 					if nvllp.TenantID != tenant.ID {
-						logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not owned by Tenant", nvllp.ID))
+						logger.Warn().Msgf("NVLink Logical Partition: %v specified in request data is not owned by Tenant", nvllp.ID)
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not owned by Tenant", nvllp.ID), nil)
 					}
 
 					if nvllp.Status != cdbm.NVLinkLogicalPartitionStatusReady {
-						logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllp.ID))
+						logger.Warn().Msgf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllp.ID)
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllp.ID), nil)
 					}
 				}
@@ -2718,7 +2713,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	instanceDAO := cdbm.NewInstanceDAO(uih.dbSession)
 
 	// Check that Instance exists
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName}, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Instance DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Instance to update", nil)
@@ -2965,7 +2960,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
 			}
 			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				logger.Warn().Msgf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
 			}
 		}
@@ -3086,22 +3081,22 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			if subnet.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request is not owned by Tenant", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request is not owned by Tenant", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request is not owned by Tenant", subnetID), nil)
 			}
 
 			if subnet.ControllerNetworkSegmentID == nil || subnet.Status != cdbm.SubnetStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request data is not in Ready state", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request data is not in Ready state", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request data is not in Ready state", subnetID), nil)
 			}
 
 			if subnet.VpcID != vpc.ID {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request does not match with VPC", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request does not match with VPC", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request does not match with VPC", subnetID), nil)
 			}
 
 			if vpc.NetworkVirtualizationType != nil && *vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", instance.VpcID))
+				logger.Warn().Msgf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", instance.VpcID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", instance.VpcID), nil)
 			}
 
@@ -3139,12 +3134,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixID))
+				logger.Warn().Msgf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixID), nil)
 			}
 
 			if vpcPrefix.SiteID != site.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixID))
+				logger.Warn().Msgf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixID), nil)
 			}
 
@@ -3185,7 +3180,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", instance.VpcID))
+				logger.Warn().Msgf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", instance.VpcID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", instance.VpcID), nil)
 			}
 
@@ -3221,7 +3216,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			interfaceVpcID := uuid.MustParse(*ifc.VpcID)
 			interfaceVpc := interfaceVpcIDMap[interfaceVpcID]
 			if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", instance.VpcID))
+				logger.Warn().Msgf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", instance.VpcID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", instance.VpcID), nil)
 			}
 
@@ -3365,17 +3360,17 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		if ibp.SiteID != site.ID {
-			logger.Warn().Msg(fmt.Sprintf("InfiniBandPartition: %v specified in request does not match with Instance Site", ibpID))
+			logger.Warn().Msgf("InfiniBandPartition: %v specified in request does not match with Instance Site", ibpID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("InfiniBand Partition: %v specified in request does not match with Instance Site", ibpID), nil)
 		}
 
 		if ibp.TenantID != tenant.ID {
-			logger.Warn().Msg(fmt.Sprintf("InfiniBandPartition: %v specified in request is not owned by Tenant", ibpID))
+			logger.Warn().Msgf("InfiniBandPartition: %v specified in request is not owned by Tenant", ibpID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("InfiniBand Partition: %v specified in request is not owned by Tenant", ibpID), nil)
 		}
 
 		if ibp.ControllerIBPartitionID == nil || ibp.Status != cdbm.InfiniBandPartitionStatusReady {
-			logger.Warn().Msg(fmt.Sprintf("InfiniBandPartition: %v specified in request data is not in Ready state", ibpID))
+			logger.Warn().Msgf("InfiniBandPartition: %v specified in request data is not in Ready state", ibpID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("InfiniBand Partition: %v specified in request data is not in Ready state", ibpID), nil)
 		}
 	}
@@ -3448,12 +3443,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 
 		if des.TenantID != tenant.ID {
 			logger.Warn().Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to current Tenant")
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID), nil)
 		}
 
 		if des.SiteID != site.ID {
 			logger.Warn().Str("Site ID", site.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to Site")
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID), nil)
 		}
 
 		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
@@ -3468,7 +3463,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 		}
 		if !versionFound {
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Version: %s was not found for DPU Extension Service: %s", adesdr.Version, desID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Version: %s was not found for DPU Extension Service: %s", adesdr.Version, desID), nil)
 		}
 	}
 
@@ -3515,7 +3510,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate each NVLink Logical Partition
-	dbnvlic := []cdbm.NVLinkInterface{}
 	for _, nvlifc := range apiRequest.NVLinkInterfaces {
 		nvllpID := uuid.MustParse(nvlifc.NVLinkLogicalPartitionID)
 
@@ -3526,21 +3520,19 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		if nvllp.SiteID != instance.SiteID {
-			logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request does not match with Instance Site", nvllpID))
+			logger.Warn().Msgf("NVLink Logical Partition: %v specified in request does not match with Instance Site", nvllpID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request does not match with Instance Site", nvllpID), nil)
 		}
 
 		if nvllp.TenantID != instance.TenantID {
-			logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not owned by Tenant", nvllpID))
+			logger.Warn().Msgf("NVLink Logical Partition: %v specified in request data is not owned by Tenant", nvllpID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not owned by Tenant", nvllpID), nil)
 		}
 
 		if nvllp.Status != cdbm.NVLinkLogicalPartitionStatusReady {
-			logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID))
+			logger.Warn().Msgf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID), nil)
 		}
-
-		dbnvlic = append(dbnvlic, cdbm.NVLinkInterface{NVLinkLogicalPartitionID: nvllp.ID, DeviceInstance: nvlifc.DeviceInstance})
 	}
 
 	// Validate NVLink interfaces if Instance Type has NVLink (GPU) Capability
@@ -4016,7 +4008,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 
 			// There can be multiple historical rows per key; Ordering existingIbIfcs by Created ascending makes the slice per key chronological.
 			for i := range existingIbIfcs {
-				key := fmt.Sprintf("%s:%s:%d", existingIbIfcs[i].InfiniBandPartitionID.String(), existingIbIfcs[i].Device, existingIbIfcs[i].DeviceInstance)
+				key := fmt.Sprintf("%s:%s:%d", existingIbIfcs[i].InfiniBandPartitionID, existingIbIfcs[i].Device, existingIbIfcs[i].DeviceInstance)
 				existingIbIfcMap[key] = append(existingIbIfcMap[key], existingIbIfcs[i])
 			}
 
@@ -4270,7 +4262,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		// Check if any DPU Extension Service Deployments are being requested to be created or removed
 		existingDesdMap := map[string]*cdbm.DpuExtensionServiceDeployment{}
 		for _, desd := range existingDesds {
-			existingDesdMap[fmt.Sprintf("%s:%s", desd.DpuExtensionServiceID.String(), desd.Version)] = &desd
+			existingDesdMap[fmt.Sprintf("%s:%s", desd.DpuExtensionServiceID, desd.Version)] = &desd
 		}
 
 		updatedDesdMap := map[string]*cdbm.DpuExtensionServiceDeployment{}
@@ -4286,7 +4278,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Invalid DPU Extension Service ID: %s specified in request", adesdr.DpuExtensionServiceID), nil)
 				}
 
-				desvID := fmt.Sprintf("%s:%s", desdID.String(), adesdr.Version)
+				desvID := fmt.Sprintf("%s:%s", desdID, adesdr.Version)
 
 				existingDesd, exists := existingDesdMap[desvID]
 				if exists {
@@ -4314,7 +4306,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			for _, existingDesd := range existingDesds {
-				desvID := fmt.Sprintf("%s:%s", existingDesd.DpuExtensionServiceID.String(), existingDesd.Version)
+				desvID := fmt.Sprintf("%s:%s", existingDesd.DpuExtensionServiceID, existingDesd.Version)
 				_, exists := updatedDesdMap[desvID]
 				if !exists && existingDesd.Status != cdbm.DpuExtensionServiceDeploymentStatusTerminating {
 					// The deployment is not present in request sent by user, update status to Terminating if not already in that state
@@ -4346,7 +4338,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			// There can be multiple NVLink interfaces for the same NVLink Logical Partition ID and Device Instance
 			// Ensure that existingNvlIfcs is sorted by created timestamp in ascending order
 			for i := range existingNvlIfcs {
-				key := fmt.Sprintf("%s:%d", existingNvlIfcs[i].NVLinkLogicalPartitionID.String(), existingNvlIfcs[i].DeviceInstance)
+				key := fmt.Sprintf("%s:%d", existingNvlIfcs[i].NVLinkLogicalPartitionID, existingNvlIfcs[i].DeviceInstance)
 				existingNvlIfcMap[key] = append(existingNvlIfcMap[key], existingNvlIfcs[i])
 			}
 
@@ -4366,7 +4358,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				nvllpIDs.Add(nvllPartitionID)
 
 				// If the number of active NVLink interfaces is unchanged, consume matching keys (multiset match).
-				key := fmt.Sprintf("%s:%d", nvllPartitionID.String(), apiNvlIfc.DeviceInstance)
+				key := fmt.Sprintf("%s:%d", nvllPartitionID, apiNvlIfc.DeviceInstance)
 				existingNvlIfcsForKey := existingNvlIfcMap[key]
 
 				// Check the status of the most recent NVLink interface for this key
@@ -4881,7 +4873,7 @@ func NewGetInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Instance"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance/{id} [get]
 func (gih GetInstanceHandler) Handle(c echo.Context) error {
@@ -4931,7 +4923,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -5115,18 +5107,20 @@ func NewGetAllInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param infrastructureProviderId query string false "Deprecated: Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use siteId to scope results to a specific Infrastructure Provider's Sites."
-// @Param siteId query string true "ID of Site"
-// @Param vpcId query string true "ID of Vpc"
-// @Param instanceTypeId query string false "ID of Instance Type"
-// @Param operatingSystemId query string false "ID of Operating System"
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param vpcId query []string false "ID of Vpc" collectionFormat(multi)
+// @Param instanceTypeId query []string false "ID of Instance Type" collectionFormat(multi)
+// @Param operatingSystemId query []string false "ID of Operating System" collectionFormat(multi)
 // @Param name query string false "Filter by Instance name"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param ipAddress query string false "Filter by IP address. Can be specified multiple times to filter on more than one IP address."
+// @Param status query []string false "Filter Instances by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one status." collectionFormat(multi)
+// @Param ipAddress query []string false "Filter by IP address. Can be specified multiple times to filter on more than one IP address." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
+// @Param machineId query []string false "Filter by machineId; repeat the parameter to specify multiple values" collectionFormat(multi)
+// @Param networkSecurityGroupId query []string false "Filter by networkSecurityGroupId; repeat the parameter to specify multiple values" collectionFormat(multi)
 // @Success 200 {array} []model.APIInstance
 // @Router /v2/org/{org}/nico/instance [get]
 func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
@@ -5275,7 +5269,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 		for _, status := range statusStrings {
 			_, ok := cdbm.InstanceStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 			}
 			filter.Statuses = append(filter.Statuses, status)
@@ -5354,14 +5348,14 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	if machineIDs := qParams["machineId"]; len(machineIDs) != 0 {
 		cotel.SetAttribute(handlerSpan, attribute.StringSlice("machineId", machineIDs))
 		machineDAO := cdbm.NewMachineDAO(gaih.dbSession)
-		machines, _, err := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: machineIDs, ExcludeMetadata: true}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		existingMachineIDs, err := machineDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{MachineIDs: machineIDs})
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving machines from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve machines with IDs %v specified in query", strings.Join(machineIDs, ", ")), nil)
 		}
 		machineMap := map[string]bool{}
-		for _, machine := range machines {
-			machineMap[machine.ID] = true
+		for _, machineID := range existingMachineIDs {
+			machineMap[machineID] = true
 		}
 		hasValidMachineID := false
 		for _, machineID := range machineIDs {
@@ -5838,7 +5832,7 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(dih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName}, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -6087,14 +6081,6 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
 	}
 
-	// Get and validate includeRelation params
-	qParams := c.QueryParams()
-	qIncludeRelations, errMsg := common.GetAndValidateQueryRelations(qParams, cdbm.InstanceRelatedEntities)
-	if errMsg != "" {
-		logger.Warn().Msg(errMsg)
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, errMsg, nil)
-	}
-
 	// Get Instance ID from URL param
 	instanceStrID := c.Param("id")
 	instanceID, err := uuid.Parse(instanceStrID)
@@ -6106,7 +6092,7 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gisdh.dbSession)
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, nil, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)

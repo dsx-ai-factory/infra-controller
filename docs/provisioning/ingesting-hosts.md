@@ -16,6 +16,8 @@ Ensure you have the following prerequisites met before ingesting machines:
 1. For the remaining REST parity gaps, you have `nico-admin-cli` and direct access to the NICo site. See the next section for details.
 1. The NICo API service is running at IP address `NICo_API_EXTERNAL`. It is recommended that you add this IP address to your trusted list.
 1. DHCP requests from all managed host IPMI networks have been forwarded to the NICo service running at IP address `NICo_DHCP_EXTERNAL`.
+1. Complete the [DHCP Cutover Checklist](ip-and-network-configuration.md#dhcp-cutover-checklist). Configure reservations for each DPU BMC or DPU OS interface that uses a Fixed allocation policy. Dynamic and Retained policies allocate addresses through DHCP without a predefined reservation only on segments with `allocation_strategy = "dynamic"`. On segments with `allocation_strategy = "reserved"`, an interface cannot obtain its first DHCP address without an existing reservation.
+1. Configure the [Site-wide Credentials](../getting-started/quick-start.md#set-site-wide-credentials) before starting discovery.
 1. You have the following information for all hosts that need to be ingested:
 
    - The MAC address of the host BMC
@@ -258,6 +260,7 @@ per-host fields and compatibility controls. It reads a snake_case
   [Host BMC compatibility fields](ip-and-network-configuration.md#host-bmc-compatibility-fields)
   for field interactions and the supported shared HostInband topology.
 - **`host_lifecycle_profile.disable_lockdown`** (bool, default `false`): When `true`, the state machine does not lock down the host during lifecycle management, which suits automation workflows that keep lockdown disabled.
+- **`host_lifecycle_profile.retain_hbn_config_on_boot`** (bool, default `false`): When `true`, designates the machine to retain its HBN config on boot. A designated machine must declare a `dpu_bmc` and a `dpu_os` interface, and must use a `Fixed` or `Retained` `ip_allocation` on the host BMC and on both DPU interfaces; the API rejects the designation otherwise. Declaring the DPU interfaces is required because an undeclared one gets a DHCP address. A machine whose `dpu_policy` attaches no DPU declares neither. Host data interfaces are not restricted. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable.
 
 The previous `host_nics` manifest key and `--host_nics` CLI option remain
 aliases for `interfaces` and `--interfaces`. Existing manifests do not need

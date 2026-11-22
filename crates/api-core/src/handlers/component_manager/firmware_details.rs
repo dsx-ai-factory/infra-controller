@@ -30,6 +30,9 @@ use model::site_explorer::EndpointExplorationReport;
 use model::switch::{ReProvisioningState, Switch, SwitchControllerState};
 
 mod context;
+mod read;
+
+pub(crate) use read::get_component_firmware_details;
 
 #[cfg(test)]
 mod tests;
@@ -117,8 +120,13 @@ pub(super) struct StoredFirmwareActions {
 
 /// Projects host firmware and owning-rack records. DPU reprovisioning and
 /// standalone update windows are not admitted host firmware actions.
-pub(super) fn machine(machine: &HostMachine, rack: Option<&Rack>) -> StoredFirmwareActions {
-    let member = RackMember::Machine(machine);
+/// `bmc_aliases` matches MAC-only rack records; nonempty node IDs stay authoritative.
+pub(super) fn machine(
+    machine: &HostMachine,
+    rack: Option<&Rack>,
+    bmc_aliases: &[MacAddress],
+) -> StoredFirmwareActions {
+    let member = RackMember::Machine(machine, bmc_aliases);
     let rack = rack.filter(|rack| machine.rack_id.as_ref() == Some(&rack.id));
     let mut actions = rack_actions(member, rack);
     let request = machine.host_reprovision_requested.as_ref();
@@ -476,12 +484,11 @@ fn append_device_request(
     }
 }
 
-/// The actual member supplies identity and Core consumption evidence. A host's
-/// selected BMC is the only MAC available to these projectors. Additional stored
-/// MACs are retained in context::FirmwareReadContext::bmc_aliases.
+/// Selects stored rack records for one managed member. Attached host BMC aliases
+/// also match records without a node ID when the selected BMC changes.
 #[derive(Clone, Copy)]
 enum RackMember<'a> {
-    Machine(&'a HostMachine),
+    Machine(&'a HostMachine, &'a [MacAddress]),
     Switch(&'a Switch),
     Shelf(&'a PowerShelf),
 }
@@ -490,7 +497,7 @@ impl RackMember<'_> {
     /// Follows the writer's typed ID lookup before considering a MAC address.
     fn firmware_device(self, job: &FirmwareUpgradeJob) -> Option<&FirmwareUpgradeDeviceStatus> {
         let devices = match self {
-            Self::Machine(_) => &job.machines,
+            Self::Machine(..) => &job.machines,
             Self::Switch(_) => &job.switches,
             Self::Shelf(_) => &job.power_shelves,
         };
@@ -510,7 +517,7 @@ impl RackMember<'_> {
     fn selected(self, scope: &MaintenanceScope) -> bool {
         scope.is_full_rack()
             || match self {
-                Self::Machine(host) => scope.machine_ids.contains(&host.id),
+                Self::Machine(host, _) => scope.machine_ids.contains(&host.id),
                 Self::Switch(switch) => scope.switch_ids.contains(&switch.id),
                 Self::Shelf(shelf) => scope.power_shelf_ids.contains(&shelf.id),
             }
@@ -520,7 +527,7 @@ impl RackMember<'_> {
     fn matches(self, node_id: &str, mac: &str) -> bool {
         if !node_id.is_empty() {
             return match self {
-                Self::Machine(host) => node_id
+                Self::Machine(host, _) => node_id
                     .parse::<HostMachineId>()
                     .is_ok_and(|node| node == host.id),
                 Self::Switch(switch) => node_id
@@ -532,7 +539,11 @@ impl RackMember<'_> {
             };
         }
         let mac_address = match self {
-            Self::Machine(host) => host.status.bmc_info.mac,
+            Self::Machine(host, aliases) => {
+                return mac.parse::<MacAddress>().is_ok_and(|mac| {
+                    host.status.bmc_info.mac == Some(mac) || aliases.contains(&mac)
+                });
+            }
             Self::Switch(switch) => switch.bmc_mac_address,
             Self::Shelf(shelf) => shelf.bmc_mac_address,
         };
@@ -651,7 +662,7 @@ fn activity_settled(member: RackMember<'_>, rack: &Rack, activity: FirmwareActiv
     };
     match activity {
         FirmwareActivity::FirmwareObject => {
-            if let RackMember::Machine(host) = member
+            if let RackMember::Machine(host, _) = member
                 && host.host_reprovision_requested.is_some()
             {
                 return false;

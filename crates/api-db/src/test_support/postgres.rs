@@ -17,12 +17,16 @@
 
 //! PostgreSQL coordination helpers for database and downstream tests.
 
-use sqlx::PgPool;
+use crate::db_read::DbReader;
 
 /// Backend PIDs of the sessions in a lock wait behind `blocker_pid` whose
 /// query contains `query_fragment`, lowest first. The fragment match is
 /// literal so underscores in SQL identifiers cannot act as `LIKE` wildcards.
-async fn blocked_query_pids(pool: &PgPool, blocker_pid: i32, query_fragment: &str) -> Vec<i32> {
+async fn blocked_query_pids(
+    conn: impl DbReader<'_>,
+    blocker_pid: i32,
+    query_fragment: &str,
+) -> Vec<i32> {
     sqlx::query_scalar(
         r#"
             SELECT activity.pid
@@ -36,7 +40,7 @@ async fn blocked_query_pids(pool: &PgPool, blocker_pid: i32, query_fragment: &st
     )
     .bind(blocker_pid)
     .bind(query_fragment)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .expect("database lock state should be readable")
 }
@@ -44,14 +48,17 @@ async fn blocked_query_pids(pool: &PgPool, blocker_pid: i32, query_fragment: &st
 /// Waits until at least `expected` sessions are in a lock wait behind
 /// `blocker_pid` on a query containing `query_fragment` and returns their
 /// backend PIDs, lowest first.
-async fn wait_for_blocked_query_pids(
-    pool: &PgPool,
+async fn wait_for_blocked_query_pids<DB>(
+    conn: &mut DB,
     blocker_pid: i32,
     query_fragment: &str,
     expected: usize,
-) -> Vec<i32> {
+) -> Vec<i32>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     for _ in 0..300 {
-        let blocked = blocked_query_pids(pool, blocker_pid, query_fragment).await;
+        let blocked = blocked_query_pids(&mut *conn, blocker_pid, query_fragment).await;
         if blocked.len() >= expected {
             return blocked;
         }
@@ -65,28 +72,42 @@ async fn wait_for_blocked_query_pids(
 
 /// Waits for a query containing `query_fragment` to enter a lock wait behind
 /// `blocker_pid` and returns the blocked PostgreSQL backend PID.
-pub async fn wait_for_blocked_query(pool: &PgPool, blocker_pid: i32, query_fragment: &str) -> i32 {
-    wait_for_blocked_query_pids(pool, blocker_pid, query_fragment, 1).await[0]
+pub async fn wait_for_blocked_query<DB>(
+    conn: &mut DB,
+    blocker_pid: i32,
+    query_fragment: &str,
+) -> i32
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    wait_for_blocked_query_pids(conn, blocker_pid, query_fragment, 1).await[0]
 }
 
 /// Waits until at least `expected` sessions are in a lock wait behind
 /// `blocker_pid` on a query containing `query_fragment` and returns how many
 /// are.
-pub async fn wait_for_blocked_queries(
-    pool: &PgPool,
+pub async fn wait_for_blocked_queries<DB>(
+    conn: &mut DB,
     blocker_pid: i32,
     query_fragment: &str,
     expected: usize,
-) -> usize {
-    wait_for_blocked_query_pids(pool, blocker_pid, query_fragment, expected)
+) -> usize
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    wait_for_blocked_query_pids(conn, blocker_pid, query_fragment, expected)
         .await
         .len()
 }
 
 /// Sessions currently in a lock wait behind `blocker_pid` on a query
 /// containing `query_fragment`.
-pub async fn count_blocked_queries(pool: &PgPool, blocker_pid: i32, query_fragment: &str) -> usize {
-    blocked_query_pids(pool, blocker_pid, query_fragment)
+pub async fn count_blocked_queries(
+    conn: impl DbReader<'_>,
+    blocker_pid: i32,
+    query_fragment: &str,
+) -> usize {
+    blocked_query_pids(conn, blocker_pid, query_fragment)
         .await
         .len()
 }

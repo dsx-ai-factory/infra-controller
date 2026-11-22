@@ -393,9 +393,12 @@ Reachability](../../docs/manuals/vpc/vpc_network_virtualization.md#export-route-
 
 Every route target in this table has the form `<asn>:<number>`. For the admin and tenant
 tags the ASN half is the datacenter ASN allocated in 1.1.1. The control-plane tag
-`:50100` is the exception: the site controller DPUs export it under
-`siteControllerRoutesAsn` (section 2, README Step 1). The shipped sample sets that field equal to the
+is the exception: the site controller DPUs export
+`<siteControllerRoutesAsn>:<fnn.commonSiteControllerRouteTarget>`
+(section 2, README Step 1). The shipped sample sets the controller ASN equal to the
 datacenter ASN, and it differs only when several sites share one datacenter (1.1.2.2).
+The table and the rest of this page use the sample controller tag `50100`. Substitute
+your configured `fnn.commonSiteControllerRouteTarget` wherever that tag is used.
 The second half is a number from NICo's conventions, listed below. The network team must
 know both halves, because the datacenter imports these targets by their full value. A
 tenant routing profile's tag is advertised only while a VPC of that profile exists;
@@ -406,7 +409,7 @@ see [VPC Routing Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md).
 
 | RT number | Meaning | Exported by | What the datacenter must do |
 |---|---|---|---|
-| `:50100` | site controller control plane: host `/31`s and service VIP `/32`s | the site controller DPUs, as `<siteControllerRoutesAsn>:50100` | The SMN VRFs and every other VRF that must reach NICo services must import it (1.6.1). |
+| `:50100` | site controller control plane: host `/31`s and service VIP `/32`s | the site controller DPUs, using the full control-plane target above | The SMN VRFs and every other VRF that must reach NICo services must import it (1.6.1). |
 | `:50500` | external tenant routes (the normal tenant for a provider) | the managed-host DPUs, for VPCs in the `EXTERNAL` profile, in addition to each VPC's native `<datacenterAsn>:<vni>` | The internet gateway VRF must import it to learn every external VPC's prefixes (Mechanism 1 in [VPC Network Virtualization → Internet Connectivity](../../docs/manuals/vpc/vpc_network_virtualization.md#internet-connectivity)). A gateway VRF that serves one VPC with its own default route imports that VPC's native target instead (Mechanism 2, 1.7.1). |
 | `:50400` | admin network routes | the managed-host DPUs, for the admin VPC | Every VRF that must reach hosts' admin addresses must import it (1.6.2). |
 | `:50200` | internal tenant routes (operator's own users) | the managed-host DPUs, for VPCs in the `INTERNAL` profile | The shared internal egress VRF imports it ([VPC Network Virtualization](../../docs/manuals/vpc/vpc_network_virtualization.md#internet-connectivity)). |
@@ -425,13 +428,17 @@ see [VPC Routing Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md).
 #### 1.4.3. The import list of the site controller DPUs
 
 The two tables above are ordered by who exports a target. This subsection collects, from
-both of them, what the site controller DPUs import. They always import three targets:
-`:900` for the managed hosts' out-of-band prefixes (1.4.2), `:50100` for the other site
-controller nodes of the site and `:50400` for the admin VPC (1.4.1). All three are
-imported under the datacenter ASN. When `siteControllerRoutesAsn` differs from the
-datacenter ASN (1.1.2.2), the site's own `:50100` routes therefore fall outside the fixed
-import, and the operator must add `<siteControllerRoutesAsn>:50100` to
-`fnn.routeTargetsToImport` (section 2).
+both of them, what the site controller DPUs import. The template always adds three
+imports under `datacenterAsn`, using `fnn.commonManagedNodeBmcRouteTarget` for the managed
+hosts' out-of-band prefixes (1.4.2), `fnn.commonSiteControllerRouteTarget` for the other
+site controller nodes, and `fnn.commonAdminNetworkTarget` for the admin VPC (1.4.1).
+The sample values are `900`, `50100`, and `50400`.
+
+When `siteControllerRoutesAsn` differs from `datacenterAsn` (1.1.2.2), add
+`<siteControllerRoutesAsn>:<fnn.commonSiteControllerRouteTarget>` to
+`fnn.routeTargetsToImport` (section 2) so that the import matches the controller export.
+For example, with `siteControllerRoutesAsn: 4200100000` and
+`fnn.commonSiteControllerRouteTarget: 45100`, the additional import is `4200100000:45100`.
 
 In addition, the site controllers must import **the common tag of every tenant routing
 profile the site uses**. The reason is the return path. Hosts in a tenant VPC send DHCP
@@ -648,8 +655,9 @@ What each site controller DPU then does, so the network team knows what to expec
 default VRF with the `/32` loopback as VTEP source and eBGP
 unnumbered on `p0`/`p1` with IPv4 unicast + EVPN (1.2.1, 1.3.1); the host link `/31` in
 `vpc_<controlPlaneVni>` peering with the host; type-5 export of the host link and VIP
-`/32`s tagged `<siteControllerRoutesAsn>:50100`; imports of `:900`, `:50400`, `:50100`,
-the per-site list, and the VRF's own auto target; bidirectional leak with the default
+`/32`s tagged `<siteControllerRoutesAsn>:<fnn.commonSiteControllerRouteTarget>`; imports of
+the three configured common targets under `datacenterAsn`, the per-site list, and the
+VRF's own auto target; bidirectional leak with the default
 VRF. The build renders this FNN-mode template (`startupSMN.template`) when the
 site file has an `fnn:` block, which is the configuration this page describes. A site
 file without that block renders the non-FNN `startup.template` instead; that mode is

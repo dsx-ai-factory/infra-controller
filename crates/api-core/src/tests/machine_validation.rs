@@ -29,6 +29,7 @@ use common::api_fixtures::{
     get_machine_validation_runs, on_demand_machine_validation,
 };
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineState, MachineValidatingState,
     MachineValidationFilter, ManagedHostState, ValidationState,
@@ -81,9 +82,7 @@ async fn test_machine_validation_complete_with_error(
 
     let mh = create_host_with_machine_validation(&env, None, Some("Test Error".to_owned())).await;
 
-    let mut txn = env.pool.begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
     match machine.current_state() {
         ManagedHostState::Failed {
             details,
@@ -151,9 +150,7 @@ async fn test_machine_validation_with_error(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Failed {
@@ -290,10 +287,7 @@ async fn test_machine_validation(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Ready => {}
@@ -495,9 +489,12 @@ async fn test_create_update_external_config(
         .unwrap()
         .into_inner();
 
-    assert_eq!(res_next.config.clone().unwrap().name, name);
-    assert_eq!(res_next.config.clone().unwrap().description.unwrap(), desc);
-    assert_eq!(&res_next.config.clone().unwrap().version, "2");
+    assert_eq!(res_next.config.as_ref().unwrap().name, name);
+    assert_eq!(
+        res_next.config.as_ref().unwrap().description.as_deref(),
+        Some(desc)
+    );
+    assert_eq!(&res_next.config.as_ref().unwrap().version, "2");
     assert_eq!(res_next.config.unwrap().config, input.as_bytes().to_vec());
     let res_list = env
         .api
@@ -545,7 +542,7 @@ async fn test_get_external_configs_filters_by_requested_names(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
     let config = b"{}".to_vec();
     // Add/update is disabled, so seed the stored configurations through the database.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for name in ["config-a", "config-b", "config-c"] {
         db::machine_validation_config::save(txn.as_mut(), name, "validation parameters", &config)
             .await?;
@@ -698,9 +695,7 @@ async fn test_machine_validation_test_on_demand_filter(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-    let machine = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Ready => {}
@@ -846,7 +841,7 @@ async fn concurrent_on_demand_requests_create_only_one_run(
     // Keep both requests behind this lock until they have begun their lookup.
     // Without the handler's row lock, both requests can observe an unscheduled
     // machine and each create a run before either updates the request flag.
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(mh.host().id)
         .execute(gate.as_mut())
@@ -973,19 +968,17 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
     .await;
 
     let reboot_request_before_wait = {
-        let mut txn = env.pool.begin().await?;
-        let machine = mh.host().db_machine(&mut txn).await;
-        let reboot = machine
+        let machine = mh.host().db_machine(&env.pool).await;
+
+        machine
             .status
             .last_reboot_requested
-            .map(|last_reboot| (last_reboot.time, last_reboot.mode));
-        txn.commit().await?;
-        reboot
+            .map(|last_reboot| (last_reboot.time, last_reboot.mode))
     };
 
     let mut machine_validation_config = env.config.machine_validation_config.clone();
     machine_validation_config.enabled = false;
-    let handler = MachineStateHandlerBuilder::builder()
+    let handler = MachineStateHandlerBuilder::builder(env.api.instrumentation.clone())
         .hardware_models(env.config.get_firmware_config())
         .reachability_params(env.reachability_params)
         .attestation_enabled(env.attestation_enabled)
@@ -1021,14 +1014,12 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
     .await;
 
     let reboot_request_after_wait = {
-        let mut txn = env.pool.begin().await?;
-        let machine = mh.host().db_machine(&mut txn).await;
-        let reboot = machine
+        let machine = mh.host().db_machine(&env.pool).await;
+
+        machine
             .status
             .last_reboot_requested
-            .map(|last_reboot| (last_reboot.time, last_reboot.mode));
-        txn.commit().await?;
-        reboot
+            .map(|last_reboot| (last_reboot.time, last_reboot.mode))
     };
     assert_eq!(reboot_request_after_wait, reboot_request_before_wait);
 
@@ -1580,8 +1571,7 @@ async fn test_on_demant_un_verified_machine_validation(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
     match machine.current_state() {
         ManagedHostState::Ready => {}
         s => {
@@ -2661,9 +2651,8 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
     crate::machine_validation::MachineValidationManager::new(
         env.pool.clone(),
         config,
-        opentelemetry::global::meter(
-            "test_machine_validation_m1_persists_selected_test_and_idempotent_result",
-        ),
+        env.test_meter.meter(),
+        env.api.instrumentation.clone(),
     )
     .run_single_iteration()
     .await?;
@@ -2834,9 +2823,8 @@ async fn test_machine_validation_manager_reconciles_stale_active_attempt(
     crate::machine_validation::MachineValidationManager::new(
         env.pool.clone(),
         config,
-        opentelemetry::global::meter(
-            "test_machine_validation_manager_reconciles_stale_active_attempt",
-        ),
+        env.test_meter.meter(),
+        env.api.instrumentation.clone(),
     )
     .run_single_iteration()
     .await?;
@@ -3010,16 +2998,14 @@ async fn test_machine_validation_manager_reconciles_stale_run(
 
     let mut config = env.config.machine_validation_config.clone();
     config.stale_run_timeout = std::time::Duration::from_secs(1);
-    // Reconciling the stale run is the run's one completion, so the outcome
-    // counter must move exactly once under the stale-run cause. Only this
-    // test drives that cause through the product funnel, and the emit-level
-    // test serializes behind the same capture lock, so the exact delta is
-    // race-free.
-    let metrics = carbide_instrument::testing::MetricsCapture::start();
+    // Reconciliation and late RPC completions share this environment's registry.
+    let metrics =
+        carbide_instrument::testing::MetricsCapture::for_registry(env.test_meter.registry());
     crate::machine_validation::MachineValidationManager::new(
         env.pool.clone(),
         config,
-        opentelemetry::global::meter("test_machine_validation_manager_reconciles_stale_run"),
+        env.test_meter.meter(),
+        env.api.instrumentation.clone(),
     )
     .run_single_iteration()
     .await?;

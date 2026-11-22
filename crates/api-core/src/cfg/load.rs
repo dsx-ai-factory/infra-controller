@@ -26,6 +26,7 @@ use eyre::WrapErr;
 use figment::providers::{Env, Format, Toml};
 use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider};
+use itertools::Itertools;
 use serde::de::DeserializeOwned;
 
 use super::file::{
@@ -38,11 +39,20 @@ struct UnknownConfigurationField {
     source: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Deprecation {
+    /// The value is dropped.
+    Ignored,
+    /// The value is copied to the replacement key and still applies.
+    StillInUse,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DeprecatedConfigurationField {
     path: &'static str,
     source: String,
     replacement: Option<&'static str>,
+    deprecation: Deprecation,
 }
 
 /// Configuration diagnostics collected before the process logging subscriber
@@ -76,19 +86,19 @@ impl ConfigurationDiagnostics {
         log_unknown_fields(&self.unknown_fields);
 
         for field in self.deprecated_fields {
-            if let Some(replacement) = field.replacement {
-                tracing::warn!(
+            match field.deprecation {
+                Deprecation::StillInUse => tracing::warn!(
                     config_key = field.path,
                     config_source = %field.source,
-                    replacement,
-                    "Ignoring deprecated configuration key"
-                );
-            } else {
-                tracing::warn!(
+                    replacement = field.replacement,
+                    "Using deprecated configuration key"
+                ),
+                Deprecation::Ignored => tracing::warn!(
                     config_key = field.path,
                     config_source = %field.source,
+                    replacement = field.replacement,
                     "Ignoring deprecated configuration key"
-                );
+                ),
             }
         }
 
@@ -183,11 +193,9 @@ fn reject_unknown_fields_if_requested(
         return Ok(());
     }
 
-    let fields = unknown_fields
-        .iter()
-        .map(|field| format!("{} ({})", field.path, field.source))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let fields = unknown_fields.iter().format_with(", ", |field, f| {
+        f(&format_args!("{} ({})", field.path, field.source))
+    });
     Err(eyre::eyre!("unknown configuration fields: {fields}"))
 }
 
@@ -243,15 +251,18 @@ pub(crate) fn all_configuration_files(carbide_config: &CarbideConfig) -> Vec<&Pa
         .collect()
 }
 
-/// Normalizes the legacy site-explorer DPU-policy key within one configuration
-/// provider, before Figment applies provider precedence.
+/// Rewrites deprecated keys within one configuration provider, before Figment
+/// applies provider precedence.
 ///
 /// Keeping this at the provider boundary makes global < site < environment win
-/// regardless of whether a source uses `dpu_policy` or legacy `dpu_mode`.
-/// Within one source, the canonical key wins when both are present.
-struct NormalizeLegacyDpuPolicy<P>(P);
+/// regardless of whether a source uses the deprecated or the current key.
+/// Within one source, the current key wins when both are present.
+struct NormalizeLegacyKeys<P>(P);
 
-impl<P: Provider> Provider for NormalizeLegacyDpuPolicy<P> {
+const LEGACY_KEY_NORMALIZERS: &[fn(&mut Dict)] =
+    &[normalize_legacy_dpu_policy, normalize_legacy_web_ui];
+
+impl<P: Provider> Provider for NormalizeLegacyKeys<P> {
     fn metadata(&self) -> Metadata {
         self.0.metadata()
     }
@@ -259,24 +270,49 @@ impl<P: Provider> Provider for NormalizeLegacyDpuPolicy<P> {
     fn data(&self) -> Result<Map<Profile, Dict>, figment::Error> {
         let mut data = self.0.data()?;
         for profile in data.values_mut() {
-            let Some(Value::Dict(_, site_explorer)) = profile.get_mut("site_explorer") else {
-                continue;
-            };
-
-            let legacy = site_explorer.remove("dpu_mode");
-            let canonical_is_set = site_explorer
-                .get("dpu_policy")
-                .is_some_and(|value| !matches!(value, Value::Empty(..)));
-            if !canonical_is_set && let Some(value) = legacy {
-                site_explorer.insert("dpu_policy".to_string(), value);
+            for normalize in LEGACY_KEY_NORMALIZERS {
+                normalize(profile);
             }
         }
-
         Ok(data)
     }
 
     fn profile(&self) -> Option<Profile> {
         self.0.profile()
+    }
+}
+
+/// Moves `site_explorer.dpu_mode` to `site_explorer.dpu_policy`.
+fn normalize_legacy_dpu_policy(profile: &mut Dict) {
+    let Some(Value::Dict(_, site_explorer)) = profile.get_mut("site_explorer") else {
+        return;
+    };
+
+    let legacy = site_explorer.remove("dpu_mode");
+    let canonical_is_set = site_explorer
+        .get("dpu_policy")
+        .is_some_and(|value| !matches!(value, Value::Empty(..)));
+    if !canonical_is_set && let Some(value) = legacy {
+        site_explorer.insert("dpu_policy".to_string(), value);
+    }
+}
+
+/// Copies the top-level `web_ui_*` keys under `web_ui`. The old keys stay so
+/// startup can warn about them.
+fn normalize_legacy_web_ui(profile: &mut Dict) {
+    for (legacy, canonical) in [
+        ("web_ui_sidebar_tools", "sidebar_tools"),
+        ("web_ui_logs_link_template", "logs_link_template"),
+    ] {
+        let Some(value) = profile.get(legacy).cloned() else {
+            continue;
+        };
+        let web_ui = profile
+            .entry("web_ui".to_string())
+            .or_insert_with(|| Value::from(Dict::new()));
+        if let Value::Dict(_, fields) = web_ui {
+            fields.entry(canonical.to_string()).or_insert(value);
+        }
     }
 }
 
@@ -293,11 +329,11 @@ fn merge_carbide_config_providers(
     site: Option<impl Provider>,
     environment: impl Provider,
 ) -> Figment {
-    let mut figment = Figment::new().merge(NormalizeLegacyDpuPolicy(global));
+    let mut figment = Figment::new().merge(NormalizeLegacyKeys(global));
     if let Some(site) = site {
-        figment = figment.merge(NormalizeLegacyDpuPolicy(site));
+        figment = figment.merge(NormalizeLegacyKeys(site));
     }
-    figment.merge(NormalizeLegacyDpuPolicy(environment))
+    figment.merge(NormalizeLegacyKeys(environment))
 }
 
 /// Load, normalize, and validate the Carbide API configuration, emitting
@@ -332,33 +368,52 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
             "force_dpu_nic_mode",
             config.deprecated_force_dpu_nic_mode.is_some(),
             Some("site_explorer.dpu_policy"),
+            Deprecation::Ignored,
         ),
         (
             "site_explorer.force_dpu_nic_mode",
             config.site_explorer.deprecated_force_dpu_nic_mode.is_some(),
             Some("site_explorer.dpu_policy"),
+            Deprecation::Ignored,
         ),
         (
             "rack_management_enabled",
             config.deprecated_rack_management_enabled.is_some(),
             None,
+            Deprecation::Ignored,
         ),
         (
             "site_explorer.explore_mode",
             config.site_explorer.deprecated_explore_mode.is_some(),
             None,
+            Deprecation::Ignored,
+        ),
+        (
+            "web_ui_sidebar_tools",
+            config.deprecated_web_ui_sidebar_tools.is_some(),
+            Some("web_ui.sidebar_tools"),
+            Deprecation::StillInUse,
+        ),
+        (
+            "web_ui_logs_link_template",
+            config.deprecated_web_ui_logs_link_template.is_some(),
+            Some("web_ui.logs_link_template"),
+            Deprecation::StillInUse,
         ),
     ]
     .into_iter()
-    .filter(|(_, is_set, _)| *is_set)
-    .map(|(path, _, replacement)| DeprecatedConfigurationField {
-        path,
-        source: merged_config
-            .find_metadata(path)
-            .map(super::provenance::source_label)
-            .unwrap_or_else(|| "configuration".to_string()),
-        replacement,
-    })
+    .filter(|(_, is_set, _, _)| *is_set)
+    .map(
+        |(path, _, replacement, deprecation)| DeprecatedConfigurationField {
+            path,
+            source: merged_config
+                .find_metadata(path)
+                .map(super::provenance::source_label)
+                .unwrap_or_else(|| "configuration".to_string()),
+            replacement,
+            deprecation,
+        },
+    )
     .collect();
 
     let diagnostics = ConfigurationDiagnostics {
@@ -422,6 +477,7 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     config
         .driver_rules()
         .wrap_err("invalid bmc_driver_rules configuration")?;
+    config.validate_admission_covers_cert_manager()?;
     config
         .firmware_global
         .downloads
@@ -439,20 +495,24 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
 
     config
         .nvlink_config
-        .get_or_insert_with(NvLinkConfig::default);
+        .get_or_insert_with(NvLinkConfig::default)
+        // Defaulting later fills the certificate, key, and authority together and only when no
+        // nmx_c_tls_* key is set, so a pair complete here stays complete.
+        .nmx_c_tls_config()
+        .wrap_err("invalid nvlink_config")?;
 
     // Publish the configured tool list so the admin-UI sidebar and per-machine
     // "Logs" deep link can read it back via `crate::configured_tools`. The list
     // is owned here (not in `carbide-api-web`) because it is derived from the
     // parsed config, before the web layer exists.
-    crate::init_tools(config.web_ui_sidebar_tools.clone());
+    crate::init_tools(config.web_ui.sidebar_tools.clone());
 
     // Publish the site name the same way, for the admin-UI sidebar header.
     crate::init_site_name(config.sitename.clone());
 
     // Publish the logs link URL template for the "Logs" link on machine and
     // endpoint detail pages.
-    crate::init_logs_link_template(config.web_ui_logs_link_template.clone());
+    crate::init_logs_link_template(config.web_ui.logs_link_template.clone());
 
     // Publish the deployment-wide host naming policy so the DB layer can read it
     // wherever an interface is [re]named (same way we do it w/ `init_tools` above).
@@ -578,7 +638,94 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::cfg::file::BmcBackend;
     use crate::logging::stream::{LogStream, LogStreamLayer};
+
+    #[test]
+    fn web_ui_settings_use_the_right_source() {
+        scenarios!(
+            run = |(global, site, environment): (&str, &str, &str)| {
+                let global = format!("{}\n{global}", include_str!("test_data/min_config.toml"));
+                merge_carbide_config_providers(
+                    Toml::string(&global),
+                    Some(Toml::string(site)),
+                    Toml::string(environment),
+                )
+                .extract::<CarbideConfig>()
+                .map(|config| (config.web_ui.logs_link_template, config.web_ui.sidebar_tools.len()))
+                .map_err(drop)
+            };
+            "site files override global files with either format" {
+                (
+                    "[web_ui]\nlogs_link_template = 'global'",
+                    "web_ui_logs_link_template = 'site'\n[[web_ui.sidebar_tools]]\nname = 'grafana'\ndisplay_name = 'Grafana'\nurl = 'https://grafana.example.com'",
+                    "",
+                ) => Yields(("site".to_string(), 1)),
+                ("web_ui_logs_link_template = 'global'", "[web_ui]\nlogs_link_template = 'site'", "")
+                    => Yields(("site".to_string(), 0)),
+            }
+            "environment variables override site files" {
+                ("", "[web_ui]\nlogs_link_template = 'site'", "web_ui_logs_link_template = 'env'")
+                    => Yields(("env".to_string(), 0)),
+            }
+            "empty nested fields override old fields in the same file" {
+                (
+                    "web_ui_logs_link_template = 'old'\n[[web_ui_sidebar_tools]]\nname = 'grafana'\ndisplay_name = 'Grafana'\nurl = 'https://grafana.example.com'\n[web_ui]\nlogs_link_template = ''\nsidebar_tools = []",
+                    "",
+                    "",
+                ) => Yields((String::new(), 0)),
+            }
+            "an invalid web_ui section still fails when old fields are present" {
+                ("web_ui = 42\nweb_ui_logs_link_template = 'old'", "", "") => Fails,
+            }
+        );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn legacy_web_ui_keys_are_applied_warned_and_omitted() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\ndeny_unknown_fields = true\nweb_ui_logs_link_template = 'logs'\n\
+                 [[web_ui_sidebar_tools]]\nname = 'grafana'\ndisplay_name = 'Grafana'\nurl = 'https://grafana.example.com'\n",
+                include_str!("test_data/min_config.toml"),
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            let stream = LogStream::new(16, 64 * 1024);
+            let mut logs = stream.subscribe();
+            let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
+            let config = tracing::subscriber::with_default(subscriber, || {
+                parse_carbide_config(Path::new("config.toml"), None)
+            })
+            .expect("strict configuration with the deprecated keys must load");
+
+            assert_eq!(config.web_ui.logs_link_template, "logs");
+            assert_eq!(config.web_ui.sidebar_tools.len(), 1);
+            let serialized =
+                toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
+            assert!(!serialized.contains("web_ui_"));
+
+            let warnings = std::iter::from_fn(|| logs.try_recv().ok())
+                .filter(|line| line.message == "Using deprecated configuration key")
+                .map(|line| {
+                    (
+                        line.fields.get("config_key").cloned(),
+                        line.fields.get("replacement").cloned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                warnings,
+                [
+                    ("web_ui_sidebar_tools", "web_ui.sidebar_tools"),
+                    ("web_ui_logs_link_template", "web_ui.logs_link_template"),
+                ]
+                .map(|(key, replacement)| (Some(key.to_string()), Some(replacement.to_string())))
+            );
+            Ok(())
+        })
+    }
 
     #[derive(Clone, Copy)]
     struct PolicyLayers {
@@ -767,6 +914,40 @@ request_timeout_seconds = 5"#
         })
     }
 
+    /// A present firmware settings table defaults omitted delivery controls.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn firmware_delivery_defaults_apply_to_present_global_section() {
+        use carbide_firmware::downloader::FirmwareDownloadConfig;
+        use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
+
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                &format!(
+                    "{}\n[firmware_global]\nmax_uploads = 1\n",
+                    include_str!("test_data/min_config.toml")
+                ),
+            )?;
+            let config = parse_carbide_config(Path::new("config.toml"), None)
+                .expect("existing firmware settings accept omitted delivery controls");
+            assert_eq!(config.firmware_global.max_uploads, 1);
+            assert_eq!(
+                config.firmware_global.downloads,
+                FirmwareDownloadConfig::default()
+            );
+            assert_eq!(
+                config.firmware_global.nic_firmware_cache_capacity_bytes,
+                16 * 1024 * 1024 * 1024
+            );
+            assert_eq!(
+                config.firmware_global.nic_firmware_delivery_mode,
+                FirmwareDeliveryMode::SiteCache
+            );
+            Ok(())
+        })
+    }
+
     /// Loads BMC driver rule overrides and rejects any the drivers cannot
     /// serve before activating Core.
     #[test]
@@ -817,6 +998,33 @@ selections = { power = "standard" }"#
                         => FailsWith("invalid bmc_driver_rules configuration: unknown power driver no-such-driver".to_string()),
                     "[[bmc_driver_rules]]\nid = \"lenovo-xcc3\"\nselections = { power = \"standard\" }"
                         => FailsWith("invalid bmc_driver_rules configuration: rule id lenovo-xcc3 is used more than once".to_string()),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Existing configurations keep libredfish, and only the two clients parse.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bmc_backend_defaults_to_libredfish() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.bmc_backend)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "BMC backend" {
+                    "" => Yields(BmcBackend::Libredfish),
+                    "bmc_backend = \"drivers\"" => Yields(BmcBackend::Drivers),
+                    "bmc_backend = \"redfish\"" => FailsWith(
+                        "failed to load configuration files: unknown variant: found `redfish`, expected ``libredfish` or `drivers`` for key \"default.bmc_backend\" in config.toml TOML file".to_string(),
+                    ),
                 }
             );
             Ok(())
@@ -893,10 +1101,9 @@ selections = { power = "standard" }"#
     fn route_targets_are_validated_during_startup_loading() {
         figment::Jail::expect_with(|jail| {
             // Put 257 valid targets in one prefix rule to exercise configured-pair admission.
-            let oversized_targets = (0..=256)
-                .map(|vni| format!("{{ asn = 64512, vni = {vni} }}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let oversized_targets = (0..=256).format_with(", ", |vni, f| {
+                f(&format_args!("{{ asn = 64512, vni = {vni} }}"))
+            });
             let oversized_conditional_exports = format!(
                 "[fnn.routing_profiles.OVERSIZED]\nroute_targets_on_exports_by_prefix = [{{ prefix = \"0.0.0.0/0\", route_targets = [{oversized_targets}] }}]"
             );
@@ -1103,6 +1310,32 @@ route_targets_on_exports_by_prefix = [{ prefix = "::/0", route_targets = [] }]"#
         })
     }
 
+    /// A client certificate without its key stops configuration loading, even with NVLink
+    /// partitioning disabled, and the error names the missing setting.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nmx_c_client_certificate_without_key_fails_configuration_loading() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\n[nvlink_config]\nnmx_c_tls_client_cert_path = \"/etc/nico/nmxc/client.crt\"\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            let error = parse_carbide_config(Path::new("config.toml"), None)
+                .expect_err("a client certificate without its key must be rejected");
+            let message = format!("{error:#}");
+            assert!(message.contains("invalid nvlink_config"), "{message}");
+            assert!(
+                message.contains(
+                    "nmx_c_tls_client_cert_path is set without nmx_c_tls_client_key_path"
+                ),
+                "{message}"
+            );
+            Ok(())
+        })
+    }
+
     #[test]
     #[allow(clippy::result_large_err)]
     fn legacy_keys_without_a_replacement_are_accepted_warned_and_omitted() {
@@ -1148,6 +1381,7 @@ route_targets_on_exports_by_prefix = [{ prefix = "::/0", route_targets = [] }]"#
             assert!(warnings.iter().all(|line| {
                 line.level == "WARN"
                     && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
+                    && !line.fields.contains_key("replacement")
             }));
             Ok(())
         })

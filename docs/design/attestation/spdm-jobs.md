@@ -3,9 +3,9 @@
 **Status:** Implemented
 
 An SPDM attestation job records one attempt to check a machine's selected
-devices. The [profile design](attestation-profiles.md)
-explains how those devices are selected. The job gives that attempt its own
-identity, progress, and results.
+devices. The [profile design](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/design/attestation/attestation-profiles.md)
+explains the default selection; a trigger can override it with an attester regex.
+The job gives that attempt its own identity, progress, and results.
 
 ## Job identity
 
@@ -89,7 +89,7 @@ The next iteration schedules replacement work or skips an empty selection.
 ## Reading results and keeping history
 
 The commands below belong to `nico-admin-cli attestation spdm`. They use the
-[SPDM gRPC methods](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/rpc/proto/forge.proto#L1098).
+[SPDM gRPC methods](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/rpc/proto/forge.proto#L1146).
 
 ### Start a run: `trigger`
 
@@ -97,6 +97,30 @@ The commands below belong to `nico-admin-cli attestation spdm`. They use the
 `TriggerMachineAttestation`. On success, it prints the job ID when devices
 were scheduled, or `none` when no job was created. Keep that ID to inspect or
 fail or waive the run.
+
+By default, selection uses the machine's hardware-class profile. Supplying
+`--attester-id-regex` replaces that selection for this request, including when
+the profile is missing or its mode is `NONE`, without modifying the stored
+profile. The pattern uses Rust regex syntax and searches within each reported
+attester ID, case-sensitive by default: `GPU_` selects IDs containing that text;
+`GPU_0$` selects IDs ending in `GPU_0`; `^HGX_IRoT_GPU_0$` selects exactly that ID.
+Empty or invalid patterns are rejected before contacting the BMC. Device
+enablement, SPDM type/version checks, and site-wide SPDM enablement still apply.
+
+The trigger prints the applied regex for an override, the scheduled attester IDs
+in ascending order, and the job ID. The outcome names that follow are API model
+values. The CLI renders them as descriptions, such as
+`scheduled using the manual attester override`. A matching override reports
+`AttesterOverrideScheduled`. No eligible match creates no job:
+`NoAttestersFound` means discovery found no eligible devices, while
+`AttesterOverrideMatchedNothing` means eligible devices existed but
+none matched the regex. An attester override applies no profile, so its scheduling
+events report `profile_source=unprofiled` even when a profile exists. The distinct
+override outcomes separate successful selection and unmatched regexes from
+profile-driven `Scheduled` and `PolicyMatchedNothing` attempts. Inspect the
+targeted run through its job ID. The `machines list --machine-id` assessment
+uses the current profile. The **Health Alerts** column can use a stored manual
+selection.
 
 ### Inspect, fail, or waive a run: `job`
 
@@ -113,7 +137,9 @@ The `job` group operates on individual runs:
 `passed`. `get`, `waive`, and `fail` take a job ID. Both `list` and `get` print JSON;
 `get` returns the details from `SpdmGetAttestationResponse`. Reading an unknown
 or removed job returns not found. A successful `waive` or `fail` acknowledges the
-request; the controller performs the BMC cleanup as described above.
+request; the controller performs the BMC cleanup as described above. Both work
+on a retained job even while `spdm.enabled` is off. To clear an
+`SpdmAttestationFailed` alert, waive the job named in its message.
 
 For a stuck run, fail its original job and inspect it until cleanup completes:
 
@@ -150,13 +176,15 @@ result can therefore differ from the machine's assessment.
 Older runs remain visible through `job list` and `job get` until history
 cleanup removes them. Cleanup runs when a device records completion and
 removes whole eligible jobs. It keeps the ten newest completed jobs per
-machine, unfinished jobs, jobs holding evidence collection claims, and jobs
-containing a device's latest attestation record. Newest means `started_at`
-descending, then `job_id` descending.
+machine, unfinished jobs, jobs holding evidence collection claims, jobs
+containing a device's latest attestation record, and jobs containing a
+device's newest finished result, even while a newer attempt for that device is
+unfinished. Newest means `started_at` descending, then `job_id` descending.
 The job being updated is also kept until a later cleanup, so ten is not a
 strict limit on retained jobs.
 
-Implementation: [scheduling](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/machine-controller/src/handler/attestation.rs),
-[job reads and status](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/api-db/src/attestation/spdm.rs),
-[worker](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/spdm-controller/src/handler.rs),
-and [storage and cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/api-db/migrations/20260917113009_spdm_job_id.sql).
+Implementation: [scheduling](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/machine-controller/src/handler/attestation.rs),
+[job reads and status](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/api-db/src/attestation/spdm.rs),
+[worker](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/spdm-controller/src/handler.rs),
+[storage](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/api-db/migrations/20260917113009_spdm_job_id.sql),
+and [current cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-db/migrations/20261113233000_spdm_retain_newest_finished_attestation.sql).

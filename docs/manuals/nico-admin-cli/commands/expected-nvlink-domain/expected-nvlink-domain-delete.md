@@ -22,7 +22,7 @@ Delete a declaration and release its members without changing hardware
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<ID>`
 

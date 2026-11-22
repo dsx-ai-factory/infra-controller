@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgConnection;
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 pub type IsFirstObservation = bool;
 
@@ -80,7 +81,7 @@ pub async fn observe_as_latest_version(
 
 /// Return the date the given version was superseded, if found.
 pub async fn date_superseded(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     version: &str,
 ) -> Result<Option<DateTime<Utc>>, DatabaseError> {
     let query = "SELECT superseded FROM forge_versions WHERE version = $1";
@@ -88,7 +89,7 @@ pub async fn date_superseded(
     // double-option here because it's a nullable value *and* the query may not return a row.
     let result: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(query)
         .bind(version)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
