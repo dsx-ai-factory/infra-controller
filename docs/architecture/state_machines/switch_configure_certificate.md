@@ -81,7 +81,7 @@ credentials at the target revision advance without a password update. Valid
 credentials that have not converged use the same password-update job as expired
 factory credentials.
 
-RMS v0.13.0-rc.5 handles forced-expiry recovery for factory-default credentials
+RMS handles forced-expiry recovery for factory-default credentials
 over SSH; this sequence does not add recovery for arbitrary expired nondefault
 passwords. Existing mTLS bindings
 remain in place while bootstrap waits or retries a failed job or transport error.
