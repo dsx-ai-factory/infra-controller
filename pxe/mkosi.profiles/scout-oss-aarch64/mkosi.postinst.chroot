@@ -13,6 +13,8 @@ echo "$PKG_VERSION" >/etc/scout-image-version
 # ============================================================================
 # We install these in postinst to avoid double-triggering the DKMS build
 NV_PACKAGES="nvidia-open datacenter-gpu-manager-4-cuda13 datacenter-gpu-manager-4-core datacenter-gpu-manager-4-proprietary-cuda13 libnvidia-cfg1 libnvidia-compute libnvidia-decode libnvidia-encode libnvidia-fbc1 libnvidia-gl libnvidia-gpucomp nvidia-dkms-open nvidia-driver-open nvidia-fabricmanager nvidia-firmware nvidia-kernel-common nvidia-kernel-source-open nvidia-modprobe nvidia-persistenced xserver-xorg-video-nvidia libxnvctrl0 nvidia-settings nvidia-imex mft"
+# nerdctl --gpus all invokes the toolkit on the Scout host before starting a container.
+NV_PACKAGES+=" nvidia-container-toolkit"
 APT_SANDBOX_OPTS="-o APT::Sandbox::User=root"
 export DEBIAN_FRONTEND=noninteractive
 
@@ -117,6 +119,10 @@ cp /build-output/forge-scout-network.sh /opt/forge/
 # Ensure key commands are present
 for bin in /opt/forge/forge-scout \
            /opt/forge/mlx-firmware-supervisor \
+           /usr/bin/nvidia-container-cli \
+           /usr/bin/nvidia-container-runtime \
+           /usr/bin/nvidia-container-runtime-hook \
+           /usr/bin/nvidia-ctk \
            /usr/bin/dcgmi \
            /usr/libexec/datacenter-gpu-manager-4/nvvs \
            /usr/libexec/datacenter-gpu-manager-4/plugins/cuda13/BwChecker_13
@@ -131,6 +137,10 @@ done
 # Ensure no missing libraries for key commands
 for bin in /opt/forge/forge-scout \
            /opt/forge/mlx-firmware-supervisor \
+           /usr/bin/nvidia-container-cli \
+           /usr/bin/nvidia-container-runtime \
+           /usr/bin/nvidia-container-runtime-hook \
+           /usr/bin/nvidia-ctk \
            /usr/bin/dcgmi \
            /usr/libexec/datacenter-gpu-manager-4/nvvs \
            /usr/libexec/datacenter-gpu-manager-4/plugins/cuda13/BwChecker_13
@@ -141,6 +151,10 @@ do
     exit 1
   fi
 done
+
+# These commands must run during the image build without GPU hardware.
+nvidia-container-cli --version
+nvidia-ctk --version
 
 # Check the nvidia driver versions are consistent
 NV_PKGS="nvidia-open libnvidia-compute nvidia-dkms-open nvidia-driver-open nvidia-fabricmanager
