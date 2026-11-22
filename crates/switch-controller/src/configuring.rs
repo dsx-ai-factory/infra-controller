@@ -35,7 +35,7 @@ use crate::certificate::{
 use crate::context::SwitchStateHandlerContextObjects;
 use crate::nvos_password_rotation::{
     NvosPasswordRotationOutcome, expected_nvos_credential_pair, read_nvos_site_credentials,
-    reconcile_nvos_password_rotation,
+    reconcile_nvos_password_bootstrap, reconcile_nvos_password_rotation,
 };
 
 /// Result of resolving the current per-switch NVOS credential.
@@ -82,34 +82,19 @@ async fn handle_bootstrap_nvos_password(
     state: &Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    // An unpublished managed target is not evidence of usable credentials.
-    // Preserve rollout skips when configuration writes cannot be started.
-    if state.rack_id.is_some()
-        && let Some(manager) = ctx.services.component_manager.as_ref()
-        && manager.nv_switch.supports_password_rotation()
-    {
-        let mut conn = ctx.services.db_pool.acquire().await?;
-        if db::credential_rotation::current_target_version(
-            &mut conn,
-            db::credential_rotation::CredentialRotationType::Nvos,
-        )
-        .await?
-        .is_none()
-        {
-            return Ok(StateHandlerOutcome::wait(
-                "waiting for a managed NVOS password target before switch bootstrap".to_string(),
-            ));
-        }
-    } else {
+    if state.rack_id.is_none() {
         return Ok(StateHandlerOutcome::transition(disable_mtls_start()));
     }
 
-    match reconcile_nvos_password_rotation(switch_id, state, ctx).await? {
+    match reconcile_nvos_password_bootstrap(switch_id, state, ctx).await? {
         NvosPasswordRotationOutcome::UpToDate => {
             Ok(StateHandlerOutcome::transition(disable_mtls_start()))
         }
         NvosPasswordRotationOutcome::Waiting(reason) => Ok(StateHandlerOutcome::wait(reason)),
-        NvosPasswordRotationOutcome::CredentialError(cause) => Ok(StateHandlerOutcome::transition(
+        NvosPasswordRotationOutcome::CredentialError(cause) => Ok(StateHandlerOutcome::wait(
+            format!("waiting for valid NVOS admin credentials: {cause}"),
+        )),
+        NvosPasswordRotationOutcome::Failed(cause) => Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Error { cause },
         )),
     }
@@ -133,7 +118,8 @@ async fn handle_rotate_os_password(
             SwitchControllerState::FetchInfo,
         )),
         NvosPasswordRotationOutcome::Waiting(reason) => Ok(StateHandlerOutcome::wait(reason)),
-        NvosPasswordRotationOutcome::CredentialError(cause) => Ok(StateHandlerOutcome::transition(
+        NvosPasswordRotationOutcome::CredentialError(cause)
+        | NvosPasswordRotationOutcome::Failed(cause) => Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Error { cause },
         )),
     }

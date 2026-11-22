@@ -7,8 +7,9 @@ Service (RMS)** asynchronously and polls job status until completion.
 
 ## Goals
 
-- Bootstrap managed NVOS credentials before configuration writes, then install
-  or rotate the switch NVOS certificate during initial switch bring-up.
+- When an NVOS target is published, bootstrap credentials before configuration
+  writes, then install or rotate the switch NVOS certificate during initial
+  switch bring-up.
 - Reset existing mTLS bindings before installing certificates during initial
   bring-up, so stale client-CA trust cannot block installation.
 - Keep RMS-specific protobuf and job semantics behind the CM `NvSwitchManager`
@@ -28,7 +29,7 @@ direction TB
 
 state Configuring {
     [*] --> BootstrapNvosPassword
-    BootstrapNvosPassword --> BootstrapNvosPassword : waiting for target, job, or credential persistence
+    BootstrapNvosPassword --> BootstrapNvosPassword : waiting for credentials, job, or credential persistence
     BootstrapNvosPassword --> DisableMtls : credentials ready or bootstrap skipped
     state DisableMtls {
         [*] --> DisableStart
@@ -49,7 +50,7 @@ state Configuring {
 
 FetchInfo --> Validating : slot and tray lookup complete
 
-BootstrapNvosPassword --> Error : inconsistent credential data
+BootstrapNvosPassword --> Error : password job Failed
 DisableMtls --> Error : job Failed, outcome unknown, or unobservable
 ConfigureCertificate --> Error : job Failed
 ```
@@ -73,26 +74,46 @@ submit the operation twice. The condition tables for
 
 ### Bootstrap NVOS credentials before configuration writes
 
-`BootstrapNvosPassword` reuses the durable NVOS password reconciler. The managed
-NVOS target must be published before bootstrap can proceed. NICo submits the
-password update through CM, polls its job, then writes and reads back the new
-per-switch credential before entering `DisableMtls(Start)`. Already-confirmed
-credentials at the target revision advance without a password update. Valid
-credentials that have not converged use the same password-update job as expired
-factory credentials.
+`BootstrapNvosPassword` reuses the durable NVOS password reconciler when a
+managed NVOS target is published. NICo submits the password update through CM,
+polls its job, then writes and reads back the new per-switch credential before
+entering `DisableMtls(Start)`. Already-confirmed credentials at the target
+revision advance without a password update.
 
-RMS handles forced-expiry recovery for factory-default credentials
-over SSH; this sequence does not add recovery for arbitrary expired nondefault
-passwords. Existing mTLS bindings
-remain in place while bootstrap waits or retries a failed job or transport error.
-Inconsistent expected credential data transitions to `Error`. The operation's
-staged target, attempt, and job ID persist across controller restarts.
+RMS handles forced-expiry recovery over SSH only for the factory `admin` account
+with factory password `admin`. The recovery validates a fresh SSH login with the
+new password. This flow requires an RMS build that implements that SSH recovery
+path; password-update RPC availability alone does not establish support. Other
+password updates require working NVUE authentication and TLS/mTLS trust. Bootstrap does not repair self-signed server certificates or
+stale mTLS trust for non-factory credentials. A terminal password-job failure
+moves bootstrap to `Error`, preserving existing mTLS bindings and the staged
+credential/job record for investigation. It does not retry that failed job or
+fall through to configuration writes. Routine password rotation retains its
+existing retry policy.
 
-Bootstrap skips when the switch has no rack, CM is unavailable, or the backend
-does not support password rotation, preserving those rollout paths. A managed
-backend with no published target waits in bootstrap. The later
-`RotateOsPassword` pass remains in place to converge any target published during
-certificate configuration; Ready-state password rotation is unchanged.
+Malformed or inconsistent credential data waits in bootstrap so operators can correct
+it without resetting controller state. Before a job is staged, correcting the
+expected-switch credential pair lets reconciliation resume. After staging, NICo
+preserves the captured per-switch credential to handle partial device changes;
+if that credential is lost, restore it in the credential store. Changing an
+expected-switch bootstrap pair does not replace a staged operation's credential.
+Pending jobs, transient poll errors, and incomplete credential persistence also
+wait. Missing (`NotFound`) or `Unknown` job statuses retain the existing retry
+behavior against the staged target.
+
+Bootstrap skips when the switch has no rack, CM is unavailable, the backend does
+not support password rotation, or no NVOS target is published. Sites without a
+target retain their existing ingestion behavior; this skip does not establish
+that an expired password is usable. To enable managed password bootstrap, follow
+[Start the rotation](../../operations/nvos-password-rotation.md#start-the-rotation).
+Publishing a target is a site-wide rotation, not a per-switch recovery request.
+If both credential sources are absent, the reconciler also skips bootstrap;
+`DisableMtls(Start)` then waits for imported credentials before any device write.
+
+The later `RotateOsPassword` pass remains in place to converge any target
+published during certificate configuration; Ready-state password rotation is
+unchanged. The staged target, attempt, and job ID persist across controller
+restarts.
 
 ### Disable mTLS before certificate installation
 
@@ -545,7 +566,9 @@ Integration tests cover:
 
 - Initial ingestion enters password bootstrap before mTLS writes
 - Confirmed target credentials skip bootstrap password updates
-- Incomplete password jobs and missing targets preserve existing mTLS bindings
+- Missing targets and unsupported backends preserve existing ingestion behavior
+- Malformed credentials wait and resume after correction
+- Failed bootstrap jobs stop without retries or mTLS writes
 - Password completion persists effective credentials before advancing to mTLS disable
 - Skip when `rack_id` or component manager is absent → `RotateOsPassword`
 - `Start` → `WaitForComplete` with mock CM

@@ -30,7 +30,7 @@ stateDiagram-v2
     Initializing --> Configuring : primary NVOS interface associated
     Initializing --> Error : no NVOS MACs, no primary, or MAC conflict
     Configuring --> FetchInfo : password bootstrap, mTLS reset, certificate config and rotation done
-    Configuring --> Error : invalid credentials, mTLS disable or certificate job failed
+    Configuring --> Error : password bootstrap, mTLS disable or certificate job failed
     FetchInfo --> Validating : slot and tray lookup complete
     Validating --> BomValidating : validation complete
     BomValidating --> Ready : BOM validation complete
@@ -77,9 +77,9 @@ stateDiagram-v2
 | *(create)* | Created | Switch created |
 | Created | Initializing (`WaitForOsMachineInterface`) | Controller processes switch |
 | Initializing (`WaitForOsMachineInterface`) | Configuring (`BootstrapNvosPassword`) | Primary NVOS interface associated for expected switch |
-| Configuring (`BootstrapNvosPassword`) | Configuring (`DisableMtls` `Start`) | Managed NVOS credentials converged and persisted, or no rack, no CM, or password rotation unsupported |
-| Configuring (`BootstrapNvosPassword`) | Configuring (`BootstrapNvosPassword`) | Waiting for managed target, password job, retry, or credential persistence |
-| Configuring (`BootstrapNvosPassword`) | Error | Inconsistent expected NVOS credential data or missing BMC MAC |
+| Configuring (`BootstrapNvosPassword`) | Configuring (`DisableMtls` `Start`) | Managed NVOS credentials converged and persisted, or no rack, no CM, password rotation unsupported, no published target, or credential resolution skipped |
+| Configuring (`BootstrapNvosPassword`) | Configuring (`BootstrapNvosPassword`) | Waiting for valid credential data, password job, retry, or credential persistence |
+| Configuring (`BootstrapNvosPassword`) | Error | Password bootstrap job reports `Failed` |
 | Configuring (`DisableMtls` `Start`) | Configuring (`DisableMtls` `WaitForComplete`) | Component manager returns RMS `BatchDisableSwitchMtls` job ID |
 | Configuring (`DisableMtls` `Start`) | Configuring (`ConfigureCertificate` `Start`) | No `rack_id`, no component manager, no services, or backend does not support the operation (skip disable step) |
 | Configuring (`DisableMtls` `Start`) | Error | Missing BMC MAC or endpoint, or the submission outcome is unknown |

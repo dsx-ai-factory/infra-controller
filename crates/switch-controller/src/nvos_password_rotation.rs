@@ -46,6 +46,15 @@ pub enum NvosPasswordRotationOutcome {
 
     /// Expected-switch credential data prevents safe rotation.
     CredentialError(String),
+
+    /// A bootstrap job failed; configuration writes must not proceed.
+    Failed(String),
+}
+
+#[derive(Clone, Copy)]
+enum FailedJobPolicy {
+    Retry,
+    Stop,
 }
 
 /// Inputs shared by initial dispatch and completion persistence.
@@ -334,6 +343,7 @@ async fn reconcile_staged_rotation(
     switch_id: &SwitchId,
     bmc_mac_address: mac_address::MacAddress,
     operation: &db::credential_rotation::DeviceRotationOperationState,
+    failed_job_policy: FailedJobPolicy,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
     let target_version = operation.rotating_to_version.ok_or_else(|| {
@@ -390,6 +400,13 @@ async fn reconcile_staged_rotation(
                 ctx,
             )
             .await
+        }
+        SwitchPasswordRotationState::Failed
+            if matches!(failed_job_policy, FailedJobPolicy::Stop) =>
+        {
+            Ok(NvosPasswordRotationOutcome::Failed(format!(
+                "NVOS password bootstrap job {job_id} failed; mTLS and certificate configuration were not attempted"
+            )))
         }
         SwitchPasswordRotationState::Failed
         | SwitchPasswordRotationState::NotFound
@@ -593,11 +610,29 @@ pub(crate) async fn needs_nvos_password_reconciliation(
     ))
 }
 
+/// Reconciles initial credentials without replaying a terminally failed job.
+pub(crate) async fn reconcile_nvos_password_bootstrap(
+    switch_id: &SwitchId,
+    state: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
+    reconcile_nvos_password(switch_id, state, ctx, FailedJobPolicy::Stop).await
+}
+
 /// Reconciles or submits NVOS password rotation work for one switch.
 pub async fn reconcile_nvos_password_rotation(
     switch_id: &SwitchId,
     state: &Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
+    reconcile_nvos_password(switch_id, state, ctx, FailedJobPolicy::Retry).await
+}
+
+async fn reconcile_nvos_password(
+    switch_id: &SwitchId,
+    state: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    failed_job_policy: FailedJobPolicy,
 ) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
     // Component-manager availability and password-rotation support are rollout
     // gates. The API cannot publish an NVOS target while either is absent, so
@@ -664,7 +699,14 @@ pub async fn reconcile_nvos_password_rotation(
             return stage_rotation(switch_id, bmc_mac_address, target_version, ctx).await;
         }
 
-        return reconcile_staged_rotation(switch_id, bmc_mac_address, operation, ctx).await;
+        return reconcile_staged_rotation(
+            switch_id,
+            bmc_mac_address,
+            operation,
+            failed_job_policy,
+            ctx,
+        )
+        .await;
     }
 
     if matches!(

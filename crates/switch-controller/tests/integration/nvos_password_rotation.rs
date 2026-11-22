@@ -898,29 +898,153 @@ async fn bootstrap_waits_for_password_job_and_publishes_before_mtls(
 }
 
 #[sqlx_test]
-async fn bootstrap_waits_when_managed_target_is_missing(pool: sqlx::PgPool) -> TestResult {
+async fn bootstrap_skips_when_rotation_is_not_actionable(pool: sqlx::PgPool) -> TestResult {
     let env = ControllerEnv::new(pool.clone()).await;
+    let cases = [
+        (
+            "no managed target",
+            false,
+            MockNvSwitchManager::default().with_password_rotation_enabled(),
+        ),
+        ("unsupported backend", true, MockNvSwitchManager::default()),
+    ];
+    for (index, (case, publish, manager)) in cases.into_iter().enumerate() {
+        if publish {
+            publish_target(&env, &pool, None, TARGET_PASSWORD).await?;
+        }
+        let (switch_id, mac) =
+            create_switch(&env, &pool, Some(format!("Switch{}", index + 1))).await?;
+        enter_password_bootstrap(&pool, &switch_id).await?;
+        run_controller(&env, &pool, manager, 1).await;
+        assert!(
+            matches!(
+                load_switch(&pool, &switch_id).await?.controller_state.value,
+                SwitchControllerState::Configuring {
+                    config_state: ConfiguringState::DisableMtls {
+                        disable_mtls: model::switch::DisableMtlsState::Start
+                    }
+                }
+            ),
+            "{case} must preserve the existing ingestion path"
+        );
+        let mut conn = pool.acquire().await?;
+        assert!(
+            db::credential_rotation::device_rotation_operation_state(
+                &mut *conn,
+                db::credential_rotation::CredentialRotationType::Nvos,
+                mac
+            )
+            .await?
+            .is_none(),
+            "{case} must not stage a password update"
+        );
+    }
+    Ok(())
+}
+
+#[sqlx_test]
+async fn bootstrap_resumes_after_expected_credentials_are_corrected(
+    pool: sqlx::PgPool,
+) -> TestResult {
+    let env = ControllerEnv::new(pool.clone()).await;
+    publish_target(&env, &pool, None, TARGET_PASSWORD).await?;
     let (switch_id, mac) = create_switch(&env, &pool, None).await?;
     enter_password_bootstrap(&pool, &switch_id).await?;
-    let manager = MockNvSwitchManager::default().with_password_rotation_enabled();
+    env.test_credential_manager
+        .delete_credentials(&CredentialKey::SwitchNvosAdmin {
+            bmc_mac_address: mac,
+        })
+        .await
+        .expect("failed to remove bootstrap credential");
+    sqlx::query(
+        "UPDATE expected_switches SET nvos_username = 'nvos-admin', nvos_password = NULL \
+         WHERE bmc_mac_address = $1",
+    )
+    .bind(mac)
+    .execute(&pool)
+    .await?;
+    let manager = MockNvSwitchManager::default()
+        .with_password_rotation_enabled()
+        .with_mtls_disable_job("must-not-start-before-credentials")
+        .with_password_rotation_job("corrected-bootstrap-job")
+        .with_password_rotation_job_status(SwitchPasswordRotationState::Pending);
     run_controller(&env, &pool, manager.clone(), 1).await;
-    let state = load_switch(&pool, &switch_id).await?;
     assert!(matches!(
-        state.controller_state.value,
+        load_switch(&pool, &switch_id).await?.controller_state.value,
         SwitchControllerState::Configuring {
             config_state: ConfiguringState::BootstrapNvosPassword
         }
     ));
     assert!(manager.mtls_calls().is_empty());
-    let mut conn = pool.acquire().await?;
-    assert!(
-        db::credential_rotation::device_rotation_operation_state(
-            &mut *conn,
-            db::credential_rotation::CredentialRotationType::Nvos,
-            mac
-        )
-        .await?
-        .is_none()
+    let staged_jobs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM device_credential_rotation \
+         WHERE device_mac = $1 AND credential_type = 'nvos'",
+    )
+    .bind(mac)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(staged_jobs, 0);
+    sqlx::query("UPDATE expected_switches SET nvos_password = $2 WHERE bmc_mac_address = $1")
+        .bind(mac)
+        .bind(CURRENT_PASSWORD)
+        .execute(&pool)
+        .await?;
+    run_controller(&env, &pool, manager.clone(), 2).await;
+    assert!(matches!(
+        load_switch(&pool, &switch_id).await?.controller_state.value,
+        SwitchControllerState::Configuring {
+            config_state: ConfiguringState::BootstrapNvosPassword
+        }
+    ));
+    assert_eq!(
+        operation_state(&pool, mac).await?.rotate_job_id.as_deref(),
+        Some("corrected-bootstrap-job")
+    );
+    assert!(manager.mtls_calls().is_empty());
+    Ok(())
+}
+
+#[sqlx_test]
+async fn failed_bootstrap_stops_without_retrying_or_changing_mtls(
+    pool: sqlx::PgPool,
+) -> TestResult {
+    let env = ControllerEnv::new(pool.clone()).await;
+    publish_target(&env, &pool, None, TARGET_PASSWORD).await?;
+    let (switch_id, mac) = create_switch(&env, &pool, None).await?;
+    enter_password_bootstrap(&pool, &switch_id).await?;
+    let manager = MockNvSwitchManager::default()
+        .with_password_rotation_enabled()
+        .with_mtls_disable_job("must-not-start-after-failed-bootstrap")
+        .with_password_rotation_job("failed-bootstrap-job")
+        .with_password_rotation_job_status(SwitchPasswordRotationState::Failed);
+    // Submit, observe terminal failure, then prove another pass does not retry.
+    run_controller(&env, &pool, manager.clone(), 3).await;
+    assert!(matches!(
+        load_switch(&pool, &switch_id).await?.controller_state.value,
+        SwitchControllerState::Error { cause }
+            if cause.contains("NVOS password bootstrap job failed-bootstrap-job failed")
+    ));
+    let operation = operation_state(&pool, mac).await?;
+    assert_eq!(operation.current_version, None);
+    assert_eq!(operation.rotating_to_version, Some(0));
+    assert_eq!(
+        operation.rotate_job_id.as_deref(),
+        Some("failed-bootstrap-job")
+    );
+    assert_eq!(operation.rotate_attempts, 1);
+    assert!(manager.mtls_calls().is_empty());
+    assert_eq!(
+        env.test_credential_manager
+            .get_credentials(&CredentialKey::SwitchNvosAdmin {
+                bmc_mac_address: mac
+            })
+            .await
+            .expect("failed to read preserved bootstrap credentials")
+            .unwrap(),
+        Credentials::UsernamePassword {
+            username: "nvos-admin".into(),
+            password: CURRENT_PASSWORD.into(),
+        }
     );
     Ok(())
 }
