@@ -18,7 +18,8 @@ import (
 	"fmt"
 )
 
-// VpcStatus Status values for VPC objects
+// VpcStatus Status values for VPC objects. Pending retains a saved creation whose original Core
+// outcome is unresolved; it does not imply that Core has not processed the request.
 type VpcStatus string
 
 // List of VpcStatus

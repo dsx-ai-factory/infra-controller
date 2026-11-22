@@ -20,7 +20,7 @@ use std::fs;
 use std::time::Duration;
 
 use carbide_firmware::test_support::script_setup;
-use carbide_machine_controller::config::{FirmwareGlobal, TimePeriod};
+use carbide_machine_controller::config::TimePeriod;
 use carbide_machine_controller::handler::MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES;
 use carbide_uuid::machine::StableHostMachineId;
 use common::api_fixtures::instance::TestInstance;
@@ -192,10 +192,8 @@ async fn test_postingestion_bmc_upgrade_uefi(
     update_manager.run_single_iteration().await.unwrap();
 
     // Check that we're properly marking it as upgrade needed
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_some());
-    txn.commit().await.unwrap();
 
     env.run_machine_state_controller_iteration_no_requeue()
         .await;
@@ -203,8 +201,7 @@ async fn test_postingestion_bmc_upgrade_uefi(
     run_until_firmware_upgrade_started(env, mh, FirmwareComponentType::Uefi, 0).await;
 
     // It should have "started" a UEFI upgrade
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -218,13 +215,11 @@ async fn test_postingestion_bmc_upgrade_uefi(
         panic!("Not in WaitingForFirmwareUpgrade");
     };
     assert_eq!(firmware_type, &FirmwareComponentType::Uefi);
-    txn.commit().await.unwrap();
 
     // The faked Redfish task will immediately show as completed, but we won't proceed further because "site explorer" (ie us) has not re-reported the info.
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -234,7 +229,6 @@ async fn test_postingestion_bmc_upgrade_uefi(
     let HostReprovisionState::ResetForNewFirmware { .. } = reprovision_state else {
         panic!("Not in reset {reprovision_state:?}");
     };
-    txn.commit().await.unwrap();
 
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
@@ -281,8 +275,7 @@ async fn test_postingestion_bmc_upgrade_uefi(
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -292,7 +285,6 @@ async fn test_postingestion_bmc_upgrade_uefi(
     let HostReprovisionState::CheckingFirmwareRepeatV2 { .. } = reprovision_state else {
         panic!("Not in reset {reprovision_state:?}");
     };
-    txn.commit().await.unwrap();
 
     Ok(())
 }
@@ -307,8 +299,7 @@ async fn test_postingestion_bmc_upgrade_bmc(
     run_until_firmware_upgrade_started(env, mh, FirmwareComponentType::Bmc, 0).await;
 
     // It should have "started" a BMC upgrade now
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -327,7 +318,6 @@ async fn test_postingestion_bmc_upgrade_bmc(
     };
     assert_eq!(firmware_type, &FirmwareComponentType::Bmc);
     assert_eq!(firmware_number, &Some(0));
-    txn.commit().await.unwrap();
 
     // WaitingForFirmwareUpgrade -> CheckingFirmware (firmware_number: 1)
     env.run_machine_state_controller_iteration_no_requeue()
@@ -339,8 +329,7 @@ async fn test_postingestion_bmc_upgrade_bmc(
 
     run_until_firmware_upgrade_started(env, mh, FirmwareComponentType::Bmc, 1).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -359,7 +348,6 @@ async fn test_postingestion_bmc_upgrade_bmc(
     };
     assert_eq!(firmware_type, &FirmwareComponentType::Bmc);
     assert_eq!(*firmware_number, Some(1));
-    txn.commit().await.unwrap();
 
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
@@ -410,8 +398,7 @@ async fn test_postingestion_bmc_upgrade_bmc(
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -421,7 +408,6 @@ async fn test_postingestion_bmc_upgrade_bmc(
     let HostReprovisionState::NewFirmwareReportedWait { .. } = reprovision_state else {
         panic!("Not in waiting {reprovision_state:?}");
     };
-    txn.commit().await.unwrap();
 
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
@@ -435,8 +421,7 @@ async fn test_postingestion_bmc_upgrade_complete(
     update_manager: &MachineUpdateManager,
 ) -> CarbideResult<()> {
     // It should be checking
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -446,18 +431,15 @@ async fn test_postingestion_bmc_upgrade_complete(
     let HostReprovisionState::CheckingFirmwareRepeatV2 { .. } = reprovision_state else {
         panic!("Not in checking");
     };
-    txn.commit().await.unwrap();
 
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
 
     // Now we should be back waiting for lockdown to resolve
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostInit { .. } = host.current_state() else {
         panic!("Not in HostInit");
     };
-    txn.commit().await.unwrap();
 
     // Step until we reach ready
     env.run_machine_state_controller_iteration().await;
@@ -465,13 +447,11 @@ async fn test_postingestion_bmc_upgrade_complete(
     // Now let update manager run again, it should not put us back to reprovisioning.
     update_manager.run_single_iteration().await?;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_none()); // Should be cleared or we'd right back in
     assert!(host.status.update_complete);
-    let reqs = db::host_machine_update::find_upgrade_needed(&mut txn, true, false).await?;
+    let reqs = db::host_machine_update::find_upgrade_needed(&env.pool, true, false).await?;
     assert!(reqs.is_empty());
-    txn.commit().await.unwrap();
 
     assert_eq!(
         env.test_meter
@@ -538,10 +518,8 @@ async fn test_host_fw_upgrade_enabledisable_global_enabled(
     txn.commit().await.unwrap();
 
     update_manager.run_single_iteration().await?;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_some());
-    txn.commit().await.unwrap();
 
     Ok(())
 }
@@ -576,10 +554,8 @@ async fn test_host_fw_upgrade_enabledisable_global_disabled(
     tracing::info!("run iteration");
     update_manager.run_single_iteration().await?;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_some());
-    txn.commit().await.unwrap();
 
     Ok(())
 }
@@ -762,15 +738,13 @@ async fn test_instance_upgrading_actual(
     } else {
         // A tick of the state machine, but we don't start anything yet and it's still in assigned/ready
         env.run_machine_state_controller_iteration().await;
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let host = mh.host().db_machine(&mut txn).await;
+        let host = mh.host().db_machine(&env.pool).await;
         let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
             panic!("Unexpected state {:?}", host.state);
         };
         let InstanceState::Ready = instance_state else {
             panic!("Unexpecte instance state {:?}", host.state);
         };
-        txn.commit().await.unwrap();
 
         // Simulate a tenant OKing the request
         let request = rpc::forge::InstancePowerRequest {
@@ -799,11 +773,9 @@ async fn test_instance_upgrading_actual_part_2(
     tinstance: &TestInstance<'_, '_>,
     update_manager: &MachineUpdateManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = env.pool.txn_begin().await.unwrap();
     // Check that the TenantState is what we expect based on the instance/machine state.
-    let host = mh.host().db_machine(&mut txn).await;
-    let instance = tinstance.db_instance(&mut txn).await;
-    txn.commit().await.unwrap();
+    let host = mh.host().db_machine(&env.pool).await;
+    let instance = tinstance.db_instance(&env.pool).await;
 
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
@@ -838,8 +810,7 @@ async fn test_instance_upgrading_actual_part_2(
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -847,7 +818,7 @@ async fn test_instance_upgrading_actual_part_2(
         panic!("Unexpected instance state {:?}", host.state);
     };
 
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
         instance_snapshot_derive_status(
@@ -876,7 +847,6 @@ async fn test_instance_upgrading_actual_part_2(
             .merges
             .contains_key(HOST_FW_UPDATE_HEALTH_REPORT_SOURCE)
     );
-    txn.commit().await.unwrap();
 
     // Simulate agent saying it's booted so we can continue
     mh.host().forge_agent_control().await;
@@ -884,8 +854,7 @@ async fn test_instance_upgrading_actual_part_2(
     env.run_machine_state_controller_iteration().await;
 
     // Should check firmware next
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
@@ -899,7 +868,7 @@ async fn test_instance_upgrading_actual_part_2(
     };
     assert!(host.host_reprovision_requested.is_some());
 
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
         instance_snapshot_derive_status(
@@ -920,7 +889,6 @@ async fn test_instance_upgrading_actual_part_2(
         .state,
         TenantState::Updating
     );
-    txn.commit().await.unwrap();
 
     let request = Request::new(mh.id);
     env.api.reset_host_reprovisioning(request).await?;
@@ -931,8 +899,7 @@ async fn test_instance_upgrading_actual_part_2(
 
     run_until_firmware_upgrade_started(env, mh, FirmwareComponentType::Uefi, 0).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
@@ -948,7 +915,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(firmware_type, FirmwareComponentType::Uefi);
 
     // Verify expected TenantState
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
         instance_snapshot_derive_status(
@@ -970,13 +937,10 @@ async fn test_instance_upgrading_actual_part_2(
         TenantState::Updating
     );
 
-    txn.commit().await.unwrap();
-
     // The faked Redfish task will immediately show as completed, but we won't proceed further because "site explorer" (ie us) has not re-reported the info.
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -988,7 +952,7 @@ async fn test_instance_upgrading_actual_part_2(
     };
 
     // Check that the TenantState is what we expect based on the instance/machine state.
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
         instance_snapshot_derive_status(
@@ -1009,8 +973,6 @@ async fn test_instance_upgrading_actual_part_2(
         .state,
         TenantState::Updating
     );
-
-    txn.commit().await.unwrap();
 
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
@@ -1082,8 +1044,7 @@ async fn test_instance_upgrading_actual_part_2(
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -1095,7 +1056,7 @@ async fn test_instance_upgrading_actual_part_2(
     };
 
     // Check that the TenantState is what we expect based on the instance/machine state.
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
         instance_snapshot_derive_status(
@@ -1116,7 +1077,6 @@ async fn test_instance_upgrading_actual_part_2(
         .state,
         TenantState::Updating
     );
-    txn.commit().await.unwrap();
 
     // Box::pin to keep the nested future on the heap and limit the outer state machine size.
     Box::pin(test_instance_upgrading_actual_part_3(
@@ -1140,8 +1100,7 @@ async fn test_instance_upgrading_actual_part_3(
     run_until_firmware_upgrade_started(env, mh, FirmwareComponentType::Bmc, 0).await;
 
     // It should have "started" a BMC upgrade now (first file out of 2)
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
@@ -1161,7 +1120,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(firmware_type, FirmwareComponentType::Bmc);
     assert_eq!(firmware_number, Some(0));
     // Check that the TenantState is what we expect based on the instance/machine state.
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
 
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
@@ -1184,14 +1143,11 @@ async fn test_instance_upgrading_actual_part_3(
         TenantState::Updating
     );
 
-    txn.commit().await.unwrap();
-
     // Another state machine pass
     // WaitingForFirmwareUpgrade -> CheckingFirmware (firmware_number: 1)
     env.run_machine_state_controller_iteration_no_requeue()
         .await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -1291,8 +1247,7 @@ async fn test_instance_upgrading_actual_part_3(
     // Another state machine pass
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -1304,7 +1259,7 @@ async fn test_instance_upgrading_actual_part_3(
     };
 
     // Check that the TenantState is what we expect based on the instance/machine state.
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
 
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
@@ -1331,8 +1286,7 @@ async fn test_instance_upgrading_actual_part_3(
     env.run_machine_state_controller_iteration().await;
 
     // It should be checking
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -1344,7 +1298,7 @@ async fn test_instance_upgrading_actual_part_3(
     };
 
     // Check that the TenantState is what we expect based on the instance/machine state.
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
 
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
@@ -1367,13 +1321,10 @@ async fn test_instance_upgrading_actual_part_3(
         TenantState::Updating
     );
 
-    txn.commit().await.unwrap();
-
     // Another state machine pass, and we should be complete
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::Assigned { instance_state } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -1382,7 +1333,7 @@ async fn test_instance_upgrading_actual_part_3(
     };
 
     // Check that the TenantState is what we expect based on the instance/machine state.
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
 
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
@@ -1407,15 +1358,15 @@ async fn test_instance_upgrading_actual_part_3(
 
     update_manager.run_single_iteration().await.unwrap();
 
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_none());
-    let reqs = db::host_machine_update::find_upgrade_needed(&mut txn, true, false)
+    let reqs = db::host_machine_update::find_upgrade_needed(&env.pool, true, false)
         .await
         .unwrap();
     assert!(reqs.is_empty());
 
     // Make sure TenantState agrees
-    let instance = tinstance.db_instance(&mut txn).await;
+    let instance = tinstance.db_instance(&env.pool).await;
 
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
@@ -1437,8 +1388,6 @@ async fn test_instance_upgrading_actual_part_3(
         .state,
         TenantState::Configuring
     );
-
-    txn.commit().await.unwrap();
 
     // Validate update_firmware_version_by_machine_id behavior
     assert_eq!(
@@ -1488,17 +1437,14 @@ async fn test_script_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
     update_manager.run_single_iteration().await.unwrap();
 
     // Check that we're properly marking it as upgrade needed
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_some());
-    txn.commit().await.unwrap();
 
     // Now we want a tick of the state machine
     env.run_machine_state_controller_iteration().await;
 
     // It should have started the script
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -1510,12 +1456,10 @@ async fn test_script_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
     let HostReprovisionState::WaitingForScript { .. } = reprovision_state else {
         panic!("Not in WaitingForScript");
     };
-    txn.commit().await.unwrap();
 
     // The script shouldn't have completed yet, so the state machine running shouldn't change anything
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -1527,13 +1471,11 @@ async fn test_script_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
     let HostReprovisionState::WaitingForScript { .. } = reprovision_state else {
         panic!("Not in WaitingForScript");
     };
-    txn.commit().await.unwrap();
 
     // Wait a few seconds for the sleep, now the script should complete and we go to CheckingFirmwareRetry
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -1545,7 +1487,6 @@ async fn test_script_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
     let HostReprovisionState::CheckingFirmwareRepeatV2 { .. } = reprovision_state else {
         panic!("Not in CheckingFirmwareRepeat");
     };
-    txn.commit().await.unwrap();
 
     Ok(())
 }
@@ -1553,6 +1494,8 @@ async fn test_script_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
 #[crate::sqlx_test]
 async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     let mut config = get_config();
+    // Retry failed scripts immediately so the test reaches exhaustion without sleeping.
+    config.firmware_global.host_firmware_upgrade_retry_interval = chrono::TimeDelta::zero();
     config.host_models = HashMap::from([(
         "1".to_string(),
         Firmware {
@@ -1587,18 +1530,15 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     update_manager.run_single_iteration().await.unwrap();
 
     // Check that we're properly marking it as upgrade needed
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_some());
-    txn.commit().await.unwrap();
 
     // Start the script without requeueing its completion before we inspect it.
     env.run_machine_state_controller_iteration_no_requeue()
         .await;
 
     // It should have started the script
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -1610,7 +1550,6 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     let HostReprovisionState::WaitingForScript { .. } = reprovision_state else {
         panic!("Not in WaitingForScript");
     };
-    txn.commit().await.unwrap();
 
     run_until_reprovision_state(&env, &mh, "FailedFirmwareUpgrade", |state| match state {
         HostReprovisionState::WaitingForScript { .. } => false,
@@ -1621,8 +1560,7 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
         ),
     })
     .await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
@@ -1631,21 +1569,18 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::FailedFirmwareUpgrade { .. } = reprovision_state else {
-        panic!("Not in FailedFirmwareUpgrade");
+    let HostReprovisionState::FailedFirmwareUpgrade {
+        report_time: Some(_),
+        ..
+    } = reprovision_state
+    else {
+        panic!("Expected FailedFirmwareUpgrade with a retry timestamp, got {reprovision_state:?}");
     };
-    txn.commit().await.unwrap();
 
     for retry_i in 1..=MAX_FIRMWARE_UPGRADE_RETRIES {
-        // Wait and try again, it will increment the retry_count and move to CheckingFirmware again
-        tokio::time::sleep(std::time::Duration::from_secs(
-            FirmwareGlobal::get_retry_interval().as_seconds_f64() as u64,
-        ))
-        .await;
         env.run_machine_state_controller_iteration_no_requeue()
             .await;
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let host = mh.host().db_machine(&mut txn).await;
+        let host = mh.host().db_machine(&env.pool).await;
 
         assert!(host.host_reprovision_requested.is_some());
         let ManagedHostState::HostReprovision {
@@ -1659,14 +1594,12 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
         let HostReprovisionState::CheckingFirmwareV2 { .. } = reprovision_state else {
             panic!("Not in CheckingFirmware");
         };
-        txn.commit().await.unwrap();
 
         env.run_machine_state_controller_iteration_no_requeue()
             .await;
 
         // It should have started the script
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let host = mh.host().db_machine(&mut txn).await;
+        let host = mh.host().db_machine(&env.pool).await;
 
         assert!(host.host_reprovision_requested.is_some());
         let ManagedHostState::HostReprovision {
@@ -1678,7 +1611,6 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
         let HostReprovisionState::WaitingForScript { .. } = reprovision_state else {
             panic!("Not in WaitingForScript");
         };
-        txn.commit().await.unwrap();
 
         run_until_reprovision_state(&env, &mh, "FailedFirmwareUpgrade", |state| match state {
             HostReprovisionState::WaitingForScript { .. } => false,
@@ -1689,8 +1621,7 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
             ),
         })
         .await;
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let host = mh.host().db_machine(&mut txn).await;
+        let host = mh.host().db_machine(&env.pool).await;
 
         assert!(host.host_reprovision_requested.is_some());
         let ManagedHostState::HostReprovision {
@@ -1701,21 +1632,29 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
             panic!("Not in HostReprovision");
         };
         assert_eq!(*retry_count, retry_i);
-        let HostReprovisionState::FailedFirmwareUpgrade { .. } = reprovision_state else {
-            panic!("Not in FailedFirmwareUpgrade");
+        let HostReprovisionState::FailedFirmwareUpgrade {
+            report_time: Some(_),
+            ..
+        } = reprovision_state
+        else {
+            panic!(
+                "Expected FailedFirmwareUpgrade with a retry timestamp, got {reprovision_state:?}"
+            );
         };
-        txn.commit().await.unwrap();
     }
 
-    // Wait and try again, it should not retry any more and stay in FailedFirmwareUpgrade
-    tokio::time::sleep(std::time::Duration::from_secs(
-        FirmwareGlobal::get_retry_interval().as_seconds_f64() as u64,
-    ))
-    .await;
+    // With no retry delay, this pass checks that the budget blocks another attempt.
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
+    assert!(
+        matches!(
+            &host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::DoNothing { .. })
+        ),
+        "expected DoNothing after exhausting retries, got {:?}",
+        host.controller_state_outcome
+    );
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
         reprovision_state,
@@ -1728,7 +1667,6 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     let HostReprovisionState::FailedFirmwareUpgrade { .. } = reprovision_state else {
         panic!("Not in FailedFirmwareUpgrade");
     };
-    txn.commit().await.unwrap();
 
     // The machine with the exhausted retry budget surfaces on the update
     // manager's gauge rather than in per-pass logs.
@@ -1790,8 +1728,7 @@ async fn test_artifact_download_failure_fails_upgrade(pool: sqlx::PgPool) -> Car
 
     // The first pass starts the download and waits for it without dropping the request.
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert_eq!(host.current_state(), &ManagedHostState::Ready);
     assert!(host.host_reprovision_requested.is_some());
     let Some(PersistentStateHandlerOutcome::Wait { reason, .. }) = &host.controller_state_outcome
@@ -1802,7 +1739,6 @@ async fn test_artifact_download_failure_fails_upgrade(pool: sqlx::PgPool) -> Car
         );
     };
     assert!(reason.contains("missing.bin"), "{reason}");
-    txn.commit().await.unwrap();
 
     // The background download fails within milliseconds, but keep running passes until one
     // records it so a slow runner cannot fail the test; the limit keeps it from hanging.
@@ -1810,9 +1746,7 @@ async fn test_artifact_download_failure_fails_upgrade(pool: sqlx::PgPool) -> Car
     for _ in 0..50 {
         sleep(Duration::from_millis(100)).await;
         env.run_machine_state_controller_iteration().await;
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let host = mh.host().db_machine(&mut txn).await;
-        txn.commit().await.unwrap();
+        let host = mh.host().db_machine(&env.pool).await;
         if host.current_state() != &ManagedHostState::Ready {
             failed_host = Some(host);
             break;
@@ -1949,8 +1883,7 @@ async fn test_explicit_update(pool: sqlx::PgPool) -> CarbideResult<()> {
     // Now it should start
     update_manager.run_single_iteration().await.unwrap();
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision { .. } = host.state.clone().value else {
         panic!("Unexpected state {:?}", host.state);
     };
@@ -1991,17 +1924,14 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
     update_manager.run_single_iteration().await?;
 
     // verify reprovision was requested
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(host.host_reprovision_requested.is_some());
-    txn.commit().await.unwrap();
 
     // state machine iteration
     // Ready -> WaitingForManualUpgrade
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(
         matches!(
             host.current_state(),
@@ -2042,8 +1972,7 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
     env.run_machine_state_controller_iteration_no_requeue()
         .await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.manual_firmware_upgrade_completed.is_some());
 
@@ -2057,7 +1986,6 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
         ),
         "Machine should be in HostReprovision::CheckingFirmwareRepeat"
     );
-    txn.commit().await.unwrap();
 
     // CheckingFirmwareRepeat -> WaitingForUpload
     env.run_machine_state_controller_iteration_no_requeue()
@@ -2130,8 +2058,7 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
     env.run_machine_state_controller_iteration().await;
 
     // assert manual_firmware_upgrade_completed is cleared
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
 
     assert!(host.manual_firmware_upgrade_completed.is_none());
     assert_eq!(host.current_state(), &ManagedHostState::Ready);
@@ -2210,8 +2137,7 @@ async fn test_drive_without_scout_script_errors_instead_of_redfish_upload(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -2254,7 +2180,7 @@ async fn put_in_waiting_for_scout_upgrade(
             deadline,
             delivered_at: Some(chrono::Utc::now()),
             task_json: String::new(),
-            result,
+            result: result.map(Box::new),
         },
         retry_count: 0,
     };
@@ -2298,8 +2224,7 @@ async fn test_new_firmware_reported_wait_retries_reset_after_timeout(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -2333,8 +2258,7 @@ async fn test_new_firmware_reported_wait_fails_after_reset_retry_limit(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -2382,8 +2306,7 @@ async fn test_waiting_for_scout_upgrade_success_transitions_to_reset_for_new_fir
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -2426,8 +2349,7 @@ async fn test_waiting_for_scout_upgrade_failure_uses_error_as_reason(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -2466,8 +2388,7 @@ async fn test_waiting_for_scout_upgrade_failure_without_error_uses_exit_code(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -2503,8 +2424,7 @@ async fn test_waiting_for_scout_upgrade_past_deadline_times_out(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()
@@ -2542,8 +2462,7 @@ async fn test_waiting_for_scout_upgrade_before_deadline_waits(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let ManagedHostState::HostReprovision {
         reprovision_state, ..
     } = host.current_state()

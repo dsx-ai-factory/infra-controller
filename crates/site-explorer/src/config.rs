@@ -133,6 +133,26 @@ pub struct SiteExplorerConfig {
     )]
     pub switch_and_power_shelf_pass_interval: std::time::Duration,
 
+    /// The longest one ManagedHost creation attempt may take once it holds
+    /// its admin-lock admission permit. The deadline covers acquiring a pool
+    /// connection, the creation transaction, and the after-commit admin
+    /// address repair together. A transaction that exceeds it fails the
+    /// attempt, releases the permit, and closes the connection instead of
+    /// returning it to the pool; a later run retries the host. A repair that
+    /// exceeds it leaves the host created and counts as a failed admin
+    /// address reconciliation. The host reconciler's admin address repair
+    /// has the same deadline, counted from its own admission permit. Keep it
+    /// above the PostgreSQL `statement_timeout`, so the server ends a
+    /// statement before the attempt is abandoned. Must be at least `1s` and
+    /// at most `24h`. Configuration loading rejects other values. Read
+    /// at startup. A change needs a restart.
+    #[serde(
+        default = "SiteExplorerConfig::default_machine_creation_timeout",
+        deserialize_with = "SiteExplorerConfig::deserialize_machine_creation_timeout",
+        serialize_with = "as_std_duration"
+    )]
+    pub machine_creation_timeout: std::time::Duration,
+
     /// Whether SiteExplorer should rotate/update Switch NVOS admin credentials
     #[serde(
         default = "SiteExplorerConfig::default_rotate_switch_nvos_credentials",
@@ -249,6 +269,7 @@ impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
             machines_created_per_run: config.machines_created_per_run,
             machine_creation_concurrency: config.machine_creation_concurrency,
             switch_and_power_shelf_pass_interval: config.switch_and_power_shelf_pass_interval,
+            machine_creation_timeout: config.machine_creation_timeout,
             create_power_shelves: config.create_power_shelves.clone(),
             power_shelves_created_per_run: config.power_shelves_created_per_run,
             create_switches: config.create_switches.clone(),
@@ -276,6 +297,7 @@ impl Default for SiteExplorerConfig {
             machine_creation_concurrency: Self::default_machine_creation_concurrency(),
             switch_and_power_shelf_pass_interval:
                 Self::default_switch_and_power_shelf_pass_interval(),
+            machine_creation_timeout: Self::default_machine_creation_timeout(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: bmc_proxy(None),
@@ -311,6 +333,7 @@ impl PartialEq for SiteExplorerConfig {
             machines_created_per_run,
             machine_creation_concurrency,
             switch_and_power_shelf_pass_interval,
+            machine_creation_timeout,
             rotate_switch_nvos_credentials,
             override_target_ip,
             override_target_port,
@@ -341,6 +364,7 @@ impl PartialEq for SiteExplorerConfig {
             && *machines_created_per_run == other.machines_created_per_run
             && *machine_creation_concurrency == other.machine_creation_concurrency
             && *switch_and_power_shelf_pass_interval == other.switch_and_power_shelf_pass_interval
+            && *machine_creation_timeout == other.machine_creation_timeout
             && rotate_switch_nvos_credentials.load(AtomicOrdering::Relaxed)
                 == other
                     .rotate_switch_nvos_credentials
@@ -368,6 +392,31 @@ impl PartialEq for SiteExplorerConfig {
 }
 
 impl SiteExplorerConfig {
+    // Hard minimum of `machine_creation_timeout`.
+    const MIN_MACHINE_CREATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    // Hard maximum of `machine_creation_timeout`.
+    const MAX_MACHINE_CREATION_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(24 * 60 * 60);
+
+    fn deserialize_machine_creation_timeout<'de, D>(
+        deserializer: D,
+    ) -> Result<std::time::Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let timeout: std::time::Duration = deserialize_duration(deserializer)?;
+        // Reject values that leave a creation attempt without a usable deadline.
+        if timeout < Self::MIN_MACHINE_CREATION_TIMEOUT
+            || timeout > Self::MAX_MACHINE_CREATION_TIMEOUT
+        {
+            return Err(serde::de::Error::custom(
+                "site_explorer.machine_creation_timeout must be at least 1s and at most 24h",
+            ));
+        }
+        Ok(timeout)
+    }
+
     pub const fn default_run_interval() -> std::time::Duration {
         std::time::Duration::from_secs(120)
     }
@@ -413,6 +462,13 @@ impl SiteExplorerConfig {
     /// created.
     pub const fn default_switch_and_power_shelf_pass_interval() -> std::time::Duration {
         std::time::Duration::from_secs(15 * 60)
+    }
+
+    /// Deadline of one managed host creation attempt after admission: three
+    /// times the 10 minute `statement_timeout` that `helm-prereqs` sets for
+    /// PostgreSQL.
+    pub const fn default_machine_creation_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(30 * 60)
     }
 
     pub fn default_rotate_switch_nvos_credentials() -> Arc<AtomicBool> {
@@ -466,8 +522,40 @@ where
     S: Serializer,
 {
     if let Some(val) = val.load().deref().deref() {
-        s.serialize_str(val.to_string().as_str())
+        // Keep `HostPortPair`'s YAML map-key handling.
+        val.serialize(s)
     } else {
         s.serialize_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    /// The range configuration loading enforces, so no creation attempt runs
+    /// without a usable deadline.
+    #[test]
+    fn machine_creation_timeout_is_bounded_at_loading() {
+        scenarios!(
+            run = |timeout: &str| {
+                let config_json = format!(r#"{{"machine_creation_timeout":"{timeout}"}}"#);
+                serde_json::from_str::<SiteExplorerConfig>(&config_json)
+                    .map(|config| config.machine_creation_timeout)
+                    .map_err(drop)
+            };
+            "a timeout up to the hard maximum is accepted" {
+                "24h" => Yields(SiteExplorerConfig::MAX_MACHINE_CREATION_TIMEOUT),
+            }
+            "a timeout below one second is rejected" {
+                "999ms" => Fails,
+            }
+            "a timeout must stay within the hard maximum" {
+                "86401s" => Fails,
+            }
+        );
     }
 }

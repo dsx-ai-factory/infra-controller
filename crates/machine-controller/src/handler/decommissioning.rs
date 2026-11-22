@@ -17,14 +17,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, LockdownScope, PowerState, ResetType};
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use db::TransactionVending as _;
+use itertools::Itertools;
+use libredfish::JobState;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
-use libredfish::{EnabledDisabled, JobState, RedfishError};
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
@@ -109,11 +110,7 @@ pub(super) async fn handle_suppressing_site_explorer(
     } else {
         StateHandlerOutcome::wait(format!(
             "waiting for Site Explorer suppression acknowledgement: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         ))
     };
 
@@ -128,18 +125,14 @@ pub(super) async fn handle_deconfiguring_host(
     let machine = &state.host_snapshot;
     match deconfiguring_state {
         DeconfiguringHostState::DisableLockdown => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
-                Ok(()) | Err(RedfishError::NotSupported(_)) => {}
-                Err(error) => {
-                    return Err(StateHandlerError::GenericError(eyre::eyre!(
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+            bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
                         "failed to disable host BMC lockdown: {error}"
-                    )));
-                }
-            }
+                    ))
+                })?;
 
             let next = if machine.bmc_vendor().is_supermicro() {
                 DeconfiguringHostState::RebootAfterLockdown
@@ -189,9 +182,8 @@ pub(super) async fn handle_deconfiguring_host(
                         object_id: machine.id.to_string(),
                         missing: "bmc_mac",
                     })?;
-            let mut conn = ctx.services.db_pool.acquire().await?;
             let status = db::credential_rotation::device_rotation_status(
-                &mut conn,
+                &ctx.services.db_pool,
                 db::credential_rotation::CredentialRotationType::HostUefi,
                 bmc_mac,
             )
@@ -211,7 +203,6 @@ pub(super) async fn handle_deconfiguring_host(
                     "invalid host UEFI credential version {version}: {error}"
                 ))
             })?;
-            drop(conn);
 
             let key = CredentialKey::host_uefi_site_default(version);
             let credentials = ctx
@@ -542,6 +533,15 @@ pub(super) async fn handle_deconfiguring_dpus(
                     "waiting for managed host DPF resources to be deleted".to_string(),
                 ));
             }
+            if !dpf_sdk
+                .delete_host_bmc_credential_secrets(&host_dpf_id, &dpu_dpf_ids)
+                .await
+                .map_err(|error| StateHandlerError::GenericError(error.into()))?
+            {
+                return Ok(StateHandlerOutcome::wait(
+                    "waiting for managed host BMC credential Secrets to be deleted".to_string(),
+                ));
+            }
             let next_states = dpu_states
                 .keys()
                 .map(|&id| (id, DeconfiguringDpuState::InstallingBfb))
@@ -611,8 +611,8 @@ pub(super) async fn handle_deconfiguring_dpus(
             }
         }
         DeconfiguringDpuState::WaitingForBootAfterBfbInstall => {
-            let redfish_client = ctx.services.create_redfish_client_from_machine(dpu).await?;
-            let (finished_booting, boot_progress) = did_dpu_finish_booting(redfish_client.as_ref())
+            let bmc = ctx.services.connect_bmc(dpu).await?;
+            let (finished_booting, boot_progress) = did_dpu_finish_booting(&bmc)
                 .await
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre::eyre!(
@@ -680,8 +680,8 @@ async fn oob_interface_mac_addresses(
     machine_id: MachineId,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
-    let mut conn = ctx.services.db_pool.acquire().await?;
-    let interfaces = db::machine_interface::find_by_machine_ids(&mut conn, &[machine_id]).await?;
+    let interfaces =
+        db::machine_interface::find_by_machine_ids(&ctx.services.db_pool, &[machine_id]).await?;
     Ok(interfaces
         .into_values()
         .flatten()
@@ -833,11 +833,7 @@ pub(super) async fn handle_waiting_for_oob_dhcp_acknowledgement(
     if !pending_macs.is_empty() {
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting for OOB DHCP suppression acknowledgement: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         )));
     }
 
@@ -958,11 +954,7 @@ pub(super) async fn handle_waiting_for_bmc_dhcp_acknowledgement(
     if !pending_macs.is_empty() {
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting for BMC DHCP suppression acknowledgement after factory reset: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         )));
     }
 

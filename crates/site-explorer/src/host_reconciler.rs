@@ -43,9 +43,9 @@ use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use crate::endpoint_exploration_report_ext::EndpointExplorationReportExt;
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
+use crate::inventory_creator::{attempt_deadline, reconcile_host_admin_addresses_after_commit};
 use crate::machine_interfaces::MachineInterfacesExt;
 use crate::managed_host::{ZeroDpuHostLookup, find_zero_dpu_host};
-use crate::metrics::SiteExplorerHostAdminAddressReconcileFailed;
 
 const DESIRED_BOOT_INTERFACE_RECONCILE_PAGE_SIZE: i64 = 100;
 
@@ -54,15 +54,28 @@ pub(super) struct HostReconciler {
     instrumentation: Instrumentation,
     database_connection: PgPool,
     retained_boot_interface_window: Option<chrono::Duration>,
+    /// Deadline of one admin address repair once it holds its admission
+    /// permit.
+    admin_address_repair_timeout: Duration,
     resource_pool_registry: ResourcePoolRegistry,
     common_pools: Arc<CommonPools>,
     pub(super) preparation_cancel_token: CancellationToken,
+}
+
+impl db::TransactionVending for HostReconciler {
+    #[track_caller]
+    fn txn_begin(
+        &self,
+    ) -> impl Future<Output = Result<db::Transaction<'static>, db::DatabaseError>> {
+        db::Transaction::begin_instrumented(&self.database_connection, &self.instrumentation)
+    }
 }
 
 impl HostReconciler {
     pub(super) fn new(
         database_connection: PgPool,
         retained_boot_interface_window: Option<chrono::Duration>,
+        admin_address_repair_timeout: Duration,
         resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         instrumentation: Instrumentation,
@@ -71,6 +84,7 @@ impl HostReconciler {
             instrumentation,
             database_connection,
             retained_boot_interface_window,
+            admin_address_repair_timeout,
             resource_pool_registry,
             common_pools,
             preparation_cancel_token: CancellationToken::new(),
@@ -198,7 +212,7 @@ impl HostReconciler {
         let declared_primary = machine_data.and_then(|data| data.declared_primary_mac());
 
         let mut _admin_admission = None;
-        let mut txn = self.database_connection.txn_begin().await?;
+        let mut txn = self.txn_begin().await?;
         let (machine_id, predicted_id): (HostMachineId, _) =
             match find_zero_dpu_host(txn.as_pgconn(), bmc_interface.mac_address, &mac_addresses)
                 .await?
@@ -215,7 +229,7 @@ impl HostReconciler {
             // queue cannot occupy pool connections. Revalidate after the wait.
             txn.rollback().await?;
             _admin_admission = Some(db::machine_interface::admin_lock_admission().await);
-            txn = self.database_connection.txn_begin().await?;
+            txn = self.txn_begin().await?;
             if !matches!(
                 find_zero_dpu_host(txn.as_pgconn(), bmc_interface.mac_address, &mac_addresses)
                     .await?,
@@ -319,7 +333,7 @@ impl HostReconciler {
             let _admission =
                 acquire_admin_admission(needs_bounded_admission, &self.preparation_cancel_token)
                     .await?;
-            let mut txn = self.database_connection.txn_begin().await?;
+            let mut txn = self.txn_begin().await?;
             // Provider preparation may outlive the attachment snapshot.
             let current_associations =
                 db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
@@ -347,7 +361,7 @@ impl HostReconciler {
             }
             Self::reconcile_desired_boot_interface(txn.as_pgconn(), &host_machine_id, None).await?;
             for prepared in &loopbacks {
-                prepared.attach(&mut txn, false).await?;
+                prepared.attach(&mut txn).await?;
             }
             for prepared in &asns {
                 prepared.attach(&mut txn).await?;
@@ -372,18 +386,13 @@ impl HostReconciler {
         // Admin address repair takes segment locks before row locks, so it needs
         // its own transaction. Wait for admission before it occupies a connection.
         let _admin_admission = db::machine_interface::admin_lock_admission().await;
-        if let Err(error) = db::machine_interface::reconcile_admin_addresses_after_commit(
+        reconcile_host_admin_addresses_after_commit(
             &self.database_connection,
             &host_machine_id,
+            attempt_deadline(self.admin_address_repair_timeout),
+            &self.instrumentation,
         )
-        .await
-        {
-            self.instrumentation
-                .emit(SiteExplorerHostAdminAddressReconcileFailed {
-                    host_machine_id,
-                    error: error.to_string(),
-                });
-        }
+        .await;
 
         Ok(())
     }
@@ -483,17 +492,13 @@ impl HostReconciler {
             after_id = Some(*last_id);
 
             for machine_id in machine_ids {
-                let mut txn = self
-                    .database_connection
-                    .txn_begin()
-                    .await
-                    .inspect_err(|error| {
-                        self.instrumentation
-                            .emit(HostReconciliationFailed::DesiredBootInterface {
-                                host_machine_id: machine_id,
-                                error: error.to_string(),
-                            });
-                    })?;
+                let mut txn = self.txn_begin().await.inspect_err(|error| {
+                    self.instrumentation
+                        .emit(HostReconciliationFailed::DesiredBootInterface {
+                            host_machine_id: machine_id,
+                            error: error.to_string(),
+                        });
+                })?;
                 match Self::reconcile_desired_boot_interface(txn.as_pgconn(), &machine_id, None)
                     .await
                 {

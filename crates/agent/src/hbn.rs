@@ -72,7 +72,7 @@ pub(super) async fn get_hbn_container_id() -> eyre::Result<String> {
     let cmd_res = timeout(TIMEOUT_GET_CONTAINER_ID, cmd.output())
         .await
         .wrap_err_with(|| format!("timeout calling {cmd_str}"))?;
-    let out = cmd_res.wrap_err(cmd_str.to_string())?;
+    let out = cmd_res.wrap_err_with(|| cmd_str.clone())?;
     if !out.status.success() {
         return Err(eyre::eyre!("{} for cmd '{cmd_str}'", out.status,));
     }
@@ -122,15 +122,15 @@ pub(super) async fn run_in_container(
     let cmd_res = timeout(TIMEOUT_CONTAINER_CMD, cmd.output())
         .await
         .wrap_err_with(|| format!("timeout calling {cmd_str}"))?;
-    let out = cmd_res.wrap_err(cmd_str.to_string())?;
+    let out = cmd_res.wrap_err_with(|| cmd_str.clone())?;
 
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
 
     if need_success && !out.status.success() {
         tracing::debug!(
             command = cmd_str.as_str(),
-            stderr = stderr.as_str(),
+            stderr = stderr.as_ref(),
             "Container command failed"
         );
         return Err(eyre::eyre!(
@@ -143,7 +143,7 @@ pub(super) async fn run_in_container(
     if !stdout.is_empty() {
         tracing::trace!("{stdout}");
     }
-    Ok(stdout)
+    Ok(stdout.into_owned())
 }
 
 async fn fetch_hbn_version() -> eyre::Result<String> {

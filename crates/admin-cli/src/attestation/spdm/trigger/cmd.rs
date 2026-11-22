@@ -48,11 +48,11 @@ fn outcome(outcome: i32) -> &'static str {
         Ok(SpdmSchedulingOutcome::NoProfile) => {
             "nothing scheduled: neither this class nor any has a profile"
         }
-        Ok(SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing) => {
-            "nothing scheduled: the manual trigger's regex matched no eligible attester"
+        Ok(SpdmSchedulingOutcome::AttesterOverrideMatchedNothing) => {
+            "nothing scheduled: the manual attester override matched no eligible attester"
         }
-        Ok(SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled) => {
-            "scheduled using the manual trigger's regex"
+        Ok(SpdmSchedulingOutcome::AttesterOverrideScheduled) => {
+            "scheduled using the manual attester override"
         }
         Ok(SpdmSchedulingOutcome::Unspecified) | Err(_) => {
             "unknown to this client; the server is newer"
@@ -77,12 +77,12 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
         "Attestation triggered for machine {}",
         res.machine_id
             .map(|e| e.to_string())
-            .unwrap_or("No MachineId returned".to_string())
+            .unwrap_or_else(|| "No MachineId returned".to_string())
     );
     println!("  outcome:        {}", outcome(res.outcome));
     // Report the server's applied selector, rather than inferring it from the request.
     if let Some(pattern) = &res.attester_id_regex {
-        println!("  selection:      manual override ({pattern})");
+        println!("  selection:      manual attester override ({pattern})");
     }
     println!("  devices:        {}", res.devices_under_attestation);
     if !res.attester_ids.is_empty() {
@@ -91,8 +91,9 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
     println!(
         "  job ID:         {}",
         res.job_id
-            .map(|id| id.value)
-            .unwrap_or_else(|| "none".to_string())
+            .as_ref()
+            .map(|id| id.value.as_str())
+            .unwrap_or("none")
     );
     // Exploration may not have recorded a hardware class for this BMC.
     println!(

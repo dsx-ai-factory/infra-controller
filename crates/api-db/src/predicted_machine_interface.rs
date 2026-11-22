@@ -49,7 +49,7 @@ impl ColumnInfo<'_> for MacAddressColumn {
 }
 
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PredictedMachineInterface>>(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<PredictedMachineInterface>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(format!(
@@ -59,7 +59,7 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PredictedMachineInterface
     .filter(&filter);
     query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))
 }
@@ -134,22 +134,23 @@ pub async fn delete(
 /// All predicted interfaces for a machine -- the boot-interface candidates a
 /// host offers while it awaits its first DHCP lease.
 pub async fn find_by_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &carbide_uuid::machine::MachineId,
 ) -> Result<Vec<PredictedMachineInterface>, DatabaseError> {
-    find_by(txn, ObjectColumnFilter::One(MachineIdColumn, machine_id)).await
+    find_by(conn, ObjectColumnFilter::One(MachineIdColumn, machine_id)).await
 }
 
 pub async fn find_by_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: MacAddress,
 ) -> Result<Option<PredictedMachineInterface>, DatabaseError> {
-    Ok(
-        find_by(txn, ObjectColumnFilter::One(MacAddressColumn, &mac_address))
-            .await?
-            .into_iter()
-            .next(),
+    Ok(find_by(
+        conn,
+        ObjectColumnFilter::One(MacAddressColumn, &mac_address),
     )
+    .await?
+    .into_iter()
+    .next())
 }
 
 /// Returns the machine IDs owning predictions for the requested MACs.
@@ -303,7 +304,7 @@ mod test_bulk_host_interfaces {
         txn.rollback().await?;
         let mut connection = pool.acquire().await?;
         assert!(
-            find_by_mac_address(&mut connection, macs[0])
+            find_by_mac_address(&mut *connection, macs[0])
                 .await?
                 .is_none()
         );

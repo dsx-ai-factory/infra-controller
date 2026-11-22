@@ -3044,7 +3044,7 @@ paths:
                           created: '2019-08-24T16:02:00Z'
                           updated: '2019-08-24T16:02:00Z'
                         - status: Pending
-                          message: 'Request received, pending processing'
+                          message: VPC creation is awaiting its original Site result
                           created: '2019-08-24T14:15:22Z'
                           updated: '2019-08-24T14:15:22Z'
                       created: '2019-08-24T14:15:22Z'
@@ -3154,7 +3154,7 @@ paths:
       operationId: create-vpc
       responses:
         '201':
-          description: Created
+          description: Core creation and local completion committed. If the response cannot read persisted status history, it returns an empty `statusHistory` array; a later GET can retrieve the history.
           content:
             application/json:
               schema:
@@ -3177,20 +3177,29 @@ paths:
                     labels:
                       region: us-west-1
                       env: dev
-                    status: Pending
+                    status: Ready
                     statusHistory:
                       - status: Pending
-                        message: 'Request received, pending processing'
+                        message: VPC creation is awaiting its original Site result
+                        created: '2019-08-24T14:15:22Z'
+                        updated: '2019-08-24T14:15:22Z'
+                      - status: Ready
+                        message: VPC is ready for use
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '400':
+          description: Request validation failed before persistence, or the original Site workflow returned a bad request after dispatch. A post-dispatch error identifies the retained Pending VPC and does not permit a fresh create with the same ID.
           $ref: '#/components/responses/ValidationError'
         '403':
+          description: REST authorization failed before persistence, or Core denied the original creation after dispatch. A post-dispatch error identifies the retained Pending VPC.
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: The original Site workflow could not find a required Core resource after dispatch. The error identifies the retained Pending VPC; this response alone does not authorize cleanup.
+          $ref: '#/components/responses/NotFoundError'
         '409':
-          description: A VPC with the requested `id` or `name` already exists, or the requested DPS power resource-group name is already in use. This can also occur when inventory reconciliation completes before an ambiguous create is retried. Existing DPS groups are not reused, and their ownership is not disclosed.
+          description: A VPC with the requested `id` or `name` already exists, or the requested DPS power resource-group name is in use. After persistence, the original workflow identity can conflict, Core can report a creation conflict, or the Core result can differ from the saved inputs. An uncertain creation retains its ID and reserves its VPC name for the Tenant and Site until completion or local deletion. Existing DPS groups are not reused, and their ownership is not disclosed.
           content:
             application/json:
               schema:
@@ -3199,7 +3208,7 @@ paths:
                 example-1:
                   value:
                     source: nico
-                    message: A Vpc with specified ID already exists
+                    message: A VPC with specified ID already exists
                     data:
                       id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                 power-resource-group-conflict:
@@ -3208,7 +3217,7 @@ paths:
                     message: Power resource group already exists
                     data: null
         '412':
-          description: The latest successfully stored configuration inventory for the selected Site does not report Core support for SLAAC, the Site's `dpsPowerManagement` capability is `false` while the request specifies a non-empty power resource group, or Core rejects another create prerequisite. Site capability checks fail before REST persistence or workflow dispatch; a Core rejection occurs after dispatch and the REST transaction is rolled back.
+          description: The latest successfully stored configuration inventory for the selected Site does not report Core support for SLAAC, the Site's `dpsPowerManagement` capability is `false` while the request specifies a non-empty power resource group, or Core rejects another create prerequisite. Site capability checks fail before persistence or dispatch. A Core rejection occurs after dispatch; the original record remains Pending until its terminal outcome is verified.
           content:
             application/json:
               schema:
@@ -3219,8 +3228,11 @@ paths:
                     source: nico
                     message: Site does not advertise support for SLAAC-enabled VPCs
                     data: null
+        '429':
+          description: The original Site workflow returned a resource-exhausted response after dispatch. The error identifies the retained Pending VPC.
+          $ref: '#/components/responses/GenericHttpError'
         '500':
-          description: The API encountered an internal error resolving the selected Site client, persisting the VPC, starting the create workflow, or waiting for the workflow result. A failure before the workflow start request rolls back the REST transaction and no remote create is requested. An error returned while starting the workflow or waiting for its result also rolls back the REST transaction, but remote acceptance or creation may be unknown; a wait timeout triggers an attempted workflow termination.
+          description: The API cannot resolve the Site client, save the request, dispatch creation, or persist local completion. Site-client and save failures can occur before any VPC record exists. An unconfirmed initial commit identifies the original ID without proving whether the row was saved. After the Pending record commits, uncertain dispatch or completion failure retains that record and its dependencies and identifies the saved VPC. Recovery never repeats Core creation.
           content:
             application/json:
               schema:
@@ -3231,8 +3243,11 @@ paths:
                     source: nico
                     message: Failed to retrieve client for Site
                     data: null
+        '501':
+          description: The original Site workflow returned an unsupported-operation response after dispatch. The error identifies the retained Pending VPC.
+          $ref: '#/components/responses/GenericHttpError'
         '503':
-          description: Core or the selected Site Agent returned unavailable after the create workflow was dispatched. REST rolls back the transaction in progress, but the outcome in Core may be unknown.
+          description: DPS provisioning can be unavailable before persistence, when no VPC record is saved. After dispatch, Core or the selected Site Agent can return unavailable; REST retains the original Pending record and its dependencies because it cannot establish whether Core created the VPC. The error identifies the retained VPC only after persistence.
           content:
             application/json:
               schema:
@@ -3241,16 +3256,34 @@ paths:
                 example-1:
                   value:
                     source: nico
-                    message: Core unavailable after VPC create dispatch
+                    message: 'rpc error: code = Unavailable desc = Core service unavailable; VPC 497f6eca-6276-4993-bfeb-53cbbbba6f08 remains Pending'
+                    data: null
+        '504':
+          description: The original workflow wait exceeded its deadline, or the request context expired before dispatch. An uncertain start or wait retains Pending and its dependencies. If this process positively declines dispatch, it records Error; if saving that decision fails, the row remains Pending. The error identifies the saved VPC and its decision. Timeout alone does not prove cancellation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                example-1:
+                  value:
+                    source: nico
+                    message: VPC creation workflow timed out; VPC 497f6eca-6276-4993-bfeb-53cbbbba6f08 remains Pending
                     data: null
       description: |-
         Create a VPC for the org.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        When `slaacEnabled` is true, REST reads `vpcSlaac` from the latest successfully stored configuration inventory for the selected Site before persisting the VPC. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag reports Core support only; it does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. Core can also return 412 after dispatch for another create prerequisite. Failure to resolve the Site client or persist the VPC returns 500, rolls back the REST transaction, and does not request a remote create. An error returned while starting the workflow also returns 500 and may leave remote acceptance unknown. After the start request, an unavailable result returns 503, while a workflow wait timeout returns 500 and triggers an attempted workflow termination. Errors while starting or waiting for the workflow roll back the REST transaction, but do not guarantee that Core did not create the VPC; a later inventory reconciliation may recreate the REST record.
+        When `slaacEnabled` is true, REST reads `vpcSlaac` from the latest successfully stored configuration inventory for the selected Site before persisting the VPC. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag reports Core support only; it does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. Core can also return 412 after dispatch for another create prerequisite.
 
-        Safe recovery from an ambiguous create result requires supplying a stable `id` in the original request. After an ambiguous error while starting the workflow or after dispatch, callers should allow inventory reconciliation time, then retrieve that `id`. If the VPC is found, do not retry. If no record is found, reuse the same `id` for any retry; reusing the ID prevents a second Core VPC record, but the retry itself is not guaranteed to succeed and can return 409 if reconciliation completes concurrently.
+        REST saves the original VPC identity, normalized request, tenant, Site, metadata, and caller attribution before asking Core to create the VPC. Successful synchronous creation returns 201 after local completion commits. A failed response-history read does not undo that success; `statusHistory` is empty in that response, and a later GET can retrieve persisted history. Prerequisites, creation, and local completion share one response budget, capped by any earlier caller deadline. Core unavailability returns 503. An uncertain start or workflow wait timeout retains Pending and its dependencies. REST does not terminate or repeat an uncertain creation.
+
+        Inventory completes the same original record after observing a matching committed Core VPC. Completion checks the Core ID, Tenant, creation metadata, and creation fields that Core persists against the saved request. A response without structured configuration or metadata cannot complete the row. Missing inventory does not prove cancellation. Recovery uses the VPC stored on the Site.
+
+        Pending creation blocks VPC updates and routing mutations. An unresolved or stopped request does not establish ownership for child inventory or peering deletion. DELETE asks Core to cancel unfinished creation. If creation committed first, Core returns the VPC for matching and normal deletion checks. Otherwise, Core prevents delayed creation with that ID and confirms allocation cleanup before REST records Error and permits local cleanup. A known local decision not to dispatch also permits local cleanup. Failed or uncertain cancellation retains Pending and its dependencies; repeat DELETE to retry cancellation without creating another VPC. Imported Error VPCs without a saved rejection retain normal Core deletion checks.
+
+        An optional `id` selects the VPC identity. Independent requests without an `id` remain distinct requests. Reusing an existing REST identity returns 409; it does not replay creation. If an explicitly requested ID instead collides with a different VPC on the Site, REST retains the Pending request and its dependencies for operator repair. It does not adopt or delete the conflicting VPC. After an ambiguous response, use the saved VPC ID in the error message to inspect the retained record instead of submitting another creation. A 4xx response after dispatch can retain the original request; correcting the body and resubmitting the same ID returns 409. REST recovery only observes the original operation and never starts another Core creation after the foreground request expires.
       requestBody:
         content:
           application/json:
@@ -3334,7 +3367,7 @@ paths:
                         created: '2019-08-24T16:02:00Z'
                         updated: '2019-08-24T16:02:00Z'
                       - status: Pending
-                        message: 'Request received, pending processing'
+                        message: VPC creation is awaiting its original Site result
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -3345,7 +3378,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-vpc
       description: |-
-        Retrieve a specific VPC by ID.
+        Retrieve a specific VPC by ID. A Pending VPC retains its original caller attribution and creation inputs while its original Core outcome remains unresolved, including after a lost response.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
@@ -3378,7 +3411,7 @@ paths:
                   value:
                     message: Deletion request was accepted
         '400':
-          description: The VPC ID is invalid, the VPC does not belong to the requested organization, its Site is not Registered, or it still has associated Subnets, VPC Prefixes, or Instances.
+          description: The VPC ID is invalid, the VPC does not belong to the requested organization, its Site is not Registered and creation has not already been confirmed stopped, or it still has associated Subnets, VPC Prefixes, or Instances.
           content:
             application/json:
               schema:
@@ -3394,7 +3427,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another VPC power operation is in progress, or an Instance was associated with the VPC after the initial deletion checks.
+          description: The committed Core VPC conflicts with the saved creation inputs, another VPC power operation is in progress, or an Instance was associated with the VPC after the initial deletion checks. A creation conflict retains Pending and its dependencies.
           content:
             application/json:
               schema:
@@ -3406,15 +3439,32 @@ paths:
                     message: Another power operation is already in progress for the VPC
                     data: null
         '412':
-          description: Deletion was rejected because a Site precondition was not satisfied. Core cannot delete the VPC while it still has peerings, including peerings in Deleting. Delete the peerings and wait for them to disappear, then retry. The VPC's REST status is unchanged when Core rejects the request.
+          description: A Site precondition prevents deletion or creation cancellation, including a tenant mismatch or unfinished allocation cleanup. Core also rejects deletion while peerings remain, including peerings in Deleting. Resolve the reported condition and retry. REST retains the VPC when Core rejects the request.
           $ref: '#/components/responses/GenericHttpError'
         '500':
-          description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
+          description: The request failed because of a database, Temporal dispatch, malformed proxy response, or unexpected Site communication error. Failure to save creation completion or confirmed cancellation prevents local cleanup and retains the VPC.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site does not support cancellation of unfinished VPC creation. Upgrade Core and Site Agent before retrying; REST retains Pending and its dependencies.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site is unavailable during deletion or creation cancellation. REST retains the VPC. This response does not establish whether an earlier operation committed.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Creation cancellation exceeded its deadline or its caller stopped waiting. REST retains Pending and its dependencies. Cancellation can have committed; repeat DELETE to confirm cleanup.
           $ref: '#/components/responses/GenericHttpError'
       description: |-
         Delete a specific VPC by ID.
 
-        Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Instance checks include direct and prefix-derived Interface attachments owned by other Tenants. Delete those dependent resources first.
+        For a Pending VPC, REST asks the Site to settle creation. If creation already committed, the returned VPC must match the saved creation inputs before normal deletion continues. Otherwise, Core prevents later creation with this ID and waits for unfinished allocation cleanup before confirming cancellation. REST then saves its cancellation decision before local deletion. The operation also handles a crash after REST saved the request but before dispatch. It does not start another create.
+
+        REST commits local soft deletion of a positively stopped request before attempting DPS cleanup. Only that deletion's successful caller attempts bounded DPS cleanup, and REST returns 202 after the local deletion. A cleanup failure or process interruption can leave a DPS group for operator reconciliation; the soft-deleted request retains its original group reference and rejection proof. A later DELETE returns 404 and does not repeat DPS cleanup. DPS deletion uses the group name and cannot atomically require that the group is still the original provider object. REST sends no Core mutation or deletion for this request, so an unrelated Core VPC with the same UUID is unaffected. A local database failure returns 500 and prevents the DPS attempt.
+
+        Before relying on Pending DELETE cancellation, deploy the updated Core, REST handlers, and inventory workers, and drain creates started by earlier versions. Earlier writers do not honor the saved cancellation decision and can finish creation after REST removes the request.
+
+        Failed, malformed, or timed-out cancellation retains Pending and its dependencies. Repeat DELETE to retry the same Core identity. Creation cancellation and ordinary deletion share one response budget. A Site that does not support creation cancellation returns 501 and retains the request; upgrade both Core and Site Agent before retrying. Imported Error VPCs without a saved cancellation decision use normal Core deletion checks.
+
+        Deletion requires the VPC's Site to be `Registered`, unless creation has already been confirmed stopped or never dispatched. All deletion paths require that no Subnets, VPC Prefixes, or Instances reference the VPC. Instance checks include direct and prefix-derived Interface attachments owned by other Tenants. Delete those dependent resources first.
 
         First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
@@ -3449,10 +3499,10 @@ paths:
                     labels:
                       region: us-west-1
                       env: dev
-                    status: Pending
+                    status: Ready
                     statusHistory:
-                      - status: Pending
-                        message: 'Request received, pending processing'
+                      - status: Ready
+                        message: VPC is ready for use
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -3462,7 +3512,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: The requested DPS power resource-group name is already in use. Existing DPS groups are not reused, and their ownership is not disclosed.
+          description: The VPC creation is Pending or positively rejected and its original inputs cannot be changed, or the requested DPS power resource-group name is already in use. Existing DPS groups are not reused, and their ownership is not disclosed.
           content:
             application/json:
               schema:
@@ -3479,7 +3529,7 @@ paths:
       tags:
         - VPC
       description: |-
-        Update an existing VPC
+        Update an existing VPC. Pending or positively rejected creation returns 409 before any update or DPS change.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
 
@@ -3738,6 +3788,9 @@ paths:
         '404':
           description: The VPC or a required named routing profile was not found.
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: VPC creation is Pending or was positively rejected before Core commit. Its routing allocations cannot be changed; a rejected request permits only local deletion.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: Core rejected the change because the observed version is stale, the destination exceeds the Tenant's access tier, the configuration or allocations are unsupported or inconsistent, or the exact VNI is unavailable or does not match the retained allocation. The rejected request commits no changes.
           $ref: '#/components/responses/GenericHttpError'
@@ -3783,7 +3836,7 @@ paths:
 
         Supply the exact `ifVersionMatch` and `expectedInactiveVni` from the authoritative state used for that decision. REST does not substitute a fresh version. The release advances the Core VPC version and makes the inactive VNI available for allocation to another VPC. It is never part of an automatic profile change or cleanup loop.
 
-        A timeout, lost response, or invalid acknowledgement may follow a committed release. Inspect authoritative routing state before deciding what to do next; do not automatically retry or replace the original version. A stale-version error does not prove that a previous release failed. The ordinary VPC GET may lag the authoritative response.
+        A timeout, lost response, or invalid acknowledgement may follow a committed release. Inspect authoritative routing state before deciding what to do next; do not automatically retry or replace the original version. If an earlier release timed out, a stale-version rejection does not establish whether that release completed. The ordinary VPC GET may lag the authoritative response.
       requestBody:
         required: true
         content:
@@ -3803,6 +3856,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: VPC creation is Pending or was positively rejected before Core commit. Its routing allocations cannot be changed; a rejected request permits only local deletion.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The observed version is stale, the exact inactive VNI does not match, or allocation ownership is missing or inconsistent. The rejected request commits no changes.
           $ref: '#/components/responses/GenericHttpError'
@@ -3861,10 +3917,10 @@ paths:
                     labels:
                       region: us-west-1
                       env: dev
-                    status: Pending
+                    status: Ready
                     statusHistory:
-                      - status: Pending
-                        message: 'Request received, pending processing'
+                      - status: Ready
+                        message: VPC is ready for use
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -3873,6 +3929,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: VPC creation is Pending or was positively rejected before Core commit. Its original virtualization input cannot be changed; a rejected request permits only local deletion.
+          $ref: '#/components/responses/GenericHttpError'
       tags:
         - VPC
       description: |-
@@ -3881,7 +3940,7 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
 
         Tenant must own the VPC
-        Request is rejected if the VPC already has Subnets or Instances.
+        Request is rejected if the VPC already has Subnets or Instances. Pending or positively rejected creation returns 409 before any virtualization change.
       requestBody:
         content:
           application/json:
@@ -4128,6 +4187,7 @@ paths:
 
         Tenant Admin can delete only peerings where both VPCs belong to their tenant.
         Provider Admin can delete only multi-tenant peerings in sites they provide.
+        An unresolved or positively stopped parent VPC creation returns `409`; its saved identity does not authorize deletion of the Site peering.
 
         User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
       responses:
@@ -4147,6 +4207,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A parent VPC creation is unresolved or stopped. REST blocks peering deletion because the saved request does not establish ownership of the Site resource.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site rejected deletion because a precondition was not satisfied. The peering's REST status is unchanged. Retry the request; contact support if it continues to fail.
           content:
@@ -7073,6 +7136,8 @@ paths:
         Create a SKU.
 
         The Org must have an Infrastructure Provider that owns the Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        HTTP 409 covers an existing SKU ID or a concurrent REST mutation that prevents saving the local record. The error message identifies when Core has already created the SKU. If REST has not saved that record, GET can return HTTP 404 until inventory reconciliation discovers the SKU. Refresh the SKU before retrying.
       requestBody:
         content:
           application/json:
@@ -7090,6 +7155,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
       tags:
         - SKU
   '/v2/org/{org}/nico/sku/{skuId}':
@@ -7175,6 +7242,10 @@ paths:
         Delete an unused SKU. The Site is determined from the saved SKU record.
 
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        Requires a `Registered` Site. Returns `400` if the SKU is associated with a Machine or referenced by an Expected Machine, including an in-flight batch create. Expected Machine requests that attach this SKU wait for deletion to finish, while concurrent SKU changes return `409`. Returns `204` once the SKU is deleted, including when it was already absent on the Site.
+
+        Requests time out with `504` after `50s` or the caller's earlier deadline. Returns `503` when Site communication is unavailable. Deletion on the Site can still finish after a timeout, so repeat the `DELETE` to join an in-flight call or clean up a SKU already removed on the Site. Avoid recreating the same SKU ID until an interrupted deletion completes. Inventory reconciliation also removes an unreferenced SKU once the Site stops reporting it. If an Expected Machine attaches to a retained SKU before cleanup, remove that reference before retrying `DELETE`.
       responses:
         '204':
           description: No Content
@@ -7184,6 +7255,20 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - SKU
     patch:
@@ -7196,6 +7281,8 @@ paths:
         the schema version will be updated to the current version (5).
 
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        HTTP 409 can occur after Core updates the SKU if a concurrent REST mutation prevents saving the local record. The error message identifies this condition. Refresh the SKU before retrying; inventory reconciliation can update the local record after the Core change.
       requestBody:
         required: true
         content:
@@ -7215,6 +7302,8 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
       tags:
         - SKU
   '/v2/org/{org}/nico/infiniband-partition':
@@ -12394,7 +12483,7 @@ paths:
             default: false
           in: query
           name: force
-          description: Request forced deletion on the Site, including host, DPU, and BMC interfaces. Starting a new attempt requires a Registered Site; a confirmed-complete retained request is replayed locally. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
+          description: Request forced deletion on the Site, including host, DPU, and BMC interfaces. Requires a Registered Site. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
         - schema:
             type: boolean
             default: false
@@ -12412,7 +12501,7 @@ paths:
             default: false
           in: query
           name: allowDeleteWithAllocation
-          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Machines with a recorded force-deletion attempt do not count toward capacity in later Allocation or deletion checks, even before inventory marks them missing. Does not imply either Instance or Instance Type deletion permission.
+          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. A retained Machine keeps counting toward capacity in later Allocation and deletion checks until its Instance Type association is removed. Does not imply either Instance or Instance Type deletion permission.
 
       responses:
         '202':
@@ -12433,10 +12522,10 @@ paths:
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
         '409':
-          description: Site cleanup is incomplete, an attempt changed concurrently, or ordinary REST-only cleanup lacks confirmed completion. A Retry-After header of 5 indicates a confirmed incomplete Core result; wait at least 5 seconds and repeat the forced DELETE with the same options. A pending attempt is recovered by its recorded workflow ID. No automatic continuation is scheduled, and the Machine remains unavailable for placement.
+          description: Core confirmed that Site cleanup is incomplete. Wait at least the Retry-After delay and repeat the forced DELETE with the same options. No automatic continuation is scheduled. A Machine not already missing on Site reports `Initializing` until cleanup completes or inventory reports another state from Core. An already-missing Machine keeps its status.
           headers:
             Retry-After:
-              description: Minimum delay in seconds before repeating a forced deletion after a confirmed incomplete Core result. Other conflicts may omit this header.
+              description: Minimum delay in seconds before repeating a forced deletion after a confirmed incomplete Core result.
               schema:
                 type: integer
                 example: 5
@@ -12473,43 +12562,40 @@ paths:
       description: >-
         Requires Provider Admin access to the Machine's Infrastructure Provider.
         Regular deletion requires the Machine to be missing on Site for at least 24 hours,
-        with no attached Instance or assigned Instance Type. The confirmed-complete
-        retained-deletion recovery exception is described below.
+        with no attached Instance or assigned Instance Type.
 
-        Starting forced deletion requires a Registered Site and the applicable overrides.
+        Forced deletion requires a Registered Site and the applicable overrides.
         Authoritative Core Instance-consent enforcement and the Instance Type override
         require Core builds containing https://github.com/dsx-ai-factory/infra-controller/pull/5394.
         Older Core ignores the new protobuf fields; REST-side checks against REST records
         do not establish Core's current ownership state or replace server-side enforcement.
         It also supports missing Machines without waiting 24 hours. Before contacting Core,
-        REST records an attempt ID and makes the Machine unavailable for every Instance
-        placement path and for new Allocation capacity. A timeout, transport failure, or
-        unavailable workflow history keeps that attempt and quarantine. Retrying retrieves
-        the exact recorded execution instead of issuing another Core deletion. If no result
-        is available, including after a crash before dispatch, provide the attempt ID from
-        the error to the Site operator; ordinary deletion remains blocked.
+        REST reports the Machine as `Initializing` with the message
+        `Machine is being force deleted` and marks it unusable by Tenants, so automatic and
+        batch Instance placement skip it. A Machine already missing on Site keeps its status.
 
-        A definitive Core precondition or validation rejection allows a corrected forced
-        request to start a new attempt. A confirmed incomplete result returns HTTP 409 with
-        `Retry-After: 5`; repeat the same forced DELETE after at least 5 seconds. No automatic
-        continuation is scheduled. Only a confirmed complete result or an actual Core
-        NotFound response records completion. Missing Temporal history is not completion.
+        Forced requests for the same Machine join a Core deletion that is still running.
+        After a timeout or transport failure, repeat the forced DELETE. Core treats a
+        Machine it has already deleted as a completed deletion. A confirmed incomplete
+        result returns HTTP 409 with `Retry-After: 5`; repeat the same forced DELETE after
+        at least 5 seconds. No automatic continuation is scheduled.
 
         Forced deletion returns HTTP 202 only after confirmed Site completion. REST records
         are removed only when no Instance deletion was requested, no Instance remains
         attached, and remaining Allocation capacity is sufficient. Otherwise, owner records
-        remain. Allocation Constraints are never deleted by this operation. Present inventory
-        cannot clear the retained marker, and completed forced requests replay locally
-        without deleting a newly rediscovered Core Machine. A later REST cleanup failure
-        preserves completion proof for local replay without workflow history.
+        remain and REST reports the Machine as missing on Site with status `Error`, as
+        inventory would. A retained Machine keeps counting toward Allocation capacity.
+        Allocation Constraints are never deleted by this operation.
 
-        After confirmed completion, owners may remove the retained Instance and all Machine
-        Instance Type associations; existing quota guards may require them to reduce or
-        rebalance Allocation Constraints before unlinking. Ordinary DELETE, with force omitted or false and no
-        overrides, then removes only REST Machine records even if Core reports the Machine
-        present and no missing inventory was observed. The Machine must be unassigned and
-        have neither an Instance Type ID nor association rows. This cleanup never calls Core
-        and returns HTTP 202; a later fresh inventory may restore the rediscovered Machine.
+        To remove retained REST records, have the owners remove the retained Instance. Then
+        repeat the forced DELETE with allowDeleteWithInstanceType=true instead of
+        allowDeleteWithInstance, since dropping allowDeleteWithInstance also drops the
+        Instance Type removal it permits. Existing quota guards may
+        require the owners to reduce or rebalance Allocation Constraints first. Ordinary
+        DELETE also removes the records once the Machine has been missing on Site for 24
+        hours without an Instance or Instance Type. If Core rediscovers the Machine first,
+        inventory restores it as a present Machine. A repeated forced DELETE then deletes
+        it on the Site again.
   '/v2/org/{org}/nico/machine/{machineId}/bmc/reset':
     parameters:
       - schema:
@@ -12956,6 +13042,16 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: |-
+            Core can decline the command before sending it if the host's BMC
+            target or selected IPMI port changed, a NIC firmware update is active,
+            or a queued instance reboot is unfinished. The response message
+            identifies the failed precondition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: machine-power-control-machine
@@ -20967,7 +21063,12 @@ components:
           description: URL from which the firmware artifact can be downloaded.
         sha256:
           type: string
-          description: Optional SHA-256 digest of the artifact, in lowercase hex.
+          description: |-
+            SHA-256 digest of the artifact, in lowercase hex. Required when the
+            version installs through Scout, which verifies every artifact.
+            Scout is used in the following cases: a `Drive` version, a version
+            with `upgradeScript`, or a component for which Core packages a
+            Scout script. Optional otherwise.
       example:
         url: https://firmware.example.invalid/28.47.2682/fw.bin
         sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
@@ -21012,6 +21113,17 @@ components:
             Optional. When `true`, this firmware version applies only during BMC
             pre-ingestion. Omitted on update preserves the stored value; set to
             `false` to clear a previously stored value.
+        upgradeScript:
+          oneOf:
+            - $ref: '#/components/schemas/HostFirmwareUpgradeScript'
+            - type: 'null'
+          description: |-
+            Optional script Scout downloads and runs on the host to install this
+            version. When omitted or null, Core uses the script packaged for the
+            vendor, model and component, if any. A `Drive` version with neither
+            is rejected, because drives never fall back to a BMC upload. On
+            update, the version is replaced as a whole, so omitting it clears a
+            stored script.
       example:
         version: '28.47.2682'
         default: true
@@ -21021,6 +21133,72 @@ components:
         installOnlySpecified: false
         preUpdateResets: false
         preingestionExclusiveConfig: false
+    HostFirmwareUpgradeScript:
+      type: object
+      title: HostFirmwareUpgradeScript
+      description: Script Scout downloads and runs on the host to install a firmware version.
+      required:
+        - url
+        - sha256
+        - executionTimeoutSeconds
+        - artifactDownloadTimeoutSeconds
+      properties:
+        url:
+          type: string
+          minLength: 1
+          description: HTTPS URL of the script. Its last path segment is the script's file name.
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 digest of the script, in lowercase hex.
+        executionTimeoutSeconds:
+          type: integer
+          format: uint32
+          minimum: 1
+          description: Seconds Scout lets the script run.
+        artifactDownloadTimeoutSeconds:
+          type: integer
+          format: uint32
+          minimum: 1
+          description: |-
+            Seconds Scout allows for downloading each of the version's artifacts,
+            applied to each artifact separately. The script itself always has a
+            fixed 30-second download limit that this field does not change.
+      example:
+        url: https://scripts.example.invalid/scsi_drive_upgrade.sh
+        sha256: c60b4c1c2d46f7b9e50d7d2e2d77dbfbe7884030b0e9a86a4636b4bc85d8609e
+        executionTimeoutSeconds: 3600
+        artifactDownloadTimeoutSeconds: 600
+    HostFirmwareOrderingEntry:
+      title: HostFirmwareOrderingEntry
+      description: |-
+        One component in a host firmware update ordering: a bare component
+        type such as `BMC`, or a `HostFirmwareComponentRef` object. A `Drive`
+        needs the object form to name its drive model. Responses use the bare
+        type for every component without a drive model.
+      oneOf:
+        - $ref: '#/components/schemas/HostFirmwareComponentType'
+        - $ref: '#/components/schemas/HostFirmwareComponentRef'
+    HostFirmwareComponentRef:
+      type: object
+      title: HostFirmwareComponentRef
+      description: The object form of one component in a host firmware update ordering.
+      required:
+        - type
+      properties:
+        type:
+          $ref: '#/components/schemas/HostFirmwareComponentType'
+        driveModel:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 96
+          description: |-
+            The drive's Redfish `Drive.Model` as Site Explorer records it,
+            without leading or trailing whitespace, for example `ST24000NM005H`.
+            Required for `Drive` and must be absent or null for every other
+            type.
     HostFirmwareComponentConfig:
       type: object
       title: HostFirmwareComponentConfig
@@ -21031,6 +21209,17 @@ components:
       properties:
         type:
           $ref: '#/components/schemas/HostFirmwareComponentType'
+        driveModel:
+          type: string
+          minLength: 1
+          maxLength: 96
+          description: |-
+            The drive's Redfish `Drive.Model` as Site Explorer records it,
+            without leading or trailing whitespace, for example
+            `ST24000NM005H`. Required for `Drive` and rejected for every other
+            type. Each drive model is a separate component. Site Explorer
+            records drives only when its `explore_drive_firmware` setting is
+            enabled; it is disabled by default.
         firmware:
           type: array
           minItems: 1
@@ -21042,17 +21231,28 @@ components:
           minLength: 1
           description: |-
             Optional minimum firmware version required before BMC pre-ingestion can
-            complete. Omitted on update preserves the stored value.
+            complete. Omitted on update preserves the stored value. Rejected for
+            `Drive`, because pre-ingestion upgrades only through the BMC.
     HostFirmwareComponent:
       type: object
       title: HostFirmwareComponent
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - driveModel
       description: One component entry in a stored host firmware config response.
       required:
         - type
+        - driveModel
         - firmware
       properties:
         type:
           $ref: '#/components/schemas/HostFirmwareComponentType'
+        driveModel:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: The drive model of a `Drive` component; null for every other type.
         currentVersionDetectionRegEx:
           type: string
           readOnly: true
@@ -21073,7 +21273,7 @@ components:
         Host firmware configuration upsert payload. Configurations are keyed by
         `(vendor, model)` on the Site's Core instance. On first create,
         `ordering` must list every component being configured. On update,
-        newly added components must also appear in `ordering`.
+        newly added components must also appear in the new `ordering`.
       required:
         - siteId
         - vendor
@@ -21107,12 +21307,34 @@ components:
         ordering:
           type: array
           items:
-            $ref: '#/components/schemas/HostFirmwareComponentType'
+            $ref: '#/components/schemas/HostFirmwareOrderingEntry'
           description: |-
-            Update order for configured components. Required on first create.
-            Must include every configured component and must be updated when
-            adding a new component on subsequent PUTs.
+            Update order for configured components, each drive model as its own
+            entry. Required on first create. Must include every configured
+            component and must be updated when adding a new component on
+            subsequent PUTs. When omitted on update, the stored order is kept.
       examples:
+        - siteId: 00000000-0000-0000-0000-000000000001
+          vendor: LenovoAMI
+          model: ThinkSystem HS350X V3
+          ordering:
+            - type: Drive
+              driveModel: ST24000NM005H
+          components:
+            - type: Drive
+              driveModel: ST24000NM005H
+              firmware:
+                - version: ET07
+                  default: true
+                  powerDrainsNeeded: 1
+                  artifacts:
+                    - url: https://firmware.example.invalid/st24000nm005h/ET07/et07.lod
+                      sha256: 27925abb3edb48119579e8eaac1d15fbe7d2a3b12f277f1a13cdce1b8a6f8431
+                  upgradeScript:
+                    url: https://scripts.example.invalid/scsi_drive_upgrade.sh
+                    sha256: c60b4c1c2d46f7b9e50d7d2e2d77dbfbe7884030b0e9a86a4636b4bc85d8609e
+                    executionTimeoutSeconds: 3600
+                    artifactDownloadTimeoutSeconds: 600
         - siteId: 00000000-0000-0000-0000-000000000001
           vendor: Nvidia
           model: DGXH100
@@ -21189,9 +21411,9 @@ components:
         ordering:
           type: array
           items:
-            $ref: '#/components/schemas/HostFirmwareComponentType'
+            $ref: '#/components/schemas/HostFirmwareOrderingEntry'
           readOnly: true
-          description: Stored update order for configured components.
+          description: Stored update order for configured components, each drive model as its own entry.
         created:
           type: string
           format: date-time
@@ -21211,6 +21433,7 @@ components:
             - BMC
           components:
             - type: BMC
+              driveModel: null
               firmware:
               - version: '2.3.7'
                 default: true
@@ -21221,6 +21444,7 @@ components:
                   - url: https://firmware.example.invalid/2.3.7/fw.bin
                     sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
             - type: Cx7
+              driveModel: null
               firmware:
                 - version: '28.47.2682'
                   default: true
@@ -21235,7 +21459,9 @@ components:
     HostFirmwareComponentType:
       type: string
       title: HostFirmwareComponentType
-      description: Host firmware component type exposed by the REST API.
+      description: |-
+        Host firmware component type exposed by the REST API. `Drive` is the
+        firmware of one drive model, named by a separate `driveModel`.
       enum:
         - BMC
         - CEC
@@ -21247,6 +21473,7 @@ components:
         - CombinedBmcUefi
         - GPU
         - Cx7
+        - Drive
     SpectrumXMultiplaneRange:
       type: object
       description: Inclusive ascending bounds. Rail bounds are 0 through 3; plane bounds are 0 through 7.
@@ -23164,10 +23391,10 @@ components:
             relatedInstanceIds:
               - b1a5a05e-303c-11f0-b618-7f2e7f9b64ed
           nvLinkLogicalPartitionId: dd887330-dbd3-45ce-b400-c42fc8e47315
-          status: Pending
+          status: Ready
           statusHistory:
-            - status: Pending
-              message: 'Request received, pending processing'
+            - status: Ready
+              message: VPC is ready for use
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
           created: '2019-08-24T14:15:22Z'
@@ -23416,7 +23643,7 @@ components:
     VpcStatus:
       title: VpcStatus
       type: string
-      description: Status values for VPC objects
+      description: Status values for VPC objects. Pending retains a saved creation whose original Core outcome is unresolved; it does not imply that Core has not processed the request.
       enum:
         - Pending
         - Provisioning
@@ -23500,7 +23727,7 @@ components:
             - string
             - 'null'
           minLength: 1
-          description: Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`.
+          description: Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true` and REST DPS power provisioning to be enabled.
         networkSecurityGroupId:
           type:
             - string
@@ -23631,7 +23858,7 @@ components:
           oneOf:
             - $ref: '#/components/schemas/VpcRetainedVniAllocation'
             - type: 'null'
-          description: Allocation owned by this VPC in the other pool, or null when the valid active allocation is its only allocation. Inconsistent ownership is an error, not a null result.
+          description: Original assignment in the other pool, including an assignment whose release awaits provider confirmation. The response does not distinguish pending release from an allocation whose release has not started. Null means no retained assignment remains. Routing mutations reject unfinished cleanup. Inconsistent ownership returns an error.
       required:
         - vpcId
         - version
@@ -29831,8 +30058,19 @@ components:
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
+          deprecated: true
           description: |-
-            Optional, write-only authentication data for firmware downloads.
+            Deprecated alias of downloadCredentials. Supply at most one
+            non-null alias. Retained for existing clients.
+        downloadCredentials:
+          oneOf:
+            - $ref: '#/components/schemas/FirmwareAuthenticationData'
+            - type: 'null'
+          writeOnly: true
+          description: |-
+            Optional authentication for downloading firmware files, independent
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
         ruleId:
@@ -31135,10 +31373,36 @@ components:
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
+          deprecated: true
           description: |-
-            Optional, write-only authentication data for firmware downloads.
+            Deprecated alias of downloadCredentials. Supply at most one
+            non-null alias. Retained for existing clients.
+        downloadCredentials:
+          oneOf:
+            - $ref: '#/components/schemas/FirmwareAuthenticationData'
+            - type: 'null'
+          writeOnly: true
+          description: |-
+            Optional authentication for downloading firmware files, independent
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
+        deviceCredentialOverrides:
+          oneOf:
+            - $ref: '#/components/schemas/DeviceCredentialOverrides'
+            - type: 'null'
+          writeOnly: true
+          description: |-
+            Optional device logins shared by all directly dispatched tray targets.
+            Requires overrideReadinessCheck=true. Omitted or null preserves
+            configured credential lookup. Rack firmware endpoints ignore this field.
+            Unsupported for
+            standalone compute reprovisioning, DPU updates, the Core compute
+            backend and legacy compute controllers. NVOS logins are supported only for switches.
+            Credentials remain encrypted in task storage and workflow payloads;
+            backend registration may persist them in its own credential store.
+            Supported targets must already exist in the site's Flow inventory.
         ruleId:
           type: string
           format: uuid
@@ -31241,6 +31505,54 @@ components:
       examples:
         - taskIds:
             - 550e8400-e29b-41d4-a716-446655440000
+    DeviceCredentialOverrides:
+      title: DeviceCredentialOverrides
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: |-
+        Device login overrides, separate from firmware file-download authentication.
+        At least one non-null pair is required. Supplied pairs take precedence over
+        stored credentials; authentication failures do not fall back. Omitted pairs
+        retain configured lookup. Used for both dispatch and status polling.
+        Values are write-only and never returned by task reads.
+      properties:
+        bmc:
+          $ref: '#/components/schemas/DeviceLogin'
+          description: Compute or switch BMC, or power-shelf PMC login.
+        nvos:
+          $ref: '#/components/schemas/DeviceLogin'
+          description: Switch NVOS login; unsupported for other tray types.
+      anyOf:
+        - required: [bmc]
+        - required: [nvos]
+      example:
+        bmc:
+          username: admin
+          password: example-bmc-password
+        nvos:
+          username: admin
+          password: example-nvos-password
+    DeviceLogin:
+      title: DeviceLogin
+      type: object
+      additionalProperties: false
+      description: Complete write-only username/password pair for device access.
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Nonempty device username.
+        password:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Nonempty device password.
+      example:
+        username: admin
+        password: example-device-password
     FirmwareAuthenticationData:
       title: FirmwareAuthenticationData
       type: object
@@ -31393,10 +31705,36 @@ components:
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
+          deprecated: true
           description: |-
-            Optional, write-only authentication data for firmware downloads.
+            Deprecated alias of downloadCredentials. Supply at most one
+            non-null alias. Retained for existing clients.
+        downloadCredentials:
+          oneOf:
+            - $ref: '#/components/schemas/FirmwareAuthenticationData'
+            - type: 'null'
+          writeOnly: true
+          description: |-
+            Optional authentication for downloading firmware files, independent
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
+        deviceCredentialOverrides:
+          oneOf:
+            - $ref: '#/components/schemas/DeviceCredentialOverrides'
+            - type: 'null'
+          writeOnly: true
+          description: |-
+            Optional device logins shared by all directly dispatched tray targets.
+            Requires overrideReadinessCheck=true. Omitted or null preserves
+            configured credential lookup. Rack firmware endpoints ignore this field.
+            Unsupported for
+            standalone compute reprovisioning, DPU updates, the Core compute
+            backend and legacy compute controllers. NVOS logins are supported only for switches.
+            Credentials remain encrypted in task storage and workflow payloads;
+            backend registration may persist them in its own credential store.
+            Supported targets must already exist in the site's Flow inventory.
         ruleId:
           type: string
           format: uuid

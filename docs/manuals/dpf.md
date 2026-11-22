@@ -5,7 +5,7 @@
 NICo supports two ways of provisioning DPUs:
 
 1. iPXE based
-2. DPF based
+1. DPF based
 
 This manual covers deployment of **DPF based** provisioning as it is used by NICo.
 It assumes that a working Kubernetes cluster is already available, and is intentionally
@@ -17,6 +17,15 @@ authoritative source for installing and configuring DPF is the [upstream guide](
 
 NICo is designed to follow the Zero-Trust use case detailed in the DPF documentation: [DPF Zero-Trust Mode - HBN Usecase](https://docs.nvidia.com/networking/display/dpf26041/hbn-in-dpf-zero-trust).
 
+Distinguish managed-host DPUs from DPUs in the site controller nodes. NICo
+does not provision the site controller's own DPUs. Provision those separately
+before creating Kubernetes, following the
+[Site Controller Node DPU Requirements](../getting-started/quick-start.md#site-controller-node-dpu-requirements)
+and the [Control-Plane Network Requirements](https://github.com/dsx-ai-factory/infra-controller/blob/main/scripts/control-plane-dpu/control-plane-network.md).
+Advice about NIC mode in a DPF host-provisioning workflow does not replace
+those control-plane requirements; the documented BlueField-3 site controller
+setup uses DPU mode.
+
 You should follow that guide as the base. The instructions below only describe
 the **deltas, additions, and tweaks** that need to be applied on top of the
 official DPF flow so that NICo can integrate with the resulting DPF
@@ -27,13 +36,13 @@ setup.
 The guide is organized into the following sections:
 
 1. **Prerequisites** — work that must be done before installing DPF.
-2. **DPF Installation** — NICo-relevant notes when installing the DPF operator.
-3. **Post-Installation Configuration** — the cluster state and NICo configuration that must be in place after DPF is installed and before NICo starts.
-4. **Start carbide-api** — what NICo creates on startup, and when a restart is required to apply later DPF config changes.
+1. **DPF Installation** — NICo-relevant notes when installing the DPF operator.
+1. **Post-Installation Configuration** — the cluster state and NICo configuration that must be in place after DPF is installed and before NICo starts.
+1. **Start carbide-api** — what NICo creates on startup, and when a restart is required to apply later DPF config changes.
 
 <Note title="Notes">
 1. NICo expects DPF to be installed and configured on the same Kubernetes cluster where NICo (the controller) runs.
-2. When `[dpf].enabled = true`, DPF is the default per-host provisioning strategy. A warning is displayed for hosts that are not configured to use DPF.
+1. When `[dpf].enabled = true`, DPF is the default per-host provisioning strategy. A warning is displayed for hosts that are not configured to use DPF.
 </Note>
 ---
 
@@ -282,7 +291,7 @@ Two objects must therefore be installed:
 
 1. A `CertificateRequestPolicy` that is permissive for the
    `dpf-operator-system` namespace.
-2. A `ClusterRole` + `ClusterRoleBinding` granting cert-manager itself the
+1. A `ClusterRole` + `ClusterRoleBinding` granting cert-manager itself the
    `use` verb on that policy.
 
 > **Note**: The policy and role below use wildcard (`*`) values for
@@ -428,6 +437,35 @@ resources in `dpf-operator-system`. This is a **namespaced Role +
 RoleBinding** scoped to `dpf-operator-system` — cluster-admin is *not*
 required.
 
+This Role trusts NICo to read, list, create, and delete every Secret in the DPF
+namespace, including `bmc-shared-password` and registry credentials. NICo's cleanup
+code limits deletion to Secrets with the matching device label and a generated
+name (`<device-id>-initial` or `<device-id>-v<version>`). NICo enforces these
+ownership checks itself; Kubernetes RBAC grants access throughout the namespace.
+
+<Note>
+With DPF 26.8.0 or later (excluding prereleases of 26.8.0), NICo registers each
+new DPUDevice with its own immutable, version-labeled BMC credential Secret
+containing the DPU's established ingestion password, including retained
+credentials. NICo preserves existing DPUDevice credential references. Older DPF
+versions continue to use the shared BMC password.
+
+Reset, forced deletion, and decommissioning wait for the host's DPUNode,
+DPUDevices, and DPUs to drain before deleting its credential Secrets. Forced
+deletion can bypass this wait with `allow_delete_with_orphaned_dpf_crds`, leaving
+resources for manual cleanup.
+
+If Secret creation succeeds but DPUDevice creation fails, NICo retries registration
+using the existing Secret only when its device and version labels, password, type,
+and immutability match and it is not being deleted. A conflicting Secret blocks
+registration until you reset or force-delete the host and let credential Secret
+cleanup finish.
+
+NICo skips DPU BMC root and `service` account rotation in this mode, including
+forced requests, because coordinated updates to DPF's immutable credential
+references are not supported. Host BMC rotation remains available.
+</Note>
+
 <Note>
 On chart-based deployments, this Role/RoleBinding is created by the
 NICo Core chart itself (`nico-api.dpf.rbacCreate=true`, set automatically by `setup.sh`, and the DPF default), with the subject bound to the chart's actual ServiceAccount (`nico-api` in `nico-system` by default).
@@ -487,7 +525,7 @@ rules:
     verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create"]
+    verbs: ["get", "list", "create", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: ["bmc-shared-password"]
@@ -1007,6 +1045,94 @@ The proxy is part of the flavor spec — changing or adding `[dpf.proxy]` produc
 new flavor name (hash-derived) and triggers a full DPU reprovisioning. Set it before
 the first NICo startup with DPF enabled if possible.
 
+If the site runs a container registry that mirrors or caches the external registries,
+add one `[[dpf.registry_mirrors]]` table per upstream registry so that containerd on
+every DPU pulls that registry's images from the mirror first:
+
+```toml
+[[dpf.registry_mirrors]]
+upstream = "nvcr.io"
+mirror = "https://registry.example.com/v2/nvcr-cache"
+override_path = true
+```
+
+For each entry NICo embeds a containerd host configuration file,
+`/etc/containerd/certs.d/<upstream>/hosts.toml`, into the `DPUFlavor` spec. The entry
+above renders as:
+
+```toml
+[host."https://registry.example.com/v2/nvcr-cache"]
+  capabilities = ["pull", "resolve"]
+  override_path = true
+```
+
+Each mirror entry supports the following fields:
+
+- `upstream` is the registry host exactly as it appears in image references, with the
+  port when the references carry one. It names the directory, so it must be a plain
+  `host[:port]`, and it may appear in only one entry. Docker Hub is `docker.io`, the
+  name containerd looks it up under, not `registry-1.docker.io` or `index.docker.io`.
+  containerd's `_default` directory, a mirror for every registry, is not supported.
+- `mirror` is the `http://` or `https://` URL of the mirror, without userinfo, a query,
+  or a fragment. containerd appends `/v2` to it unless the path already ends in `/v2`.
+  Set `override_path = true` when the mirror serves the upstream under a path prefix,
+  and give the complete API root in `mirror`, as above. A trailing slash is dropped.
+- `server` sets the fallback registry URL. When it is omitted, containerd falls back to
+  the upstream registry itself, so an image the mirror cannot serve is still pulled
+  from the upstream.
+- `ca_pem` holds the PEM certificates that sign the mirror's TLS certificate. NICo
+  writes them to `/etc/containerd/certs.d/<upstream>/ca.crt` and names that file in
+  `hosts.toml`. Omit it when the certificate chains to a CA in the DPU's system trust
+  store. It must contain at least one PEM certificate, and every certificate in the
+  bundle must parse. containerd fails every pull for that upstream, the fallback
+  included, when it cannot load the file.
+- `dial_timeout` is the longest time containerd waits for a connection to the mirror
+  before it moves on to the fallback. It is a positive whole number of seconds or
+  milliseconds with at most six digits, such as `5s` or `500ms`. When it is omitted,
+  containerd waits 30 seconds. The key takes effect from containerd 2.1; earlier
+  versions ignore it.
+
+NICo rejects an entry that breaks these rules at startup, before it writes any DPF
+resource.
+
+NICo writes the files but does not change containerd's own configuration. containerd
+reads them only when its registry `config_path` includes `/etc/containerd/certs.d`.
+That is the default from containerd 2.2; earlier versions need it set in the
+containerd configuration the BFB ships (bf-bundle 3.4.1 sets it). To check, look for
+the registry `config_path` in `containerd config dump` on a provisioned DPU. Pass the
+configuration file containerd runs with, for example
+`containerd --config /etc/containerd/config-mlnx.toml config dump`: without it the
+command prints containerd's built-in defaults, not the running configuration. Where
+`config_path` is neither set nor defaulted, the files are ignored and every pull goes
+to the upstream registry as before.
+
+For each image pull, containerd tries the mirror first for the tag, each manifest,
+and each layer. It moves on to the upstream registry at once when the mirror refuses
+the connection, answers with an error, or presents a certificate the DPU does not
+trust. A mirror address that silently drops packets is different: every request then
+waits for containerd's connection timeout (30 seconds) before it falls back, so pulls
+still succeed but take minutes. Give the mirror an address that answers or refuses
+quickly while the mirror is down, or set `dial_timeout` to a few seconds so that each
+request gives up sooner.
+
+Image references and pull secrets stay as they are. containerd offers the pull secret
+of the upstream registry to any host in `hosts.toml` that asks for credentials, so a
+mirror is trusted with those credentials: use an `https://` mirror that the site
+controls. A mirror that serves the mirrored repositories anonymously is never sent
+them.
+
+When `[dpf.proxy]` is also set, list the mirror's host or network in `no_proxy`;
+otherwise containerd connects to an `https://` mirror through the proxy.
+
+Like the proxy, the mirrors are part of the flavor spec: adding, changing, or removing
+an entry produces a new flavor name and triggers a full DPU reprovisioning. The order
+of the entries does not matter. Set them before the first NICo startup with DPF
+enabled if possible.
+
+BF4 Astra is the exception. It uses a `DPUFlavorTemplate`, and NICo cannot yet tell
+that a provisioned Astra DPU was rendered from an older template, so a change to the
+mirrors (or to `[dpf.proxy]`) reaches an Astra DPU only when it is next reprovisioned.
+
 `extra_bfcfg_parameters` sets additional `bf.cfg` parameters on every DPU, most commonly
 a login password for the DPU's `ubuntu` user:
 
@@ -1056,6 +1182,7 @@ Field reference (all under `[dpf]`):
 | TOML key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch. Must be `true` to use DPF-based provisioning. |
+| `enable_pci_switch_emulation` | bool | `false` | Set `PCI_SWITCH_EMULATION_ENABLE=1` in provisioning nvconfig for all deployments, including BF3 GB200 and the Astra flavor template, to enable PCI switch emulation for DPU-emulated storage such as DOCA SNAP. Omitted or `false` leaves the parameter unset; it does not explicitly disable firmware emulation. |
 | `docker_image_pull_secret` | string (optional) | none | Top-level override for the image-pull Secret of the carbide services (`dpu_agent`, `dhcp_server`, `fmds`, `otel`) and fallback for Astra extra services (Weave DHCP, Weave flow controller, Xplane); never applied to `dts`/`doca_hbn`. An extra service's own secret takes precedence. Unset by default: services pull from a public registry (no `imagePullSecrets`) unless a secret is given here or per-service. |
 | `dpu_agent_bootstrap_ca` | tagged table | `source = "legacy_download"` | Selects legacy download or mounted-object bootstrap trust for the DPU agent. |
 | `services.<svc>` | table | per-service defaults | Helm/image overrides for each mandatory DPUService. |
@@ -1067,6 +1194,13 @@ Field reference (all under `[dpf]`):
 | `deployments.<name>.extra_services.<svc>` | table | none | Deployment-local field overrides for one deployment-specific service. Supported keys are `doca_weave_dhcp_agent`, `doca_weave_flow_controller`, and `doca_xplane`; unsupported services are ignored for that deployment type. |
 | `proxy.https_proxy` | string | — | HTTPS proxy URL for DPU image pulls (see section 3.5). |
 | `proxy.no_proxy` | list of strings | `[]` | Hosts/CIDRs that must bypass the proxy. |
+| `registry_mirrors` | list of tables | `[]` | Containerd registry mirrors for DPU image pulls, one entry per upstream registry (see section 3.5). Adding, changing, or removing an entry renames the flavor and reprovisions BF3 and generic BF4 DPUs. For BF4 Astra, changes reach existing DPUs on their next reprovision. |
+| `registry_mirrors[].upstream` | string | required | Registry host as it appears in image references, `host[:port]`. Docker Hub is `docker.io`. |
+| `registry_mirrors[].mirror` | string | required | `http://` or `https://` URL of the mirror, without userinfo, query, or fragment. |
+| `registry_mirrors[].override_path` | bool | `false` | Use the path of `mirror` as the registry API root instead of appending `/v2`. |
+| `registry_mirrors[].server` | string (optional) | the upstream registry | Fallback registry URL. |
+| `registry_mirrors[].ca_pem` | string (optional) | system trust store | PEM certificate bundle that signs the mirror's TLS certificate. At least one certificate is required, and every certificate must parse. |
+| `registry_mirrors[].dial_timeout` | string (optional) | 30 seconds | Maximum wait for a connection to the mirror before fallback. A positive whole number of seconds or milliseconds with at most six digits, such as `5s` or `500ms`. Requires containerd 2.1 or later. |
 | `extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines appended verbatim to every deployment's `DPUFlavor` `bfcfgParameters`. Not interpreted or quoted by NICo; entries containing `{{` are rejected at startup. Changing the list renames every flavor and reprovisions the site's DPUs. |
 | `deployments.<name>.extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines for this deployment's `DPUFlavor` only. Appends to the site-wide `extra_bfcfg_parameters`; does not replace it. |
 
@@ -1075,6 +1209,24 @@ Notes:
 - The DPF operator namespace (`dpf-operator-system`) and the kubeconfig used
   to talk to the host cluster are **not** configured here — carbide-api uses
   its in-cluster ServiceAccount and the fixed `dpf-operator-system` namespace.
+
+#### PCI switch emulation for DPU-emulated storage
+
+Enable PCI switch emulation in the existing `site-config.toml` section:
+
+```toml
+[dpf]
+enabled = true
+enable_pci_switch_emulation = true
+```
+
+Restart the NICo API to generate the updated flavors. DPF applies the nvconfig
+parameter during DPU provisioning. Changing this setting changes flavor hashes
+and makes existing BF3 and generic BF4 DPUs eligible for reprovisioning through
+the normal update flow. Astra template changes apply on provisioning; NICo does
+not detect template-only drift, so explicitly reprovision existing Astra DPUs to
+apply the setting. The setting applies to every deployment and has no
+per-deployment override.
 
 #### DPUService rollout gating
 
@@ -1212,17 +1364,17 @@ newly installed CA. Use the following sequence for a mounted root rotation:
 
 1. Create a new versioned Secret or ConfigMap containing an overlap bundle with
    both the old and new roots.
-2. Set `[dpf.dpu_agent_bootstrap_ca].name` to the new object name and restart
+1. Set `[dpf.dpu_agent_bootstrap_ca].name` to the new object name and restart
    `carbide-api`.
-3. Wait for DPF to reconcile the service template and for every affected DPU
+1. Wait for DPF to reconcile the service template and for every affected DPU
    agent pod to roll and run its init container again.
-4. Verify that each pod installed the overlap bundle at
+1. Verify that each pod installed the overlap bundle at
    `/opt/forge/forge_root.pem` and can authenticate the NICo API certificate
    chain.
-5. Rotate the NICo API certificate chain to one that terminates at the new root.
+1. Rotate the NICo API certificate chain to one that terminates at the new root.
    While the overlap bundle is installed, verify that every affected DPU agent
    can authenticate the new server chain.
-6. Create another versioned object without the old root and repeat the
+1. Create another versioned object without the old root and repeat the
    configuration, restart, reconciliation, and verification steps. Remove the
    old objects only after that rollout succeeds.
 
@@ -1366,7 +1518,7 @@ field is **`dpf_enabled`** on each expected-machine entry. A host is
 provisioned via DPF only when **both** of the following are true:
 
 1. `[dpf].enabled = true` in the site config (section 3.5), and
-2. `dpf_enabled = true` on that host's expected-machine entry.
+1. `dpf_enabled = true` on that host's expected-machine entry.
 
 **The per-host default is `true`.** When `dpf_enabled` is omitted, it is stored as `true` — DPF is the default provisioning path (iPXE is deprecated). To keep a host on iPXE, set `dpf_enabled = false`.
 
@@ -1526,8 +1678,10 @@ Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
 - A `DPUFlavor` CR (BF3/generic BF4) or `DPUFlavorTemplate` CR (Astra) named
   `<flavor_name>-<spec-hash>`. The 16-character hex suffix is a SHA-256 digest
   of the flavor spec or template; changing it, including adding or changing
-  `[dpf.proxy]` or `[dpf].extra_bfcfg_parameters`, produces a new name and
-  triggers reprovisioning.
+  `[dpf.proxy]`, `[[dpf.registry_mirrors]]`, or `[dpf].extra_bfcfg_parameters`,
+  produces a new name. BF3 and generic BF4 DPUs reprovision when the flavor
+  changes. Existing Astra DPUs receive template changes when they are next
+  reprovisioned.
 - A set of `DPUServiceInterface`, `DPUServiceTemplate`,
   `DPUServiceConfiguration`, and `DPUServiceNAD` CRs, one per mandatory
   DPUService (`dts`, `doca-hbn`, `carbide-dpu-agent`, `carbide-dhcp-server`,
@@ -1545,8 +1699,8 @@ enabling DPF for the first time, changing a deployment's BFB URL, renaming a
 `DPUDeployment`/flavor resource, adding or removing BF4 deployment tables,
 pinning a different chart/image version under `[dpf.services.*]` or a
 deployment's `[dpf.deployments.<name>.services]`, or adding/changing
-`[dpf.proxy]` or `[dpf].extra_bfcfg_parameters` — **requires a carbide-api
-restart** for the new configuration to take effect.
+`[dpf.proxy]`, `[[dpf.registry_mirrors]]`, or `[dpf].extra_bfcfg_parameters` —
+**requires a carbide-api restart** for the new configuration to take effect.
 
 ---
 

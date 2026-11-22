@@ -35,14 +35,6 @@ async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnect
     let segment_id = env.segment_id;
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
 
-    let txn = env
-        .harness
-        .api()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    txn.commit().await.unwrap();
-
     let instance_metadata = rpc::forge::Metadata {
         name: "test_instance_with_labels".to_string(),
         description: "this instance must have labels.".to_string(),
@@ -79,8 +71,9 @@ async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnect
         Some(instance_metadata.clone())
     );
 
-    let mut txn = env.harness.db_txn().await;
-    let fetched_instance = tinstance.db_instance(&mut txn).await;
+    let fetched_instance = tinstance
+        .db_instance(&env.harness.api().database_connection)
+        .await;
     assert_eq!(fetched_instance.machine_id, mh.host.id);
 
     assert_eq!(fetched_instance.metadata.name, "test_instance_with_labels");
@@ -94,8 +87,6 @@ async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnect
         "value1"
     );
     assert_eq!(fetched_instance.metadata.labels.get("key2").unwrap(), "");
-
-    txn.rollback().await.unwrap();
 
     let mut instances = find_instances_by_label(
         &env,
@@ -133,14 +124,6 @@ async fn test_instance_hostname_creation(_: PgPoolOptions, options: PgConnectOpt
     let segment_id = env.segment_id;
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
 
-    let txn = env
-        .harness
-        .api()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    txn.commit().await.unwrap();
-
     let instance_hostname = "test-hostname";
 
     let tinstance = mh
@@ -152,25 +135,15 @@ async fn test_instance_hostname_creation(_: PgPoolOptions, options: PgConnectOpt
         .await;
     env.advance_instance_to_ready(&mh, &tinstance).await;
 
-    let mut txn = env.harness.db_txn().await;
-
-    let fetched_instance = tinstance.db_instance(&mut txn).await;
+    let fetched_instance = tinstance
+        .db_instance(&env.harness.api().database_connection)
+        .await;
 
     let returned_hostname = fetched_instance.config.tenant.hostname;
 
     assert_eq!(returned_hostname.unwrap(), instance_hostname);
 
-    txn.rollback().await.unwrap();
-
     //Check for duplicate hostnames
-    let txn = env
-        .harness
-        .api()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    txn.commit().await.unwrap();
-
     let other_mh = env.create_managed_host(ManagedHostConfig::default()).await;
     let other_instance = other_mh
         .instance_builder(&env.harness)
@@ -200,6 +173,7 @@ async fn test_instance_phone_home(_: PgPoolOptions, options: PgConnectOptions) {
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };

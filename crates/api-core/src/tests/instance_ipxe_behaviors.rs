@@ -20,7 +20,6 @@ use std::error::Error;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::{TestEnv, TestManagedHost, create_test_env};
-use db::TransactionVending as _;
 use rpc::forge::forge_server::Forge;
 
 use crate::tests::common;
@@ -33,17 +32,23 @@ const RETRYABLE_CUSTOM_IPXE: &str = "set nico-retry-provisioning 1\nSomeRandomiP
 
 #[crate::sqlx_test]
 async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
+    let mut config = common::api_fixtures::get_config();
+    config
+        .machine_state_controller
+        .instance_reboot_queue_enabled = true;
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        common::api_fixtures::TestEnvOverrides::with_config(config),
+    )
+    .await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.host().id])
+    let host_interface = mh.host().first_interface(&env.pool).await;
+    let interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.host().id])
         .await
         .unwrap();
     let client_ip = interfaces[&mh.host().id][0].addresses[0].to_string();
-    txn.rollback().await.unwrap();
     let host_arch = rpc::forge::MachineArchitecture::X86;
 
     let tinstance = create_instance(&env, &mh, false, segment_id).await;
@@ -56,9 +61,12 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
-    txn.rollback().await.unwrap();
+    assert!(
+        tinstance
+            .db_instance(&env.pool)
+            .await
+            .use_custom_pxe_on_boot
+    );
 
     // Generating the script clears `use_custom_pxe_on_boot` before the
     // URL lookup. A failed lookup must leave that request pending.
@@ -91,9 +99,12 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
         "{error:?}"
     );
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
-    txn.rollback().await.unwrap();
+    assert!(
+        tinstance
+            .db_instance(&env.pool)
+            .await
+            .use_custom_pxe_on_boot
+    );
 
     sqlx::query("UPDATE network_segments SET allocation_strategy = 'reserved' WHERE name = $1")
         .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
@@ -105,9 +116,12 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    assert!(!tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
-    txn.rollback().await.unwrap();
+    assert!(
+        !tinstance
+            .db_instance(&env.pool)
+            .await
+            .use_custom_pxe_on_boot
+    );
 
     // Second boot should return "exit"
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
@@ -128,7 +142,14 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     );
 
     // A regular reboot attempt should still lead to returning "exit"
+    let actions = env.redfish_sim.timepoint();
     invoke_instance_power(&env, tinstance.id, false).await;
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .all_hosts()
+            .is_empty()
+    );
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert!(
         pxe.pxe_script.contains("Current state: Assigned/Ready"),
@@ -139,9 +160,49 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
 
+    // Finish the queued ordinary reboot before requesting a different boot mode.
+    env.run_machine_state_controller_iteration().await;
+    assert_eq!(
+        env.redfish_sim.actions_since(&actions).all_hosts(),
+        vec![
+            carbide_redfish::libredfish::test_support::RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ),
+        ]
+    );
+    let mut txn = env.pool.begin().await.unwrap();
+    let ordinary_reboot = db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap();
+    assert!(!ordinary_reboot.is_pending());
+    txn.rollback().await.unwrap();
+    let pxe = host_interface.get_pxe_instructions(host_arch).await;
+    assert!(
+        pxe.pxe_script.contains(
+            "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
+        ),
+        "an accepted ordinary reboot must retain the OS boot mode: {}",
+        pxe.pxe_script
+    );
+
     // A reboot with flag `boot_with_custom_ipxe` should provide the custom iPXE
     // The reboot is handled by the state machine, which makes sure the boot order is configured properly.
     invoke_instance_power(&env, tinstance.id, true).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    assert_eq!(
+        db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .hardware_dispatch,
+        Some(ordinary_reboot.clone())
+    );
+    txn.rollback().await.unwrap();
     env.run_machine_state_controller_iteration_until_state_condition(&mh.id, 5, |machine| {
         matches!(
             machine.current_state(),
@@ -179,7 +240,26 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
 
     // The next reboot should again lead to returning "exit"
+    let actions = env.redfish_sim.timepoint();
     invoke_instance_power(&env, tinstance.id, false).await;
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .all_hosts()
+            .is_empty()
+    );
+    // This must be new work, not the previously settled ordinary reboot.
+    let mut txn = env.pool.begin().await.unwrap();
+    let next_reboot = db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap();
+    assert!(next_reboot.is_pending());
+    assert_ne!(next_reboot.token, ordinary_reboot.token);
+    txn.rollback().await.unwrap();
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert!(
         pxe.pxe_script.contains("Current state: Assigned/Ready"),
@@ -189,6 +269,27 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     assert!(pxe.pxe_script.contains(
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
+    // After custom PXE completes, an ordinary reboot must execute and settle too.
+    env.run_machine_state_controller_iteration().await;
+    assert_eq!(
+        env.redfish_sim.actions_since(&actions).all_hosts(),
+        vec![
+            carbide_redfish::libredfish::test_support::RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ),
+        ]
+    );
+    let mut txn = env.pool.begin().await.unwrap();
+    let final_reboot = db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap();
+    assert_eq!(final_reboot.token, next_reboot.token);
+    assert!(!final_reboot.is_pending());
+    txn.rollback().await.unwrap();
 }
 
 #[crate::sqlx_test]
@@ -213,9 +314,7 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let host_interface = mh.host().first_interface(&env.pool).await;
     let host_arch = rpc::forge::MachineArchitecture::X86;
 
     let tinstance = create_instance(&env, &mh, true, segment_id).await;
@@ -279,6 +378,7 @@ pub(in crate::tests) async fn create_instance<'a, 'b>(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,

@@ -21,6 +21,8 @@ use std::time::Duration;
 
 use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_ib_fabric::ib::{Filter, IBFabric, IBFabricManager};
+use carbide_ib_partition_controller::context::IBPartitionStateHandlerServices;
+use carbide_ib_partition_controller::handler::IBPartitionStateHandler;
 use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
@@ -38,6 +40,8 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::{OwnerType, ResourcePoolEntry, ResourcePoolEntryState};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{IbPartitionStatus, TenantState};
+use state_controller::db_write_batch::DbWriteBatch;
+use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHandlerError};
 use tonic::Request;
 
 use crate::api::Api;
@@ -306,6 +310,20 @@ async fn ib_pkey_reservation(env: &TestEnv, pkey: PartitionKey) -> ResourcePoolE
         .into_iter()
         .find(|entry| entry.pool_name == pkey_pool.name())
         .expect("the IB PKey reservation exists")
+}
+
+/// Reads the whole Integrated receipt so a failed release cannot silently change ownership.
+async fn ib_pkey_receipt(env: &TestEnv, pkey: PartitionKey) -> Option<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT to_jsonb(a) FROM resource_pool_allocations a
+         JOIN resource_pool r ON r.id = a.integrated_resource_id
+         WHERE r.name = $1 AND r.value = $2",
+    )
+    .bind(env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME].name())
+    .bind(u16::from(pkey).to_string())
+    .fetch_optional(&env.pool)
+    .await
+    .expect("read the IB PKey allocation receipt")
 }
 
 /// Stops a public writer after admission, then proves the public soft delete
@@ -1536,15 +1554,7 @@ async fn test_ib_skip_update_infiniband_status(pool: sqlx::PgPool) {
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env
-        .pool
-        .clone()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-
-    let machine = mh.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.host().db_machine(&env.pool.clone()).await;
 
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);
     assert!(!machine.is_dpu());
@@ -1610,7 +1620,13 @@ fn guids_by_device(machine: &rpc::forge::Machine) -> HashMap<String, Vec<String>
         .unwrap()
         .infiniband_interfaces
         .clone();
-    ib_ifaces.sort_by_key(|iface| iface.pci_properties.as_ref().unwrap().slot().to_string());
+    ib_ifaces.sort_by(|left, right| {
+        left.pci_properties
+            .as_ref()
+            .unwrap()
+            .slot()
+            .cmp(right.pci_properties.as_ref().unwrap().slot())
+    });
 
     let mut guids: HashMap<String, Vec<String>> = HashMap::new();
     for iface in ib_ifaces.iter() {
@@ -1757,8 +1773,8 @@ async fn test_count_instances_referencing_partition(pool: sqlx::PgPool) {
 /// The controller retains a partition and its PKey while any Instance row
 /// references it, including a terminating Instance after UFM unbinds its GUIDs.
 /// Cleanup during the final partition lock wait must be visible to the recount.
-/// The partition stays locked while its PKey release waits, then both changes
-/// commit in that same controller iteration.
+/// The partition stays locked while release waits. Failed release preserves
+/// both records. A later iteration releases only the renamed target's PKey.
 #[crate::sqlx_test]
 async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sqlx::PgPool) {
     let mut config = common::api_fixtures::get_config();
@@ -1797,6 +1813,43 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
         owner: ib_partition.metadata.as_ref().unwrap().name.clone(),
         owner_type: OwnerType::IBPartition.to_string(),
     };
+
+    let (sibling_id, sibling) = create_ib_partition(
+        &env,
+        "test_ib_partition".to_string(),
+        DEFAULT_TENANT.to_string(),
+    )
+    .await;
+    let sibling_pkey: PartitionKey = sibling.status.as_ref().unwrap().pkey().parse().unwrap();
+    let sibling_reservation = ib_pkey_reservation(&env, sibling_pkey).await;
+    assert_ne!(sibling_pkey, pkey);
+    assert_eq!(sibling_reservation.state.0, expected_pkey_state);
+    let current_receipts = async || {
+        [
+            ib_pkey_receipt(&env, pkey).await,
+            ib_pkey_receipt(&env, sibling_pkey).await,
+        ]
+    };
+    let original_receipts = current_receipts().await;
+    assert!(original_receipts.iter().all(Option::is_some));
+    env.api
+        .update_ib_partition(Request::new(rpc::forge::IbPartitionUpdateRequest {
+            id: Some(ib_partition_id),
+            config: ib_partition.config.clone(),
+            if_version_match: Some(ib_partition.config_version.clone()),
+            metadata: Some(rpc::Metadata {
+                name: "renamed partition".into(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap();
+    // Older partitions store their assigned PKey only in status.
+    sqlx::query("UPDATE ib_partitions SET pkey = NULL WHERE id = $1")
+        .bind(ib_partition_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
 
     let assert_waiting = || async {
         let partition = db::ib_partition::find_by(
@@ -1900,6 +1953,12 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
         .execute(&mut *txn)
         .await
         .unwrap();
+    // Clear the first Wait so the next assertion depends on this iteration.
+    sqlx::query("UPDATE ib_partitions SET controller_state_outcome = NULL WHERE id = $1")
+        .bind(ib_partition_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
 
     // Controller should still wait — soft-deleted instance row still exists
@@ -1942,6 +2001,11 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     txn.commit().await.unwrap();
 
     let pkey_pool = &env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    // Existing free rows stay valid. The next attempt to free a PKey fails.
+    sqlx::query("ALTER TABLE resource_pool ADD CONSTRAINT reject_target_pkey_release CHECK (allocated IS NOT NULL) NOT VALID")
+        .execute(&env.pool)
+        .await
+        .unwrap();
     let mut pkey_guard = env.pool.txn_begin().await.unwrap();
     sqlx::query("SELECT state FROM resource_pool WHERE name = $1 AND value = $2 FOR UPDATE")
         .bind(pkey_pool.name())
@@ -1996,7 +2060,151 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     pkey_guard.commit().await.unwrap();
     tokio::time::timeout(Duration::from_secs(30), deletion)
         .await
-        .expect("controller finishes after the PKey release is allowed");
+        .expect("controller reports the injected failure after the PKey lock is released");
+
+    let failed = db::ib_partition::find_by(
+        &env.pool,
+        ObjectColumnFilter::One(db::ib_partition::IdColumn, &ib_partition_id),
+        &env.api.instrumentation,
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    assert_eq!(
+        failed.controller_state.value,
+        IBPartitionControllerState::Deleting
+    );
+    assert_eq!(failed.metadata.name, "renamed partition");
+    let Some(PersistentStateHandlerOutcome::Error { err, .. }) = failed.controller_state_outcome
+    else {
+        panic!("failed PKey release must persist a controller error");
+    };
+    assert!(err.contains("reject_target_pkey_release"), "{err}");
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+    assert_eq!(
+        metrics.gauge_value(
+            "carbide_machines_with_state_handling_errors_per_state",
+            &[
+                ("state", "deleting"),
+                ("substate", ""),
+                ("error", "db_error"),
+                ("fresh", "true"),
+            ]
+        ),
+        1.0
+    );
+    assert_eq!(
+        ib_pkey_reservation(&env, pkey).await.state.0,
+        expected_pkey_state
+    );
+    let sibling_after = ib_pkey_reservation(&env, sibling_pkey).await;
+    assert_eq!(sibling_after.state.0, sibling_reservation.state.0);
+    assert_eq!(sibling_after.allocated, sibling_reservation.allocated);
+    assert_eq!(current_receipts().await, original_receipts);
+    sqlx::query("ALTER TABLE resource_pool DROP CONSTRAINT reject_target_pkey_release")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    // A reservation held by another kind of owner must survive a release attempt.
+    let wrong_owner = ResourcePoolEntryState::Allocated {
+        owner: ib_partition.metadata.as_ref().unwrap().name.clone(),
+        owner_type: OwnerType::Machine.to_string(),
+    };
+    sqlx::query("UPDATE resource_pool SET state = $1 WHERE name = $2 AND value = $3")
+        .bind(sqlx::types::Json(&wrong_owner))
+        .bind(pkey_pool.name())
+        .bind(pkey_u16.to_string())
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    env.run_ib_partition_controller_iteration().await;
+    let failed = db::ib_partition::find_by(
+        &env.pool,
+        ObjectColumnFilter::One(db::ib_partition::IdColumn, &ib_partition_id),
+        &env.api.instrumentation,
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    assert_eq!(
+        failed.controller_state.value,
+        IBPartitionControllerState::Deleting
+    );
+    let Some(PersistentStateHandlerOutcome::Error { err, .. }) = &failed.controller_state_outcome
+    else {
+        panic!("wrong-owner release must persist a fresh controller error");
+    };
+    assert!(
+        err.contains(&OwnerType::Machine.to_string())
+            && err.contains(&OwnerType::IBPartition.to_string())
+            && err.contains(&pkey_u16.to_string()),
+        "{err}"
+    );
+    assert_eq!(ib_pkey_reservation(&env, pkey).await.state.0, wrong_owner);
+    let sibling_after = ib_pkey_reservation(&env, sibling_pkey).await;
+    assert_eq!(sibling_after.state.0, sibling_reservation.state.0);
+    assert_eq!(sibling_after.allocated, sibling_reservation.allocated);
+    assert_eq!(current_receipts().await, original_receipts);
+    sqlx::query("UPDATE resource_pool SET state = $1 WHERE name = $2 AND value = $3")
+        .bind(sqlx::types::Json(&expected_pkey_state))
+        .bind(pkey_pool.name())
+        .bind(pkey_u16.to_string())
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    // A stale status value cannot authorize release of a sibling's live grant.
+    let mut stale = failed;
+    stale.status.as_mut().unwrap().pkey = Some(sibling_pkey);
+    let mut services = IBPartitionStateHandlerServices {
+        instrumentation: env.api.instrumentation.clone(),
+        db_pool: env.pool.clone(),
+        ib_fabric_manager: env.api.ib_fabric_manager.clone(),
+        ib_pools: env.common_pools.infiniband.clone(),
+        resource_pool_registry: std::sync::Arc::new(env.api.resource_pool_registry.clone()),
+    };
+    let mut metrics = ();
+    let mut pending_db_writes = DbWriteBatch::new();
+    let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+        services: &mut services,
+        metrics: &mut metrics,
+        pending_db_writes: &mut pending_db_writes,
+    };
+    let Err(error) = IBPartitionStateHandler::default()
+        .handle_object_state(
+            &ib_partition_id,
+            &mut stale,
+            &IBPartitionControllerState::Deleting,
+            &mut ctx,
+        )
+        .await
+    else {
+        panic!("a changed status PKey must invalidate deletion before release");
+    };
+    assert!(matches!(
+        error,
+        StateHandlerError::IterationInvalidated { .. }
+    ));
+    let surviving = db::ib_partition::find_by(
+        &env.pool,
+        ObjectColumnFilter::List(db::ib_partition::IdColumn, &[ib_partition_id, sibling_id]),
+        &env.api.instrumentation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(surviving.len(), 2);
+    assert_eq!(
+        ib_pkey_reservation(&env, pkey).await.state.0,
+        expected_pkey_state
+    );
+    assert_eq!(
+        ib_pkey_reservation(&env, sibling_pkey).await.state.0,
+        expected_pkey_state
+    );
+    assert_eq!(current_receipts().await, original_receipts);
+    env.run_ib_partition_controller_iteration().await;
 
     let partitions = env
         .api
@@ -2015,6 +2223,31 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     let allocation = ib_pkey_reservation(&env, pkey).await;
     assert_eq!(allocation.state.0, ResourcePoolEntryState::Free);
     assert_eq!(allocation.allocated, None);
+    assert_eq!(
+        current_receipts().await,
+        [None, original_receipts[1].clone()]
+    );
+    let sibling_after = ib_pkey_reservation(&env, sibling_pkey).await;
+    assert_eq!(sibling_after.state.0, sibling_reservation.state.0);
+    assert_eq!(sibling_after.allocated, sibling_reservation.allocated);
+    let sibling_found = env
+        .api
+        .find_ib_partitions_by_ids(Request::new(rpc::forge::IbPartitionsByIdsRequest {
+            ib_partition_ids: vec![sibling_id],
+            include_history: false,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(sibling_found.ib_partitions.len(), 1);
+    let sibling_after = &sibling_found.ib_partitions[0];
+    assert_eq!(sibling_after.id, sibling.id);
+    assert_eq!(sibling_after.metadata, sibling.metadata);
+    assert_eq!(sibling_after.config, sibling.config);
+    assert_eq!(
+        sibling_after.status.as_ref().unwrap().pkey,
+        sibling.status.as_ref().unwrap().pkey
+    );
 }
 
 #[crate::sqlx_test]

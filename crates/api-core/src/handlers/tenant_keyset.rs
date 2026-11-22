@@ -56,7 +56,7 @@ pub(crate) async fn create(
 
     let public_keys = &keyset_request.keyset_content.public_keys;
     tracing::info!(
-        organization_id = keyset_request.keyset_identifier.organization_id.to_string(),
+        organization_id = keyset_request.keyset_identifier.organization_id.as_str(),
         keyset_id = keyset_request.keyset_identifier.keyset_id,
         public_key_suffixes = PublicKeySuffixes(public_keys).to_string(),
         public_key_suffix_count = public_keys.len(),
@@ -148,7 +148,7 @@ pub(crate) async fn update(
 
     let public_keys = &update_request.keyset_content.public_keys;
     tracing::info!(
-        organization_id = update_request.keyset_identifier.organization_id.to_string(),
+        organization_id = update_request.keyset_identifier.organization_id.as_str(),
         keyset_id = update_request.keyset_identifier.keyset_id,
         public_key_suffixes = PublicKeySuffixes(public_keys).to_string(),
         public_key_suffix_count = public_keys.len(),
@@ -186,7 +186,7 @@ pub(crate) async fn delete(
 
     txn.commit().await?;
     tracing::info!(
-        organization_id = keyset_identifier.organization_id.to_string(),
+        organization_id = keyset_identifier.organization_id.as_str(),
         keyset_id = keyset_identifier.keyset_id,
         "Tenant keyset deleted"
     );
@@ -201,11 +201,7 @@ pub(crate) async fn validate_public_key(
     let request = TenantPublicKeyValidationRequest::try_from(request.into_inner())
         .map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
-
-    db::tenant::validate_public_key(&request, &mut txn).await?;
-
-    txn.commit().await?;
+    db::tenant::validate_public_key(&request, &mut api.db_reader()).await?;
 
     Ok(Response::new(rpc::ValidateTenantPublicKeyResponse {}))
 }
@@ -217,7 +213,7 @@ impl Display for PublicKeySuffixes<'_> {
         self.0
             .iter()
             .map(|v| PublicKeySuffix(&v.public_key))
-            .join(",")
+            .format(",")
             .fmt(fmt)
     }
 }
@@ -227,15 +223,54 @@ struct PublicKeySuffix<'a>(&'a PublicKey);
 impl Display for PublicKeySuffix<'_> {
     fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
         const PUB_KEY_SUFFIX_LEN: usize = 8;
-        self.0
-            .key
-            .chars()
+        let key = &self.0.key;
+        let start = key
+            .char_indices()
             .rev()
-            .take(PUB_KEY_SUFFIX_LEN)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<String>()
-            .fmt(fmt)
+            .nth(PUB_KEY_SUFFIX_LEN - 1)
+            .map_or(0, |(index, _)| index);
+        key[start..].fmt(fmt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[test]
+    fn public_key_suffixes_preserve_characters_and_separators() {
+        let checks: [Check<&[&str], String>; 3] = [
+            Check {
+                scenario: "no keys",
+                input: &[],
+                expect: String::new(),
+            },
+            Check {
+                scenario: "short key",
+                input: &["short"],
+                expect: "short".to_string(),
+            },
+            Check {
+                scenario: "multiple keys truncate by character",
+                input: &["0123456789", "prefixé漢🙂δ中ñøß"],
+                expect: "23456789,é漢🙂δ中ñøß".to_string(),
+            },
+        ];
+        check_values(checks, |keys| {
+            let keys = keys
+                .iter()
+                .map(|key| TenantPublicKey {
+                    public_key: PublicKey {
+                        algo: None,
+                        key: (*key).to_string(),
+                        comment: None,
+                    },
+                    comment: None,
+                })
+                .collect();
+            PublicKeySuffixes(&keys).to_string()
+        });
     }
 }

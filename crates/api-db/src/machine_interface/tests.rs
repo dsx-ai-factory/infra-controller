@@ -30,6 +30,8 @@ use model::network_segment::{
 
 use super::*;
 use crate as db;
+use crate::TransactionVending as _;
+use crate::db_read::PgPoolReader;
 use crate::test_support::postgres::wait_for_blocked_query;
 
 #[test]
@@ -858,7 +860,7 @@ async fn observed_dhcp_rechecks_static_assignment_before_moving_segment(
         );
     }
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut connection, interface.id).await?;
+        db::machine_interface_address::find_for_interface(&mut *connection, interface.id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     Ok(())
@@ -935,7 +937,7 @@ async fn discovery_lookup_rechecks_address_after_assignment(
 
     let mut connection = pool.acquire().await?;
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut connection, interface_id).await?;
+        db::machine_interface_address::find_for_interface(&mut *connection, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].address, replacement_address);
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
@@ -1497,7 +1499,7 @@ async fn fixed_preallocation_rechecks_static_address_after_waiting(
 
     let mut connection = pool.acquire().await?;
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut connection, interface_id).await?;
+        db::machine_interface_address::find_for_interface(&mut *connection, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].address, committed_address);
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
@@ -2443,9 +2445,19 @@ async fn allocation_mode_locks_ipv4_only_admin_segments_shared(
         Ok::<(), Box<dyn std::error::Error>>(())
     };
     let release = async {
-        wait_for_blocked_query(&pool, holder_pid, "pg_advisory_xact_lock(").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            holder_pid,
+            "pg_advisory_xact_lock(",
+        )
+        .await;
         holder.rollback().await?;
-        wait_for_blocked_query(&pool, peer_pid, "pg_advisory_xact_lock(").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            peer_pid,
+            "pg_advisory_xact_lock(",
+        )
+        .await;
         peer.rollback().await?;
         Ok::<(), Box<dyn std::error::Error>>(())
     };

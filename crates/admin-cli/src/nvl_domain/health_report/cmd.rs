@@ -27,6 +27,7 @@ use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::health_utils;
 use crate::rpc::ApiClient;
+use crate::table_utils::wrap_line;
 
 const MESSAGE_WRAP_WIDTH: usize = 60;
 const TARGET_WRAP_WIDTH: usize = 36;
@@ -80,9 +81,9 @@ fn display_health_reports(
 
     let mut rows = Vec::new();
     for entry in entries {
-        let report = entry.report.ok_or(CarbideCliError::GenericError(
-            "missing response".to_string(),
-        ))?;
+        let report = entry
+            .report
+            .ok_or_else(|| CarbideCliError::GenericError("missing response".to_string()))?;
         let mode = match forgerpc::HealthReportApplyMode::try_from(entry.mode)
             .map_err(|_| CarbideCliError::GenericError("invalid response".to_string()))?
         {
@@ -185,22 +186,4 @@ fn wrap_text(value: &str, width: usize) -> String {
         .map(|line| wrap_line(line, width))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Hard-wraps a single line without changing its content.
-fn wrap_line(value: &str, width: usize) -> String {
-    if width == 0 {
-        return value.to_string();
-    }
-
-    let mut output = String::new();
-    for (index, ch) in value.chars().enumerate() {
-        if index > 0 && index % width == 0 {
-            output.push('\n');
-        }
-
-        output.push(ch);
-    }
-
-    output
 }

@@ -177,7 +177,7 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     for call in calls {
         let nodes = &call.nodes.as_ref().unwrap().nodes;
         assert_eq!(nodes.len(), 2);
-        assert!(nodes.iter().all(|node| node.rack_id == rack_id.to_string()));
+        assert!(nodes.iter().all(|node| node.rack_id == rack_id.as_str()));
         assert_eq!(
             nodes
                 .iter()

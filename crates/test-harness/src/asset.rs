@@ -20,6 +20,7 @@ use std::sync::Arc;
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
+use db::db_read::DbReader;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig, power_shelf_id};
 use model::rack::RackConfig;
 use model::switch::{NewSwitch, SwitchConfig, switch_id};
@@ -62,7 +63,7 @@ impl TestSwitch {
         slot_number: i32,
         tray_index: i32,
     ) -> Self {
-        let name = format!("Test Switch {}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let name = format!("Test Switch {:08x}", uuid::Uuid::new_v4().as_fields().0);
         let id = switch_id::from_hardware_info(
             &name,
             "NVIDIA",
@@ -103,12 +104,9 @@ pub struct TestExpectedSwitch {
 }
 
 impl TestExpectedSwitch {
-    /// Loads the current expected-switch record through the caller's connection.
-    pub async fn db_record(
-        &self,
-        txn: &mut sqlx::PgConnection,
-    ) -> model::expected_switch::ExpectedSwitch {
-        db::expected_switch::find_by_id(txn, self.id)
+    /// Loads the current expected-switch record using the caller's database reader.
+    pub async fn db_record(&self, db: impl DbReader<'_>) -> model::expected_switch::ExpectedSwitch {
+        db::expected_switch::find_by_id(db, self.id)
             .await
             .expect("expected switch lookup should succeed")
             .expect("expected switch should exist")

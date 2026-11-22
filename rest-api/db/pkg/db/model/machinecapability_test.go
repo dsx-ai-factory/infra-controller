@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -1163,105 +1164,104 @@ func TestMachineCapabilitySQLDAO_Update(t *testing.T) {
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		desc               string
-		ID                 uuid.UUID
-		mc                 *MachineCapability
-		MachineID          *string
-		InstanceTypeID     *uuid.UUID
-		Type               *MachineCapabilityType
-		Name               *string
-		Frequency          *string
-		Capacity           *string
-		Vendor             *string
-		Count              *int
-		DeviceType         *MachineCapabilityDeviceType
-		Info               map[string]interface{}
-		Index              *int
-		Threads            *int
-		Cores              *int
-		HardwareRevision   *string
-		InactiveDevices    []int
-		expectedError      bool
-		verifyChildSpanner bool
+		desc                string
+		ID                  uuid.UUID
+		MachineID           *string
+		InstanceTypeID      *uuid.UUID
+		Type                *MachineCapabilityType
+		Name                *string
+		Frequency           *string
+		Capacity            *string
+		Vendor              *string
+		Count               *int
+		DeviceType          *MachineCapabilityDeviceType
+		Info                map[string]interface{}
+		Index               *int
+		Threads             *int
+		Cores               *int
+		HardwareRevision    *string
+		InactiveDevices     []int
+		expectedError       bool
+		wantTimestampChange bool
+		verifyChildSpanner  bool
 	}{
 		{
-			desc:               "Update instance id",
-			ID:                 mcsExp[0].ID,
-			mc:                 &mcsExp[0],
-			MachineID:          nil,
-			InstanceTypeID:     mcsExp[3].InstanceTypeID,
-			Type:               nil,
-			Name:               nil,
-			Frequency:          nil,
-			Capacity:           nil,
-			Count:              nil,
-			expectedError:      false,
-			verifyChildSpanner: true,
+			desc:                "noop when InstanceTypeID is nil",
+			ID:                  mcsExp[0].ID,
+			MachineID:           nil,
+			InstanceTypeID:      mcsExp[3].InstanceTypeID,
+			Type:                nil,
+			Name:                nil,
+			Frequency:           nil,
+			Capacity:            nil,
+			Count:               nil,
+			expectedError:       false,
+			wantTimestampChange: false,
+			verifyChildSpanner:  true,
 		},
 		{
-			desc:           "Update machine ID",
-			ID:             mcsExp[3].ID,
-			mc:             &mcsExp[3],
-			MachineID:      mcsExp[0].MachineID,
-			InstanceTypeID: nil,
-			Type:           nil,
-			Name:           nil,
-			Frequency:      nil,
-			Capacity:       nil,
-			Count:          nil,
-			expectedError:  false,
+			desc:                "Update machine ID",
+			ID:                  mcsExp[3].ID,
+			MachineID:           mcsExp[0].MachineID,
+			InstanceTypeID:      nil,
+			Type:                nil,
+			Name:                nil,
+			Frequency:           nil,
+			Capacity:            nil,
+			Count:               nil,
+			expectedError:       false,
+			wantTimestampChange: true,
 		},
 		{
-			desc:             "Update Capability Type and Name, Frequency, Capacity, Cores, Threads, HardwareRevision, Count",
-			ID:               mcsExp[2].ID,
-			mc:               &mcsExp[2],
-			MachineID:        nil,
-			InstanceTypeID:   nil,
-			Type:             cutil.GetPtr(MachineCapabilityTypeMemory),
-			Name:             cutil.GetPtr(name),
-			Frequency:        cutil.GetPtr(frequency),
-			Capacity:         cutil.GetPtr(capacity),
-			Count:            cutil.GetPtr(count),
-			Cores:            cutil.GetPtr(128),
-			Threads:          cutil.GetPtr(256),
-			HardwareRevision: cutil.GetPtr("v.12345"),
-			Index:            cutil.GetPtr(1000),
-			InactiveDevices:  []int{2, 4},
-			expectedError:    false,
+			desc:                "Update Capability Type and Name, Frequency, Capacity, Cores, Threads, HardwareRevision, Count",
+			ID:                  mcsExp[2].ID,
+			MachineID:           nil,
+			InstanceTypeID:      nil,
+			Type:                cutil.GetPtr(MachineCapabilityTypeMemory),
+			Name:                cutil.GetPtr(name),
+			Frequency:           cutil.GetPtr(frequency),
+			Capacity:            cutil.GetPtr(capacity),
+			Count:               cutil.GetPtr(count),
+			Cores:               cutil.GetPtr(128),
+			Threads:             cutil.GetPtr(256),
+			HardwareRevision:    cutil.GetPtr("v.12345"),
+			Index:               cutil.GetPtr(1000),
+			InactiveDevices:     []int{2, 4},
+			expectedError:       false,
+			wantTimestampChange: true,
 		},
 		{
-			desc:           "Update Vendor",
-			ID:             mcsExp[3].ID,
-			mc:             &mcsExp[3],
-			MachineID:      nil,
-			InstanceTypeID: nil,
-			Type:           nil,
-			Name:           nil,
-			Frequency:      nil,
-			Capacity:       nil,
-			Vendor:         cutil.GetPtr("Test Vendor"),
-			Count:          nil,
-			expectedError:  false,
+			desc:                "Update Vendor",
+			ID:                  mcsExp[3].ID,
+			MachineID:           nil,
+			InstanceTypeID:      nil,
+			Type:                nil,
+			Name:                nil,
+			Frequency:           nil,
+			Capacity:            nil,
+			Vendor:              cutil.GetPtr("Test Vendor"),
+			Count:               nil,
+			expectedError:       false,
+			wantTimestampChange: true,
 		},
 		{
-			desc:           "Update DeviceType for Network",
-			ID:             mcsExp[4].ID,
-			mc:             &mcsExp[4],
-			MachineID:      nil,
-			InstanceTypeID: nil,
-			Type:           nil,
-			Name:           nil,
-			Frequency:      nil,
-			Capacity:       nil,
-			Vendor:         nil,
-			DeviceType:     cutil.GetPtr(MachineCapabilityDeviceType(deviceType)),
-			Count:          nil,
-			expectedError:  false,
+			desc:                "Update DeviceType for Network",
+			ID:                  mcsExp[4].ID,
+			MachineID:           nil,
+			InstanceTypeID:      nil,
+			Type:                nil,
+			Name:                nil,
+			Frequency:           nil,
+			Capacity:            nil,
+			Vendor:              nil,
+			DeviceType:          cutil.GetPtr(MachineCapabilityDeviceType(deviceType)),
+			Count:               nil,
+			expectedError:       false,
+			wantTimestampChange: true,
 		},
 		{
 			desc:           "Update to invalid Capability Type",
 			ID:             mcsExp[2].ID,
-			mc:             &mcsExp[2],
 			MachineID:      nil,
 			InstanceTypeID: nil,
 			Type:           cutil.GetPtr(MachineCapabilityType("invalid-type")),
@@ -1274,7 +1274,6 @@ func TestMachineCapabilitySQLDAO_Update(t *testing.T) {
 		{
 			desc:           "Update info",
 			ID:             mcsExp[2].ID,
-			mc:             &mcsExp[2],
 			MachineID:      nil,
 			InstanceTypeID: nil,
 			Type:           nil,
@@ -1285,11 +1284,18 @@ func TestMachineCapabilitySQLDAO_Update(t *testing.T) {
 			Info: map[string]interface{}{
 				"test": "test",
 			},
-			expectedError: false,
+			expectedError:       false,
+			wantTimestampChange: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := mcd.GetByID(ctx, nil, tc.ID, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := mcd.Update(ctx, nil,
 				MachineCapabilityUpdateInput{
 					ID:               tc.ID,
@@ -1366,7 +1372,7 @@ func TestMachineCapabilitySQLDAO_Update(t *testing.T) {
 				assert.Equal(t, tc.InactiveDevices, got.InactiveDevices)
 			}
 
-			assert.NotEqual(t, got.Updated.String(), tc.mc.Updated.String())
+			assert.Equal(t, tc.wantTimestampChange, !got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
@@ -1436,7 +1442,7 @@ func TestMachineCapabilitySQLDAO_ClearFromParams(t *testing.T) {
 			paramCapacity:       false,
 			paramInfo:           false,
 			expectError:         false,
-			expectUpdate:        true,
+			expectUpdate:        false,
 		},
 		{
 			desc:                "can clear capacity, frequency and info",
@@ -1473,6 +1479,12 @@ func TestMachineCapabilitySQLDAO_ClearFromParams(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectError {
+				predecessor, getErr := mcd.GetByID(ctx, nil, tc.mc.ID, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			tmp, err := mcd.ClearFromParams(ctx, nil, tc.mc.ID,
 				tc.paramMachineID, tc.paramInstanceTypeID, tc.paramFrequency, tc.paramCapacity, tc.paramVendor, tc.paramInfo)
 
@@ -1503,7 +1515,9 @@ func TestMachineCapabilitySQLDAO_ClearFromParams(t *testing.T) {
 				assert.Nil(t, tmp.Info)
 			}
 			if tc.expectUpdate {
-				assert.True(t, tmp.Updated.After(tc.mc.Updated))
+				assert.True(t, tmp.Updated.After(previousUpdated), "timestamp did not advance: previous=%v actual=%v", previousUpdated, tmp.Updated)
+			} else {
+				assert.True(t, tmp.Updated.Equal(previousUpdated), "no-op changed timestamp: previous=%v actual=%v", previousUpdated, tmp.Updated)
 			}
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

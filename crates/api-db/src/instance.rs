@@ -328,7 +328,7 @@ pub async fn find(
 /// Converts decoded snapshot rows to InstanceSnapshots, batch-loading OS
 /// definitions as needed.
 async fn resolve_snapshots_from_json_rows(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     rows: Vec<(Json<InstanceSnapshotPgJson>,)>,
 ) -> Result<Vec<InstanceSnapshot>, DatabaseError> {
     let pg_jsons: Vec<InstanceSnapshotPgJson> = rows.into_iter().map(|(json,)| json.0).collect();
@@ -342,7 +342,7 @@ async fn resolve_snapshots_from_json_rows(
     let os_by_id: std::collections::HashMap<uuid::Uuid, OsRow> = if os_ids.is_empty() {
         std::collections::HashMap::new()
     } else {
-        operating_system::get_many(&mut *txn, &os_ids)
+        operating_system::get_many(conn, &os_ids)
             .await?
             .into_iter()
             .map(|r| (r.id, r))
@@ -531,14 +531,17 @@ pub async fn find_id_by_machine_id(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-pub async fn find_by_machine_id(
-    txn: &mut PgConnection,
+pub async fn find_by_machine_id<DB>(
+    conn: &mut DB,
     machine_id: &MachineId,
-) -> Result<Option<InstanceSnapshot>, DatabaseError> {
-    let Some(instance_id) = find_id_by_machine_id(&mut *txn, machine_id).await? else {
+) -> Result<Option<InstanceSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let Some(instance_id) = find_id_by_machine_id(&mut *conn, machine_id).await? else {
         return Ok(None);
     };
-    find_by_id(txn, instance_id).await
+    find_by_id(conn, instance_id).await
 }
 
 /// Locks and returns the live `Instance` assigned to one `Machine`.
@@ -575,20 +578,23 @@ pub async fn find_live_by_machine_id_for_update(
     Ok(Some(instance))
 }
 
-pub async fn find_by_machine_ids(
-    txn: &mut PgConnection,
+pub async fn find_by_machine_ids<DB>(
+    conn: &mut DB,
     machine_ids: &[&HostMachineId],
-) -> Result<Vec<InstanceSnapshot>, DatabaseError> {
+) -> Result<Vec<InstanceSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     if machine_ids.is_empty() {
         return Ok(Vec::new());
     }
     let query = "SELECT row_to_json(i.*) from instances i WHERE machine_id = ANY($1)";
     let rows: Vec<(Json<InstanceSnapshotPgJson>,)> = sqlx::query_as(query)
         .bind(machine_ids)
-        .fetch_all(&mut *txn)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    resolve_snapshots_from_json_rows(&mut *txn, rows).await
+    resolve_snapshots_from_json_rows(&mut *conn, rows).await
 }
 
 /// Returns the current DPU/VPC memberships owned by service-interface records.
@@ -667,7 +673,7 @@ pub async fn highest_retained_service_vpc_slot(
           AND attachment->>'id' = service_interface->>'attachment_id'
     "#;
     let highest: Option<i64> = sqlx::query_scalar(query)
-        .bind(service_id.to_string())
+        .bind(sqlx::types::Text(service_id))
         .fetch_one(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -690,11 +696,14 @@ pub async fn highest_retained_service_vpc_slot(
 ///
 /// Soft-deleted instances remain results because their attachment cleanup is
 /// still outstanding until physical instance deletion completes.
-pub async fn find_by_extension_service(
-    txn: &mut PgConnection,
+pub async fn find_by_extension_service<DB>(
+    conn: &mut DB,
     service_id: ExtensionServiceId,
     version: Option<ConfigVersion>,
-) -> Result<Vec<InstanceSnapshot>, DatabaseError> {
+) -> Result<Vec<InstanceSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut builder = sqlx::QueryBuilder::new(
         r#"SELECT row_to_json(i.*) FROM instances i
             WHERE EXISTS (
@@ -703,20 +712,20 @@ pub async fn find_by_extension_service(
                 WHERE cfg->>'service_id' =
         "#,
     );
-    builder.push_bind(service_id.to_string());
+    builder.push_bind(sqlx::types::Text(service_id));
 
     if let Some(version) = version {
         builder.push(" AND cfg->>'version' = ");
-        builder.push_bind(version.to_string());
+        builder.push_bind(version);
     }
     builder.push(")");
 
     let rows: Vec<(Json<InstanceSnapshotPgJson>,)> = builder
         .build_query_as()
-        .fetch_all(&mut *txn)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql().as_str(), e))?;
-    resolve_snapshots_from_json_rows(txn, rows).await
+    resolve_snapshots_from_json_rows(conn, rows).await
 }
 
 /// Returns true if any non-deleted instance has this logical partition ID in
@@ -735,7 +744,7 @@ pub async fn any_instance_referencing_nvlink_logical_partition(
           )
     )"#;
     sqlx::query_scalar(query)
-        .bind(logical_partition_id.to_string())
+        .bind(sqlx::types::Text(logical_partition_id))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -750,7 +759,7 @@ pub async fn any_instance_referencing_nvlink_logical_partition(
 /// once even when several configurations or interfaces contain the same
 /// reference.
 pub async fn count_network_segment_references(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_id: &NetworkSegmentId,
 ) -> Result<usize, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new("SELECT count(*) FROM instances WHERE ");
@@ -758,7 +767,7 @@ pub async fn count_network_segment_references(
 
     let reference_count: i64 = builder
         .build_query_scalar()
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))?;
 
@@ -768,7 +777,7 @@ pub async fn count_network_segment_references(
 /// Counts instances whose current service endpoints or current/pending host
 /// configuration refer to `vpc_id`.
 pub async fn count_vpc_references(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: &VpcId,
 ) -> Result<usize, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new("SELECT count(*) FROM instances WHERE ");
@@ -776,7 +785,7 @@ pub async fn count_vpc_references(
 
     let reference_count: i64 = builder
         .build_query_scalar()
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))?;
 
@@ -940,7 +949,7 @@ pub async fn update_config(
             operating_system_id=$2, os_ipxe_script=$3, os_user_data=$4, os_always_boot_with_ipxe=$5, os_phone_home_enabled=$6,
             os_image_id=$7, keyset_ids=$8,
             name=$9, description=$10, labels=$11::json, network_security_group_id=$14,
-            power_profile=$15
+            power_profile=$15, dhcp_option_set_id=$16
             WHERE id=$12 AND config_version=$13 AND deleted IS NULL
             RETURNING id";
     let query_result: Result<(InstanceId,), _> = sqlx::query_as(query)
@@ -959,6 +968,7 @@ pub async fn update_config(
         .bind(expected_version)
         .bind(config.network_security_group_id)
         .bind(config.power_profile)
+        .bind(config.dhcp_option_set_id)
         .fetch_one(&mut *txn)
         .await;
 
@@ -1587,7 +1597,7 @@ pub async fn update_extension_services_config(
 /// (126k binds) would fail outright. `batch_persist` chunks the INSERT into
 /// sub-batches of `BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW` rows, all issued
 /// on the caller's transaction so the write stays all-or-nothing.
-const BATCH_PERSIST_BINDS_PER_ROW: usize = 28;
+const BATCH_PERSIST_BINDS_PER_ROW: usize = 29;
 
 /// Batch insert for multiple instances.
 /// This is optimized for inserting many instances in a single database operation.
@@ -1635,7 +1645,8 @@ pub async fn batch_persist<'a>(
                         nvlink_config_version,
                         spx_config,
                         spx_config_version,
-                        power_profile
+                        power_profile,
+                        dhcp_option_set_id
                     )
                     SELECT 
                             vals.id, vals.machine_id, vals.operating_system_id, vals.os_user_data, vals.os_ipxe_script,
@@ -1648,7 +1659,7 @@ pub async fn batch_persist<'a>(
                             vals.instance_type_id, vals.extension_services_config::json, 
                             vals.extension_services_config_version, vals.nvlink_config::json, 
                             vals.nvlink_config_version, vals.spx_config::json, vals.spx_config_version,
-                            vals.power_profile
+                            vals.power_profile, vals.dhcp_option_set_id
                     FROM (VALUES ";
 
     let expected_count = values.len() as u64;
@@ -1678,7 +1689,7 @@ pub async fn batch_persist<'a>(
             separated.push("(");
             separated.push_bind_unseparated(value.instance_id);
             separated.push_unseparated(",");
-            separated.push_bind_unseparated(value.machine_id.to_string());
+            separated.push_bind_unseparated(value.machine_id);
             separated.push_unseparated(",");
             separated.push_bind_unseparated(operating_system_id);
             separated.push_unseparated(",");
@@ -1744,6 +1755,8 @@ pub async fn batch_persist<'a>(
             separated.push_bind_unseparated(value.spx_config_version);
             separated.push_unseparated(",");
             separated.push_bind_unseparated(&value.config.power_profile);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.config.dhcp_option_set_id);
             separated.push_unseparated(")");
         }
 
@@ -1753,7 +1766,7 @@ pub async fn batch_persist<'a>(
                        description, labels, config_version, hostname, network_security_group_id,
                        instance_type_id, extension_services_config, extension_services_config_version,
                        nvlink_config, nvlink_config_version, spx_config, spx_config_version,
-                       power_profile)
+                       power_profile, dhcp_option_set_id)
             INNER JOIN machines m ON m.id = vals.machine_id
                 AND (vals.instance_type_id IS NULL OR m.instance_type_id = vals.instance_type_id)");
 
@@ -2126,6 +2139,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
     use crate::test_support::postgres::wait_for_blocked_query;
 
     const INSTANCE_IPXE_SCRIPT: &str = "#!ipxe boot-from-instance-columns";
@@ -2162,9 +2176,12 @@ mod tests {
             .await
             .expect("define loopback test pools");
         txn.commit().await.expect("commit loopback pool setup");
-        crate::resource_pool::create_common_pools(pool.clone(), HashSet::new())
-            .await
-            .expect("create common loopback pools")
+        crate::resource_pool::create_common_pools(
+            &mut PgPoolReader::from(pool.clone()),
+            HashSet::new(),
+        )
+        .await
+        .expect("create common loopback pools")
     }
 
     struct ServiceVpcReclamationFixture {
@@ -2471,6 +2488,7 @@ mod tests {
             network: InstanceNetworkConfig::default(),
             infiniband: InstanceInfinibandConfig::default(),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             extension_services: InstanceExtensionServicesConfig::default(),
             nvlink: InstanceNvLinkConfig::default(),
             spxconfig: InstanceSpxConfig::default(),
@@ -3421,8 +3439,12 @@ mod tests {
             outcome
         };
         let release_cleanup = async {
-            wait_for_blocked_query(&pool, cleanup_pid, "SET extension_services_config_version")
-                .await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                cleanup_pid,
+                "SET extension_services_config_version",
+            )
+            .await;
             cleanup.commit().await.expect("commit observed cleanup");
         };
         let (outcome, ()) = tokio::join!(competing_writer, release_cleanup);
@@ -4602,7 +4624,12 @@ mod tests {
             error
         };
         let release_writer = async {
-            wait_for_blocked_query(&pool, writer_pid, "FROM instance_addresses").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                writer_pid,
+                "FROM instance_addresses",
+            )
+            .await;
             writer.commit().await.unwrap();
         };
         let (error, ()) = tokio::join!(blocked_delete, release_writer);
@@ -4691,7 +4718,12 @@ mod tests {
             error
         };
         let release_deletion = async {
-            wait_for_blocked_query(&pool, deletion_pid, "LOCK TABLE instance_addresses").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                deletion_pid,
+                "LOCK TABLE instance_addresses",
+            )
+            .await;
             deletion.commit().await.unwrap();
         };
         let (error, ()) = tokio::join!(blocked_writer, release_deletion);

@@ -151,11 +151,11 @@ pub async fn create(
 }
 
 pub async fn find_by_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     name: &str,
 ) -> DatabaseResult<Option<PowerShelf>> {
     let mut power_shelves =
-        find_by(txn, ObjectColumnFilter::One(NameColumn, &name.to_string())).await?;
+        find_by(conn, ObjectColumnFilter::One(NameColumn, &name.to_string())).await?;
 
     if power_shelves.is_empty() {
         Ok(None)
@@ -176,10 +176,10 @@ pub async fn find_by_name(
 }
 
 pub async fn find_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: &PowerShelfId,
 ) -> DatabaseResult<Option<PowerShelf>> {
-    let mut power_shelves = find_by(txn, ObjectColumnFilter::One(IdColumn, id)).await?;
+    let mut power_shelves = find_by(conn, ObjectColumnFilter::One(IdColumn, id)).await?;
 
     if power_shelves.is_empty() {
         Ok(None)
@@ -199,11 +199,11 @@ pub async fn find_by_id(
 // the machine_interfaces table, but for now this is going to be like
 // this until I take care of the issue.
 pub async fn find_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_address: mac_address::MacAddress,
 ) -> DatabaseResult<Option<PowerShelf>> {
     let power_shelves = find_by(
-        txn,
+        conn,
         ObjectColumnFilter::One(BmcMacAddressColumn, &bmc_mac_address),
     )
     .await?;
@@ -246,7 +246,7 @@ pub async fn find_ids(
 
     if let Some(state) = &filter.controller_state {
         qb.push(" AND ps.controller_state->>'state' = ");
-        qb.push_bind(state.clone());
+        qb.push_bind(state);
     }
 
     if let Some(mac) = filter.bmc_mac {
@@ -298,14 +298,14 @@ FROM (
 ) AS power_shelves"#;
 
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PowerShelf>>(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> DatabaseResult<Vec<PowerShelf>> {
     let mut query = FilterableQueryBuilder::new(POWER_SHELVES_WITH_BMC_INFO).filter(&filter);
 
     query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }

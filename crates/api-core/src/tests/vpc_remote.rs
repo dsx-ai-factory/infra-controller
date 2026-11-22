@@ -16,7 +16,6 @@ use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::vpc::VpcId;
 use db::TransactionVending as _;
 use db::resource_pool::remote;
-use db::test_support::postgres::wait_for_blocked_queries;
 use model::instance::config::network::{InstanceInterfaceRoutingProfile, InstanceNetworkConfig};
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
@@ -33,8 +32,10 @@ use rpc::forge::forge_server::Forge;
 use sqlx::PgPool;
 use tonic::{Code, Request};
 
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::resource_pool::{RemotePool, RemotePoolFixture};
 use crate::tests::common::rpc_builder::{VpcCreationRequest, VpcDeletionRequest};
+use crate::tests::wait_for_blocked_queries;
 
 /// `VPC_POOLS` moves both VNI pools to the provider: internal VPCs draw
 /// automatic values, while external VPCs request manual ones.
@@ -467,7 +468,7 @@ async fn remote_vpc_cancels_after_admission_changes_or_shutdown(
                 assert!(
                     error
                         .message()
-                        .contains("unfinished request for slot `vni`"),
+                        .contains("already has an allocation or unfinished request for slot `vni`"),
                     "{error}"
                 );
                 assert_eq!(receipt(&fixture, vpc_id).await?, pending);
@@ -740,6 +741,12 @@ async fn configured_vpcs_converge_on_one_name(database: PgPool) -> eyre::Result<
     second?;
     let created = db::vpc::find_by_name(&fixture.env.pool, "concurrent-initial").await?;
     assert_eq!(created.len(), 1);
+    // Neither the winner nor the discarded startup ID needs an unfinished
+    // creation record after the name conflict has been resolved.
+    let requests: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests")
+        .fetch_one(&fixture.env.pool)
+        .await?;
+    assert_eq!(requests, 0);
     let created = &created[0];
     uuid::Uuid::parse_str(&created.config.tenant_organization_id)?;
     assert_eq!(
@@ -1966,10 +1973,11 @@ async fn remote_routing_cancellation_drops_final_admission(database: PgPool) -> 
             .await;
             let error =
                 competing.expect_err("another foreground request cannot replace pending work");
+            assert_eq!(error.code(), Code::FailedPrecondition);
             assert!(
                 error
                     .message()
-                    .contains("unfinished request for slot `vni`"),
+                    .contains("already has an allocation or unfinished request for slot `vni`"),
                 "{error}"
             );
             assert_eq!(receipt(&fixture, id).await?, pending);
@@ -2317,5 +2325,705 @@ async fn routing_membership_uses_acknowledged_remote_eligibility(
             .into_inner(),
         switched
     );
+    fixture.stop().await
+}
+
+/// Cancellation before dispatch reserves the ID without allocating anything.
+/// Existing tenant contention must not inherit the new five-second creation
+/// statement cap. Once the lock is released, Integrated creation still succeeds.
+#[crate::sqlx_test]
+async fn vpc_creation_admission_preserves_database_waits(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    let tenant = "admission-wait";
+    create_fixture_tenant(&env, tenant).await?;
+    let id = VpcId::new();
+    let mut blocker = env.pool.txn_begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await?;
+    db::tenant::find(tenant, true, blocker.as_pgconn()).await?;
+    let creation = env.api.create_vpc(
+        VpcCreationRequest::builder(tenant)
+            .id(id)
+            .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+            .tonic_request(),
+    );
+    tokio::pin!(creation);
+    // Observe the real row-lock wait before measuring elapsed time. Advancing
+    // Tokio's clock would not exercise PostgreSQL's statement timeout.
+    tokio::select! {
+        result = &mut creation => panic!("creation bypassed tenant admission: {result:?}"),
+        _ = wait_for_blocked_queries(&env.pool, pid, "tenants", 1) => {},
+    }
+    tokio::select! {
+        result = &mut creation => panic!("tenant admission ended before its lock was released: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(6)) => {},
+    }
+    blocker.rollback().await?;
+    tokio::time::timeout(Duration::from_secs(10), creation).await??;
+
+    // Prove creation completed, rather than merely avoiding the timeout error.
+    let saved = db::vpc::find_by_id_including_deleted(&env.pool, id)
+        .await?
+        .expect("VPC was committed after tenant admission");
+    assert_eq!(saved.config.tenant_organization_id, tenant);
+    assert!(saved.deleted.is_none());
+    Ok(())
+}
+
+/// Failed native allocation must not leave a saved attempt for an ID that the
+/// caller never received. A retry without an ID must not accumulate those rows.
+#[crate::sqlx_test]
+async fn vpc_creation_integrated_failure_leaves_no_unfinished_request(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    for _ in 0..2 {
+        let request = VpcCreationRequest::builder("failed-native-request")
+            .vni(100u32)
+            .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+            .tonic_request();
+        assert!(request.get_ref().id.is_none());
+        let error = env
+            .api
+            .create_vpc(request)
+            .await
+            .expect_err("VNI is outside the configured inventory");
+        assert!(error.message().contains("cannot be requested"), "{error}");
+        let unfinished: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests")
+            .fetch_one(&env.pool)
+            .await?;
+        assert_eq!(unfinished, 0);
+    }
+    Ok(())
+}
+
+/// A delayed Integrated create must not revive a request REST already removed.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_before_dispatch(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    let id = VpcId::new();
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: "cancel-before-dispatch".into(),
+    };
+    assert!(
+        env.api
+            .cancel_vpc_creation(Request::new(cancellation.clone()))
+            .await?
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+
+    // The original create can arrive after cancellation's reply, including
+    // after REST has removed its own row and dependencies.
+    let error = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("cancel-before-dispatch")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+                .tonic_request(),
+        )
+        .await
+        .expect_err("cancelled ID cannot be created later");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(error.message().contains("was cancelled; use a new VPC ID"));
+    // This path uses Integrated inventory: absence of remote work alone would
+    // not catch an accidental native reservation before the cancellation check.
+    let owned: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE state->>'owner' = $1")
+            .bind(id.to_string())
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(owned, 0);
+    let saved: (String, bool) = sqlx::query_as(
+        "SELECT tenant_organization_id, cancelled FROM vpc_creation_requests WHERE vpc_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(saved, ("cancel-before-dispatch".to_owned(), true));
+    assert!(
+        db::vpc::find_by_id_including_deleted(&env.pool, id)
+            .await?
+            .is_none()
+    );
+    assert!(
+        remote::latest_for_owner_slot(&env.pool, OwnerType::Vpc, &id.to_string(), "vni")
+            .await?
+            .is_none()
+    );
+    assert!(
+        env.api
+            .cancel_vpc_creation(Request::new(cancellation))
+            .await?
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+    Ok(())
+}
+
+/// A committed VPC wins cancellation and keeps its allocation and metadata.
+/// Tenant mismatches must fail without modifying that VPC.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_after_commit(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    let id = VpcId::new();
+    let created = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("committed-before-cancel")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let before = db::vpc::find_by_id_including_deleted(&env.pool, id)
+        .await?
+        .expect("committed VPC");
+    let allocation_query = "SELECT to_jsonb(a) FROM resource_pool_allocations AS a WHERE owner_id = $1 ORDER BY allocation_id";
+    let allocations_before: Vec<serde_json::Value> = sqlx::query_scalar(allocation_query)
+        .bind(id.to_string())
+        .fetch_all(&env.pool)
+        .await?;
+    assert_eq!(allocations_before.len(), 1);
+    assert_eq!(allocations_before[0]["state"], "attached");
+    let unfinished: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests WHERE vpc_id = $1")
+            .bind(id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(
+        unfinished, 0,
+        "successful creation removes its temporary request"
+    );
+
+    for (tenant, permitted) in [
+        // The original tenant learns the committed result instead of deleting it.
+        ("committed-before-cancel", true),
+        // Another tenant cannot settle this VPC or release its allocation.
+        ("another-tenant", false),
+    ] {
+        let result = env
+            .api
+            .cancel_vpc_creation(Request::new(forge::CancelVpcCreationRequest {
+                id: Some(id),
+                tenant_organization_id: tenant.into(),
+            }))
+            .await;
+        if permitted {
+            assert_eq!(
+                result?.into_inner().result,
+                Some(forge::cancel_vpc_creation_response::Result::CreatedVpc(
+                    created.clone()
+                ))
+            );
+        } else {
+            assert_eq!(
+                result.expect_err("different tenant").code(),
+                Code::FailedPrecondition
+            );
+        }
+        let after = db::vpc::find_by_id_including_deleted(&env.pool, id)
+            .await?
+            .expect("VPC remains present");
+        assert_eq!(after, before);
+        let allocations_after: Vec<serde_json::Value> = sqlx::query_scalar(allocation_query)
+            .bind(id.to_string())
+            .fetch_all(&env.pool)
+            .await?;
+        assert_eq!(allocations_after, allocations_before);
+    }
+    Ok(())
+}
+
+/// An allocation-row timeout must roll back cancellation without racing the
+/// provider's own timeout. Prepare its result first and leave attachment pending.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_allocation_write_is_bounded(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    let id = VpcId::new();
+    let tenant = "cancel-allocation-write";
+    create_tenant(&fixture, tenant, "INTERNAL").await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    db::vpc::creation::lock(&mut txn, id).await?;
+    db::vpc::creation::begin(&mut txn, id, tenant).await?;
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(&mut txn, &fixture.env.common_pools.ethernet.pool_vpc_vni)
+        .await?
+        .expect("VNI pool");
+    txn.commit().await?;
+    let prepared = selected
+        .prepare_allocation(
+            &fixture.env.pool,
+            OwnerType::Vpc,
+            &id.to_string(),
+            "vni",
+            None,
+            &fixture.cancel,
+        )
+        .await?;
+    let pending = receipt(&fixture, id).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: tenant.into(),
+    };
+    // The creation lock is free, but another writer can still hold the allocation.
+    // Its SQL deadline must retain retry guidance and roll back the decision.
+    let mut blocker = fixture.env.pool.begin().await?;
+    sqlx::query(
+        "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
+    )
+    .bind(pending.allocation_id)
+    .fetch_one(&mut *blocker)
+    .await?;
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        fixture
+            .env
+            .api
+            .cancel_vpc_creation(Request::new(cancellation.clone())),
+    )
+    .await?
+    .expect_err("allocation row is locked");
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    assert!(
+        error
+            .message()
+            .contains("VPC creation cancellation database operation timed out"),
+        "{error}"
+    );
+    blocker.rollback().await?;
+    let cancelled: bool =
+        sqlx::query_scalar("SELECT cancelled FROM vpc_creation_requests WHERE vpc_id = $1")
+            .bind(id)
+            .fetch_one(&fixture.env.pool)
+            .await?;
+    assert!(
+        !cancelled,
+        "failed write must roll back the creation decision"
+    );
+    assert_eq!(receipt(&fixture, id).await?, pending);
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // After the SQL blocker leaves, REST needs a confirmed cancellation before
+    // it can remove its Pending VPC, even when the reservation is already gone.
+    let response = fixture
+        .env
+        .api
+        .cancel_vpc_creation(Request::new(cancellation))
+        .await?
+        .into_inner();
+    assert_eq!(
+        response.result,
+        Some(forge::cancel_vpc_creation_response::Result::Cancelled(()))
+    );
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    drop(prepared);
+    fixture.stop().await
+}
+
+/// Cancel a real allocation while its reply is held, then let creation resume.
+/// The saved decision must prevent attachment and survive API reconstruction;
+/// another tenant must not be able to cancel that unfinished allocation first.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_during_provider_work(database: PgPool) -> eyre::Result<()> {
+    let mut fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "cancel-in-flight", "INTERNAL").await?;
+    let id = VpcId::new();
+    let request = VpcCreationRequest::builder("cancel-in-flight")
+        .id(id)
+        .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+        .tonic_request()
+        .into_inner();
+    let pause = fixture.provider.allocate_pause.clone();
+    pause.pause_next.store(true, Ordering::SeqCst);
+    let api = fixture.env.api.clone();
+    let late_request = request.clone();
+    let creation = tokio::spawn(async move { api.create_vpc(Request::new(late_request)).await });
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()).await?;
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+    let pending = receipt(&fixture, id).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+
+    // Tenant identity is saved before provider I/O, even though there is no
+    // VPC row yet for an ordinary ownership lookup.
+    let error = fixture
+        .env
+        .api
+        .cancel_vpc_creation(Request::new(forge::CancelVpcCreationRequest {
+            id: Some(id),
+            tenant_organization_id: "different-tenant".into(),
+        }))
+        .await
+        .expect_err("cannot cancel another tenant's pending create");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(receipt(&fixture, id).await?.state, AllocationState::Pending);
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: "cancel-in-flight".into(),
+    };
+    let api = fixture.env.api.clone();
+    let original = cancellation.clone();
+    let cancelled =
+        tokio::spawn(async move { api.cancel_vpc_creation(Request::new(original)).await });
+    // Observe the committed cancellation before releasing the provider reply.
+    // This orders the race without guessing how long the handler takes to start.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let requested: bool =
+                sqlx::query_scalar("SELECT cancelled FROM vpc_creation_requests WHERE vpc_id = $1")
+                    .bind(id)
+                    .fetch_one(&fixture.env.pool)
+                    .await?;
+            if requested {
+                return Ok::<_, eyre::Report>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    pause.resume.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(10), creation)
+        .await??
+        .expect_err("cancelled allocation cannot attach");
+    assert!(
+        matches!(error.code(), Code::FailedPrecondition | Code::Aborted),
+        "{error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(15), cancelled)
+            .await???
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+    let terminal = receipt(&fixture, id).await?;
+    assert_eq!(terminal.allocation_id, pending.allocation_id);
+    assert_eq!(terminal.state, AllocationState::Cancelled);
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    assert!(
+        db::vpc::find_by_id_including_deleted(&fixture.env.pool, id)
+            .await?
+            .is_none()
+    );
+
+    // Reconstruct Core after a lost reply. Cancellation is safe to repeat, and
+    // neither this request nor a delayed first create can reserve another VNI.
+    fixture.initialize(PoolDefinitionSource::ListenOnly).await?;
+    assert!(
+        fixture
+            .env
+            .api
+            .cancel_vpc_creation(Request::new(cancellation))
+            .await?
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+    let allocations = fixture.provider.allocations.load(Ordering::SeqCst);
+    assert_eq!(
+        fixture
+            .env
+            .api
+            .create_vpc(Request::new(request))
+            .await
+            .expect_err("ID remains cancelled")
+            .code(),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        fixture.provider.allocations.load(Ordering::SeqCst),
+        allocations
+    );
+    fixture.stop().await
+}
+
+/// The VPC's cancellation fence must stop attachment even when the allocator
+/// still has a valid assignment. Remote cleanup cannot mask a missing recheck.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_rechecks_before_attachment(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "cancel-attachment", "INTERNAL").await?;
+    let id = VpcId::new();
+    let pause = fixture.provider.allocate_pause.clone();
+    pause.pause_next.store(true, Ordering::SeqCst);
+    let api = fixture.env.api.clone();
+    let creation = tokio::spawn(async move {
+        api.create_vpc(
+            VpcCreationRequest::builder("cancel-attachment")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()).await?;
+    let pending = receipt(&fixture, id).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // Save only the consumer decision, leaving allocation eligible to attach.
+    // This is the same creation fence used by Integrated, whose allocation
+    // has no separate remote cancellation state to reject attachment for it.
+    let mut txn = fixture.env.pool.begin().await?;
+    db::vpc::creation::lock(&mut txn, id).await?;
+    db::vpc::creation::cancel(&mut txn, id, "cancel-attachment").await?;
+    txn.commit().await?;
+    assert_eq!(receipt(&fixture, id).await?.state, AllocationState::Pending);
+    pause.resume.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(10), creation)
+        .await??
+        .expect_err("creation cancellation must prevent attachment");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("was cancelled; use a new VPC ID"),
+        "{error}"
+    );
+    assert!(
+        db::vpc::find_by_id_including_deleted(&fixture.env.pool, id)
+            .await?
+            .is_none()
+    );
+
+    // The failed attachment must now hand its unused assignment to cleanup.
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::CancelRequested
+    );
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(pending.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    fixture.stop().await
+}
+
+/// Cancellation must stop while waiting for another creation transaction,
+/// without returning a cleanup acknowledgement or saving a decision it never made.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_wait_is_bounded(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    for (scenario, shutdown, sql_deadline) in [
+        // Advancing Tokio proves the RPC budget independently of PostgreSQL.
+        ("RPC deadline", false, false),
+        // A real blocked statement must preserve timeout status when SQL fires first.
+        ("SQL deadline", false, true),
+        // Service shutdown must wake the same blocked operation.
+        ("shutdown", true, false),
+    ] {
+        let id = VpcId::new();
+        let mut blocker = env.pool.begin().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        db::vpc::creation::lock(&mut blocker, id).await?;
+        let cancellation =
+            env.api
+                .cancel_vpc_creation(Request::new(forge::CancelVpcCreationRequest {
+                    id: Some(id),
+                    tenant_organization_id: scenario.into(),
+                }));
+        tokio::pin!(cancellation);
+        tokio::select! {
+            result = &mut cancellation => panic!("cancellation bypassed the creation lock: {result:?}"),
+            _ = wait_for_blocked_queries(&env.pool, pid, "vpc-creation:", 1) => {},
+        }
+        if shutdown {
+            // Shutdown must wake a live blocked request, not just reject a new one.
+            env.api.cancel_token.cancel();
+        } else if !sql_deadline {
+            // Paused time keeps the test quick. The outer timeout below must
+            // expire after the handler's deadline, so a longer handler wait fails.
+            tokio::time::pause();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(36), cancellation)
+            .await
+            .expect("Core must stop waiting before the test's 36-second bound")
+            .expect_err("unfinished cancellation");
+        if !shutdown && !sql_deadline {
+            tokio::time::resume();
+        }
+        assert_eq!(
+            error.code(),
+            if shutdown {
+                Code::Cancelled
+            } else {
+                Code::DeadlineExceeded
+            }
+        );
+        if sql_deadline {
+            assert!(
+                error
+                    .message()
+                    .contains("VPC creation cancellation database operation timed out"),
+                "the SQL deadline must fire before the RPC timer: {error}"
+            );
+        } else if !shutdown {
+            assert!(
+                error
+                    .message()
+                    .contains("VPC creation cancellation timed out"),
+                "the RPC deadline must fire before PostgreSQL stops waiting: {error}"
+            );
+        }
+        blocker.rollback().await?;
+        let saved: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests WHERE vpc_id = $1")
+                .bind(id)
+                .fetch_one(&env.pool)
+                .await?;
+        assert_eq!(
+            saved, 0,
+            "{scenario} must not claim a cancellation decision"
+        );
+    }
+    Ok(())
+}
+
+/// A terminal newer attempt cannot acknowledge cleanup of an older assignment.
+/// REST must retain dependent resources until that assignment is released.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_checks_older_releases(database: PgPool) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "older-release", "INTERNAL").await?;
+    let id = VpcId::new();
+    fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("older-release")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await?;
+    let attached = receipt(&fixture, id).await?;
+
+    // An unused routing change leaves a newer cancelled generation while the
+    // original assignment remains attached. Use the actual allocation lifecycle.
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(
+            &mut txn,
+            &fixture.env.common_pools.ethernet.pool_external_vpc_vni,
+        )
+        .await?
+        .expect("external pool");
+    txn.commit().await?;
+    let unused = selected
+        .prepare_exact_allocation(
+            &fixture.env.pool,
+            OwnerType::Vpc,
+            &id.to_string(),
+            "vni",
+            50_001,
+            &fixture.cancel,
+        )
+        .await?;
+    unused.cancel(&fixture.env.pool).await?;
+    let newer = receipt(&fixture, id).await?;
+    fixture
+        .remote(EXTERNAL_VPC_VNI)
+        .reconcile(newer.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // Delete saves release intent for the original assignment. Cancellation must
+    // not treat the latest Cancelled generation as proof that all cleanup finished.
+    fixture
+        .env
+        .api
+        .delete_vpc(VpcDeletionRequest::builder().id(id).tonic_request())
+        .await?;
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: "older-release".into(),
+    };
+    let error = fixture
+        .env
+        .api
+        .cancel_vpc_creation(Request::new(cancellation.clone()))
+        .await
+        .expect_err("older release still needs provider confirmation");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("unfinished VNI cleanup"),
+        "{error}"
+    );
+    assert_eq!(
+        remote::load(&fixture.env.pool, attached.allocation_id)
+            .await?
+            .expect("original allocation")
+            .state,
+        AllocationState::ReleaseRequested
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // Once recovery confirms that exact release, the same cancellation is safe
+    // to acknowledge without dispatching another allocation.
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(attached.allocation_id, &fixture.cancel)
+        .await?;
+    assert!(matches!(
+        fixture
+            .env
+            .api
+            .cancel_vpc_creation(Request::new(cancellation))
+            .await?
+            .into_inner()
+            .result,
+        Some(forge::cancel_vpc_creation_response::Result::Cancelled(()))
+    ));
+    assert_eq!(
+        remote::load(&fixture.env.pool, attached.allocation_id)
+            .await?
+            .expect("released allocation")
+            .state,
+        AllocationState::Released
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
     fixture.stop().await
 }

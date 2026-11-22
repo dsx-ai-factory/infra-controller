@@ -97,7 +97,7 @@ mod tests {
         let mut status = tonic::Status::resource_exhausted("API admission capacity exhausted");
         status.metadata_mut().insert(
             ADMISSION_RETRY_PUSHBACK_HEADER,
-            MetadataValue::try_from(pushback_millis.to_string().as_str()).unwrap(),
+            MetadataValue::from(pushback_millis),
         );
         status
     }

@@ -26,6 +26,7 @@ use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::VpcPrefixId;
 use config_version::ConfigVersion;
 use db::TransactionVending as _;
+use db::db_read::DbReader;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::InstanceExtensionServiceConfig;
 use model::instance::config::network::{DeviceLocator, InstanceServiceInterfaceConfig};
@@ -64,6 +65,7 @@ impl<'a, 'b> TestInstanceBuilder<'a, 'b> {
                 network: None,
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -161,12 +163,13 @@ pub(in crate::tests) struct TestInstance<'a, 'b> {
     mh: &'b TestManagedHost,
 }
 
-type Txn<'a> = db::Transaction<'a>;
-
 impl<'a, 'b> TestInstance<'a, 'b> {
-    pub(in crate::tests) async fn db_instance(&self, txn: &mut Txn<'_>) -> Box<InstanceSnapshot> {
+    pub(in crate::tests) async fn db_instance(
+        &self,
+        db: impl DbReader<'_>,
+    ) -> Box<InstanceSnapshot> {
         Box::new(
-            db::instance::find_by_id(txn.as_mut(), self.id)
+            db::instance::find_by_id(db, self.id)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -193,6 +196,8 @@ impl<'a, 'b> TestInstance<'a, 'b> {
 }
 
 /// Persists a synthetic attachment and matching service interface for lifecycle guard tests.
+///
+/// Reuses an existing fixture tenant so callers can seed multiple service attachments.
 ///
 /// Public activation remains fail-closed until the complete lifecycle is enabled. Matching IDs
 /// satisfy attachment-to-service-interface validation, while one transaction and a committed
@@ -229,9 +234,12 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
     // Register the fixture tenant before creating the synthetic service to satisfy
     // the extension service's tenant foreign key.
     let tenant_config = default_tenant_config();
-    create_fixture_tenant(env, tenant_config.tenant_organization_id.clone())
-        .await
-        .unwrap();
+    if let Err(error) =
+        create_fixture_tenant(env, tenant_config.tenant_organization_id.clone()).await
+    {
+        // Reuse an already registered tenant while rejecting other fixture setup failures.
+        assert_eq!(error.code(), tonic::Code::AlreadyExists, "{error}");
+    }
     persist_service_vpc_attachment(
         env,
         instance_id,
@@ -511,6 +519,7 @@ pub(in crate::tests) fn config_for_ib_config(
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     }
@@ -528,6 +537,7 @@ pub(in crate::tests) fn config_for_nvlink_config(
         nvlink: Some(nvl_config),
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     }
@@ -838,7 +848,7 @@ pub(in crate::tests) async fn update_instance_network_status_observation(
     let query = "UPDATE machines SET network_status_observation = jsonb_set(network_status_observation, ARRAY['instance_network_observation'], $1) WHERE id=$2";
     let _query_result = sqlx::query(query)
         .bind(sqlx::types::Json(obs))
-        .bind(dpu_id.to_string())
+        .bind(dpu_id)
         .execute(txn.deref_mut())
         .await
         .unwrap();
@@ -864,7 +874,7 @@ pub(in crate::tests) async fn update_instance_nvlink_config(
     let query = "UPDATE instances SET nvlink_config=$1::json where id = $2::uuid returning id";
     let _query_result = sqlx::query(query)
         .bind(sqlx::types::Json(config))
-        .bind(id.to_string())
+        .bind(id)
         .execute(txn.deref_mut())
         .await
         .unwrap();

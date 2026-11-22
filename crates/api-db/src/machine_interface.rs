@@ -21,7 +21,9 @@ use std::net::IpAddr;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId,
+};
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
@@ -47,10 +49,7 @@ use crate::db_read::DbReader;
 use crate::host_naming::{self, NamingContext};
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface_address::{AddressAlreadyInUseError, MachineInterfaceAddressWithType};
-use crate::{
-    DatabaseError, DatabaseResult, Transaction, TransactionVending as _,
-    network_segment as db_network_segment,
-};
+use crate::{DatabaseError, DatabaseResult, Transaction, network_segment as db_network_segment};
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "machine_interfaces_segment_id_mac_address_key";
 const SQL_VIOLATION_ONE_PRIMARY_INTERFACE: &str = "one_primary_interface_per_machine";
@@ -222,7 +221,7 @@ macro_rules! machine_interface_snapshot_query {
 /// the allocation commits. Removal evidence starts with the updated writers;
 /// addresses removed before then cannot be inferred from `last_dhcp`.
 pub async fn can_apply_expected_allocation(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
 ) -> DatabaseResult<bool> {
@@ -237,7 +236,7 @@ pub async fn can_apply_expected_allocation(
     sqlx::query_scalar(query)
         .bind(interface_id)
         .bind(family.pg_family())
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
@@ -376,12 +375,12 @@ pub async fn demote_primary_interfaces_for_machine(
 /// then all dormant.
 pub async fn machine_has_primary_interface(
     machine_id: &MachineId,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<bool, DatabaseError> {
     let query = "SELECT EXISTS(SELECT 1 FROM machine_interfaces WHERE machine_id=$1 AND primary_interface=true)";
     let (exists,): (bool,) = sqlx::query_as(query)
         .bind(machine_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(exists)
@@ -449,34 +448,29 @@ pub async fn associate_bmc_interface(
     association: MachineInterfaceAssociation,
     txn: &mut PgConnection,
 ) -> DatabaseResult<MachineInterfaceId> {
-    let (query, association_type, id_value) = match association {
-        MachineInterfaceAssociation::Machine(id) => (
-            "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type, \
+    let (query, statement) = match association {
+        MachineInterfaceAssociation::Machine(id) => {
+            let query = "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type, \
              interface_type='Bmc'::interface_type, primary_interface=false \
-             WHERE id=$3::uuid RETURNING id",
-            "Machine",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::Switch(id) => (
-            "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type, \
+             WHERE id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Machine"))
+        }
+        MachineInterfaceAssociation::Switch(id) => {
+            let query = "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type, \
              interface_type='Bmc'::interface_type, primary_interface=false \
-             WHERE id=$3::uuid RETURNING id",
-            "Switch",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::PowerShelf(id) => (
-            "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type, \
+             WHERE id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Switch"))
+        }
+        MachineInterfaceAssociation::PowerShelf(id) => {
+            let query = "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type, \
              interface_type='Bmc'::interface_type, primary_interface=false \
-             WHERE id=$3::uuid RETURNING id",
-            "PowerShelf",
-            id.to_string(),
-        ),
+             WHERE id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("PowerShelf"))
+        }
     };
     // `primary_interface` is always forced to false here, so the one-primary
     // constraint cannot fire -- only the single-association one is relevant.
-    sqlx::query_as(query)
-        .bind(id_value)
-        .bind(association_type)
+    statement
         .bind(*interface_id)
         .fetch_one(txn)
         .await
@@ -519,26 +513,21 @@ pub async fn associate_interface_with_machine(
     association: MachineInterfaceAssociation,
     txn: &mut PgConnection,
 ) -> DatabaseResult<MachineInterfaceId> {
-    let (query, association_type, id_value) = match association {
-        MachineInterfaceAssociation::Machine(id) => (
-            "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
-            "Machine",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::Switch(id) => (
-            "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
-            "Switch",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::PowerShelf(id) => (
-            "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
-            "PowerShelf",
-            id.to_string(),
-        ),
+    let (query, statement) = match association {
+        MachineInterfaceAssociation::Machine(id) => {
+            let query = "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Machine"))
+        }
+        MachineInterfaceAssociation::Switch(id) => {
+            let query = "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Switch"))
+        }
+        MachineInterfaceAssociation::PowerShelf(id) => {
+            let query = "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("PowerShelf"))
+        }
     };
-    sqlx::query_as(query)
-        .bind(id_value)
-        .bind(association_type)
+    statement
         .bind(*interface_id)
         .fetch_one(txn)
         .await
@@ -574,6 +563,31 @@ pub async fn find_by_mac_addresses(
         ObjectColumnFilter::List(MacAddressColumn, mac_addresses),
     )
     .await
+}
+
+/// Whether this DPU owns the OS/admin MAC. If any real interfaces are assigned,
+/// all must belong to this DPU and at least one must be a data interface.
+/// Read both tables in one snapshot: first DHCP can replace a prediction with
+/// an assigned interface in one transaction.
+pub async fn dpu_owns_oob_mac(
+    db: impl DbReader<'_>,
+    dpu_id: &DpuMachineId,
+    mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    let query = "SELECT COALESCE(
+        bool_and(machine_id IS NOT DISTINCT FROM $2) AND bool_or(interface_type = 'Data'),
+        EXISTS (SELECT 1 FROM predicted_machine_interfaces
+                WHERE mac_address = $1 AND machine_id = $2 AND expected_network_segment_type = 'underlay')
+    )
+    FROM machine_interfaces
+    WHERE mac_address = $1
+      AND (machine_id IS NOT NULL OR switch_id IS NOT NULL OR power_shelf_id IS NOT NULL)";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .bind(dpu_id.as_machine_id())
+        .fetch_one(db)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Associates an unowned OOB interface with the supplied DPU or predicts it before DHCP.
@@ -760,12 +774,12 @@ pub async fn find_by_ips(
     Ok(by_ip)
 }
 
-pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<MachineInterfaceSnapshot>> {
-    find_by(txn, ObjectColumnFilter::All::<IdColumn>).await
+pub async fn find_all(conn: impl DbReader<'_>) -> DatabaseResult<Vec<MachineInterfaceSnapshot>> {
+    find_by(conn, ObjectColumnFilter::All::<IdColumn>).await
 }
 
 pub async fn find_by_machine_ids<ID>(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[ID],
 ) -> Result<std::collections::HashMap<ID, Vec<MachineInterfaceSnapshot>>, DatabaseError>
 where
@@ -773,7 +787,7 @@ where
 {
     use itertools::Itertools;
     Ok(find_by(
-        txn,
+        conn,
         ObjectColumnFilter::List(
             MachineIdColumn,
             &machine_ids
@@ -859,13 +873,13 @@ pub async fn find_by_machine_id_for_update(
 /// [`crate::instance_address::segment_has_allocations`] (used by the
 /// segment-drain reconcile).
 pub async fn count_by_segment_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_id: &NetworkSegmentId,
 ) -> Result<usize, DatabaseError> {
     let query = "SELECT count(*) FROM machine_interfaces WHERE segment_id = $1";
     let (address_count,): (i64,) = sqlx::query_as(query)
         .bind(segment_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -907,6 +921,22 @@ pub async fn lock_for_address_assignment(
         .ok_or(DatabaseError::FindOneReturnedNoResultsError(
             interface_id.into(),
         ))
+}
+
+/// Keep a host's BMC address stable while authorizing a saved hardware request.
+/// The caller already holds the Machine lock. Forced cleanup takes interfaces first,
+/// so fail without waiting on a busy row and let the controller retry its transaction.
+pub async fn lock_bmc_interfaces(
+    txn: &mut PgConnection,
+    machine_id: carbide_uuid::machine::HostMachineId,
+) -> DatabaseResult<()> {
+    let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1 AND interface_type = 'Bmc' ORDER BY id FOR UPDATE NOWAIT";
+    sqlx::query(query)
+        .bind(machine_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
 }
 
 /// Optional metadata used while finding or creating a DHCP machine interface.
@@ -993,11 +1023,6 @@ async fn find_or_create_machine_interface_inner(
         is_primary,
         retained_window,
     } = options;
-    let relaystr = relays
-        .iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<String>>()
-        .join(", ");
     match machine_id {
         None => {
             tracing::info!(
@@ -1023,6 +1048,7 @@ async fn find_or_create_machine_interface_inner(
             match ifcs.len() {
                 1 => Ok(ifcs.remove(0)),
                 n => {
+                    let relaystr = relays.iter().join(", ");
                     tracing::warn!(
                         %mac_address,
                         relay_ip_addresses = %relaystr,
@@ -1060,11 +1086,6 @@ pub async fn find_or_create_observed_machine_interface(
         .as_ref()
         .and_then(|interface| interface.role.primary_interface_override());
     let interface_type = expected_interface_type.unwrap_or(InterfaceType::Data);
-    let relaystr = relays
-        .iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<String>>()
-        .join(", ");
     match machine_id {
         None => {
             tracing::info!(
@@ -1081,9 +1102,12 @@ pub async fn find_or_create_observed_machine_interface(
                         %mac_address,
                         "No existing machine_interface with mac address exists yet, creating observed row",
                     );
-                    let network_segments =
-                        network_segments_for_dhcp_relays(txn, relays, expected_interface.as_ref())
-                            .await?;
+                    let network_segments = network_segments_for_dhcp_relays(
+                        &mut *txn,
+                        relays,
+                        expected_interface.as_ref(),
+                    )
+                    .await?;
 
                     if network_segments.is_empty() {
                         return Err(DatabaseError::FailedPrecondition(format!(
@@ -1159,6 +1183,7 @@ pub async fn find_or_create_observed_machine_interface(
             match ifcs.len() {
                 1 => Ok(ifcs.remove(0)),
                 n => {
+                    let relaystr = relays.iter().join(", ");
                     tracing::warn!(
                         %mac_address,
                         relay_ip_addresses = %relaystr,
@@ -1318,7 +1343,7 @@ async fn apply_primary_declaration(
 /// Resolve DHCP candidate network segments for a relay list and optional
 /// expected-interface declaration.
 pub async fn network_segments_for_dhcp_relays(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     relays: &[IpAddr],
     expected_interface: Option<&ExpectedInterface>,
 ) -> DatabaseResult<Vec<NetworkSegment>> {
@@ -1326,7 +1351,7 @@ pub async fn network_segments_for_dhcp_relays(
         expected_interface.and_then(ExpectedInterface::resolved_network_segment_type);
     let guarded_network_segment_type =
         expected_interface.and_then(ExpectedInterface::segment_type_guard);
-    let network_segments = db_network_segment::for_relay_all(txn, relays).await?;
+    let network_segments = db_network_segment::for_relay_all(conn, relays).await?;
     let exact_segment_ids = exact_dhcpv6_link_address_segment_ids(&network_segments, relays);
     if !exact_segment_ids.is_empty() {
         // DHCPv6 link-address is authoritative relay metadata. A configured
@@ -1439,7 +1464,8 @@ async fn validate_existing_mac_and_create_inner(
             );
 
             let mut network_segments =
-                network_segments_for_dhcp_relays(txn, relays, expected_interface.as_ref()).await?;
+                network_segments_for_dhcp_relays(&mut *txn, relays, expected_interface.as_ref())
+                    .await?;
 
             if !network_segments.is_empty() {
                 let exact_segment_ids =
@@ -1472,10 +1498,8 @@ async fn validate_existing_mac_and_create_inner(
                 }
 
                 if let Some(address_family) = address_family {
-                    let candidate_segment_ids = network_segments
-                        .iter()
-                        .map(|segment| segment.id.to_string())
-                        .join(", ");
+                    let candidate_segment_ids =
+                        network_segments.iter().map(|segment| segment.id).join(", ");
 
                     // Reuse the existing dynamic create path unchanged: each
                     // candidate snapshot now exposes only the requested family,
@@ -1546,7 +1570,7 @@ async fn validate_existing_mac_and_create_inner(
             if let Some(family) = address_family
                 && !matches!(
                     crate::machine_interface_address::find_allocation_type_for_family(
-                        txn,
+                        &mut *txn,
                         existing_interface.id,
                         family
                     )
@@ -1567,7 +1591,7 @@ async fn validate_existing_mac_and_create_inner(
             }
             let apply_expected_allocation = match address_family {
                 Some(family) => {
-                    can_apply_expected_allocation(txn, existing_interface.id, family).await?
+                    can_apply_expected_allocation(&mut *txn, existing_interface.id, family).await?
                 }
                 None => true,
             };
@@ -1775,7 +1799,7 @@ async fn reconcile_existing_preallocation(
                 address.segment_id, target_segment.id,
             )));
         }
-        if can_apply_expected_allocation(txn, iface.id, static_ip.address_family()).await? {
+        if can_apply_expected_allocation(&mut *txn, iface.id, static_ip.address_family()).await? {
             let mut allocation_txn = Transaction::begin_inner(txn).await?;
             let derived_segment;
             let target_segment = match known_target_segment {
@@ -2253,11 +2277,9 @@ async fn create_dynamic(
         }
     }
 
-    let segment_list = segments
-        .iter()
-        .map(|segment| format!("`{}` ({})", segment.config.name, segment.id))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let segment_list = segments.iter().format_with(", ", |segment, f| {
+        f(&format_args!("`{}` ({})", segment.config.name, segment.id))
+    });
 
     Err(DatabaseError::internal(format!(
         "ownership or hostname retries exhausted while allocating machine interface addresses from segments {segment_list}"
@@ -2293,7 +2315,7 @@ async fn create_static_path(
                 .or_else(|| segments.iter().find(|s| s.config.name == crate::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME))
                 .ok_or_else(|| DatabaseError::internal(format!(
                     "unable to find network segment that contains requested IP {address} in network segments: {}",
-                    segments.iter().map(|s| s.id.to_string()).join(", "),
+                    segments.iter().map(|s| s.id).join(", "),
                 ))
     )?;
 
@@ -2428,14 +2450,10 @@ async fn create_inner(
 ) -> DatabaseResult<MachineInterfaceId> {
     // Allocation must have produced at least one address for the new interface.
     if allocated_addresses.is_empty() {
-        let prefixes: Vec<_> = segment
-            .prefixes
-            .iter()
-            .map(|p| p.prefix.to_string())
-            .collect();
+        let prefixes = segment.prefixes.iter().map(|p| p.prefix).join(", ");
         return Err(crate::DatabaseError::ResourceExhausted(format!(
             "No IP addresses left in network segment (prefixes: {})",
-            prefixes.join(", ")
+            prefixes
         )));
     }
     // A brand-new interface has no stored name yet, so the configured strategy
@@ -2756,10 +2774,9 @@ pub async fn allocate_svi_ip(
     txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<(NetworkPrefixId, IpAddr)> {
-    let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-        Box::new(UsedAdminNetworkIpResolver {
-            segment_id: segment.id,
-        });
+    let dhcp_handler = UsedAdminNetworkIpResolver {
+        segment_id: segment.id,
+    };
 
     // Prevent other allocations from happening concurrently in this network segment
     lock_network_segment_exclusive(txn, segment).await?;
@@ -2962,9 +2979,9 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineInterfaceSnapshot>
 
 pub async fn get_machine_interface_primary(
     machine_id: &MachineId,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
-    find_by_machine_ids(txn, &[*machine_id])
+    find_by_machine_ids(conn, &[*machine_id])
         .await?
         .remove(machine_id)
         .ok_or_else(|| DatabaseError::NotFoundError {
@@ -2999,7 +3016,8 @@ pub async fn move_predicted_machine_interface_to_machine(
         relay_ip_address = %relay_ip,
         "Got DHCP from predicted machine interface, moving to machine"
     );
-    let Some(network_segment) = crate::network_segment::for_relay(txn, relay_ip).await? else {
+    let Some(network_segment) = crate::network_segment::for_relay(&mut *txn, relay_ip).await?
+    else {
         return Err(DatabaseError::FailedPrecondition(format!(
             "No network segment defined for relay address: {relay_ip}"
         )));
@@ -3191,7 +3209,7 @@ pub async fn create_host_machine_dpu_interface_proactively(
     admin_fnn_enabled: bool,
     retained_window: Option<chrono::Duration>,
 ) -> Result<MachineInterfaceSnapshot, DatabaseError> {
-    let mut admin_networks = crate::network_segment::admin(txn).await?;
+    let mut admin_networks = crate::network_segment::admin(&mut *txn).await?;
     // IPv6 FNN admin prefixes omit a gateway because the DPU provides the SVI and router
     // advertisements. That does not remove the gateway requirement from an IPv4 sibling.
     admin_networks.retain(|network| {
@@ -3353,27 +3371,33 @@ async fn reconcile_admin_addresses(
 /// the next Site Explorer iteration revisits the host and retries the
 /// repair; a permanent failure leaves the endpoint alone, since repeating
 /// the reconcile cannot fix it. The error is returned for the caller to
-/// count.
+/// count. The call has no deadline of its own. A caller that drops it, as at
+/// a deadline, discards the connection in use instead of returning it to the
+/// pool.
 ///
 /// Returns whether the active admin config changed.
 pub async fn reconcile_admin_addresses_after_commit(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<bool> {
     const RECONCILE_ATTEMPTS: u32 = 3;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
-    let mut result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+    let mut result =
+        reconcile_admin_addresses_in_own_transaction(pool, host_machine_id, instrumentation).await;
     for retry in 1..RECONCILE_ATTEMPTS {
         if !result.as_ref().is_err_and(is_transient_reconcile_failure) {
             break;
         }
         tokio::time::sleep(RETRY_DELAY * retry).await;
-        result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+        result =
+            reconcile_admin_addresses_in_own_transaction(pool, host_machine_id, instrumentation)
+                .await;
     }
     if let Err(reconcile_error) = &result
         && is_transient_reconcile_failure(reconcile_error)
-        && let Err(error) = request_host_exploration(pool, host_machine_id).await
+        && let Err(error) = request_host_exploration(pool, host_machine_id, instrumentation).await
     {
         tracing::warn!(
             %host_machine_id,
@@ -3401,26 +3425,51 @@ fn is_transient_reconcile_failure(error: &DatabaseError) -> bool {
 async fn request_host_exploration(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<()> {
-    let mut txn = pool.txn_begin().await?;
-    crate::explored_endpoints::request_exploration_for_machine(host_machine_id, txn.as_pgconn())
-        .await?;
-    txn.commit().await
+    let mut session = crate::DbSessionGuard::acquire(pool).await?;
+    let mut txn = Transaction::begin_inner(session.as_pgconn())
+        .await?
+        .with_instrumentation(instrumentation);
+    match crate::explored_endpoints::request_exploration_for_machine(
+        host_machine_id,
+        txn.as_pgconn(),
+    )
+    .await
+    {
+        Ok(()) => {
+            txn.commit().await?;
+            session.return_to_pool();
+            Ok(())
+        }
+        Err(error) => {
+            txn.rollback_or_log("exploration request after admin address reconcile")
+                .await;
+            session.return_to_pool();
+            Err(error)
+        }
+    }
 }
 
 async fn reconcile_admin_addresses_in_own_transaction(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<bool> {
-    let mut txn = pool.txn_begin().await?;
+    let mut session = crate::DbSessionGuard::acquire(pool).await?;
+    let mut txn = Transaction::begin_inner(session.as_pgconn())
+        .await?
+        .with_instrumentation(instrumentation);
     match reconcile_admin_addresses_and_network_config(txn.as_pgconn(), host_machine_id).await {
         Ok(active_config_changed) => {
             txn.commit().await?;
+            session.return_to_pool();
             Ok(active_config_changed)
         }
         Err(error) => {
             txn.rollback_or_log("admin address reconcile after commit")
                 .await;
+            session.return_to_pool();
             Err(error)
         }
     }
@@ -4323,7 +4372,7 @@ pub async fn sync_hostname_after_address_assignment(
 }
 
 pub async fn find_by_machine_and_segment(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
     segment_id: NetworkSegmentId,
 ) -> Result<Vec<MachineInterfaceSnapshot>, DatabaseError> {
@@ -4334,7 +4383,7 @@ pub async fn find_by_machine_and_segment(
     sqlx::query_as::<_, MachineInterfaceSnapshot>(QUERY)
         .bind(machine_id)
         .bind(segment_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
         .map(|interfaces| interfaces.into_iter().collect())
@@ -4391,9 +4440,9 @@ async fn reconcile_interface_segment(
         .and_then(ExpectedInterface::segment_type_guard)
         .is_some()
     {
-        network_segments_for_dhcp_relays(txn, relays, expected_interface).await?
+        network_segments_for_dhcp_relays(&mut *txn, relays, expected_interface).await?
     } else {
-        db_network_segment::for_relay_all(txn, relays).await?
+        db_network_segment::for_relay_all(&mut *txn, relays).await?
     };
 
     if relay_segments.is_empty() {
@@ -4429,7 +4478,7 @@ async fn reconcile_interface_segment_candidates(
         return Ok(());
     }
 
-    let static_segment_id = match crate::network_segment::static_assignments(txn).await {
+    let static_segment_id = match crate::network_segment::static_assignments(&mut *txn).await {
         Ok(segment) => Some(segment.id),
         Err(error) if error.is_not_found() => None,
         Err(error) => return Err(error),
@@ -4490,11 +4539,7 @@ async fn reconcile_interface_segment_candidates(
             "Network segment mismatch for existing MAC address: {} stored segment: {} discovery candidates: {}",
             existing_interface.mac_address,
             existing_interface.segment_id,
-            authoritative_segment_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<String>>()
-                .join(", "),
+            authoritative_segment_ids.iter().join(", "),
         )));
     }
 
@@ -4679,35 +4724,32 @@ pub async fn record_deletion(txn: &mut PgConnection) -> Result<(), DatabaseError
 
 /// Find all machine interface IDs associated with a switch.
 pub async fn find_ids_by_switch_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     switch_id: &SwitchId,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
     let query = "SELECT id FROM machine_interfaces WHERE switch_id = $1";
     sqlx::query_as::<_, MachineInterfaceId>(query)
         .bind(switch_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Find all machine interface IDs associated with a power shelf.
 pub async fn find_ids_by_power_shelf_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     power_shelf_id: &PowerShelfId,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
     let query = "SELECT id FROM machine_interfaces WHERE power_shelf_id = $1";
     sqlx::query_as::<_, MachineInterfaceId>(query)
         .bind(power_shelf_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
 #[async_trait::async_trait]
-impl<DB> UsedIpResolver<DB> for UsedAdminNetworkIpResolver
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+impl UsedIpResolver for UsedAdminNetworkIpResolver {
     // used_ips returns globally owned machine-interface addresses contained by
     // this segment's prefixes. Filtering by the owning interface's segment
     // would miss a static assignment that predates its containing managed
@@ -4717,7 +4759,7 @@ where
     // `machine_interface_addresses` table, where
     // `machine_interface_addresses_host_address_check` permits only /32 or
     // /128 host addresses.
-    async fn used_ips(&self, txn: &mut DB) -> Result<Vec<IpAddr>, DatabaseError> {
+    async fn used_ips(&self, conn: impl DbReader<'_>) -> Result<Vec<IpAddr>, DatabaseError> {
         // IpAddrContainer is a small private struct used
         // for binding the result of the subsequent SQL
         // query, so we can implement FromRow and return
@@ -4740,7 +4782,7 @@ WHERE np.segment_id = $1::uuid";
 
         let containers: Vec<IpAddrContainer> = sqlx::query_as(query)
             .bind(self.segment_id)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -4763,8 +4805,11 @@ WHERE np.segment_id = $1::uuid";
     // saying its not implemented for machine_interfaces, BUT,
     // it keeps it cleaner knowing the IpAllocator works via
     // calling used_prefixes() regardless of who is using it.
-    async fn used_prefixes(&self, txn: &mut DB) -> Result<Vec<IpNetwork>, DatabaseError> {
-        let used_ips = self.used_ips(txn).await?;
+    async fn used_prefixes(
+        &self,
+        conn: impl DbReader<'_>,
+    ) -> Result<Vec<IpNetwork>, DatabaseError> {
+        let used_ips = self.used_ips(conn).await?;
         let mut ip_networks: Vec<IpNetwork> = Vec::new();
         for used_ip in used_ips {
             // Use /32 for IPv4 host addresses, /128 for IPv6 host addresses.

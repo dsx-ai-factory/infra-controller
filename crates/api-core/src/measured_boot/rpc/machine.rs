@@ -64,12 +64,11 @@ pub(crate) async fn handle_show_candidate_machine(
     api: &Api,
     req: ShowCandidateMachineRequest,
 ) -> Result<ShowCandidateMachineResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     let machine = match req.selector {
         // Show a machine with the given ID.
         Some(show_candidate_machine_request::Selector::MachineId(machine_uuid)) => {
             db::measured_boot::machine::from_id(
-                &mut txn,
+                &mut api.db_reader(),
                 MachineId::from_str(&machine_uuid).map_err(|_| {
                     CarbideError::from(RpcDataConversionError::InvalidMachineId(machine_uuid))
                 })?,
@@ -82,8 +81,6 @@ pub(crate) async fn handle_show_candidate_machine(
         // Show all system profiles.
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
-
-    txn.commit().await?;
 
     Ok(ShowCandidateMachineResponse {
         machine: Some(machine.into()),

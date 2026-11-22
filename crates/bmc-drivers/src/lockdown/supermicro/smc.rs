@@ -65,11 +65,14 @@ impl<B: Bmc> Lockdown<B> for SmcLockdown {
         let sys_lockdown = sys_lockdown_scope(scope)?;
         let enabled = desired == LockdownDesiredState::Enabled;
         let switch_on = find_controls(cx, scope, enabled).await?;
+        let host = matches!(scope, LockdownScope::Host | LockdownScope::All);
         let mut outcome = DriverOutcome::complete();
-        if sys_lockdown && (!enabled || switch_on) {
+        // The switch blocks the host writes, so a lock clears it first only
+        // when host writes follow.
+        if sys_lockdown && (!enabled || (host && switch_on)) {
             outcome = outcome.merge(set_sys_lockdown(cx, false).await?);
         }
-        if matches!(scope, LockdownScope::Host | LockdownScope::All) {
+        if host {
             if enabled {
                 if !cx.has_quirk(Quirk::SupermicroHostInterfaceRequired) {
                     outcome = outcome.merge(set_host_interfaces(cx, false).await?);
@@ -80,7 +83,7 @@ impl<B: Bmc> Lockdown<B> for SmcLockdown {
                 outcome = outcome.merge(set_host_interfaces(cx, true).await?);
             }
         }
-        if enabled && sys_lockdown {
+        if enabled && sys_lockdown && (host || !switch_on) {
             outcome = outcome.merge(set_sys_lockdown(cx, true).await?);
         }
         Ok(outcome)
@@ -104,21 +107,24 @@ mod tests {
     const SYS_LOCKDOWN: &str = "/redfish/v1/Managers/1/Oem/Supermicro/SysLockdown";
 
     /// A full lockdown clears a switch that is already on before the writes it
-    /// blocks, and writes nothing when the BMC lacks the KCS control.
+    /// blocks, and writes nothing when the BMC lacks the KCS control. A BMC
+    /// lockdown leaves a switch that is already on alone.
     #[tokio::test]
-    async fn full_lockdown_clears_the_switch_first_and_needs_every_control() {
+    async fn lockdown_clears_the_switch_only_before_the_writes_it_blocks() {
         let interface = (HOST_INTERFACE, json!({"InterfaceEnabled": false}));
         let kcs = (KCS, json!({"Privilege": "Callback"}));
         let switch = |enabled| (SYS_LOCKDOWN, json!({"SysLockdownEnabled": enabled}));
-        for (scenario, switch_on, has_kcs, expected) in [
+        for (scenario, scope, switch_on, has_kcs, expected) in [
             (
-                "switch off",
+                "full lockdown, switch off",
+                LockdownScope::All,
                 false,
                 true,
                 Ok(vec![interface.clone(), kcs.clone(), switch(true)]),
             ),
             (
-                "switch already on",
+                "full lockdown, switch already on",
+                LockdownScope::All,
                 true,
                 true,
                 Ok(vec![
@@ -128,7 +134,27 @@ mod tests {
                     switch(true),
                 ]),
             ),
-            ("no KCS control", true, false, Err(())),
+            (
+                "full lockdown, no KCS control",
+                LockdownScope::All,
+                true,
+                false,
+                Err(()),
+            ),
+            (
+                "BMC lockdown, switch off",
+                LockdownScope::Bmc,
+                false,
+                true,
+                Ok(vec![switch(true)]),
+            ),
+            (
+                "BMC lockdown, switch already on",
+                LockdownScope::Bmc,
+                true,
+                true,
+                Ok(vec![]),
+            ),
         ] {
             let mut supermicro = json!({"SysLockdown": {"@odata.id": SYS_LOCKDOWN}});
             if has_kcs {
@@ -178,7 +204,7 @@ mod tests {
             let cx = bmc.cx().await;
 
             let result = SmcLockdown
-                .set(&cx, LockdownScope::All, LockdownDesiredState::Enabled)
+                .set(&cx, scope, LockdownDesiredState::Enabled)
                 .await;
             let recorded = bmc.writes();
             let writes: Vec<(&str, serde_json::Value)> = recorded

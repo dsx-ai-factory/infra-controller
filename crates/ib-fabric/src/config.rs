@@ -118,7 +118,7 @@ impl IBFabricConfig {
     {
         let mtu = i32::deserialize(deserializer)?;
 
-        IBMtu::try_from(mtu).map_err(|e| serde::de::Error::custom(e.to_string()))
+        IBMtu::try_from(mtu).map_err(serde::de::Error::custom)
     }
 
     pub fn deserialize_rate_limit<'de, D>(deserializer: D) -> Result<IBRateLimit, D::Error>
@@ -127,7 +127,7 @@ impl IBFabricConfig {
     {
         let rate_limit = i32::deserialize(deserializer)?;
 
-        IBRateLimit::try_from(rate_limit).map_err(|e| serde::de::Error::custom(e.to_string()))
+        IBRateLimit::try_from(rate_limit).map_err(serde::de::Error::custom)
     }
 
     pub fn deserialize_service_level<'de, D>(deserializer: D) -> Result<IBServiceLevel, D::Error>
@@ -136,7 +136,7 @@ impl IBFabricConfig {
     {
         let service_level = i32::deserialize(deserializer)?;
 
-        IBServiceLevel::try_from(service_level).map_err(|e| serde::de::Error::custom(e.to_string()))
+        IBServiceLevel::try_from(service_level).map_err(serde::de::Error::custom)
     }
 }
 

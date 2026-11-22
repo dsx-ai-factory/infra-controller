@@ -243,9 +243,8 @@ async fn test_network_segment_lifecycle_with_vpc_and_domain(
 #[crate::sqlx_test]
 async fn test_admin_network_exists(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.txn_begin().await?;
 
-    let segments = db::network_segment::admin(&mut txn).await?;
+    let segments = db::network_segment::admin(&env.pool).await?;
 
     assert_eq!(segments[0].id, env.admin_segment());
 
@@ -292,8 +291,7 @@ async fn test_multiple_admin_network_segments_exist(
     assert!(segment_ids.contains(&second_admin_segment));
 
     // Verify the DB admin lookup returns both admin segments as candidates.
-    let mut txn = env.pool.txn_begin().await?;
-    let admin_segments = db::network_segment::admin(&mut txn).await?;
+    let admin_segments = db::network_segment::admin(&env.pool).await?;
     let admin_segment_ids = admin_segments
         .iter()
         .map(|segment| segment.id)

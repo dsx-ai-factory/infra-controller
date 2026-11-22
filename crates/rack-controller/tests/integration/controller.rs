@@ -253,7 +253,11 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services)
         .state_handler(rack_handler)
@@ -267,7 +271,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // power shelves, so Created transitions immediately.
     controller.run_single_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(rack.controller_state.value, RackState::Discovering),
         "Expected rack to be in Discovering, got: {:?}",
@@ -280,7 +284,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // Both machines are already Ready (created above).
     controller.run_single_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(
             rack.controller_state.value,
@@ -306,7 +310,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     controller.run_single_iteration().await; // ConfigureNmxCluster(Start) -> Completed
     controller.run_single_iteration().await; // Completed -> Validating(Pending)
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(
             rack.controller_state.value,
@@ -354,7 +358,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // The handler finds rv.run-id on a machine and promotes to InProgress.
     controller.run_single_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(
             rack.controller_state.value,
@@ -372,7 +376,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // Partition p0 has validated > 0 (both nodes pass), so InProgress -> Partial.
     controller.run_single_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(
             rack.controller_state.value,
@@ -390,7 +394,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // validated(1) == total_partitions(1) -> Validated.
     controller.run_single_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(
             rack.controller_state.value,
@@ -407,7 +411,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // Iteration 10: Validating(Validated) -> Ready.
     controller.run_single_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(rack.controller_state.value, RackState::Ready),
         "Expected Ready, got: {:?}",
@@ -425,7 +429,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
         .await?;
     let mut histories = result.into_inner().histories;
     let records = histories
-        .remove(&rack_id.to_string())
+        .remove(rack_id.as_str())
         .unwrap_or_default()
         .records;
 
@@ -484,7 +488,11 @@ async fn test_error_state_does_nothing_with_controller(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services)
         .state_handler(rack_handler)
@@ -493,7 +501,7 @@ async fn test_error_state_does_nothing_with_controller(
 
     controller.run_single_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         matches!(rack.controller_state.value, RackState::Error { .. }),
         "Error state should not transition"
@@ -529,7 +537,11 @@ async fn test_rack_deletion_with_state_controller(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services.clone())
         .state_handler(rack_handler.clone())
@@ -784,12 +796,9 @@ async fn test_stale_rack_maintenance_termination_latch_does_not_block_non_mainte
     Ok(())
 }
 
-async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Box<Rack>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+async fn get_db_rack(db: impl DbReader<'_>, rack_id: &RackId) -> Box<Rack> {
     Box::new(
-        db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
+        db_rack::find_by(db, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
             .await
             .unwrap()
             .pop()

@@ -21,10 +21,7 @@ use carbide_secrets::credentials::{
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use db::{
-    TransactionVending as _, machine as db_machine, machine_topology as db_machine_topology,
-    switch as db_switch,
-};
+use db::{machine as db_machine, machine_topology as db_machine_topology, switch as db_switch};
 use eyre::{Result, eyre};
 use librms::protos::rack_manager as rms;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -60,21 +57,14 @@ pub async fn load_rack_firmware_inventory(
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) -> Result<RackFirmwareInventory> {
-    let machine_ids = {
-        let mut txn = db_pool.txn_begin().await?;
-
-        let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
-            txn.as_mut(),
-            MachineSearchConfig {
-                rack_id: Some(rack_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
-
-        txn.commit().await?;
-        machine_ids
-    };
+    let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
+        db_pool,
+        MachineSearchConfig {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
     let machines =
         load_compute_firmware_inventory(db_pool, credential_manager, &machine_ids).await?;
 
@@ -100,25 +90,16 @@ pub async fn load_compute_firmware_inventory(
     credential_manager: &dyn CredentialManager,
     machine_ids: &[HostMachineId],
 ) -> Result<Vec<FirmwareUpgradeDeviceInfo>> {
-    let (machine_topologies, bmc_ips) = {
-        let mut txn = db_pool.txn_begin().await?;
-        let machine_topologies =
-            db_machine_topology::find_latest_by_machine_ids(txn.as_mut(), machine_ids).await?;
-        // The BMC IP is live network state -- read it from machine_interfaces, not the
-        // discovery topology snapshot, so a released or changed lease can't surface a stale IP.
-        let bmc_ips: std::collections::HashMap<_, _> =
-            db_machine_topology::find_machine_bmc_pairs_by_machine_id(
-                txn.as_mut(),
-                machine_ids.to_vec(),
-            )
+    let machine_topologies =
+        db_machine_topology::find_latest_by_machine_ids(db_pool, machine_ids).await?;
+    // The BMC IP is live network state -- read it from machine_interfaces, not the
+    // discovery topology snapshot, so a released or changed lease can't surface a stale IP.
+    let bmc_ips: std::collections::HashMap<_, _> =
+        db_machine_topology::find_machine_bmc_pairs_by_machine_id(db_pool, machine_ids.to_vec())
             .await?
             .into_iter()
             .filter_map(|(id, ip)| ip.map(|ip| (id, ip)))
             .collect();
-
-        txn.commit().await?;
-        (machine_topologies, bmc_ips)
-    };
 
     let mut machines = Vec::with_capacity(machine_ids.len());
     for machine_id in machine_ids {
@@ -157,23 +138,15 @@ pub async fn load_rack_switch_firmware_inventory(
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) -> Result<RackSwitchFirmwareInventory> {
-    let (switch_ids, switch_endpoints) = {
-        let mut txn = db_pool.txn_begin().await?;
-
-        let switch_ids = db_switch::find_ids(
-            txn.as_mut(),
-            model::switch::SwitchSearchFilter {
-                rack_id: Some(rack_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
-        let switch_endpoints =
-            db_switch::find_switch_endpoints_by_ids(txn.as_mut(), &switch_ids).await?;
-
-        txn.commit().await?;
-        (switch_ids, switch_endpoints)
-    };
+    let switch_ids = db_switch::find_ids(
+        db_pool,
+        model::switch::SwitchSearchFilter {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let switch_endpoints = db_switch::find_switch_endpoints_by_ids(db_pool, &switch_ids).await?;
 
     let mut switches = Vec::with_capacity(switch_endpoints.len());
     for switch in &switch_endpoints {
@@ -191,16 +164,11 @@ pub async fn load_switch_firmware_device_info(
     credential_manager: &dyn CredentialManager,
     switch_id: &SwitchId,
 ) -> Result<FirmwareUpgradeDeviceInfo> {
-    let switch_endpoint = {
-        let mut txn = db_pool.txn_begin().await?;
-        let mut switch_endpoints =
-            db_switch::find_switch_endpoints_by_ids(txn.as_mut(), std::slice::from_ref(switch_id))
-                .await?;
-        txn.commit().await?;
-        switch_endpoints
-            .pop()
-            .ok_or_else(|| eyre!("switch {} missing endpoint info", switch_id))?
-    };
+    let mut switch_endpoints =
+        db_switch::find_switch_endpoints_by_ids(db_pool, std::slice::from_ref(switch_id)).await?;
+    let switch_endpoint = switch_endpoints
+        .pop()
+        .ok_or_else(|| eyre!("switch {} missing endpoint info", switch_id))?;
 
     switch_endpoint_to_firmware_device_info(credential_manager, &switch_endpoint).await
 }

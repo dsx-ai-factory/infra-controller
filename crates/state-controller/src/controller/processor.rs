@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ::db::db_read::PgPoolReader;
 use ::db::{DatabaseError, TransactionVending as _};
 use config_version::Versioned;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -55,8 +56,8 @@ const MISSING_OBJECT_STATE: &str = "object_state";
 /// The `StateProcessor` is responsible for executing the state handler functions
 /// for all objects where state handling is requested.
 pub(super) struct StateProcessor<IO: StateControllerIO> {
-    /// A database connection pool that can be used for additional queries
-    pub(super) pool: sqlx::PgPool,
+    /// Database used for controller transactions
+    pub(super) database: super::ControllerDatabase,
     pub(super) handler_services: Arc<<IO::ContextObjects as StateHandlerContextObjects>::Services>,
     pub(super) io: Arc<IO>,
     pub(super) state_handler: Arc<
@@ -448,7 +449,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let capacity = capacity.min(u32::MAX as usize) as u32;
         let objects = tokio::time::timeout_at(deadline, async {
             let mut txn = self
-                .pool
+                .database
                 .txn_begin()
                 .await
                 .map_err(IterationError::from_transaction)?;
@@ -516,7 +517,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         deadline: tokio::time::Instant,
     ) {
         let cloned_object_id = object_id.clone();
-        let pool = self.pool.clone();
+        let database = self.database.clone();
         let services = self.handler_services.as_ref().clone();
         let io = self.io.clone();
         let handler = self.state_handler.clone();
@@ -530,7 +531,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                 async move {
                     let metrics = process_object(
                         cloned_object_id.clone(),
-                        pool,
+                        database,
                         services,
                         io,
                         handler,
@@ -569,7 +570,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
         // Replace completed claims with requested follow-up entries in one transaction so a failed
         // commit cannot lose queued work.
-        let mut txn = self.pool.txn_begin().await?;
+        let mut txn = self.database.txn_begin().await?;
         let num_deleted = db::delete_queued_objects(
             &mut txn,
             IO::DB_QUEUED_OBJECTS_TABLE_NAME,
@@ -686,7 +687,7 @@ pub(super) enum IterationError {
 #[allow(clippy::too_many_arguments)]
 async fn process_object<IO: StateControllerIO>(
     object_id: IO::ObjectId,
-    pool: sqlx::PgPool,
+    database: super::ControllerDatabase,
     mut services: <IO::ContextObjects as StateHandlerContextObjects>::Services,
     io: Arc<IO>,
     handler: Arc<
@@ -721,20 +722,14 @@ async fn process_object<IO: StateControllerIO>(
                 state: String::new(),
             });
         }
-        let mut txn = pool
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         let mut snapshot = io
-            .load_object_state(&mut txn, &object_id)
+            .load_object_state(&mut PgPoolReader::from(database.pool.clone()), &object_id)
             .await?
             .ok_or_else(|| StateHandlerError::MissingData {
                 object_id: object_id.to_string(),
                 missing: MISSING_OBJECT_STATE,
             })?;
-        let controller_state = io
-            .load_controller_state(&mut txn, &object_id, &snapshot)
-            .await?;
+        let controller_state = io.load_controller_state(&object_id, &snapshot).await?;
         metrics.common.initial_state = Some(controller_state.value.clone());
         metrics.common.state_entered_at = Some(controller_state.version.timestamp());
         // Unwrap uses a very large duration as default to show something is wrong
@@ -749,16 +744,11 @@ async fn process_object<IO: StateControllerIO>(
 
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline,
             services: &mut services,
             metrics: &mut metrics.specific,
             pending_db_writes: &mut pending_db_writes,
         };
-
-        // Commit the transaction now, since we don't want to leave a txn open
-        // throughout handle_object_state.
-        txn.commit()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
 
         let handler_output = handler
             .handle_object_state(&object_id, &mut snapshot, &controller_state.value, &mut ctx)
@@ -772,7 +762,8 @@ async fn process_object<IO: StateControllerIO>(
                 let mut txn = if let Some(txn) = outcome.take_transaction() {
                     txn
                 } else {
-                    pool.txn_begin()
+                    database
+                        .txn_begin()
                         .await
                         .map_err(StateHandlerError::from_transaction)?
                 };
@@ -792,7 +783,8 @@ async fn process_object<IO: StateControllerIO>(
             Err(e @ StateHandlerError::IterationInvalidated { .. }) => return Err(e),
             Err(e) => (
                 Err(e),
-                pool.txn_begin()
+                database
+                    .txn_begin()
                     .await
                     .map_err(StateHandlerError::from_transaction)?,
             ),
@@ -873,7 +865,7 @@ async fn process_object<IO: StateControllerIO>(
         } else if !matches!(handler_outcome, Ok(StateHandlerOutcome::Deleted { .. })) {
             // Whatever is the reason, outcome must be stored in db.
             let _ = txn.rollback().await;
-            let mut txn = pool
+            let mut txn = database
                 .txn_begin()
                 .await
                 .map_err(StateHandlerError::from_transaction)?;

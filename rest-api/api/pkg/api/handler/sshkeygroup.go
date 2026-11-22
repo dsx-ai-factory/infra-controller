@@ -117,30 +117,7 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating SSH Key Group creation request data", verr)
 	}
 
-	// check for name uniqueness for the tenant, ie, Tenant cannot have another SSH Key Group with same name
 	skgDAO := cdbm.NewSSHKeyGroupDAO(cskgh.dbSession)
-	skgs, tot, err := skgDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SSHKeyGroupFilterInput{
-			Names:     []string{apiRequest.Name},
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant SSH Key Group")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create SSH Key Group due to DB error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key Group with same name already exists for tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "An SSH Key Group with specified name already exists for Tenant", validation.Errors{
-			"id": errors.New(skgs[0].ID.String()),
-		})
-	}
-
-	// Verify or validate site
 	sdDAO := cdbm.NewStatusDetailDAO(cskgh.dbSession)
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(cskgh.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(cskgh.dbSession)
@@ -163,8 +140,8 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 		}
 
 		if site.Status != cdbm.SiteStatusRegistered {
-			logger.Warn().Msg(fmt.Sprintf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID.String()))
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SSH Key Group, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
+			logger.Warn().Msgf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SSH Key Group, Site: %s specified in request is not in Registered state", site.ID), nil)
 		}
 
 		// Validate the current tenant has access to this site
@@ -210,6 +187,35 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	dbskgsd := []cdbm.StatusDetail{}
 
 	err = cdb.WithTx(ctx, cskgh.dbSession, func(tx *cdb.Tx) error {
+		// Check name uniqueness under the Tenant lock that inventory recovery
+		// also holds, so neither can insert a duplicate Group name.
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key Group, could not acquire data store lock", nil)
+		}
+
+		lockedNameMatches, _, derr := skgDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.SSHKeyGroupFilterInput{
+				Names:     []string{apiRequest.Name},
+				TenantIDs: []uuid.UUID{tenant.ID},
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of tenant SSH Key Group")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key Group due to DB error", nil)
+		}
+		if len(lockedNameMatches) > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key Group with same name already exists for tenant")
+			return cutil.NewAPIError(http.StatusConflict, "An SSH Key Group with specified name already exists for Tenant", validation.Errors{
+				"id": errors.New(lockedNameMatches[0].ID.String()),
+			})
+		}
+
 		// Create SSH Key Group
 		skg, derr := skgDAO.Create(
 			ctx,
@@ -277,7 +283,7 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 		// Update SSH Key Group hash version
 		// Get hash version for current SSH Key Group using SSH Key Group Association and SSH Key IDs
-		uskg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID)
+		uskg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID, false)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating version for created SSH Key Group")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to set version for created SSH Key Group, DB error", nil)
@@ -585,8 +591,8 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 				}
 
 				if site.Status != cdbm.SiteStatusRegistered {
-					logger.Warn().Msg(fmt.Sprintf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID.String()))
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update SSH Key Group, The Site with ID: %s where this SSH Key Group is being created is not in Registered state", site.ID.String()), nil)
+					logger.Warn().Msgf("Unable to associate SSH Key Group to Site: %s. Site is not in Registered state", site.ID)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update SSH Key Group, The Site with ID: %s where this SSH Key Group is being created is not in Registered state", site.ID), nil)
 				}
 
 				// Validate the current tenant has access to this site
@@ -768,7 +774,7 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 		if siteAssociationChanged || keyAssociationChanged {
 			// Update SSH Key Group/Association versions
-			skg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID)
+			skg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID, false)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error updating current version for SSH Key Group")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to set updated version for SSH Key Group", nil)
@@ -1315,7 +1321,7 @@ func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
 	if statusQuery != "" {
 		_, ok := cdbm.SSHKeyGroupMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = append(statuses, statusQuery)

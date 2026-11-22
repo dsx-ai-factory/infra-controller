@@ -2796,7 +2796,7 @@ mod tests {
         // Rack 2 is soft-deleted between the census and its by-ID read; the
         // by-ID read still returns it, with `deleted` set.
         h.nico.after("find_rack_ids", |site| {
-            let rack = site.racks.get_mut(&fake::rack_id(2).to_string()).unwrap();
+            let rack = site.racks.get_mut(fake::rack_id(2).as_str()).unwrap();
             rack.deleted = Some(SystemTime::now().into());
         });
         h.sweep().await.expect("complete sweep");

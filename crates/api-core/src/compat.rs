@@ -254,11 +254,12 @@ mod tests {
             ["test-a"]
         );
         println!("Legacy data: {:?}", legacy_data);
+        let validation_id = validation_id.to_string();
         assert!(
             legacy_data
                 .pair
                 .iter()
-                .any(|pair| pair.key == "ValidationId" && pair.value == validation_id.to_string())
+                .any(|pair| pair.key == "ValidationId" && pair.value == validation_id)
         );
         assert!(
             legacy_data

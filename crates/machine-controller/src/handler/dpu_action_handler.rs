@@ -148,8 +148,10 @@ async fn pending_sync_is_outstanding(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     host: &HostMachine,
 ) -> Result<bool, StateHandlerError> {
-    let mut conn = ctx.services.db_pool.acquire().await?;
-    Ok(db::machine_pending_action::is_outstanding(&mut *conn, &host.id, DpuServiceSync).await?)
+    Ok(
+        db::machine_pending_action::is_outstanding(&ctx.services.db_pool, &host.id, DpuServiceSync)
+            .await?,
+    )
 }
 
 /// Marks this host's pending DPU service sync as done.

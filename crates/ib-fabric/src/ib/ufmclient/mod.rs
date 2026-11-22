@@ -302,9 +302,9 @@ pub(super) struct UFMConfig {
 pub(super) fn new_client(conf: UFMConfig) -> Result<Ufm, UFMError> {
     let addr = Url::parse(&conf.address)
         .map_err(|_| UFMError::InvalidConfig(format!("invalid UFM url: {}", conf.address)))?;
-    let address = addr.host_str().ok_or(UFMError::InvalidConfig(format!(
-        "invalid UFM host; url: {addr}"
-    )))?;
+    let address = addr
+        .host_str()
+        .ok_or_else(|| UFMError::InvalidConfig(format!("invalid UFM host; url: {addr}")))?;
 
     let base_path = match &conf.auth {
         AuthMethod::Token(_) => "/ufmRestV3",

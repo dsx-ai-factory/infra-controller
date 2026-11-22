@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+{{- if and .Values.metrics.enabled (eq (int .Values.metrics.port) (int .Values.service.port)) }}
+{{- fail "metrics.port must differ from service.port: metrics are served on a separate listener" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,6 +36,10 @@ spec:
             - "{{ .Values.config.path }}"
             - "--shutdown-timeout"
             - "{{ .Values.config.shutdownTimeout }}"
+            {{- if .Values.metrics.enabled }}
+            - "--metrics-listen"
+            - ":{{ .Values.metrics.port }}"
+            {{- end }}
             {{- if .Values.config.baseURL }}
             - "--base-url"
             - "{{ .Values.config.baseURL }}"
@@ -51,6 +58,10 @@ spec:
           ports:
             - containerPort: {{ .Values.service.port }}
               name: http
+            {{- if .Values.metrics.enabled }}
+            - containerPort: {{ .Values.metrics.port }}
+              name: metrics
+            {{- end }}
           # The MCP endpoint only answers JSON-RPC POSTs, so use a TCP probe
           # rather than an HTTP health check.
           readinessProbe:

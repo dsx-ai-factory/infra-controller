@@ -294,20 +294,17 @@ pub async fn set(
         })
 }
 
-pub async fn find<DB>(
+pub async fn find(
     org_id: &TenantOrganizationId,
-    db: &mut DB,
-) -> DatabaseResult<Option<TenantIdentityConfig>>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+    conn: impl DbReader<'_>,
+) -> DatabaseResult<Option<TenantIdentityConfig>> {
     let query = format!(
         "SELECT {} FROM tenant_identity_config WHERE organization_id = $1",
         TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
-        .fetch_optional(&mut *db)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY organization_id", e))
 }
@@ -551,6 +548,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::db_read::PgPoolReader;
     use crate::test_support::postgres::wait_for_blocked_query;
     use crate::{DatabaseError, TransactionVending as _, tenant};
 
@@ -821,7 +819,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         let commit_rotation = async {
             // The update must reach the database while the old key is still
             // visible to an unlocked read.
-            wait_for_blocked_query(&pool, blocker_pid, "tenant_identity_config").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker_pid,
+                "tenant_identity_config",
+            )
+            .await;
             rotation.commit().await.expect("commit rotation");
         };
         tokio::time::timeout(Duration::from_secs(60), async {
@@ -947,7 +950,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             let commit_rotation = async {
                 // Before the rotation commits, slot 1 looks expired. After the
                 // wait, it is the active signer and slot 2 has a new deadline.
-                wait_for_blocked_query(&pool, blocker_pid, "tenant_identity_config").await;
+                wait_for_blocked_query(
+                    &mut PgPoolReader::from(pool.clone()),
+                    blocker_pid,
+                    "tenant_identity_config",
+                )
+                .await;
                 rotation.commit().await.expect("commit rotation");
             };
             tokio::time::timeout(Duration::from_secs(60), async {
@@ -1033,7 +1041,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             result
         };
         let commit_first = async {
-            wait_for_blocked_query(&pool, blocker_pid, "INSERT INTO tenant_identity_config").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker_pid,
+                "INSERT INTO tenant_identity_config",
+            )
+            .await;
             first_txn.commit().await.expect("commit first creation");
         };
         let (result, ()) = tokio::time::timeout(Duration::from_secs(60), async {

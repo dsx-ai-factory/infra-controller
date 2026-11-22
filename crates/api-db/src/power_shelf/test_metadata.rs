@@ -86,7 +86,10 @@ async fn test_power_shelf_metadata_from_expected(
 
     assert_eq!(ps.metadata.name, "My Power Shelf");
     assert_eq!(ps.metadata.description, "48V power shelf");
-    assert_eq!(ps.metadata.labels.get("rack"), Some(&"rack-01".to_string()));
+    assert_eq!(
+        ps.metadata.labels.get("rack").map(String::as_str),
+        Some("rack-01")
+    );
 
     txn.rollback().await?;
     Ok(())
@@ -134,8 +137,8 @@ async fn test_power_shelf_metadata_update(
     assert_eq!(updated_ps.metadata.name, "Updated Shelf");
     assert_eq!(updated_ps.metadata.description, "Updated description");
     assert_eq!(
-        updated_ps.metadata.labels.get("team"),
-        Some(&"power".to_string())
+        updated_ps.metadata.labels.get("team").map(String::as_str),
+        Some("power")
     );
     assert_eq!(updated_ps.version.version_nr(), 2);
 

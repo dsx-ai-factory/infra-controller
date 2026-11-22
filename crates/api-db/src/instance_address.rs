@@ -89,7 +89,7 @@ pub async fn find_all_by_address(
 /// A dual-stack segment has one row per address family, so this lookup is not
 /// a zero-or-one relationship.
 pub async fn find_all_by_instance_id_and_segment_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     instance_id: &InstanceId,
     segment_id: &NetworkSegmentId,
 ) -> Result<Vec<InstanceAddress>, DatabaseError> {
@@ -103,7 +103,7 @@ pub async fn find_all_by_instance_id_and_segment_id(
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(instance_id)
         .bind(segment_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -303,7 +303,7 @@ fn validate(
 /// boolean used while draining a segment: it also checks machine interfaces
 /// and current or pending instance network configurations.
 pub async fn count_by_segment_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_id: &NetworkSegmentId,
 ) -> Result<usize, DatabaseError> {
     // NOTE(chet): Previously this query used an INNER JOIN with
@@ -315,7 +315,7 @@ pub async fn count_by_segment_id(
     let query = "SELECT count(*) FROM instance_addresses WHERE segment_id = $1::uuid";
     let (address_count,): (i64,) = query_as(query)
         .bind(segment_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(address_count.max(0) as usize)
@@ -337,7 +337,7 @@ pub async fn count_by_segment_id(
 /// individual scopes are narrower than this predicate; together they cover the
 /// same three reference sources.
 pub async fn segment_has_allocations(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_id: &NetworkSegmentId,
 ) -> Result<bool, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new(
@@ -362,7 +362,7 @@ pub async fn segment_has_allocations(
 
     builder
         .build_query_scalar()
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
@@ -461,8 +461,12 @@ pub async fn insert_service_address(
     Ok(address)
 }
 
-/// Tries to allocate IP addresses for a tenant network configuration
-/// Returns the updated configuration which includes allocated addresses
+/// Allocates addresses for a workload network configuration and returns its assigned resources.
+///
+/// New interfaces require Tenant or HostInband segments; other types return
+/// `InvalidArgument` after existing segment and VPC validation. Existing infrastructure
+/// bindings with addresses or SLAAC prefixes can remain during other interface edits.
+/// Callers must copy reused resources from matching persisted interfaces.
 pub async fn allocate(
     txn: &mut PgConnection,
     instance_id: InstanceId,
@@ -575,6 +579,20 @@ pub async fn allocate(
             }
         };
 
+        // Admin and Underlay segments serve infrastructure, while Tenant and
+        // HostInband serve workloads. Retained SLAAC bindings have only prefixes:
+        // `copy_existing_resources` copies them from matching stored interfaces,
+        // so keep those bindings while operators edit other interfaces.
+        if !segment.config.segment_type.is_tenant() {
+            if !iface.interface_prefixes.is_empty() {
+                continue;
+            }
+            return Err(DatabaseError::InvalidArgument(format!(
+                "network segment {} has type {:?} and cannot be used for instance workload allocation",
+                segment.id, segment.config.segment_type,
+            )));
+        }
+
         if segment.prefixes.is_empty() {
             tracing::error!(
                 network_segment_id = %segment.id,
@@ -647,11 +665,10 @@ pub async fn allocate(
                 .flat_map(|p| p.svi_ip.iter().copied())
                 .collect();
 
-            let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-                Box::new(UsedOverlayNetworkIpResolver {
-                    segment_id: segment.id,
-                    busy_ips,
-                });
+            let dhcp_handler = UsedOverlayNetworkIpResolver {
+                segment_id: segment.id,
+                busy_ips,
+            };
 
             // TODO(chet): FNN will need to override prefix_length (e.g. /30
             // for IPv4, /126 for IPv6) via InstanceInterfaceConfig. For now,
@@ -722,10 +739,7 @@ pub struct UsedOverlayNetworkIpResolver {
 }
 
 #[async_trait::async_trait]
-impl<DB> UsedIpResolver<DB> for UsedOverlayNetworkIpResolver
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+impl UsedIpResolver for UsedOverlayNetworkIpResolver {
     // DEPRECATED
     // With the introduction of `used_prefixes()` this is no
     // longer an accurate approach for finding all allocated
@@ -739,7 +753,7 @@ where
     // target the `address` column of the `instance_addresses`
     // table, in which a single /32 is stored (although, as an
     // `inet`, it could techincally also have a prefix length).
-    async fn used_ips(&self, txn: &mut DB) -> Result<Vec<IpAddr>, DatabaseError> {
+    async fn used_ips(&self, conn: impl DbReader<'_>) -> Result<Vec<IpAddr>, DatabaseError> {
         // IpAddrContainer is a small private struct used
         // for binding the result of the subsequent SQL
         // query, so we can implement FromRow and return
@@ -756,7 +770,7 @@ WHERE network_segments.id = $1::uuid";
 
         let containers: Vec<IpAddrContainer> = sqlx::query_as(query)
             .bind(self.segment_id)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -766,7 +780,10 @@ WHERE network_segments.id = $1::uuid";
     }
 
     // Keep allocated CIDRs intact and add caller reservations as host prefixes.
-    async fn used_prefixes(&self, txn: &mut DB) -> Result<Vec<IpNetwork>, DatabaseError> {
+    async fn used_prefixes(
+        &self,
+        conn: impl DbReader<'_>,
+    ) -> Result<Vec<IpNetwork>, DatabaseError> {
         // IpNetworkContainer is a small private struct used
         // for binding the result of the subsequent SQL
         // query, so we can implement FromRow and return
@@ -783,7 +800,7 @@ WHERE network_segments.id = $1::uuid";
 
         let containers: Vec<IpNetworkContainer> = sqlx::query_as(query)
             .bind(self.segment_id)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -942,11 +959,10 @@ pub async fn allocate_svi_ip(
     txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<(NetworkPrefixId, IpAddr)> {
-    let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-        Box::new(UsedOverlayNetworkIpResolver {
-            segment_id: segment.id,
-            busy_ips: vec![],
-        });
+    let dhcp_handler = UsedOverlayNetworkIpResolver {
+        segment_id: segment.id,
+        busy_ips: vec![],
+    };
 
     // If either requested addresses are auto-generated, we lock the entire table.
     lock_table_for_allocation(txn.as_mut()).await?;
@@ -1526,7 +1542,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let first = &expected[0];
         let by_instance = find_all_by_instance_id_and_segment_id(
-            connection,
+            &mut *connection,
             &first.instance_id,
             &first.segment_id,
         )

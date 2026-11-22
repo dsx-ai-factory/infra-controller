@@ -353,7 +353,17 @@ fn content_to_rdata(qtype: DnsResourceRecordType, content: &str) -> Option<RData
 /// `lookup_record`, which decides between records, NODATA and NXDOMAIN.
 /// Everything else is answered NOTIMP without an upstream call.
 fn api_record_type(qtype: RecordType) -> Option<DnsResourceRecordType> {
-    DnsResourceRecordType::try_from(qtype.to_string().as_str()).ok()
+    match qtype {
+        RecordType::A => Some(DnsResourceRecordType::A),
+        RecordType::AAAA => Some(DnsResourceRecordType::AAAA),
+        RecordType::PTR => Some(DnsResourceRecordType::PTR),
+        RecordType::SOA => Some(DnsResourceRecordType::SOA),
+        RecordType::NS => Some(DnsResourceRecordType::NS),
+        RecordType::CNAME => Some(DnsResourceRecordType::CNAME),
+        RecordType::MX => Some(DnsResourceRecordType::MX),
+        RecordType::TXT => Some(DnsResourceRecordType::TXT),
+        _ => None,
+    }
 }
 
 /// The query-type metric label, bounded by construction: the types the gate
@@ -376,10 +386,19 @@ impl From<RecordType> for Qtype {
 
 impl LabelValue for Qtype {
     fn label_value(&self) -> StringValue {
-        match self.0 {
-            Some(record_type) => StringValue::from(record_type.to_string().to_ascii_lowercase()),
-            None => StringValue::from("other"),
-        }
+        StringValue::from(match self.0 {
+            Some(record_type) => match record_type {
+                DnsResourceRecordType::A => "a",
+                DnsResourceRecordType::AAAA => "aaaa",
+                DnsResourceRecordType::PTR => "ptr",
+                DnsResourceRecordType::SOA => "soa",
+                DnsResourceRecordType::NS => "ns",
+                DnsResourceRecordType::CNAME => "cname",
+                DnsResourceRecordType::MX => "mx",
+                DnsResourceRecordType::TXT => "txt",
+            },
+            None => "other",
+        })
     }
 }
 

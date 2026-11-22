@@ -55,7 +55,7 @@ func BeginTx(ctx context.Context, dbSession *Session, txOptions *sql.TxOptions) 
 	// Set a max lock timeout to 300s for the transaction
 	// so that no blocking attempt to acquire a lock
 	// will block indefinitely.
-	_, err = tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
 	if err != nil {
 		wrappedTx.RollbackWithLog(ctx, log.Logger)
 		return nil, err
@@ -272,17 +272,19 @@ func GetIDB(tx *Tx, dbSession *Session) bun.IDB {
 	return dbSession.DB
 }
 
-// TryAcquireAdvisoryLock acquires an advisory lock
-// retrying (up to retryCnt times which defaults to 3) when the lock acquisition attempt fails
-// note, that each lock acquisition attempt is a non-blocking pg_try_advisory_xact_lock
-// retries will backoff exponentially starting with initial delay of 300ms (300ms, 600ms, 1200ms etc..)
-// with a max-jitter of 100ms.
+// TryAcquireAdvisoryLock acquires a transaction-level advisory lock using
+// non-blocking queries. By default it makes three total attempts, with exponential
+// backoff starting at 300ms plus up to 100ms of jitter. LockRetryOptions overrides
+// these defaults; Retries counts total attempts, and zero means unlimited attempts.
+// On exhaustion it returns only the final attempt's error, including
+// ErrXactAdvisoryLockFailed when that attempt finds the lock busy. If ctx is already
+// canceled or cancellation interrupts backoff, it returns context.Cause(ctx).
 func (tx *Tx) TryAcquireAdvisoryLock(ctx context.Context, lockID uint64, options *LockRetryOptions) error {
 	return tx.tryAcquireAdvisoryLock(ctx, lockID, options, advisoryLockExclusive)
 }
 
 // TryAcquireSharedAdvisoryLock acquires a shared transaction-level advisory
-// lock using the same non-blocking retry policy as TryAcquireAdvisoryLock.
+// lock using the same retry and error-selection policy as TryAcquireAdvisoryLock.
 func (tx *Tx) TryAcquireSharedAdvisoryLock(ctx context.Context, lockID uint64, options *LockRetryOptions) error {
 	return tx.tryAcquireAdvisoryLock(ctx, lockID, options, advisoryLockShared)
 }
@@ -314,6 +316,8 @@ func (tx *Tx) tryAcquireAdvisoryLock(ctx context.Context, lockID uint64, options
 	return retry.Do(
 		retriableFunc,
 		retry.Context(ctx),
+		// Earlier contention must not make a later failure match ErrXactAdvisoryLockFailed.
+		retry.LastErrorOnly(true),
 		retry.Attempts(retries),
 		retry.Delay(delay),
 		retry.MaxJitter(jitter),

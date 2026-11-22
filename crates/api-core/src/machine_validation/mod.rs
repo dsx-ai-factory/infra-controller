@@ -28,6 +28,7 @@ use carbide_utils::managed_loop::{LoopManager, ManagedLoopIteration};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use db::machine_validation::{StateColumn, ValidationNotActive};
 use db::{ConditionalWrite, ObjectColumnFilter};
+use itertools::Itertools;
 use model::machine::{FailureCause, FailureDetails, FailureSource};
 use model::machine_validation::{
     MachineValidation, MachineValidationRunItem, MachineValidationRunItemState,
@@ -417,7 +418,6 @@ async fn reconcile_terminal_run_items(
             .iter()
             .filter(|item| item.state == MachineValidationRunItemState::Failed)
             .map(|item| item.display_name.as_str())
-            .collect::<Vec<_>>()
             .join(", ");
         let error_message = format!(
             "Machine validation run {} completed with failed run item(s): {}",
@@ -615,7 +615,7 @@ async fn record_failed_validation_side_effects(
         return Ok(completion);
     };
 
-    let Some(machine) = db::machine::find_by_validation_id(txn, &validation.id).await? else {
+    let Some(machine) = db::machine::find_by_validation_id(&mut *txn, &validation.id).await? else {
         tracing::warn!(
             machine_validation_id = %validation.id,
             machine_id = %validation.machine_id,
@@ -663,7 +663,6 @@ mod tests {
     use carbide_uuid::machine_validation::{
         MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
     };
-    use db::TransactionVending as _;
     use model::machine_validation::MachineValidationAttemptState;
 
     use super::*;

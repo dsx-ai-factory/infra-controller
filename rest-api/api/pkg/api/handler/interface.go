@@ -196,7 +196,7 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", *request.Status))
 		_, ok := cdbm.InterfaceStatusMap[*request.Status]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", *request.Status))
+			logger.Warn().Msgf("invalid value in status query: %v", *request.Status)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		status = request.Status

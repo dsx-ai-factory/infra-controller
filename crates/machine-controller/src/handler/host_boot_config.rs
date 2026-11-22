@@ -45,9 +45,8 @@ use super::bios_config::{
 };
 use super::{
     ReachabilityParams, RequiredBootInterface, SetBootOrderOutcome,
-    are_dpus_up_trigger_reboot_if_needed, is_dpu_observed_since, log_host_config,
-    require_boot_interface, resolve_boot_interface_for_step, set_host_boot_order,
-    trigger_reboot_if_needed,
+    are_dpus_observed_since_trigger_reboot_if_needed, are_dpus_up_trigger_reboot_if_needed,
+    log_host_config, require_boot_interface, resolve_boot_interface_for_step, set_host_boot_order,
 };
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 use crate::platform_config::{self, PlatformBmc};
@@ -444,29 +443,13 @@ async fn should_wait_for_dpus_before_host_boot_config(
                 return false;
             };
 
-            for dpu_snapshot in &mh_snapshot.dpu_snapshots {
-                if !is_dpu_observed_since(dpu_snapshot, last_reboot_requested.time) {
-                    match trigger_reboot_if_needed(
-                        dpu_snapshot,
-                        mh_snapshot,
-                        None,
-                        reachability_params,
-                        ctx,
-                    )
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(
-                            dpu_machine_id = %dpu_snapshot.id,
-                            error = %e,
-                            "Could not reboot DPU while waiting to check host boot config"
-                        ),
-                    }
-                    return true;
-                }
-            }
-
-            false
+            !are_dpus_observed_since_trigger_reboot_if_needed(
+                mh_snapshot,
+                last_reboot_requested.time,
+                reachability_params,
+                ctx,
+            )
+            .await
         }
     }
 }
@@ -568,6 +551,7 @@ mod tests {
             dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -579,6 +563,12 @@ mod tests {
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline: tokio::time::Instant::now()
+                + services
+                    .site_config
+                    .machine_state_controller
+                    .controller
+                    .max_object_handling_time,
             services: &mut services,
             metrics: &mut metrics,
             pending_db_writes: &mut pending_db_writes,

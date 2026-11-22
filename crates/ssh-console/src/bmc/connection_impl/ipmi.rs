@@ -757,7 +757,7 @@ impl IpmitoolMessageProxy {
             Ok(())
         } else {
             Err(PowerResetError::Failure {
-                output: String::from_utf8_lossy(&output.stderr).to_string(),
+                output: String::from_utf8_lossy(&output.stderr).into_owned(),
             })
         }
     }

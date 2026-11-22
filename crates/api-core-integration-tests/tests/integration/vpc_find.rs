@@ -274,15 +274,15 @@ async fn test_vpc_search_based_on_labels(pool: PgPool) {
             .create_vpc(
                 rpc::VpcCreationRequest::builder("")
                     .metadata(rpc::Metadata {
-                        name: format!("VPC_{i}{i}{i}").to_string(),
-                        description: format!("VPC_{i}{i}{i} have labels").to_string(),
+                        name: format!("VPC_{i}{i}{i}"),
+                        description: format!("VPC_{i}{i}{i} have labels"),
                         labels: vec![
                             rpc::Label {
-                                key: format!("key_A_{i}{i}{i}").to_string(),
-                                value: Some(format!("value_A_{i}{i}{i}").to_string()),
+                                key: format!("key_A_{i}{i}{i}"),
+                                value: Some(format!("value_A_{i}{i}{i}")),
                             },
                             rpc::Label {
-                                key: format!("key_B_{i}{i}{i}").to_string(),
+                                key: format!("key_B_{i}{i}{i}"),
                                 value: None,
                             },
                         ],
@@ -364,17 +364,15 @@ async fn test_vpc_find_by_segment(pool: PgPool) {
         .await
         .id;
 
-    let mut txn = env.db_txn().await;
-    let vpc_id = db::vpc::find_by_name(txn.as_mut(), "test vpc 1")
+    let vpc_id = db::vpc::find_by_name(&env.api().database_connection, "test vpc 1")
         .await
         .unwrap()
         .first()
         .unwrap()
         .id;
-    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+    let vpc = db::vpc::find_by_segment(&env.api().database_connection, segment_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(vpc.id.to_string(), vpc_id.to_string());
-    txn.rollback().await.unwrap();
 }

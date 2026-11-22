@@ -15,6 +15,7 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{acknowledge, insert, latest, load, lock_binding};
+use crate::db_read::PgPoolReader;
 use crate::resource_pool::binding::bind_or_verify;
 use crate::test_support::postgres::wait_for_blocked_query;
 use crate::{DatabaseError, TransactionVending as _};
@@ -227,7 +228,12 @@ async fn binding_lock_serializes_registration_and_allows_key_shares(
         Ok::<_, eyre::Report>(second)
     };
     let commit_first = async {
-        wait_for_blocked_query(&pool, first_pid, "FOR NO KEY UPDATE").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            first_pid,
+            "FOR NO KEY UPDATE",
+        )
+        .await;
         first_txn.commit().await?;
         Ok::<_, eyre::Report>(())
     };

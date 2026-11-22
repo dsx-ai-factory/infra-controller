@@ -288,6 +288,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
 
     /// Minimal host expected machine carrying the given reservations. The child
     /// rows are written by `expected_machine::create`, which delegates to
@@ -670,10 +671,11 @@ mod tests {
             let mut creator = pool.txn_begin().await?;
             let lookup = find_by_dpu_oob_net0_mac_for_update(creator.as_mut(), mac);
             tokio::pin!(lookup);
+            let mut reader = PgPoolReader::from(pool.clone());
             tokio::select! {
                 result = &mut lookup => panic!("creation did not wait for reservation writer: {result:?}"),
                 _ = crate::test_support::postgres::wait_for_blocked_query(
-                    &pool, blocker_pid, query_fragment,
+                    &mut reader, blocker_pid, query_fragment,
                 ) => {}
             }
             let next = reservation(&mac.to_string(), Some(address), None);

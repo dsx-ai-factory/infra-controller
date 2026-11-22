@@ -18,6 +18,7 @@
 use carbide_uuid::machine::{MachineIdSource, MachineType};
 
 use super::*;
+use crate::TransactionVending as _;
 
 async fn seed_dpus(
     pool: &sqlx::PgPool,
@@ -86,7 +87,7 @@ async fn prediction_preserves_ownership_and_the_callers_transaction(
 
     let mut connection = pool.acquire().await?;
     assert!(
-        crate::predicted_machine_interface::find_by_mac_address(&mut connection, mac_address)
+        crate::predicted_machine_interface::find_by_mac_address(&mut *connection, mac_address)
             .await?
             .is_none(),
         "rolling back the caller's transaction must remove the prediction",
@@ -159,6 +160,161 @@ async fn existing_interface_ownership_is_preserved(
         );
         txn.rollback().await?;
         assert!(find_by_mac_address(&pool, mac_address).await?.is_empty());
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn dpu_loopback_owner_during_first_dhcp(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::db_read::PgPoolReader;
+    use crate::test_support::postgres::wait_for_blocked_query;
+
+    let (machine_id, _) = seed_dpus(&pool).await?;
+    let dpu_id = DpuMachineId::try_from(machine_id)?;
+    let mac = MacAddress::new([2, 0, 0, 0, 0x83, 1]);
+    let relay_ip = "192.0.2.1".parse()?;
+    let mut underlay = crate::test_support::network_segment::admin_segment(
+        "dpu-oob",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        1,
+    );
+    underlay.segment_type = NetworkSegmentType::Underlay;
+    let mut setup = pool.txn_begin().await?;
+    let segment = db_network_segment::persist(
+        underlay,
+        setup.as_mut(),
+        model::network_segment::NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    ensure_dpu_oob_interface_ownership(setup.as_mut(), &dpu_id, mac).await?;
+    // Until the real row has an owner, the prediction is still authoritative.
+    insert_machine_interface(
+        setup.as_mut(),
+        &segment.id,
+        &mac,
+        "oob".to_string(),
+        None,
+        false,
+        InterfaceType::Data,
+    )
+    .await?;
+    assert!(dpu_owns_oob_mac(setup.as_mut(), &dpu_id, mac).await?);
+    let prediction = crate::predicted_machine_interface::find_by_mac_address(setup.as_mut(), mac)
+        .await?
+        .expect("Site Explorer recorded the OS/admin MAC before DHCP");
+    setup.commit().await?;
+
+    let mut dhcp = pool.txn_begin().await?;
+    lock_network_segments_exclusive(dhcp.as_mut(), &[segment.id]).await?;
+    sqlx::query("LOCK TABLE predicted_machine_interfaces IN ACCESS EXCLUSIVE MODE")
+        .execute(dhcp.as_mut())
+        .await?;
+    let dhcp_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(dhcp.as_mut())
+        .await?;
+
+    // With two queries, the first could see no real owner and the second
+    // would wait here until DHCP had already deleted the prediction.
+    let ownership = dpu_owns_oob_mac(&pool, &dpu_id, mac);
+    tokio::pin!(ownership);
+    let mut observer = PgPoolReader::from(pool.clone());
+    tokio::select! {
+        result = &mut ownership => panic!("ownership read did not wait for promotion: {result:?}"),
+        _ = wait_for_blocked_query(&mut observer, dhcp_pid, "predicted_machine_interfaces") => {}
+    }
+    move_predicted_machine_interface_to_machine(
+        dhcp.as_mut(),
+        &prediction,
+        relay_ip,
+        None,
+        &[segment.id],
+    )
+    .await?;
+    dhcp.commit().await?;
+    assert!(
+        ownership.await?,
+        "the same DPU owns the MAC across promotion"
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn dpu_loopback_owner_requires_an_uncontested_data_interface(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use MachineInterfaceAssociation::{Machine, PowerShelf};
+
+    let (machine_id, other_machine_id) = seed_dpus(&pool).await?;
+    let dpu_id = DpuMachineId::try_from(machine_id)?;
+    let mut setup = pool.txn_begin().await?;
+    let segments: Vec<NetworkSegmentId> = sqlx::query_scalar(
+        "INSERT INTO network_segments (name, version, network_segment_type)
+         VALUES ('first', 'V1-T0', 'underlay'), ('second', 'V1-T0', 'underlay') RETURNING id",
+    )
+    .fetch_all(setup.as_mut())
+    .await?;
+    let shelf = crate::test_support::power_shelf::create_seeded(setup.as_mut(), 1, "shelf").await?;
+    setup.commit().await?;
+
+    let mac = MacAddress::new([2, 0, 0, 0, 0x84, 1]);
+    for (case, interface_type, owner, add_dpu_data_row, expected) in [
+        (
+            "DPU BMC only",
+            InterfaceType::Bmc,
+            Machine(machine_id),
+            false,
+            false,
+        ),
+        (
+            "same DPU data and BMC",
+            InterfaceType::Bmc,
+            Machine(machine_id),
+            true,
+            true,
+        ),
+        (
+            "two machine owners",
+            InterfaceType::Data,
+            Machine(other_machine_id),
+            true,
+            false,
+        ),
+        (
+            "shelf overrides prediction",
+            InterfaceType::Data,
+            PowerShelf(shelf.id),
+            false,
+            false,
+        ),
+    ] {
+        let mut txn = pool.txn_begin().await?;
+        ensure_dpu_oob_interface_ownership(txn.as_mut(), &dpu_id, mac).await?;
+        let mut rows = vec![(interface_type, owner)];
+        if add_dpu_data_row {
+            rows.push((InterfaceType::Data, Machine(machine_id)));
+        }
+        for ((interface_type, owner), segment_id) in rows.into_iter().zip(&segments) {
+            let interface_id = insert_machine_interface(
+                txn.as_mut(),
+                segment_id,
+                &mac,
+                "test".to_string(),
+                None,
+                false,
+                interface_type,
+            )
+            .await?;
+            associate_interface_with_machine(&interface_id, owner, txn.as_mut()).await?;
+        }
+        assert_eq!(
+            dpu_owns_oob_mac(txn.as_mut(), &dpu_id, mac).await?,
+            expected,
+            "{case}"
+        );
+        txn.rollback().await?;
     }
     Ok(())
 }

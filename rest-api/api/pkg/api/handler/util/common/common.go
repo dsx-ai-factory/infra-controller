@@ -300,7 +300,7 @@ func AcquireInstanceTypeQuotaLock(ctx context.Context, tx *cdb.Tx, tenantID uuid
 		return ErrInvalidFunctionParams
 	}
 
-	lockID := fmt.Sprintf("%s-%s", tenantID.String(), instanceTypeID.String())
+	lockID := fmt.Sprintf("%s-%s", tenantID, instanceTypeID)
 	return tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 }
 
@@ -325,11 +325,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	// Get all available Machines for the Instance Type
 	// Since this query is occurring outside of a lock, we will have to double check availability of Machines
 	filterInput := cdbm.MachineFilterInput{
-		InstanceTypeIDs:               []uuid.UUID{instanceType.ID},
-		IsAssigned:                    cutil.GetPtr(false),
-		Statuses:                      []string{cdbm.MachineStatusReady},
-		Labels:                        machineLabelSelector,
-		ExcludeForceDeletionRequested: true,
+		InstanceTypeIDs: []uuid.UUID{instanceType.ID},
+		IsAssigned:      cutil.GetPtr(false),
+		Statuses:        []string{cdbm.MachineStatusReady},
+		Labels:          machineLabelSelector,
 	}
 	machines, _, err := mcDAO.GetAll(ctx, tx, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -437,7 +436,7 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 					return ErrMachineUnavailable
 				}
 
-				if umc.IsAssigned || umc.IsForceDeletionQuarantined() {
+				if umc.IsAssigned {
 					return ErrMachineUnavailable
 				}
 
@@ -484,10 +483,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 }
 
 // GetCountOfMachinesForInstanceType is a utility function to return count of
-// machines for instance type, excluding recorded force-deletion attempts.
+// machines for instance type
 func GetCountOfMachinesForInstanceType(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, instanceTypeID uuid.UUID) (int, error) {
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
-	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}, ExcludeForceDeletionRequested: true}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
+	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -879,13 +878,8 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 	// instanceTypeIDToMachinesMap is used to keep track of the number of machines assigned to each instance type
 	// This would be the number of potential instances that could be created.
 	instanceTypeIDToMachinesMap := make(map[uuid.UUID]int)
-	allocationCapacityByInstanceType := make(map[uuid.UUID]int)
 	for _, machine := range machines {
 		instanceTypeIDToMachinesMap[*machine.InstanceTypeID]++
-		if machine.IsForceDeletionQuarantined() {
-			continue
-		}
-		allocationCapacityByInstanceType[*machine.InstanceTypeID]++
 
 		// If no instance was found for the machine, then it's unused.
 		// If it's in a Ready state, then record it as unused-but-usable.
@@ -915,8 +909,12 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 		}
 
 		if tenantID == nil {
-			// Retained owner rows remain Assigned, but cannot back another Allocation.
-			aas.MaxAllocatable = cutil.GetPtr(max(0, allocationCapacityByInstanceType[instanceTypeID]-aas.Total))
+			mtotal := instanceTypeIDToMachinesMap[instanceTypeID]
+			if aas.Total <= mtotal {
+				aas.MaxAllocatable = cutil.GetPtr(mtotal - aas.Total)
+			} else {
+				logger.Error().Int("Total Allocation Count", aas.Total).Int("Total Machines", mtotal).Msg("total Allocation count exceeds Machines assigned to Instance Type")
+			}
 		}
 
 		allocAPIStatsMap[instanceTypeID] = aas
@@ -1251,7 +1249,7 @@ func TerminateWorkflowOnTimeOut(echoCtx echo.Context, logger zerolog.Logger, tem
 // TerminateWorkflowOnTimeOutError performs the existing timeout cleanup without
 // sending a response, so callers can classify recovery after the DB tx unwinds.
 func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclient.Client, workflowID string, originalError error, objectType string, workflowName string) *cutil.APIError {
-	logger.Error().Err(originalError).Msg(fmt.Sprintf("failed to perform %s for %s - timeout occurred executing workflow on Site.", workflowName, objectType))
+	logger.Error().Err(originalError).Msgf("failed to perform %s for %s - timeout occurred executing workflow on Site.", workflowName, objectType)
 
 	// Create a new context deadline
 	newctx, newcancel := context.WithTimeout(context.Background(), cutil.WorkflowContextNewAfterTimeout)
@@ -1260,11 +1258,11 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 	// Initiate termination workflow
 	serr := temporalClient.TerminateWorkflow(newctx, workflowID, "", fmt.Sprintf("timeout occurred executing %s workflow for %s", workflowName, objectType))
 	if serr != nil {
-		logger.Error().Err(serr).Msg(fmt.Sprintf("failed to execute terminate Temporal workflow for %s %s workflow", objectType, workflowName))
+		logger.Error().Err(serr).Msgf("failed to execute terminate Temporal workflow for %s %s workflow", objectType, workflowName)
 		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to terminate synchronous %s %s workflow after timeout, Cloud and Site data may be de-synced: %s", objectType, workflowName, serr), nil)
 	}
 
-	logger.Info().Str("Workflow ID", workflowID).Msg(fmt.Sprintf("initiated terminate synchronous %s workflow for %s successfully", workflowName, objectType))
+	logger.Info().Str("Workflow ID", workflowID).Msgf("initiated terminate synchronous %s workflow for %s successfully", workflowName, objectType)
 
 	return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to perform %s %s - timeout occurred executing workflow on Site: %s", objectType, workflowName, originalError), nil)
 }
@@ -1307,6 +1305,8 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 			code = http.StatusNotImplemented
 		case codes.Unavailable:
 			code = http.StatusServiceUnavailable
+		case codes.DeadlineExceeded:
+			code = http.StatusGatewayTimeout
 		case codes.PermissionDenied:
 			code = http.StatusForbidden
 		case codes.AlreadyExists, codes.Aborted:
@@ -1338,6 +1338,8 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 		code = http.StatusForbidden
 	case swe.ErrTypeNICoUnavailable, swe.ErrTypeCarbideUnavailable:
 		code = http.StatusServiceUnavailable
+	case swe.ErrTypeNICoDeadlineExceeded:
+		code = http.StatusGatewayTimeout
 	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists, swe.ErrTypeNICoAborted:
 		code = http.StatusConflict
 	case swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition:
@@ -1515,17 +1517,25 @@ func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient
 		return nil, "", apiErr
 	}
 
-	if site.Status != cdbm.SiteStatusRegistered {
-		return nil, "", cutil.NewAPIError(http.StatusBadRequest, "Site is not in Registered state, unable to execute operation on Site", nil)
+	stc, apiErr := GetRegisteredSiteClient(in.Logger, in.SCP, site)
+	if apiErr != nil {
+		return nil, "", apiErr
 	}
-
-	stc, err := in.SCP.GetClientByID(site.ID)
-	if err != nil {
-		in.Logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
-	}
-
 	return stc, site.ID.String(), nil
+}
+
+// GetRegisteredSiteClient checks readiness and resolves an already-authorized
+// Site's Temporal client without querying the database.
+func GetRegisteredSiteClient(logger zerolog.Logger, pool SiteTemporalClientPool, site *cdbm.Site) (tclient.Client, *cutil.APIError) {
+	if site.Status != cdbm.SiteStatusRegistered {
+		return nil, cutil.NewAPIError(http.StatusBadRequest, "Site is not in Registered state, unable to execute operation on Site", nil)
+	}
+	stc, err := pool.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	return stc, nil
 }
 
 // IsTenant ensures that user is authorized to act as a Tenant Admin for the org.
@@ -2210,6 +2220,7 @@ func ExecuteFirmwareUpdateWorkflow(
 	version *string,
 	targets []string,
 	authenticationData *flowv1.FirmwareAuthenticationData,
+	deviceCredentialOverrides *flowv1.DeviceCredentialOverrides,
 	siteID string,
 	ruleID *string,
 	overrideReadinessCheck bool,
@@ -2218,21 +2229,22 @@ func ExecuteFirmwareUpdateWorkflow(
 	entityName string,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	flowRequest := &flowv1.UpgradeFirmwareRequest{
-		TargetSpec:             targetSpec,
-		TargetVersion:          version,
-		SubTargets:             targets,
-		Description:            fmt.Sprintf("API firmware update %s", entityName),
-		RuleId:                 GetFlowUUIDPtr(ruleID),
-		OverrideReadinessCheck: overrideReadinessCheck,
-		OverrideVersionCheck:   overrideVersionCheck,
-		AuthenticationData:     authenticationData,
+		TargetSpec:                targetSpec,
+		TargetVersion:             version,
+		SubTargets:                targets,
+		Description:               fmt.Sprintf("API firmware update %s", entityName),
+		RuleId:                    GetFlowUUIDPtr(ruleID),
+		OverrideReadinessCheck:    overrideReadinessCheck,
+		OverrideVersionCheck:      overrideVersionCheck,
+		AuthenticationData:        authenticationData,
+		DeviceCredentialOverrides: deviceCredentialOverrides,
 	}
 	if overrideVersionCheck {
 		workflowID += "-override-version-check"
 	}
 
 	conflictPolicy := temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING
-	if authenticationData != nil {
+	if authenticationData != nil || deviceCredentialOverrides != nil {
 		// A deterministic ID could attach a request carrying different
 		// credentials to an in-flight execution for the same target. A random,
 		// non-secret suffix prevents credential substitution without exposing a
@@ -2256,7 +2268,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		flowv1.Flow_UpgradeFirmware_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, conflictPolicy,
-		siteID, "authenticationData",
+		siteID, "authenticationData", "deviceCredentialOverrides",
 	)
 	if proxyErr != nil {
 		return nil, proxyErr

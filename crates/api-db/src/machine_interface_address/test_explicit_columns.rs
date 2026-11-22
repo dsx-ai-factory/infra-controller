@@ -120,10 +120,10 @@ async fn assert_address_and_dhcp_queries(
     connection: &mut PgConnection,
     expected: &DhcpRecord,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let address = find_ipv4_for_interface(connection, expected.machine_interface_id).await?;
+    let address = find_ipv4_for_interface(&mut *connection, expected.machine_interface_id).await?;
     assert_eq!(address.address, expected.address);
     let entries = dhcp_entry::find_by(
-        connection,
+        &mut *connection,
         ObjectColumnFilter::One(
             dhcp_entry::MachineInterfaceIdColumn,
             &expected.machine_interface_id,

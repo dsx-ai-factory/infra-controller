@@ -108,7 +108,7 @@ func TestFlowServerImpl_AddPowerTaskExternalTargets(t *testing.T) {
 			previousLogger := log.Logger
 			log.Logger = zerolog.New(&diagnostics)
 			t.Cleanup(func() { log.Logger = previousLogger })
-			inventory := &powerDetailsInventory{identityRead: func(context.Context) ([]component.Identity, error) {
+			inventory := &detailsInventory{identityRead: func(context.Context) ([]component.Identity, error) {
 				return tc.identities, tc.readError
 			}}
 			server := &FlowServerImpl{inventoryManager: inventory}

@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use carbide_ib_fabric::config::IBFabricConfig;
-use carbide_instrument::testing::MetricsCapture;
+use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_uuid::infiniband::IBPartitionId;
 use db::db_read::PgPoolReader;
 use db::{self, ObjectColumnFilter, TransactionVending as _};
@@ -31,6 +31,7 @@ use tonic::Request;
 
 use crate::api::Api;
 use crate::api::rpc::IbPartitionConfig;
+use crate::test_support::builder::TestApiBuilder;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::{TestEnvOverrides, create_test_env};
 
@@ -245,6 +246,9 @@ async fn test_create_ib_partition_over_max_limit(
                 .await?;
     }
 
+    let pkey_pool = &env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    let before = db::resource_pool::stats(&env.pool, pkey_pool.name()).await?;
+
     // create one more ib partition for this tenant, should be fail with no rows retruned from DB.
     let response =
         create_ib_partition_with_api(&env.api, FIXTURE_CREATED_IB_PARTITION_NAME.to_string()).await;
@@ -257,6 +261,10 @@ async fn test_create_ib_partition_over_max_limit(
         "Error message should contain 'maximum limit of infiniband partitions had been reached', but is {error}"
     );
 
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, pkey_pool.name()).await?,
+        before
+    );
     Ok(())
 }
 
@@ -307,7 +315,7 @@ async fn test_reject_create_with_invalid_metadata(
 }
 
 #[crate::sqlx_test]
-async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
+async fn create_ib_partition_allocation_failures_preserve_status_and_metrics(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = common::api_fixtures::get_config();
@@ -321,58 +329,144 @@ async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
     )
     .await;
     let pkey_pool = &env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
-    sqlx::query("UPDATE resource_pool SET auto_assign = true WHERE name = $1")
-        .bind(pkey_pool.name())
-        .execute(&env.pool)
-        .await?;
-    let before = db::resource_pool::stats(&env.pool, pkey_pool.name()).await?;
-    let id = IBPartitionId::new();
-    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
-
-    let error = env
-        .api
-        .create_ib_partition(Request::new(rpc::forge::IbPartitionCreationRequest {
-            id: Some(id),
-            config: Some(IbPartitionConfig {
-                name: "explicit-pkey".to_string(),
-                tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
-                pkey: Some("0x05".to_string()),
-            }),
-            metadata: Some(rpc::Metadata {
-                name: "explicit-pkey".to_string(),
-                ..Default::default()
-            }),
-        }))
-        .await
-        .expect_err("automatic-only pools must reject explicit PKeys");
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert!(error.message().contains("has no explicit allocation range"));
-    assert_eq!(
-        metrics.counter_delta(
-            "carbide_resource_pool_lifecycle_failures_total",
-            &[
-                ("operation", "allocate"),
-                ("failure", "configuration"),
-                ("failure_policy", "required"),
-                ("allocation_mode", "requested"),
-                ("value_type", "integer"),
-            ],
-        ),
-        1.0,
-    );
-    assert_eq!(
-        db::resource_pool::stats(&env.pool, pkey_pool.name()).await?,
-        before
-    );
-    let persisted = env
-        .api
-        .find_ib_partitions_by_ids(Request::new(rpc::forge::IbPartitionsByIdsRequest {
-            ib_partition_ids: vec![id],
-            include_history: false,
-        }))
-        .await?
-        .into_inner();
-    assert!(persisted.ib_partitions.is_empty());
+    #[derive(Clone, Copy)]
+    enum AllocationFailureCase {
+        AutomaticOnly,
+        ExhaustedWithInvalidMetadata,
+        Absent,
+    }
+    for case in [
+        AllocationFailureCase::AutomaticOnly,
+        AllocationFailureCase::ExhaustedWithInvalidMetadata,
+        AllocationFailureCase::Absent,
+    ] {
+        let (scenario, requested_pkey, code, failure, message) = match case {
+            AllocationFailureCase::AutomaticOnly => (
+                "automatic-only pool",
+                Some("0x05"),
+                tonic::Code::FailedPrecondition,
+                "configuration",
+                "has no explicit allocation range",
+            ),
+            AllocationFailureCase::ExhaustedWithInvalidMetadata => (
+                "exhausted pool with invalid metadata",
+                None,
+                tonic::Code::ResourceExhausted,
+                "exhausted",
+                "pool pkey",
+            ),
+            AllocationFailureCase::Absent => (
+                "absent pool",
+                None,
+                tonic::Code::FailedPrecondition,
+                "configuration",
+                "has no automatic allocation range",
+            ),
+        };
+        let metadata_name = match case {
+            AllocationFailureCase::ExhaustedWithInvalidMetadata => "",
+            _ => scenario,
+        };
+        let mut fallback_api = None;
+        match case {
+            AllocationFailureCase::AutomaticOnly => {
+                sqlx::query("UPDATE resource_pool SET auto_assign = true WHERE name = $1")
+                    .bind(pkey_pool.name())
+                    .execute(&env.pool)
+                    .await?;
+            }
+            AllocationFailureCase::ExhaustedWithInvalidMetadata => {
+                sqlx::query("DELETE FROM resource_pool WHERE name = $1 AND value <> '1'")
+                    .bind(pkey_pool.name())
+                    .execute(&env.pool)
+                    .await?;
+                create_ib_partition_with_api(&env.api, "occupy last PKey".into()).await?;
+            }
+            AllocationFailureCase::Absent => {
+                sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+                    .bind(pkey_pool.name())
+                    .execute(&env.pool)
+                    .await?;
+                sqlx::query("DELETE FROM resource_pool_binding WHERE pool_name = $1")
+                    .bind(pkey_pool.name())
+                    .execute(&env.pool)
+                    .await?;
+                fallback_api = Some(
+                    TestApiBuilder::new(
+                        env.pool.clone(),
+                        env.common_pools.clone(),
+                        env.api.work_lock_manager_handle.clone(),
+                    )
+                    .with_runtime_config(env.config.clone())
+                    .with_instrumentation(env.api.instrumentation.clone())
+                    .with_ib_fabric_manager(env.api.ib_fabric_manager.clone())
+                    .build(),
+                );
+            }
+        }
+        let before = db::resource_pool::stats(&env.pool, pkey_pool.name()).await?;
+        let id = IBPartitionId::new();
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+        let api = fallback_api.as_ref().unwrap_or(env.api.as_ref());
+        let (result, logs) = capture_logs_async(api.create_ib_partition(Request::new(
+            rpc::forge::IbPartitionCreationRequest {
+                id: Some(id),
+                config: Some(IbPartitionConfig {
+                    name: scenario.into(),
+                    tenant_organization_id: FIXTURE_TENANT_ORG_ID.into(),
+                    pkey: requested_pkey.map(str::to_owned),
+                }),
+                metadata: Some(rpc::Metadata {
+                    name: metadata_name.into(),
+                    ..Default::default()
+                }),
+            },
+        )))
+        .await;
+        let error = result.expect_err(scenario);
+        assert_eq!(error.code(), code, "{scenario}: {error}");
+        assert!(error.message().contains(message), "{scenario}: {error}");
+        assert!(
+            logs.iter()
+                .any(|log| log.field("owner_id") == Some(metadata_name)
+                    && log.field("pool") == Some("pkey")),
+            "missing allocation diagnostic context: {logs:?}"
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_resource_pool_lifecycle_failures_total",
+                &[
+                    ("operation", "allocate"),
+                    ("failure", failure),
+                    ("failure_policy", "required"),
+                    (
+                        "allocation_mode",
+                        if requested_pkey.is_some() {
+                            "requested"
+                        } else {
+                            "automatic"
+                        }
+                    ),
+                    ("value_type", "integer"),
+                ]
+            ),
+            1.0,
+            "{scenario}"
+        );
+        assert_eq!(
+            db::resource_pool::stats(&env.pool, pkey_pool.name()).await?,
+            before
+        );
+        let persisted = env
+            .api
+            .find_ib_partitions_by_ids(Request::new(rpc::forge::IbPartitionsByIdsRequest {
+                ib_partition_ids: vec![id],
+                include_history: false,
+            }))
+            .await?
+            .into_inner();
+        assert!(persisted.ib_partitions.is_empty(), "{scenario}");
+    }
     Ok(())
 }
 
@@ -394,7 +488,7 @@ async fn create_ib_partition_with_api_with_id(
 
     // Try an explicit pkey request with a bad format.
     // This should fail.
-    let _ = env
+    let malformed = env
         .api
         .create_ib_partition(Request::new(rpc::forge::IbPartitionCreationRequest {
             id: Some(IBPartitionId::new()),
@@ -414,6 +508,11 @@ async fn create_ib_partition_with_api_with_id(
         }))
         .await
         .unwrap_err();
+    assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+    assert!(
+        malformed.message().starts_with("invalid pkey value:"),
+        "{malformed}"
+    );
 
     // Try an explicit pkey request with a good format but in the range
     // that isn't allowed to be explicitly requested.
@@ -771,7 +870,7 @@ async fn test_duplicate_ib_partition(pool: sqlx::PgPool) {
     .unwrap()
     .remove(0);
     let status = partition.status.as_mut().unwrap();
-    status.pkey = Some(pkey.to_string().parse().unwrap());
+    status.pkey = Some(pkey.parse().unwrap());
 
     let mut txn = pool.txn_begin().await.unwrap();
     db::ib_partition::update_status(

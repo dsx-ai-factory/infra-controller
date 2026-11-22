@@ -210,11 +210,14 @@ pub(crate) async fn set_maintenance(
     let req = request.into_inner();
     let machine_id: HostMachineId = convert_and_log_machine_id(req.host_id.as_ref())?;
 
-    let (_, mut txn) = api
-        .load_machine(&machine_id, MachineSearchConfig::default())
-        .await?;
-    let dpu_machines = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id).await?;
-    txn.commit().await?;
+    Api::find_machine(
+        api.pg_pool(),
+        &machine_id.into(),
+        MachineSearchConfig::default(),
+    )
+    .await?;
+    let dpu_machines =
+        db::machine::find_dpus_by_host_machine_id(api.pg_pool(), &machine_id).await?;
 
     // We set status on both host and dpu machine to make them easier to query from DB
     match req.operation() {
@@ -225,7 +228,7 @@ pub(crate) async fn set_maintenance(
                 );
             };
 
-            let reference = reference.trim().to_string();
+            let reference = reference.trim();
             if reference.len() < 5 {
                 return Err(CarbideError::InvalidArgument(
                     "provide some valid reference. minimum expected length is 5".into(),
@@ -248,7 +251,7 @@ pub(crate) async fn set_maintenance(
                                 id: "Maintenance".parse().unwrap(),
                                 target: None,
                                 in_alert_since: Some(chrono::Utc::now()),
-                                message: reference.clone(),
+                                message: reference.to_string(),
                                 tenant_message: None,
                                 classifications: vec![
                                     health_report::HealthAlertClassification::prevent_allocations(),

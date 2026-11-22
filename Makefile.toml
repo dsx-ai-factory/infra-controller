@@ -58,7 +58,7 @@ BUILD_CONTAINER_AARCH64_URL = { value = "urm.nvidia.com/swngc-ngcc-docker-local/
 #
 # Make sure to update the RUST_NIGHTLY variable in
 # dev/docker/Dockerfile.build-container-x86_64 if you change this.
-RUST_NIGHTLY = "nightly-2026-06-16"
+RUST_NIGHTLY = "nightly-2026-11-11"
 
 [tasks.book]
 workspace = false

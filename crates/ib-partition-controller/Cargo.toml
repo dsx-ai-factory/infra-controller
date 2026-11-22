@@ -27,6 +27,7 @@ carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-ib-fabric = { path = "../ib-fabric" }
 carbide-instrument = { path = "../instrument" }
+carbide-resource-pool = { path = "../resource-pool" }
 carbide-uuid = { path = "../uuid", default-features = false }
 config-version = { path = "../config-version", default-features = false }
 state-controller = { path = "../state-controller" }

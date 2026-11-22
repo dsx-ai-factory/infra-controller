@@ -27,11 +27,9 @@ use model::ib_partition::{
     IBPartition, IBPartitionControllerState, IBPartitionStatus, NewIBPartition, PartitionKey,
 };
 use model::metadata::Metadata;
-use model::resource_pool::{OwnerType, ResourcePool, ResourcePoolEntryState};
 use sqlx::{FromRow, PgConnection};
 
 use crate::db_read::DbReader;
-use crate::resource_pool::ResourcePoolAllocationNotOwned;
 use crate::{
     ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
     FilterableQueryBuilder, ObjectColumnFilter, Transaction,
@@ -55,6 +53,14 @@ impl ColumnInfo<'_> for IdColumn {
     }
 }
 
+/// Checks the metadata accepted by partition creation and updates. Provider-backed
+/// creation also runs this check before reserving a PKey.
+pub fn validate_metadata(metadata: &Metadata) -> DatabaseResult<()> {
+    metadata.validate(true).map_err(|error| {
+        DatabaseError::InvalidArgument(format!("Invalid metadata for IBPartition: {error}"))
+    })
+}
+
 pub async fn create(
     value: NewIBPartition,
     txn: &mut PgConnection,
@@ -62,9 +68,7 @@ pub async fn create(
     status: IBPartitionStatus,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IBPartition, DatabaseError> {
-    value.metadata.validate(true).map_err(|e| {
-        DatabaseError::InvalidArgument(format!("Invalid metadata for IBPartition: {}", e))
-    })?;
+    validate_metadata(&value.metadata)?;
 
     let version = ConfigVersion::initial();
     let state = IBPartitionControllerState::Provisioning;
@@ -95,7 +99,7 @@ pub async fn create(
         .bind(sqlx::types::Json(&value.metadata.labels))
         .bind(&value.metadata.description)
         .bind(status.pkey.map(|k| u16::from(k) as i32))
-        .bind(conf.tenant_organization_id.to_string())
+        .bind(&conf.tenant_organization_id)
         .bind::<i32>(conf.mtu.clone().unwrap_or_default().into())
         .bind::<i32>(conf.rate_limit.clone().unwrap_or_default().into())
         .bind::<i32>(conf.service_level.clone().unwrap_or_default().into())
@@ -115,10 +119,12 @@ pub async fn create(
 /// Retrieves the IDs of all IB partition
 ///
 /// * `txn` - A reference to a currently open database transaction
-pub async fn list_segment_ids(txn: &mut PgConnection) -> Result<Vec<IBPartitionId>, DatabaseError> {
+pub async fn list_segment_ids(
+    conn: impl DbReader<'_>,
+) -> Result<Vec<IBPartitionId>, DatabaseError> {
     let query = "SELECT id FROM ib_partitions";
     let mut results = Vec::new();
-    let mut segment_id_stream = sqlx::query_as(query).fetch(txn);
+    let mut segment_id_stream = sqlx::query_as(query).fetch(conn);
     while let Some(maybe_id) = segment_id_stream.next().await {
         let id = maybe_id.map_err(|e| DatabaseError::query(query, e))?;
         results.push(id);
@@ -316,7 +322,7 @@ pub async fn lock_for_delete(
 }
 
 pub async fn find_pkey_by_partition_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: IBPartitionId,
 ) -> Result<Option<u16>, DatabaseError> {
     #[derive(Debug, Clone, FromRow)]
@@ -326,7 +332,7 @@ pub async fn find_pkey_by_partition_id(
         .filter(&ObjectColumnFilter::One(IdColumn, &id));
     let pkey = query
         .build_query_as::<Pkey>()
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
@@ -401,78 +407,31 @@ pub async fn mark_as_deleted(
     Ok(segment)
 }
 
-/// `delete_and_release_pkey` deletes the expected partition and releases any
-/// allocated PKey reservation in the same transaction. A missing partition or
-/// changed status PKey returns `NotApplied(ControllerStateNotCurrent)` without
-/// touching the reservation.
-///
-/// A missing or free reservation needs no release. An allocation belonging to
-/// another owner type is an error. Any error discards this operation's changes;
-/// `Applied(id)` still requires the caller to commit its outer transaction.
-pub async fn delete_and_release_pkey(
+/// `delete_if_pkey` removes only the expected UUID and status PKey. A metadata
+/// rename does not invalidate this comparison. First hold `lock_for_delete`
+/// and confirm no instance references remain using a separate statement in this
+/// transaction. Release the allocation in the same transaction and roll back
+/// both changes on failure.
+/// A missing UUID or changed status PKey returns `NotApplied`.
+pub async fn delete_if_pkey(
     partition_id: IBPartitionId,
     expected_pkey: PartitionKey,
-    pkey_pool: &ResourcePool<u16>,
-    txn: &mut PgConnection,
+    txn: &mut Transaction<'_>,
 ) -> Result<ConditionalWrite<IBPartitionId, ControllerStateNotCurrent>, DatabaseError> {
-    let mut inner_txn = Transaction::begin_inner(txn).await?;
     // Older migrations cleared the separate `pkey` column after moving the
     // value into `status`. Compare the same PKey the controller reads.
     let query = "DELETE FROM ib_partitions
                  WHERE id=$1::uuid AND status->>'pkey'=$2 RETURNING id";
     let partition: Option<IBPartitionId> = sqlx::query_as(query)
         .bind(partition_id)
-        .bind(expected_pkey.to_string())
-        .fetch_optional(&mut inner_txn)
+        .bind(sqlx::types::Text(expected_pkey))
+        .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-    let Some(partition) = partition else {
-        return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
-    };
-
-    // Reservations keep the creation-time name even after a partition rename.
-    // Deleting the exact UUID/PKey above authorizes this release, not a match
-    // against today's name. The unique status PKey prevents another partition
-    // from committing that PKey until this deletion commits.
-    // The pool stores decimal values, unlike the hex PKey in `status`.
-    let query = "SELECT state FROM resource_pool
-                 WHERE name=$1 AND value=$2 FOR UPDATE";
-    let allocation: Option<sqlx::types::Json<ResourcePoolEntryState>> = sqlx::query_scalar(query)
-        .bind(pkey_pool.name())
-        .bind(u16::from(expected_pkey).to_string())
-        .fetch_optional(&mut inner_txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-    match allocation {
-        Some(sqlx::types::Json(ResourcePoolEntryState::Allocated { owner, owner_type })) => {
-            if owner_type != OwnerType::IBPartition.to_string() {
-                return Err(DatabaseError::FailedPrecondition(format!(
-                    "PKey {expected_pkey} in pool `{}` is allocated to {owner_type}, not an IB partition",
-                    pkey_pool.name()
-                )));
-            }
-            match crate::resource_pool::release(
-                pkey_pool,
-                &mut inner_txn,
-                expected_pkey.into(),
-                OwnerType::IBPartition,
-                &owner,
-            )
-            .await?
-            {
-                ConditionalWrite::Applied(()) => {}
-                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
-                    return Err(DatabaseError::FailedPrecondition(format!(
-                        "PKey {expected_pkey} in pool `{}` did not match the locked IB reservation for owner `{owner}`",
-                        pkey_pool.name()
-                    )));
-                }
-            }
-        }
-        None | Some(sqlx::types::Json(ResourcePoolEntryState::Free)) => {}
-    }
-    inner_txn.commit().await?;
-    Ok(ConditionalWrite::Applied(partition))
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(match partition {
+        Some(partition) => ConditionalWrite::Applied(partition),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 /// Counts Instances referencing a partition in `ib_config`, including deleted
@@ -489,7 +448,7 @@ pub async fn count_instances_referencing_partition(
               @> jsonb_build_array(jsonb_build_object('ib_partition_id', $1::text))
     ";
     let (count,): (i64,) = sqlx::query_as(query)
-        .bind(partition_id.to_string())
+        .bind(sqlx::types::Text(partition_id))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -516,9 +475,7 @@ pub async fn update_metadata(
     txn: &mut PgConnection,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<ConditionalWrite<IBPartition, PartitionNotCurrent>, DatabaseError> {
-    metadata.validate(true).map_err(|e| {
-        DatabaseError::InvalidArgument(format!("Invalid metadata for IBPartition: {}", e))
-    })?;
+    validate_metadata(metadata)?;
 
     let query = "UPDATE ib_partitions SET name=$1, labels=$2::json, description=$3, config_version=$4, updated=NOW()
                  WHERE id=$5::uuid AND config_version=$6
@@ -575,10 +532,13 @@ mod tests {
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, check_cases_async};
     use model::ib_partition::IBPartitionConfig;
-    use model::resource_pool::{ResourcePoolError, ValueType};
+    use model::resource_pool::{
+        OwnerType, ResourcePool, ResourcePoolEntryState, ResourcePoolError, ValueType,
+    };
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
     use crate::resource_pool::ResourcePoolDatabaseError;
     use crate::test_support::postgres::{count_blocked_queries, wait_for_blocked_query};
 
@@ -780,9 +740,10 @@ mod tests {
                 error
             };
             tokio::pin!(admission);
+            let mut reader = PgPoolReader::from(pool.clone());
             tokio::select! {
                 error = &mut admission => panic!("{scenario}: admission did not reach its lock wait: {error:?}"),
-                _ = wait_for_blocked_query(&pool, blocker_pid, "FOR SHARE") => {}
+                _ = wait_for_blocked_query(&mut reader, blocker_pid, "FOR SHARE") => {}
             }
             let error = tokio::time::timeout(completion_timeout, admission)
                 .await
@@ -876,7 +837,7 @@ mod tests {
                         ConditionalWrite::Applied(()),
                     );
                     assert_eq!(
-                        delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut deletion)
+                        delete_if_pkey(partition.id, pkey, &mut deletion)
                             .await
                             .unwrap(),
                         ConditionalWrite::Applied(partition.id),
@@ -900,9 +861,10 @@ mod tests {
                 admitted
             };
             tokio::pin!(admission);
+            let mut reader = PgPoolReader::from(pool.clone());
             tokio::select! {
                 result = &mut admission => panic!("admission passed {kind:?} deletion: {result:?}"),
-                _ = wait_for_blocked_query(&pool, deletion_pid, "FOR SHARE") => {}
+                _ = wait_for_blocked_query(&mut reader, deletion_pid, "FOR SHARE") => {}
             }
 
             deletion.commit().await.unwrap();
@@ -998,9 +960,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         tokio::pin!(admission);
+        let mut reader = PgPoolReader::from(pool.clone());
         tokio::select! {
             result = &mut admission => panic!("admission passed the higher ID lock: {result:?}"),
-            _ = wait_for_blocked_query(&pool, guard_pid, "FOR SHARE") => {}
+            _ = wait_for_blocked_query(&mut reader, guard_pid, "FOR SHARE") => {}
         }
 
         sqlx::query("SELECT id FROM ib_partitions WHERE id = $1 FOR SHARE NOWAIT")
@@ -1040,7 +1003,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn renamed_partition_cleanup_preserves_reassigned_pkey(pool: sqlx::PgPool) {
+    async fn status_pkey_delete_and_recorded_owner_release_wait_for_commit(pool: sqlx::PgPool) {
         let pkey_pool = ResourcePool::new("ib-cleanup".to_string(), ValueType::Integer);
         let pkey = 42.try_into().unwrap();
         let mut txn = pool.txn_begin().await.unwrap();
@@ -1051,32 +1014,24 @@ mod tests {
             .execute(&mut *txn)
             .await
             .unwrap();
-        let renamed_metadata = Metadata {
-            name: "renamed".to_string(),
-            ..Default::default()
-        };
-        let ConditionalWrite::Applied(renamed) = update_metadata(
-            partition.id,
-            partition.version,
-            &renamed_metadata,
-            &mut txn,
-            &carbide_instrument::Instrumentation::noop(),
-        )
-        .await
-        .unwrap() else {
-            panic!("the partition metadata must be current");
-        };
-        assert_eq!(renamed.metadata, renamed_metadata);
-        assert_eq!(renamed.config.pkey, None);
-        assert_eq!(renamed.status.as_ref().unwrap().pkey, Some(pkey));
         txn.commit().await.unwrap();
 
         let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
-            delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut txn)
-                .await
-                .unwrap(),
+            delete_if_pkey(partition.id, pkey, &mut txn).await.unwrap(),
             ConditionalWrite::Applied(partition.id),
+        );
+
+        assert_eq!(
+            crate::resource_pool::release_by_recorded_owner(
+                &pkey_pool,
+                &mut txn,
+                u16::from(pkey),
+                OwnerType::IBPartition,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(())
         );
 
         // `Applied` does not make the PKey reusable until the caller commits.
@@ -1124,9 +1079,7 @@ mod tests {
 
         let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
-            delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut txn)
-                .await
-                .unwrap(),
+            delete_if_pkey(partition.id, pkey, &mut txn).await.unwrap(),
             ConditionalWrite::NotApplied(ControllerStateNotCurrent),
         );
         txn.commit().await.unwrap();
@@ -1134,7 +1087,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn cleanup_without_an_allocated_reservation_preserves_other_records(pool: sqlx::PgPool) {
+    async fn recorded_owner_release_without_allocation_preserves_records(pool: sqlx::PgPool) {
         let pkey_pool = ResourcePool::new("ib-cleanup".to_string(), ValueType::Integer);
         let mut txn = pool.txn_begin().await.unwrap();
         create_reserved_partition(&mut txn, &pkey_pool, "other", 43.try_into().unwrap()).await;
@@ -1186,19 +1139,31 @@ mod tests {
                         }
                     }
                     txn.commit().await.unwrap();
-                    let (mut partitions, allocations) = persisted_cleanup_records(&pool).await;
-                    partitions.retain(|row| row["id"] != partition.id.to_string());
+                    let before = persisted_cleanup_records(&pool).await;
 
                     let mut txn = pool.txn_begin().await.unwrap();
-                    let result = delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut txn)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    assert_eq!(result, ConditionalWrite::Applied(partition.id));
-                    txn.commit().await.unwrap();
+                    let result = crate::resource_pool::release_by_recorded_owner(
+                        &pkey_pool,
+                        &mut txn,
+                        u16::from(pkey),
+                        OwnerType::IBPartition,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
                     assert_eq!(
-                        persisted_cleanup_records(&pool).await,
-                        (partitions, allocations)
+                        result,
+                        ConditionalWrite::NotApplied(
+                            crate::resource_pool::ResourcePoolAllocationNotOwned
+                        )
                     );
+                    txn.commit().await.unwrap();
+                    assert_eq!(persisted_cleanup_records(&pool).await, before);
+                    let mut txn = pool.txn_begin().await.unwrap();
+                    assert_eq!(
+                        delete_if_pkey(partition.id, pkey, &mut txn).await.unwrap(),
+                        ConditionalWrite::Applied(partition.id)
+                    );
+                    txn.commit().await.unwrap();
                     Ok::<(), String>(())
                 }
             },
@@ -1219,7 +1184,7 @@ mod tests {
 
         let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
-            delete_and_release_pkey(first.id, other_pkey, &pkey_pool, &mut txn)
+            delete_if_pkey(first.id, other_pkey, &mut txn)
                 .await
                 .unwrap(),
             ConditionalWrite::NotApplied(ControllerStateNotCurrent),
@@ -1229,7 +1194,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn cleanup_release_failure_preserves_partition_after_commit(pool: sqlx::PgPool) {
+    async fn recorded_owner_release_sql_failure_preserves_outer_work(pool: sqlx::PgPool) {
         let pkey_pool = ResourcePool::new("ib-cleanup".to_string(), ValueType::Integer);
         let pkey = 42.try_into().unwrap();
         let mut txn = pool.txn_begin().await.unwrap();
@@ -1242,12 +1207,27 @@ mod tests {
         .await
         .unwrap();
         txn.commit().await.unwrap();
-        let before = persisted_cleanup_records(&pool).await;
+        let (mut partitions, allocations) = persisted_cleanup_records(&pool).await;
+        let row = partitions
+            .iter_mut()
+            .find(|row| row["id"] == partition.id.to_string())
+            .unwrap();
+        row["description"] = serde_json::json!("outer work survives");
 
         let mut txn = pool.txn_begin().await.unwrap();
-        let error = delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut txn)
+        sqlx::query("UPDATE ib_partitions SET description = 'outer work survives' WHERE id = $1")
+            .bind(partition.id)
+            .execute(txn.as_mut())
             .await
-            .unwrap_err();
+            .unwrap();
+        let error = crate::resource_pool::release_by_recorded_owner(
+            &pkey_pool,
+            &mut txn,
+            u16::from(pkey),
+            OwnerType::IBPartition,
+        )
+        .await
+        .unwrap_err();
         let DatabaseError::Sqlx(error) = error else {
             panic!("expected the injected release constraint failure, got {error:?}");
         };
@@ -1255,18 +1235,21 @@ mod tests {
             error.source.as_database_error().unwrap().constraint(),
             Some("reject_pkey_release"),
         );
-        // Commit instead of rolling back: the helper's savepoint must undo
-        // the partition deletion even when the caller keeps its transaction.
+        // The unrelated write must survive; a successful COMMIT alone can also
+        // mean PostgreSQL rolled back an aborted outer transaction.
         txn.commit().await.unwrap();
-        assert_eq!(persisted_cleanup_records(&pool).await, before);
+        assert_eq!(
+            persisted_cleanup_records(&pool).await,
+            (partitions, allocations)
+        );
     }
 
     #[crate::sqlx_test]
-    async fn cleanup_wrong_owner_type_preserves_partition_after_commit(pool: sqlx::PgPool) {
+    async fn recorded_owner_release_rejects_wrong_owner_type(pool: sqlx::PgPool) {
         let pkey_pool = ResourcePool::new("ib-cleanup".to_string(), ValueType::Integer);
         let pkey = 42.try_into().unwrap();
         let mut txn = pool.txn_begin().await.unwrap();
-        let partition = create_reserved_partition(&mut txn, &pkey_pool, "original", pkey).await;
+        create_reserved_partition(&mut txn, &pkey_pool, "original", pkey).await;
         sqlx::query("UPDATE resource_pool SET state = $1 WHERE name = $2 AND value = $3")
             .bind(sqlx::types::Json(ResourcePoolEntryState::Allocated {
                 owner: "original".to_string(),
@@ -1281,9 +1264,14 @@ mod tests {
         let before = persisted_cleanup_records(&pool).await;
 
         let mut txn = pool.txn_begin().await.unwrap();
-        let error = delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut txn)
-            .await
-            .unwrap_err();
+        let error = crate::resource_pool::release_by_recorded_owner(
+            &pkey_pool,
+            &mut txn,
+            u16::from(pkey),
+            OwnerType::IBPartition,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, DatabaseError::FailedPrecondition(_)));
         txn.commit().await.unwrap();
         assert_eq!(persisted_cleanup_records(&pool).await, before);

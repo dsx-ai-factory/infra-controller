@@ -15,13 +15,13 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_resource_pool::{ResourcePoolBackendError, ResourcePoolRegistryError};
 use config_version::ConfigVersion;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{ConditionalWrite, ObjectColumnFilter, ib_partition};
 use model::ib::DEFAULT_IB_FABRIC_NAME;
-use model::ib_partition::{IBPartitionStatus, NewIBPartition, PartitionKey};
+use model::ib_partition::{IBPartitionStatus, NewIBPartition, PKEY_ALLOCATION_SLOT, PartitionKey};
 use model::resource_pool;
-use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -33,7 +33,6 @@ pub(crate) async fn create(
 ) -> Result<Response<rpc::IbPartition>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
     let req = request.into_inner();
     let requested_pkey = req
         .config
@@ -45,52 +44,111 @@ pub(crate) async fn create(
         })
         .transpose()
         .map_err(|e| CarbideError::InvalidArgument(format!("invalid pkey value: {}", e)))?;
-    let mut resp = NewIBPartition::try_from(req)?;
+    let mut new_partition = NewIBPartition::try_from(req)?;
     let fabric_config = api.ib_fabric_manager.get_config();
 
-    // IB Configurations.
-    resp.config.mtu = Some(fabric_config.mtu.clone());
-    resp.config.rate_limit = Some(fabric_config.rate_limit.clone());
-    resp.config.service_level = Some(fabric_config.service_level.clone());
+    new_partition.config.mtu = Some(fabric_config.mtu.clone());
+    new_partition.config.rate_limit = Some(fabric_config.rate_limit.clone());
+    new_partition.config.service_level = Some(fabric_config.service_level.clone());
 
-    let allocated_pkey = allocate_pkey(api, &mut txn, &resp.metadata.name, requested_pkey).await?;
-
-    if requested_pkey.is_some() {
-        resp.config.pkey = allocated_pkey;
-    }
-
-    let resp = db::ib_partition::create(
-        resp,
-        &mut txn,
-        fabric_config.max_partition_per_tenant,
-        IBPartitionStatus {
-            pkey: allocated_pkey,
-            partition: None,
-            mtu: None,
-            rate_limit: None,
-            service_level: None,
-        },
-        &api.instrumentation,
-    )
-    .await
-    .map_err(|e| {
-        if e.is_not_found() {
-            // During IB partition creation, the insert query checks that the number of existing partitions
-            // is less than <max_partition_per_tenant> by using a sub-select query in a WHERE clause.
-            // The 'RowNotFound' error means that the number of existing partitions exceeded the limit
-            // and no insert was performed.
-            CarbideError::InvalidArgument(
-                "maximum limit of infiniband partitions had been reached".into(),
-            )
-        } else {
-            CarbideError::from(e)
+    let source_pool = api
+        .common_pools
+        .infiniband
+        .pkey_pools
+        .get(DEFAULT_IB_FABRIC_NAME)
+        .ok_or_else(|| CarbideError::internal("IB fabric is not configured".to_string()))?;
+    let owner_id = new_partition.id.to_string();
+    let integrated_owner = new_partition.metadata.name.clone();
+    // Integrated failures keep their allocation counters. Provider errors use
+    // the shared status mapping. Provider metrics are tracked in
+    // https://github.com/dsx-ai-factory/infra-controller/issues/8566.
+    let map_error = |error| match error {
+        ResourcePoolBackendError::Integrated(error) => {
+            map_pkey_allocation_error(api, source_pool, &integrated_owner, requested_pkey, error)
         }
-    })?;
-    let resp = rpc::IbPartition::try_from(resp).map(Response::new)?;
+        ResourcePoolBackendError::Registry(ResourcePoolRegistryError::Database(error)) => {
+            map_pkey_allocation_error(
+                api,
+                source_pool,
+                &integrated_owner,
+                requested_pkey,
+                error.into(),
+            )
+        }
+        error => CarbideError::from(error),
+    };
+    let selected = api
+        .resource_pool_registry
+        .select_for_allocation(&mut api.db_reader(), source_pool)
+        .await
+        .map_err(map_error)?;
+    // Validate metadata before reserving provider capacity. Native creation
+    // retains its allocation-first failure precedence in the final transaction.
+    if selected.uses_provider() {
+        ib_partition::validate_metadata(&new_partition.metadata).map_err(CarbideError::from)?;
+    }
+    let allocation = selected
+        .prepare_allocation(
+            &api.database_connection,
+            resource_pool::OwnerType::IBPartition,
+            &owner_id,
+            PKEY_ALLOCATION_SLOT,
+            requested_pkey,
+            &api.cancel_token,
+        )
+        .await
+        .map_err(map_error)?
+        .with_integrated_owner(&integrated_owner);
 
-    txn.commit().await?;
-
-    Ok(resp)
+    let completion = async {
+        let mut txn = api.txn_begin().await?;
+        let value = allocation.allocate(&mut txn).await.map_err(map_error)?;
+        let allocated_pkey = Some(PartitionKey::try_from(value).map_err(|_| {
+            CarbideError::internal(format!(
+                "partition key {value} return from pool is not a valid pkey. pool definition is invalid"
+            ))
+        })?);
+        let partition = db::ib_partition::create(
+            new_partition,
+            &mut txn,
+            fabric_config.max_partition_per_tenant,
+            IBPartitionStatus {
+                pkey: allocated_pkey,
+                partition: None,
+                mtu: None,
+                rate_limit: None,
+                service_level: None,
+            },
+            &api.instrumentation,
+        )
+        .await
+        .map_err(|error| {
+            // The quota check is part of INSERT. At the limit it returns no row.
+            if error.is_not_found() {
+                CarbideError::InvalidArgument(
+                    "maximum limit of infiniband partitions had been reached".into(),
+                )
+            } else {
+                CarbideError::from(error)
+            }
+        })?;
+        let response = rpc::IbPartition::try_from(partition)?;
+        txn.commit().await?;
+        Ok::<_, Status>(Response::new(response))
+    }
+    .await;
+    match completion {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            // The failed transaction rolls back native allocation. Remote
+            // cancellation saves recovery work without replacing this error.
+            if let Err(cleanup_error) = allocation.cancel(&api.database_connection).await {
+                tracing::error!(ib_partition_id = %owner_id, error = %cleanup_error,
+                    "could not save cancellation of IB partition PKey request");
+            }
+            Err(error)
+        }
+    }
 }
 
 pub(crate) async fn update(
@@ -140,7 +198,7 @@ pub(crate) async fn update(
         }
     }
 
-    if config.tenant_organization_id != partition.config.tenant_organization_id.to_string() {
+    if config.tenant_organization_id != partition.config.tenant_organization_id.as_str() {
         return Err(CarbideError::InvalidArgument(
             "tenant organization ID should not be updated".to_string(),
         )
@@ -324,62 +382,26 @@ pub(crate) async fn for_tenant(
     Ok(Response::new(rpc::IbPartitionList { ib_partitions }))
 }
 
-/// Allocate a value from the pkey resource pool.
-///
-/// If the pool doesn't exist return error.
-/// If the pool exists but is empty or has en error, return that.
-async fn allocate_pkey(
+/// Preserve the native allocation status and diagnostic event contracts.
+fn map_pkey_allocation_error(
     api: &Api,
-    txn: &mut PgConnection,
+    source_pool: &resource_pool::ResourcePool<u16>,
     owner_id: &str,
     requested_pkey: Option<u16>,
-) -> Result<Option<PartitionKey>, CarbideError> {
-    let source_pool = api
-        .common_pools
-        .infiniband
-        .pkey_pools
-        .get(DEFAULT_IB_FABRIC_NAME)
-        .ok_or_else(|| CarbideError::internal("IB fabric is not configured".to_string()))?;
-
-    match db::resource_pool::allocate(
-        source_pool,
-        txn,
-        resource_pool::OwnerType::IBPartition,
+    error: ResourcePoolDatabaseError,
+) -> CarbideError {
+    db::resource_pool::emit_allocation_failure(
+        &api.instrumentation,
+        source_pool.value_type,
         owner_id,
-        requested_pkey,
-    )
-    .await
-    {
-        Ok(val) => Ok(Some(PartitionKey::try_from(val).map_err(|_| {
-            CarbideError::internal(format!(
-                "partition key {val} return from pool is not a valid pkey. pool definition is invalid"
-            ))
-        })?)),
-        Err(error @ ResourcePoolDatabaseError::ResourcePool(
-            resource_pool::ResourcePoolError::Empty,
-        )) => {
-            db::resource_pool::emit_allocation_failure(
-                &api.instrumentation,
-                source_pool.value_type,
-                owner_id,
-                requested_pkey.is_some(),
-                "pkey",
-                &error,
-            );
-            Err(CarbideError::ResourceExhausted(
-                "pool pkey".to_string(),
-            ))
+        requested_pkey.is_some(),
+        "pkey",
+        &error,
+    );
+    match error {
+        ResourcePoolDatabaseError::ResourcePool(resource_pool::ResourcePoolError::Empty) => {
+            CarbideError::ResourceExhausted("pool pkey".to_string())
         }
-        Err(err) => {
-            db::resource_pool::emit_allocation_failure(
-                &api.instrumentation,
-                source_pool.value_type,
-                owner_id,
-                requested_pkey.is_some(),
-                "pkey",
-                &err,
-            );
-            Err(err.into())
-        }
+        error => error.into(),
     }
 }

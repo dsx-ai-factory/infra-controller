@@ -54,6 +54,11 @@ use crate::switch::switch_id;
 const ABSENT_MANUFACTURER: &str = "unknown";
 const ABSENT_MODEL: &str = "nomodel";
 
+/// GB200 reports the host BMC version in this firmware inventory entry.
+const GB200_HOST_BMC_INVENTORY_ID: &str = "FW_BMC_0";
+/// GB200 leaves `System_0.BiosVersion` blank and reports the host BIOS here.
+const GB200_HOST_BIOS_INVENTORY_ID: &str = "HGX_FW_CPU_0";
+
 /// Derives an endpoint's hardware class from what its BMC reports about the
 /// host system: manufacturer and model, joined by `_`.
 ///
@@ -102,12 +107,12 @@ fn class_field(preferred: Option<&str>, fallback: Option<&str>, absent: &str) ->
 /// Lowercases and joins the alphanumeric runs with `-`, which collapses every
 /// other character and drops leading and trailing separators.
 fn normalize_class_field(value: &str) -> String {
-    value
+    let mut normalized = value
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|run| !run.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+    normalized.make_ascii_lowercase();
+    normalized
 }
 
 /// How many explored endpoints carry one hardware class, or carry none.
@@ -318,7 +323,7 @@ impl EndpointExplorationReport {
             None if self.is_dpu() => self
                 .identify_dpu()
                 .map(|d| d.to_string())
-                .unwrap_or("unknown model".to_string()),
+                .unwrap_or_else(|| "unknown model".to_string()),
             None => match self.chassis.iter().find(|&x| x.model.is_some()) {
                 Some(chassis) => chassis.model.as_ref().unwrap().to_string(),
                 None => {
@@ -895,21 +900,6 @@ pub struct ExploredDpu {
 }
 
 impl ExploredDpu {
-    /// OS/admin MACs reported by Redfish, also used for DPU interface association.
-    pub fn os_mac_addresses(&self) -> impl Iterator<Item = MacAddress> + '_ {
-        self.report
-            .systems
-            .iter()
-            .flat_map(|system| &system.ethernet_interfaces)
-            .filter(|interface| {
-                interface
-                    .id
-                    .as_ref()
-                    .is_some_and(|id| id.to_lowercase().contains("oob"))
-            })
-            .filter_map(|interface| interface.mac_address)
-    }
-
     pub fn machine_id_if_valid_report(&self) -> ModelResult<DpuMachineId> {
         let Some(machine_id) = self.report.machine_id else {
             return Err(ModelError::MissingArgument("Missing Machine ID"));
@@ -992,13 +982,13 @@ impl ExploredDpu {
                 .to_string(),
             firmware_version: inventory_map
                 .get("DPU_NIC")
-                .and_then(|value| value.version.as_ref())
-                .unwrap_or(&"".to_string())
+                .and_then(|value| value.version.as_deref())
+                .unwrap_or_default()
                 .to_string(),
             firmware_date: inventory_map
                 .get("DPU_NIC")
-                .and_then(|value| value.release_date.as_ref())
-                .unwrap_or(&"".to_string())
+                .and_then(|value| value.release_date.as_deref())
+                .unwrap_or_default()
                 .to_string(),
             ..Default::default()
         };
@@ -1054,7 +1044,7 @@ mod serialize_option_display {
     use std::fmt::Display;
     use std::str::FromStr;
 
-    use serde::{Deserialize, Deserializer, Serializer, de};
+    use serde::{Deserializer, Serializer, de};
 
     pub(super) fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1062,6 +1052,8 @@ mod serialize_option_display {
         S: Serializer,
     {
         match value {
+            // MacAddress's Display ignores formatter errors; preformat so
+            // serializer write failures are still returned to the caller.
             Some(value) => serializer.serialize_str(&value.to_string()),
             None => serializer.serialize_none(),
         }
@@ -1073,11 +1065,36 @@ mod serialize_option_display {
         T::Err: Display,
         D: Deserializer<'de>,
     {
-        let value: Option<String> = Option::deserialize(deserializer)?;
-        match value {
-            None => Ok(None),
-            Some(value) => Ok(Some(T::from_str(&value).map_err(de::Error::custom)?)),
+        struct OptionVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T> de::Visitor<'de> for OptionVisitor<T>
+        where
+            T: FromStr,
+            T::Err: Display,
+        {
+            type Value = Option<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("option")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                crate::deserialize_from_str(deserializer).map(Some)
+            }
         }
+
+        deserializer.deserialize_option(OptionVisitor(std::marker::PhantomData))
     }
 }
 
@@ -1203,11 +1220,6 @@ impl EndpointExplorationReport {
     ///
     /// TODO(chet): These are obviously workarounds for now while
     /// we work with vendors to update their BMC firmware.
-    ///
-    /// Site explorer creates a power-shelf row only for an endpoint this
-    /// accepts, and `GetComponentCredentials` returns a stored BMC root
-    /// credential only for a MAC address with such a row. Loosening this
-    /// check widens which credentials that RPC can return.
     pub fn is_power_shelf(&self) -> bool {
         self.chassis.iter().any(|c| {
             c.id.to_lowercase().contains("powershelf")
@@ -1220,11 +1232,6 @@ impl EndpointExplorationReport {
     }
 
     /// Return `true` if the explored endpoint is a Switch
-    ///
-    /// Site explorer creates a switch row only for an endpoint this accepts,
-    /// and `GetComponentCredentials` returns stored switch credentials only
-    /// for a MAC address with such a row. Loosening this check widens which
-    /// credentials that RPC can return.
     pub fn is_switch(&self) -> bool {
         self.chassis
             .iter()
@@ -1366,17 +1373,17 @@ impl EndpointExplorationReport {
     /// enough data for generation is available
     pub fn generate_power_shelf_id(&mut self) -> ModelResult<Option<&PowerShelfId>> {
         let chassis = self.chassis.first().unwrap();
-        let serial_number = chassis.serial_number.clone().unwrap_or("".to_string());
-        let manufacturer = chassis.manufacturer.clone().unwrap_or("".to_string());
-        let model = chassis.model.clone().unwrap_or("".to_string());
+        let serial_number = chassis.serial_number.as_deref().unwrap_or_default();
+        let manufacturer = chassis.manufacturer.as_deref().unwrap_or_default();
+        let model = chassis.model.as_deref().unwrap_or_default();
 
         let power_shelf_type = PowerShelfType::Rack; //TODO Check later if we need to support other types
         let power_shelf_source = PowerShelfIdSource::ProductBoardChassisSerial;
 
         let power_shelf_id = power_shelf_id::from_hardware_info_with_type(
-            serial_number.as_str(),
-            manufacturer.as_str(),
-            model.as_str(),
+            serial_number,
+            manufacturer,
+            model,
             power_shelf_source,
             power_shelf_type,
         )
@@ -1434,18 +1441,18 @@ impl EndpointExplorationReport {
             HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
         ))?;
 
-        let serial_number = chassis.serial_number.clone();
-        let manufacturer = chassis.manufacturer.clone().unwrap_or("NVIDIA".to_string());
-        let model = "Switch".to_string();
+        let serial_number = chassis.serial_number.as_deref();
+        let manufacturer = chassis.manufacturer.as_deref().unwrap_or("NVIDIA");
+        let model = "Switch";
 
-        if let Some(serial_number) = serial_number.as_ref() {
+        if let Some(serial_number) = serial_number {
             let switch_type = SwitchType::NvLink;
             let switch_source = SwitchIdSource::ProductBoardChassisSerial;
 
             let switch_id = switch_id::from_hardware_info_with_type(
-                serial_number.as_str(),
-                manufacturer.as_str(),
-                model.as_str(),
+                serial_number,
+                manufacturer,
+                model,
                 switch_source,
                 switch_type,
             )
@@ -1476,8 +1483,8 @@ impl EndpointExplorationReport {
             .unwrap_or_default()
     }
 
-    /// BMC firmware observed directly from the exact `BMC` inventory entry.
-    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+    /// Returns a non-blank version from one exact firmware inventory entry.
+    fn firmware_inventory_version(&self, inventory_id: &str) -> Option<&str> {
         self.service
             .iter()
             .find(|service| service.id == "FirmwareInventory")
@@ -1485,11 +1492,17 @@ impl EndpointExplorationReport {
                 service
                     .inventories
                     .iter()
-                    .find(|inventory| inventory.id == "BMC")
+                    .find(|inventory| inventory.id == inventory_id)
             })
             .and_then(|inventory| inventory.version.as_deref())
             .map(str::trim)
             .filter(|version| !version.is_empty())
+    }
+
+    /// BMC firmware observed from the standard entry or GB200's host BMC entry.
+    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+        self.firmware_inventory_version("BMC")
+            .or_else(|| self.firmware_inventory_version(GB200_HOST_BMC_INVENTORY_ID))
     }
 
     /// Host BIOS/UEFI version observed on the `System_0` resource.
@@ -1500,6 +1513,12 @@ impl EndpointExplorationReport {
             .and_then(|system| system.bios_version.as_deref())
             .map(str::trim)
             .filter(|version| !version.is_empty())
+    }
+
+    /// Host BIOS observed from `System_0` or GB200's firmware inventory fallback.
+    pub fn observed_host_bios_version(&self) -> Option<&str> {
+        self.system_bios_version()
+            .or_else(|| self.firmware_inventory_version(GB200_HOST_BIOS_INVENTORY_ID))
     }
 
     pub fn dpu_component_version(&self, component: FirmwareComponentType) -> Option<String> {
@@ -1521,8 +1540,8 @@ impl EndpointExplorationReport {
                 // "FW_BMC_0". Both ids are unique per report, so `find` selects
                 // the single BMC firmware entry unambiguously.
                 .find(|s| s.0.contains("BMC_Firmware") || s.0.ends_with("BlueField_FW_BMC_0"))
-                .and_then(|value| value.1.version.as_ref())
-                .unwrap_or(&"0".to_string())
+                .and_then(|value| value.1.version.as_deref())
+                .unwrap_or("0")
                 .to_lowercase()
                 .replace("bf-", "")
                 .replace("bf4-", ""),
@@ -2260,14 +2279,19 @@ impl Display for BlueFieldOperatingMode {
     }
 }
 
+/// Lenovo part numbers reported for the NVIDIA BlueField-3 VPI QSFP112 2P 200G
+/// PCIe Gen5 x16 DPU, in lowercase:
+/// - `sn37b36732`: ThinkSystem SR675 V3
+///   (<https://windows-server.lenovo.com/repo/2024_05/html/SR675V3_7D9Q_7D9R-Windows_Server_2019.html>)
+/// - `sn37c16116`: ThinkSystem SR650 V4
+const LENOVO_BF3_DPU_PART_NUMBERS: &[&str] = &["sn37b36732", "sn37c16116"];
+
 // returns true if the part number is for a Bluefield-3 DPU
 pub fn is_bf3_dpu_part_number(part_number: &str) -> bool {
     let normalized_part_number = part_number.trim().to_lowercase();
     // prefix matching for BlueField-3 DPUs (https://docs.nvidia.com/networking/display/bf3dpu)
     normalized_part_number.starts_with("900-9d3b6")
-    // looks like Lenovo ThinkSystem SR675 V3s will report the part number of NVIDIA BlueField-3 VPI QSFP112 2P 200G PCIe Gen5 x16 as SN37B36732
-    // https://windows-server.lenovo.com/repo/2024_05/html/SR675V3_7D9Q_7D9R-Windows_Server_2019.html
-    ||  normalized_part_number == "sn37b36732"
+        || LENOVO_BF3_DPU_PART_NUMBERS.contains(&normalized_part_number.as_str())
 }
 
 // returns true if the part number is for a Bluefield-3 SuperNIC
@@ -2381,7 +2405,7 @@ impl MlxDeviceKind {
         // `is_bf3_supernic_part_number` deliberately groups `900-9d3b4` and
         // `900-9d3d4`; here we keep them apart because the wire enum
         // distinguishes the two SuperNIC SKU families.
-        if part_number.starts_with("900-9d3b6") || part_number == "sn37b36732" {
+        if is_bf3_dpu_part_number(&part_number) {
             Self::Bf3DpuMode
         } else if part_number.starts_with("900-9d3b4") {
             Self::Bf3NicMode
@@ -2812,6 +2836,11 @@ mod explored_mlx_device_tests {
             Case {
                 name: "lenovo-branded bf3 dpu with trailing spaces",
                 part_number: Some("SN37B36732   "),
+                expected: MlxDeviceKind::Bf3DpuMode,
+            },
+            Case {
+                name: "lenovo sr650 v4 bf3 dpu",
+                part_number: Some("SN37C16116"),
                 expected: MlxDeviceKind::Bf3DpuMode,
             },
             Case {
@@ -4795,6 +4824,13 @@ mod tests {
             serde_json::from_str::<ExploredManagedHost>(&serialized).unwrap(),
             host
         );
+        assert_eq!(
+            serde_json::from_str::<ExploredManagedHost>(
+                r#"{"HostBmcIp":"1.2.3.4","Dpus":[{"BmcIp":"1.2.3.5"}]}"#,
+            )
+            .unwrap(),
+            host
+        );
     }
 
     #[test]
@@ -4950,6 +4986,70 @@ mod tests {
         );
     }
 
+    /// Verifies GB200 firmware inventory fills only a missing host BIOS observation.
+    #[test]
+    fn observed_host_bios_version_prefers_system_and_falls_back_to_gb200_inventory() {
+        struct BiosVersionCase {
+            system_version: Option<&'static str>,
+            inventory_version: Option<&'static str>,
+        }
+
+        let report = |system_version: Option<&str>, inventory_version: Option<&str>| {
+            EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    id: "System_0".to_string(),
+                    bios_version: system_version.map(str::to_string),
+                    ..Default::default()
+                }],
+                service: vec![Service {
+                    id: "FirmwareInventory".to_string(),
+                    inventories: inventory_version
+                        .map(|version| Inventory {
+                            id: GB200_HOST_BIOS_INVENTORY_ID.to_string(),
+                            version: Some(version.to_string()),
+                            ..Default::default()
+                        })
+                        .into_iter()
+                        .collect(),
+                }],
+                ..Default::default()
+            }
+        };
+
+        value_scenarios!(
+            run = |case: BiosVersionCase| {
+                report(case.system_version, case.inventory_version)
+                    .observed_host_bios_version()
+                    .map(str::to_string)
+            };
+            "host BIOS source precedence and normalization" {
+                // The standard Redfish property must win when both sources are usable.
+                BiosVersionCase {
+                    system_version: Some("system-version"),
+                    inventory_version: Some("inventory-version"),
+                } => Some("system-version".to_string()),
+
+                // An absent System_0 value activates GB200's trimmed inventory fallback.
+                BiosVersionCase {
+                    system_version: None,
+                    inventory_version: Some(" inventory-version "),
+                } => Some("inventory-version".to_string()),
+
+                // Missing sources represent no observation, rather than malformed values.
+                BiosVersionCase {
+                    system_version: None,
+                    inventory_version: None,
+                } => None,
+
+                // Whitespace-only values are present but unusable and must normalize to absence.
+                BiosVersionCase {
+                    system_version: Some(" \t "),
+                    inventory_version: Some("  "),
+                } => None,
+            }
+        );
+    }
+
     #[test]
     fn computer_system_bios_version_is_json_compatible() {
         let system = ComputerSystem {
@@ -5058,7 +5158,7 @@ mod tests {
         ));
         let info = serde_json::from_slice::<HardwareInfo>(data).unwrap();
         let hardware_info_machine_id = from_hardware_info(&info).unwrap();
-        assert_eq!(hardware_info_machine_id.to_string(), machine_id.to_string());
+        assert_eq!(hardware_info_machine_id, machine_id);
 
         // Check the MachineId serialization and deserialization
         let serialized = serde_json::to_string(&report).unwrap();

@@ -239,12 +239,14 @@ Without that fallback, lifecycle triggers and manual triggers without
 `--attester-id-regex` do not attest a machine whose class has no profile.
 It is not blocked either. Scheduling reports `NoProfile`, and the machine
 continues to exactly the state it would have reached if attestation had run and
-passed. Nothing later in the flow can tell those two apart, so §6.4 is the only
-place the gap is visible.
+passed. Nothing later in the flow can tell those two apart, so the gap is
+visible in two places: the per-class aggregate in §6.4, and the machine's
+stored scheduling decision, which a database query can read
+([attestation health alerts](attestation-health-alerts.md), §5.4).
 
 A manual trigger with `--attester-id-regex` can still attest eligible devices
-without a profile. It overrides profile selection for that request only; see
-[manual trigger selection](spdm-jobs.md#start-a-run-trigger).
+without a profile. It overrides profile selection for that request; see
+[attester override selection](spdm-jobs.md#start-a-run-trigger).
 
 A `mode: NONE` profile on a real class also attests nothing, but on purpose.
 `NONE` means an operator decided this platform has nothing to attest.
@@ -335,7 +337,7 @@ list attesters before collecting.
 ## 5 Resolving the class and scheduling
 
 The flow below applies to lifecycle triggers and manual triggers without
-`--attester-id-regex`. A manual regex override replaces profile selection for
+`--attester-id-regex`. An attester override replaces profile selection for
 one request; see [trigger selection](spdm-jobs.md#start-a-run-trigger).
 
 1. Check `spdm_enabled`. If false, stop.
@@ -1090,7 +1092,7 @@ message SpdmMachineAttestationTriggerResponse {
 }
 ```
 
-`outcome` is an enum of the §5.3 profile outcomes and the manual-trigger outcomes
+`outcome` is an enum of the §5.3 profile outcomes and the attester override outcomes
 below, so the schema carries them and a client switching on it is exhaustive:
 
 ```protobuf
@@ -1105,17 +1107,20 @@ enum SpdmSchedulingOutcome {
   SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
   SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
   SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 7;
-  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING = 8;
-  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED = 9;
+  reserved 8, 9;
+  SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING = 10;
+  SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_SCHEDULED = 11;
 }
 ```
 
+Numbers 8 and 9 are reserved: they carried these two outcomes under names that
+predate the term "attester override".
 With `attester_id_regex`, eligible devices selected by the regex report
-`IndividualAttesterTriggerScheduled`. If eligible devices exist but none match,
-the outcome is `IndividualAttesterTriggerMatchedNothing` and no job is created.
+`AttesterOverrideScheduled`. If eligible devices exist but none match,
+the outcome is `AttesterOverrideMatchedNothing` and no job is created.
 An absent component-integrity collection or no eligible devices still reports
 `NoAttestersFound`. The regex can select one or several devices; these outcomes
-identify manual selection rather than the number of selected devices.
+identify an attester override rather than the number of selected devices.
 
 `used_any_fallback` is needed separately because `resolved_hardware_class`
 reports the machine's class either way, so without it the response cannot
@@ -1127,7 +1132,7 @@ from a count whether it was applied.
 separately does not answer this: profiles are editable, so the one an operator
 reads before or after a trigger may not be the one that ran. It is `optional`
 because `class_not_recorded` and `no_profile` are reached before any profile
-applies, and manual regex overrides apply no profile. They have no version to
+applies, and an attester override applies no profile. They have no version to
 report, and an empty string would read as unknown rather than none.
 
 It answers "which policy produced this response", not "which policy the machine
@@ -1135,7 +1140,7 @@ is attesting under".
 
 `job_id` identifies the scheduling attempt. It is present only when devices
 were scheduled, including `PartiallySatisfied` and
-`IndividualAttesterTriggerScheduled` outcomes. Use it with
+`AttesterOverrideScheduled` outcomes. Use it with
 `GetAttestation` to read that job's device details in
 `SpdmGetAttestationResponse`, with `WaiveAttestation` to request a waiver,
 or with `FailAttestation` to request failure. Either request may replace the
@@ -1188,18 +1193,18 @@ struct AttestationScheduled {
 }
 ```
 
-`outcome` is a fixed enum of the §5.3 profile outcomes and the §8 manual-trigger
-outcomes. Manual regex selection reports
-`individual_attester_trigger_scheduled` when devices are scheduled, or
-`individual_attester_trigger_matched_nothing` when eligible devices exist but
-none match. These values separate manual selection from profile-driven
+`outcome` is a fixed enum of the §5.3 profile outcomes and the §8 attester
+override outcomes. An attester override reports
+`attester_override_scheduled` when devices are scheduled, or
+`attester_override_matched_nothing` when eligible devices exist but
+none match. These values separate an attester override from profile-driven
 `scheduled` and `policy_matched_nothing` attempts.
 
 `profile_source` is `class`, `any_fallback`, or `unprofiled`. It describes the
 profile that supplied the selection, rather than whether a profile is stored
-for the machine. Manual overrides always report `unprofiled`, even when the
+for the machine. An attester override always reports `unprofiled`, even when the
 machine has a valid profile, because the regex replaces that profile's selection.
-For manual overrides, an absent component-integrity collection or no eligible
+For an attester override, an absent component-integrity collection or no eligible
 devices produces `NoAttestersFound` with `profile_source=unprofiled`. For profile
 selection, §5.3 applies: an advertised collection with no eligible devices
 produces `PolicyMatchedNothing` under an allowlist and `NoAttestersFound` under

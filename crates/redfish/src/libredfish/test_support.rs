@@ -182,6 +182,11 @@ struct RedfishSimState {
     create_client_error: Option<String>,
     /// Optional latency for the three phases of SPDM attester discovery.
     create_client_delay: Duration,
+    /// Gate one successful creation across this simulator; failed attempts leave the gate armed.
+    next_client_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
     service_root_delay: Duration,
     component_integrities_delay: Duration,
     /// When set, the sim's `BmcCredentialOps::uefi_setup` override fails with
@@ -752,6 +757,20 @@ impl RedfishSim {
         state.create_client_delay = client_creation;
         state.service_root_delay = service_root;
         state.component_integrities_delay = component_integrities;
+    }
+
+    /// Pause the next successful creation. The receiver signals when it is paused.
+    /// Sending or dropping the release sender lets creation finish.
+    pub fn pause_next_client_creation(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, preparing) = tokio::sync::oneshot::channel();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_client_pause = Some((started, paused));
+        (preparing, resume)
     }
 
     /// Force the sim's `uefi_setup` override to fail with
@@ -3160,6 +3179,17 @@ impl Redfish for RedfishSimClient {
 
 #[async_trait]
 impl RedfishClientPool for RedfishSim {
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        // The simulator applies each action directly, without an HTTP retry layer.
+        self.create_client(host, port, auth, vendor).await
+    }
+
     async fn create_client(
         &self,
         host: &str,
@@ -3167,7 +3197,7 @@ impl RedfishClientPool for RedfishSim {
         auth: RedfishAuth,
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
-        {
+        let pause = {
             let mut state = self.state.lock().unwrap();
             state.create_client_calls.push(CreateClientCall {
                 host: host.to_string(),
@@ -3194,6 +3224,12 @@ impl RedfishClientPool for RedfishSim {
             if state.fw_version.is_empty() {
                 state.fw_version = Arc::new("24.10-17".to_string());
             }
+            state.next_client_pause.take()
+        };
+        if let Some((started, resume)) = pause
+            && started.send(()).is_ok()
+        {
+            resume.await.ok();
         }
         // Client creation can wait on credentials or authentication before returning a client.
         let delay = self.state.lock().unwrap().create_client_delay;

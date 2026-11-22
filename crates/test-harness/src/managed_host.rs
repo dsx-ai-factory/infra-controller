@@ -23,6 +23,7 @@ use carbide_api_core::test_support::fixture_config::FixtureDefault as _;
 use carbide_site_explorer::test_support::TestSiteExplorer;
 use carbide_uuid::machine::PredictedHostMachineId;
 use chrono::Utc;
+use db::db_read::DbReader;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::HardwareInfo;
@@ -49,9 +50,12 @@ pub struct TestManagedHost {
 }
 
 impl TestManagedHost {
-    /// Reloads this host and its instance within the caller's transaction.
-    pub async fn snapshot(&self, txn: &mut db::Transaction<'_>) -> ManagedHostStateSnapshot {
-        db::managed_host::load_snapshot(txn.as_mut(), &self.host.id.into(), Default::default())
+    /// Reloads this host and its instance using the caller's database reader.
+    pub async fn snapshot<DB>(&self, db: &mut DB) -> ManagedHostStateSnapshot
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        db::managed_host::load_snapshot(db, &self.host.id.into(), Default::default())
             .await
             .unwrap()
             .expect("managed host should exist")

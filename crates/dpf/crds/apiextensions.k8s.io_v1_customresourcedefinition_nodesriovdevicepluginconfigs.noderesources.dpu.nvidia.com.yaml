@@ -26,8 +26,9 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: NodeSRIOVDevicePluginConfig is the Schema for the nodesriovdevicepluginconfigs
-          API
+        description: |-
+          NodeSRIOVDevicePluginConfig is the Schema for the
+          nodesriovdevicepluginconfigs API
         properties:
           apiVersion:
             description: |-
@@ -47,21 +48,23 @@ spec:
           metadata:
             type: object
           spec:
-            description: NodeSRIOVDevicePluginConfigSpec defines the desired state
-              of NodeSRIOVDevicePluginConfig
+            description: |-
+              NodeSRIOVDevicePluginConfigSpec defines the desired state of
+              NodeSRIOVDevicePluginConfig
             properties:
               devicePluginResources:
-                description: DevicePluginResources is the list of device plugin resource
-                  configurations.
+                description: |-
+                  DevicePluginResources is the list of device plugin
+                  resource configurations.
                 items:
                   description: DevicePluginResource defines a single device plugin
                     resource configuration.
                   properties:
                     name:
                       description: |-
-                        Name is the endpoint resource name for the device plugin.
-                        Should contain only alphanumeric characters, underscores and hyphens.
-                        The full extended resource name will be constructed as resource-prefix/name.
+                        Name is the endpoint resource name for the device plugin. Should contain
+                        only alphanumeric characters, underscores and hyphens. The full extended
+                        resource name will be constructed as resource-prefix/name.
                         Example: pods_vf, ovnk_mgmt_vf, pods_sf
                       minLength: 1
                       pattern: ^[a-zA-Z0-9_-]+$
@@ -76,25 +79,25 @@ spec:
                           type: boolean
                         needVhostNet:
                           description: |-
-                            NeedVhostNet mounts /dev/vhost-net and /dev/net/tun with the allocated devices.
-                            Defaults to false.
+                            NeedVhostNet mounts /dev/vhost-net and /dev/net/tun with the allocated
+                            devices. Defaults to false.
                           type: boolean
                       type: object
                     ranges:
                       description: |-
-                        Ranges specifies the function ranges on PFs to be included in this resource.
-                        For type sf, each range must set both start and end.
+                        Ranges specifies the function ranges on PFs to be included in this
+                        resource. For type sf, each range must set both start and end.
                       items:
                         description: |-
-                          FunctionRange defines a range of functions (Virtual Functions or Scalable Functions)
-                          on a Physical Function.
+                          FunctionRange defines a range of functions (Virtual Functions or Scalable
+                          Functions) on a Physical Function.
                         properties:
                           end:
                             description: |-
-                              End is the ending function index (inclusive).
-                              If not set, the range extends to the last function of this type on the PF.
-                              Required when type is sf. SF ranges are contiguous: every index from
-                              start to end (inclusive) must exist on the PF.
+                              End is the ending function index (inclusive). If not set, the range
+                              extends to the last function of this type on the PF. Required when type
+                              is sf. SF ranges are contiguous: every index from start to end
+                              (inclusive) must exist on the PF.
                             format: int32
                             minimum: 0
                             type: integer
@@ -124,8 +127,8 @@ spec:
                       type: array
                     resourcePrefix:
                       description: |-
-                        ResourcePrefix is the resource prefix used by the device plugin to prefix the resource name.
-                        If not set, the default resource prefix will be used.
+                        ResourcePrefix is the resource prefix used by the device plugin to prefix
+                        the resource name. If not set, the default resource prefix will be used.
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                       type: string
                     type:
@@ -150,8 +153,9 @@ spec:
             - devicePluginResources
             type: object
           status:
-            description: NodeSRIOVDevicePluginConfigStatus defines the observed state
-              of NodeSRIOVDevicePluginConfig
+            description: |-
+              NodeSRIOVDevicePluginConfigStatus defines the observed state of
+              NodeSRIOVDevicePluginConfig
             properties:
               conditions:
                 description: Conditions exposes the current state of the NodeSRIOVDevicePluginConfig.
@@ -211,8 +215,9 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
             type: object

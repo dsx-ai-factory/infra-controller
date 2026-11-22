@@ -52,7 +52,11 @@ itertools = { workspace = true }
 http = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
-nv-redfish = { workspace = true, features = ["computer-systems", "managers"] }
+nv-redfish = { workspace = true, features = [
+  "computer-systems",
+  "managers",
+  "secure-boot",
+] }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 rand = { workspace = true }
@@ -71,6 +75,7 @@ axum = { workspace = true }
 bmc-drivers = { path = "../bmc-drivers" }
 bmc-explorer = { path = "../bmc-explorer", features = ["test-support"] }
 bmc-mock = { path = "../bmc-mock" }
+eyre = { workspace = true }
 opentelemetry-prometheus = { workspace = true }
 prometheus = { workspace = true }
 
@@ -91,7 +96,7 @@ component-manager = { path = "../component-manager", features = [
   "test-support",
 ] }
 
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 tonic = { workspace = true }
 uuid = { workspace = true }
 

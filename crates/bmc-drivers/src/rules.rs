@@ -263,6 +263,7 @@ fn built_ins() -> Vec<Rule> {
             NvidiaBlueFieldAccounts,
             NvidiaBlueFieldDpu,
             NvidiaBlueFieldConsole,
+            NvidiaBlueFieldPower,
         ]),
     );
 

@@ -702,8 +702,7 @@ async fn configured_networks_reject_scoped_children_but_preserve_global_parents(
             assert_eq!(error.message(), expected_error, "{name}");
         } else {
             result?;
-            let mut connection = env.pool.acquire().await?;
-            let segment = db::network_segment::find_by_name(&mut connection, name).await?;
+            let segment = db::network_segment::find_by_name(&env.pool, name).await?;
             assert_eq!(segment.config.vpc_id, Some(vpc_id), "{name}");
         }
         let segment_count: i64 =
@@ -2108,6 +2107,7 @@ async fn test_deleted_vpc_prefix_cannot_allocate_new_instance_interface(
                 network: Some(single_interface_network_config_with_vpc_prefix(id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,

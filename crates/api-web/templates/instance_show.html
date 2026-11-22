@@ -23,7 +23,7 @@
 		<tr>
 			<td>
 				<a href="/admin/instance/{{ i.id }}">{% if i.metadata.name.is_empty() %}{{ i.id }}{% else %}{{ i.metadata.name }}{% endif %}</a>
-				{% if !i.metadata.name.is_empty() %}<span class="cell-sub">{{ i.id }}</span>{% endif %}
+				{% if !i.metadata.name.is_empty() %}<code class="cell-chip cell-chip-id">{{ i.id }}</code>{% endif %}
 			</td>
 			<td>{{ i.machine_id|machine_id_link|safe }}</td>
 			<td><a href="/admin/tenant/{{ i.tenant_org }}">{{ i.tenant_org }}</a></td>

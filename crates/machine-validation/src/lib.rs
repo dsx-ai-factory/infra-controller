@@ -83,38 +83,27 @@ impl MachineValidationManager {
             .build()
             .map_err(|e| MachineValidationError::Generic(format!("Client builder error: {e}")))?;
 
-        let res = client
-            .get(url)
-            .send()
-            .await
-            .or(Err(MachineValidationError::Generic(format!(
-                "Failed to GET from '{}'",
-                url
-            ))))?;
-        let total_size = res
-            .content_length()
-            .ok_or(MachineValidationError::Generic(format!(
-                "Failed to get content length from '{}'",
-                url
-            )))?;
-        let _ = std::fs::remove_file(output_file).or(Err(MachineValidationError::Generic(
-            format!("Failed to delete file '{output_file}'"),
-        )));
+        let res = client.get(url).send().await.map_err(|_| {
+            MachineValidationError::Generic(format!("Failed to GET from '{}'", url))
+        })?;
+        let total_size = res.content_length().ok_or_else(|| {
+            MachineValidationError::Generic(format!("Failed to get content length from '{}'", url))
+        })?;
+        std::fs::remove_file(output_file).ok();
 
-        let mut file = std::fs::File::create(output_file).or(Err(
-            MachineValidationError::Generic(format!("Failed to create file '{output_file}'")),
-        ))?;
+        let mut file = std::fs::File::create(output_file).map_err(|_| {
+            MachineValidationError::Generic(format!("Failed to create file '{output_file}'"))
+        })?;
         let mut buffer: u64 = 0;
         let mut stream = res.bytes_stream();
 
         while let Some(item) = stream.next().await {
-            let chunk = item.or(Err(MachineValidationError::Generic(
-                "Error while reading stream".to_string(),
-            )))?;
-            file.write_all(&chunk)
-                .or(Err(MachineValidationError::Generic(
-                    "Error while writing to file".to_string(),
-                )))?;
+            let chunk = item.map_err(|_| {
+                MachineValidationError::Generic("Error while reading stream".to_string())
+            })?;
+            file.write_all(&chunk).map_err(|_| {
+                MachineValidationError::Generic("Error while writing to file".to_string())
+            })?;
             let new = min(buffer + (chunk.len() as u64), total_size);
             buffer = new;
         }

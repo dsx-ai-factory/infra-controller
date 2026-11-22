@@ -81,12 +81,12 @@ pub(super) async fn get_status(
                 common::component_result_fields(status.result.as_ref());
             let updated_at = common::timestamp_string(status.updated_at.as_ref());
             table.add_row(Row::new(vec![
-                Cell::new(&component_id),
-                Cell::new(&result_status),
+                Cell::new(component_id),
+                Cell::new(result_status),
                 Cell::new(common::firmware_state_name(status.state)),
-                Cell::new(&common::display_or_dash(&status.target_version)),
+                Cell::new(common::display_or_dash(&status.target_version)),
                 Cell::new(&updated_at),
-                Cell::new(&error),
+                Cell::new(error),
             ]));
         }
 

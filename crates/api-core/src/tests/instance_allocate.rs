@@ -15,14 +15,12 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
-use std::ops::DerefMut;
 
 use ::rpc::forge::ManagedHostNetworkConfigRequest;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
-use db::TransactionVending as _;
 use forge::forge_server::Forge;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
@@ -264,9 +262,7 @@ async fn tenant_nic_firmware_guarded_retry_captures_selected_spx_target(pool: sq
     .unwrap();
     txn.commit().await.unwrap();
     // Capture the persisted token: incrementing again would assign a new time.
-    let mut txn = env.db_txn().await;
-    let selected_machine = host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let selected_machine = host.host().db_machine(&env.pool).await;
     let allocated = env
         .api
         .allocate_instance(tonic::Request::new(request))
@@ -602,8 +598,7 @@ async fn create_test_env_for_instance_allocation(
 }
 
 async fn vpc_id_by_name(env: &TestEnv, name: &str) -> VpcId {
-    let mut txn = env.db_txn().await;
-    let vpcs = db::vpc::find_by_name(txn.as_mut(), name).await.unwrap();
+    let vpcs = db::vpc::find_by_name(&env.pool, name).await.unwrap();
     assert_eq!(vpcs.len(), 1, "expected exactly one VPC named {name}");
     vpcs[0].id
 }
@@ -694,6 +689,7 @@ async fn test_allocate_instance_rejects_interface_anycast_prefix_outside_vpc_pro
                 network: Some(network_config),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -728,9 +724,7 @@ async fn test_zero_dpu_instance_allocation_rejects_explicit_interfaces(
     // Ingest zero DPU host
     let zero_dpu_host = api_fixtures::site_explorer::new_host(&env, config).await?;
 
-    let host_inband_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND")
-            .await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
 
     // Allocate an instance by explicitly specifying an interface that is on the HOST_INBAND network
     let instance = crate::handlers::instance::allocate(
@@ -745,6 +739,7 @@ async fn test_zero_dpu_instance_allocation_rejects_explicit_interfaces(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -813,9 +808,7 @@ async fn test_zero_dpu_instance_allocation_auto(
     let zero_dpu_host = api_fixtures::site_explorer::new_host(&env, config).await?;
     let flat_vpc_id = default_flat_vpc_id(&env).await;
 
-    let host_inband_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND")
-            .await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
 
     // Add a /64, but leave SLAAC EUI-64 inference off. Repeated
     // Information-Requests should still return host metadata without adding an
@@ -841,12 +834,10 @@ async fn test_zero_dpu_instance_allocation_auto(
         assert_eq!(response.prefix, "");
     }
 
-    let mut txn = env.db_txn().await;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), host_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, host_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].addresses.len(), 1);
     assert!(interfaces[0].addresses[0].is_ipv4());
-    txn.rollback().await?;
 
     let host_inband_prefix = host_inband_segment
         .prefixes
@@ -891,6 +882,7 @@ async fn test_zero_dpu_instance_allocation_auto(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -989,9 +981,8 @@ async fn test_zero_dpu_instance_allocation_auto(
     );
     assert_eq!(status_interfaces[0].vpc_id, Some(flat_vpc_id));
 
-    let mut txn = env.db_txn().await;
     let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance_id,
         &host_inband_segment.id,
     )
@@ -1002,7 +993,6 @@ async fn test_zero_dpu_instance_allocation_auto(
     assert_eq!(address.vpc_id, flat_vpc_id);
     assert!(address.address.is_ipv4());
     assert_eq!(address.prefix, host_inband_prefix.prefix);
-    txn.rollback().await?;
 
     // The stored prefix describes the host's subnet. Allocating the instance
     // reuses its host lease and does not consume the rest of the subnet.
@@ -1050,9 +1040,7 @@ async fn test_zero_dpu_network_update_releases_vpc_bound_host_interface(
     let zero_dpu_host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::zero_dpu()).await?;
     let flat_vpc_id = default_flat_vpc_id(&env).await;
-    let host_inband_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND")
-            .await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
     let instance = crate::handlers::instance::allocate(
         env.api.as_ref(),
         tonic::Request::new(forge::InstanceAllocationRequest {
@@ -1238,9 +1226,7 @@ async fn test_zero_dpu_auto_update_rejects_host_inband_segment_bound_to_differen
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::zero_dpu()).await?;
     let flat_vpc_id = default_flat_vpc_id(&env).await;
 
-    let host_inband_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND")
-            .await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
 
     let instance = crate::handlers::instance::allocate(
         env.api.as_ref(),
@@ -1254,6 +1240,7 @@ async fn test_zero_dpu_auto_update_rejects_host_inband_segment_bound_to_differen
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -1365,6 +1352,7 @@ async fn test_zero_dpu_instance_allocation_rejects_missing_auto(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1425,6 +1413,7 @@ async fn test_zero_dpu_instance_allocation_rejects_missing_vpc_id(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1489,6 +1478,7 @@ async fn test_zero_dpu_instance_allocation_rejects_non_flat_vpc_id(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1508,6 +1498,89 @@ async fn test_zero_dpu_instance_allocation_rejects_non_flat_vpc_id(
         err.message()
     );
     Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_infrastructure_workload_allocation_is_rejected(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let tenant_segment = env.create_vpc_and_tenant_segment().await;
+    let vpc_id = db::vpc::find_by_segment(&env.pool, tenant_segment)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let host = api_fixtures::create_managed_host(&env).await;
+
+    for (segment_type, gateway) in [
+        (
+            forge::NetworkSegmentType::Admin,
+            FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1],
+        ),
+        (
+            forge::NetworkSegmentType::Underlay,
+            FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[2],
+        ),
+    ] {
+        // Ready, VPC-bound targets isolate workload admission from the existing
+        // parent checks. Dedicated prefixes have no physical address owners.
+        let segment_id = create_network_segment(
+            &env.api,
+            &format!("unsupported workload {segment_type:?}"),
+            &format!("{}/{}", gateway.network(), gateway.prefix()),
+            &gateway.ip().to_string(),
+            segment_type,
+            Some(vpc_id),
+            false,
+        )
+        .await;
+        env.run_network_segment_controller_iteration().await;
+        env.run_network_segment_controller_iteration().await;
+        let error = env
+            .api
+            .allocate_instance(tonic::Request::new(forge::InstanceAllocationRequest {
+                machine_id: Some(host.host().id),
+                config: Some(forge::InstanceConfig {
+                    tenant: Some(default_tenant_config()),
+                    os: Some(default_os_config()),
+                    network: Some(single_interface_network_config(segment_id)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("infrastructure workload allocation must fail");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error.message().contains(&format!(
+                "network segment {segment_id} has type {segment_type:?}"
+            )),
+            "{error}"
+        );
+        assert!(
+            db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let address_counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM instance_addresses WHERE segment_id = $1),
+                    (SELECT count(*) FROM machine_interface_addresses a
+                     JOIN machine_interfaces i ON i.id = a.interface_id WHERE i.segment_id = $1)",
+        )
+        .bind(segment_id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(address_counts, (0, 0));
+        assert_eq!(
+            db::vpc::find_by_segment(&env.pool, segment_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            vpc_id
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -1547,6 +1620,7 @@ async fn test_reject_single_dpu_instance_allocation_no_network_config(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1578,9 +1652,7 @@ async fn test_reject_single_dpu_instance_allocation_host_inband_network_config(
     let single_dpu_host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default()).await?;
 
-    let host_inband_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND")
-            .await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
 
     // Create an instance on a host with DPUs, but try to configure it on a host_inband network,
     // which is not allowed
@@ -1622,6 +1694,7 @@ async fn test_reject_single_dpu_instance_allocation_host_inband_network_config(
                     auto_config: None,
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 infiniband: None,
                 nvlink: None,
@@ -1712,12 +1785,9 @@ async fn test_reject_zero_dpu_instance_allocation_multiple_vpcs(
 
     let host_snapshot_rpc: forge::Machine = zero_dpu_host.host_snapshot.clone().into();
 
-    let host_inband_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND")
-            .await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
     let host_inband_2_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND_2")
-            .await?;
+        db::network_segment::find_by_name(&env.pool, "HOST_INBAND_2").await?;
 
     let instance_network_restrictions = host_snapshot_rpc
         .status
@@ -1764,6 +1834,7 @@ async fn test_reject_zero_dpu_instance_allocation_multiple_vpcs(
             instance_type_id: None,
             config: Some(forge::InstanceConfig {
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 tenant: Some(forge::TenantConfig {
                     tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
                     hostname: None,
@@ -1824,9 +1895,7 @@ async fn test_single_dpu_instance_allocation(
     let single_dpu_host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default()).await?;
 
-    let tenant_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "TENANT")
-            .await?;
+    let tenant_segment = db::network_segment::find_by_name(&env.pool, "TENANT").await?;
 
     // Create an instance on a host with DPUs, without specifying a network config, which is not allowed
     let result = crate::handlers::instance::allocate(
@@ -1870,6 +1939,7 @@ async fn test_single_dpu_instance_allocation(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1982,9 +2052,7 @@ async fn test_reject_zero_dpu_instance_with_tenant_network_segment(
 
     let zero_dpu_host = api_fixtures::site_explorer::new_host(&env, config).await?;
 
-    let tenant_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "TENANT")
-            .await?;
+    let tenant_segment = db::network_segment::find_by_name(&env.pool, "TENANT").await?;
 
     let result = crate::handlers::instance::allocate(
         env.api.as_ref(),
@@ -1998,6 +2066,7 @@ async fn test_reject_zero_dpu_instance_with_tenant_network_segment(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -2073,6 +2142,7 @@ async fn test_reject_zero_dpu_instance_with_extension_services(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -2125,9 +2195,7 @@ async fn test_instance_allocation_rejects_auto_with_explicit_interfaces(
     let config = ManagedHostConfig::zero_dpu();
 
     let zero_dpu_host = api_fixtures::site_explorer::new_host(&env, config).await?;
-    let host_inband_segment =
-        db::network_segment::find_by_name(env.pool.txn_begin().await?.deref_mut(), "HOST_INBAND")
-            .await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
 
     let result = crate::handlers::instance::allocate(
         env.api.as_ref(),
@@ -2141,6 +2209,7 @@ async fn test_instance_allocation_rejects_auto_with_explicit_interfaces(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -2219,6 +2288,7 @@ async fn test_instance_allocation_rejects_auto_on_dpu_host(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,

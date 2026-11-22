@@ -13,6 +13,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -408,23 +409,51 @@ func TestGenerateVersionHash(t *testing.T) {
 	skgsd := NewSSHKeyGroupDAO(dbSession)
 
 	tests := []struct {
-		name                string
-		tskg                *SSHKeyGroup
-		tskgsas             []SSHKeyGroupSiteAssociation
-		expectVersionUpdate bool
-		expectErr           bool
+		name                      string
+		tskg                      *SSHKeyGroup
+		tskgsas                   []SSHKeyGroupSiteAssociation
+		groupOnly                 bool
+		expectVersionUpdate       bool
+		expectAssocVersionsUpdate bool
+		expectErr                 bool
 	}{
 		{
-			name:                "success case with site and keys",
-			tskg:                skg,
-			tskgsas:             []SSHKeyGroupSiteAssociation{*skgsa1, *skgsa2},
-			expectErr:           false,
-			expectVersionUpdate: true,
+			name:                      "success case with site and keys",
+			tskg:                      skg,
+			tskgsas:                   []SSHKeyGroupSiteAssociation{*skgsa1, *skgsa2},
+			groupOnly:                 false,
+			expectErr:                 false,
+			expectVersionUpdate:       true,
+			expectAssocVersionsUpdate: true,
+		},
+		{
+			name:                      "groupOnly updates only the group version",
+			tskg:                      skg,
+			tskgsas:                   []SSHKeyGroupSiteAssociation{*skgsa1, *skgsa2},
+			groupOnly:                 true,
+			expectErr:                 false,
+			expectVersionUpdate:       true,
+			expectAssocVersionsUpdate: false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			uskgsa, err := skgsd.GenerateAndUpdateVersion(ctx, nil, tc.tskg.ID)
+			initialVersion := "initial-group-version"
+			beforeGroup, err := skgsd.Update(ctx, nil, SSHKeyGroupUpdateInput{
+				SSHKeyGroupID: tc.tskg.ID,
+				Version:       &initialVersion,
+			})
+			assert.NoError(t, err)
+
+			skgsaDAO := NewSSHKeyGroupSiteAssociationDAO(dbSession)
+			beforeAssocs := make(map[uuid.UUID]*SSHKeyGroupSiteAssociation, len(tc.tskgsas))
+			for _, tskgsa := range tc.tskgsas {
+				cur, getErr := skgsaDAO.GetByID(ctx, nil, tskgsa.ID, nil)
+				assert.NoError(t, getErr)
+				beforeAssocs[tskgsa.ID] = cur
+			}
+
+			uskgsa, err := skgsd.GenerateAndUpdateVersion(ctx, nil, tc.tskg.ID, tc.groupOnly)
 			if tc.expectErr {
 				assert.NotNil(t, err)
 			} else {
@@ -433,14 +462,18 @@ func TestGenerateVersionHash(t *testing.T) {
 
 			if tc.expectVersionUpdate {
 				assert.NotNil(t, uskgsa)
-				assert.NotEqual(t, *tc.tskg.Version, *uskgsa.Version)
+				assert.NotEqual(t, *beforeGroup.Version, *uskgsa.Version)
 
-				skgsaDAO := NewSSHKeyGroupSiteAssociationDAO(dbSession)
 				for _, tskgsa := range tc.tskgsas {
-					uskgsa, err := skgsaDAO.GetByID(ctx, nil, tskgsa.ID, nil)
-					assert.Nil(t, err)
-					assert.NotEqual(t, *tskgsa.Version, *uskgsa.Version)
-					assert.NotEqual(t, tskgsa.Updated, uskgsa.Updated)
+					updatedAssoc, getErr := skgsaDAO.GetByID(ctx, nil, tskgsa.ID, nil)
+					assert.Nil(t, getErr)
+					if tc.expectAssocVersionsUpdate {
+						assert.NotEqual(t, *beforeAssocs[tskgsa.ID].Version, *updatedAssoc.Version)
+						assert.NotEqual(t, beforeAssocs[tskgsa.ID].Updated, updatedAssoc.Updated)
+					} else {
+						assert.Equal(t, *beforeAssocs[tskgsa.ID].Version, *updatedAssoc.Version)
+						assert.Equal(t, beforeAssocs[tskgsa.ID].Updated, updatedAssoc.Updated)
+					}
 				}
 			}
 		})
@@ -541,7 +574,7 @@ func TestSSHKeyGroupSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedName, got.Name)
 				assert.Equal(t, tc.expectedDesc, got.Description)
 				assert.Equal(t, *tc.expectedOrg, got.Org)
-				assert.Equal(t, tc.expectedTenantID.String(), got.TenantID.String())
+				assert.Equal(t, *tc.expectedTenantID, got.TenantID)
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, tc.expectedVersion, got.Version)
 			}
@@ -605,6 +638,77 @@ func TestSSHKeyGroupSQLDAO_Delete(t *testing.T) {
 				tmp, err := skgsd.GetByID(ctx, nil, tc.id, nil)
 				assert.NotNil(t, err)
 				assert.Nil(t, tmp)
+			}
+			if tc.verifyChildSpanner {
+				span := otrace.SpanFromContext(ctx)
+				assert.True(t, span.SpanContext().IsValid())
+			}
+		})
+	}
+}
+
+func TestSSHKeyGroupSQLDAO_Clear(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceInitDB(t)
+	defer dbSession.Close()
+	testSSHKeyGroupSetupSchema(t, dbSession)
+	tenant := testOperatingSystemBuildTenant(t, dbSession, "testTenant")
+	user := testOperatingSystemBuildUser(t, dbSession, "testUser")
+
+	skgsd := NewSSHKeyGroupDAO(dbSession)
+	skg1, err := skgsd.Create(ctx, nil, SSHKeyGroupCreateInput{
+		Name:      "test-clear",
+		TenantOrg: "testorg",
+		TenantID:  tenant.ID,
+		Status:    SSHKeyGroupStatusSyncing,
+		CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, skgsd.Delete(ctx, nil, skg1.ID))
+
+	skg2, err := skgsd.Create(ctx, nil, SSHKeyGroupCreateInput{
+		Name:      "test-clear-noop",
+		TenantOrg: "testorg",
+		TenantID:  tenant.ID,
+		Status:    SSHKeyGroupStatusSyncing,
+		CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, skgsd.Delete(ctx, nil, skg2.ID))
+
+	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		desc               string
+		input              SSHKeyGroupClearInput
+		expectError        bool
+		verifyChildSpanner bool
+	}{
+		{
+			desc:               "clears deleted timestamp on soft-deleted SSHKeyGroup",
+			input:              SSHKeyGroupClearInput{SSHKeyGroupID: skg1.ID, Deleted: true},
+			expectError:        false,
+			verifyChildSpanner: true,
+		},
+		{
+			desc:        "returns error when Deleted is false on soft-deleted SSHKeyGroup",
+			input:       SSHKeyGroupClearInput{SSHKeyGroupID: skg2.ID, Deleted: false},
+			expectError: true,
+		},
+		{
+			desc:        "returns error when SSHKeyGroup ID does not exist",
+			input:       SSHKeyGroupClearInput{SSHKeyGroupID: uuid.New(), Deleted: true},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := skgsd.Clear(ctx, nil, tc.input)
+			assert.Equal(t, tc.expectError, err != nil)
+			if !tc.expectError {
+				require.NotNil(t, got)
+				assert.Nil(t, got.Deleted)
 			}
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

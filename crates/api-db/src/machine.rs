@@ -18,8 +18,7 @@
 //! Machine - represents a database-backed Machine object
 //!
 //! Network configuration transaction boundaries are documented on
-//! [`try_update_network_config`] and [`update_dpu_loopback_ips_v6`]. The
-//! crate's `LOCK_ORDERING.md` traces their cross-crate callers.
+//! [`try_update_network_config`]. The crate's `LOCK_ORDERING.md` traces its cross-crate callers.
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -39,9 +38,9 @@ use carbide_uuid::rack::{RackId, RackProfileId};
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use health_report::{HealthReport, HealthReportApplyMode};
-use itertools::Itertools;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
+use model::attestation_scheduling::AttestationScheduling;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::expected_machine::ExpectedMachineData;
 use model::extension_service::ExtensionServiceType;
@@ -166,15 +165,14 @@ impl<T> ExactSizeIterator for MachineRowLockOrderIter<T> {}
 
 /// `get_or_create` returns the machine matching an interface, creating it if absent.
 /// `common_pools` selects creation allocations; `None` skips allocation.
-/// For a new DPU with pools, `requested_loopback_v6` claims that exact address;
-/// omitting it permits optional IPv6 auto-assignment. Existing rows retain their
-/// allocations. The caller holds any IPv6 reservation lock through creation.
+/// New DPUs can receive Integrated ASN and optional IPv6 allocations from the pools.
+/// Callers preparing resources separately pass `None` and attach them after creation.
+/// Existing machines retain their allocations.
 pub async fn get_or_create(
     txn: &mut PgConnection,
-    common_pools: Option<MachineCreationPools<'_>>,
+    common_pools: Option<&CommonPools>,
     stable_machine_id: &MachineId,
     interface: &MachineInterfaceSnapshot,
-    requested_loopback_v6: Option<Ipv6Addr>,
 ) -> DatabaseResult<AnyMachine> {
     let existing_machine =
         find_one(&mut *txn, stable_machine_id, MachineSearchConfig::default()).await?;
@@ -214,14 +212,13 @@ pub async fn get_or_create(
         // Host and DPU machines are created in same `discover_machine` call. Update same
         // state in both machines.
         let state = ManagedHostState::Created;
-        let machine = create_with_requested_loopback(
+        let machine = create(
             txn,
             common_pools,
             stable_machine_id,
             state,
             None,
             CURRENT_STATE_MODEL_VERSION,
-            requested_loopback_v6,
         )
         .await?;
         crate::machine_interface::associate_interface_with_machine(
@@ -428,14 +425,33 @@ pub async fn try_lock_machine_state_history(
                      hashtextextended($1, 'machine_state_history'::regclass::bigint)\
                  )";
     sqlx::query_scalar(query)
-        .bind(machine_id.to_string())
+        .bind(machine_id)
         .fetch_one(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
 
-pub async fn find_existing_machine(
+/// Takes a machine's state-history retention advisory, waiting for the holder.
+/// `advance` takes it through the history trigger before locking the machine
+/// row, so a transaction that writes that row and later persists controller
+/// state has to take it first too, or the two orders deadlock.
+pub async fn lock_machine_state_history(
     txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let query = "SELECT pg_advisory_xact_lock(\
+                     hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+                 )";
+    sqlx::query(query)
+        .bind(machine_id.to_string())
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+pub async fn find_existing_machine(
+    conn: impl DbReader<'_>,
     macaddr: MacAddress,
     relay: IpAddr,
 ) -> Result<Option<MachineId>, DatabaseError> {
@@ -483,7 +499,7 @@ pub async fn find_existing_machine(
     let id: Option<MachineId> = sqlx::query_as(query)
         .bind(macaddr)
         .bind(relay)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -522,7 +538,7 @@ pub async fn advance<ID: MachineIdSubtypeTrait>(
         )
         .bind(version)
         .bind(sqlx::types::Json(state))
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::new("update machines state", e))?;
@@ -569,15 +585,11 @@ where
         ObjectFilter::All => {} // Nothing to add.
         ObjectFilter::One(id) => {
             builder.push(" AND m.id= ");
-            builder.push_bind(id.to_string());
+            builder.push_bind(id);
         }
         ObjectFilter::List(list) => {
             builder.push(" AND m.id=ANY( ");
-            builder.push_bind(
-                list.iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<String>>(),
-            );
+            builder.push_bind(list);
             builder.push(" ) ");
         }
     }
@@ -621,7 +633,7 @@ where
 }
 
 pub async fn find_by_ip(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ip: &IpAddr,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -637,8 +649,8 @@ pub async fn find_by_ip(
         );
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(ip.to_string())
-        .fetch_optional(txn)
+        .bind(ip)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -646,10 +658,10 @@ pub async fn find_by_ip(
 }
 
 pub async fn find_id_by_bmc_ip(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_ip: &IpAddr,
 ) -> Result<Option<MachineId>, DatabaseError> {
-    crate::machine_topology::find_machine_id_by_bmc_ip(txn, &bmc_ip.to_string()).await
+    crate::machine_topology::find_machine_id_by_bmc_ip(conn, &bmc_ip.to_string()).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,7 +749,7 @@ pub async fn find_ids_by_instance_type_id(
 /// * `txn` - A reference to an active DB transaction
 /// * `machine_ids` - A slice of machine IDs to query for
 pub async fn find_nvlink_info_by_machine_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
 ) -> Result<HashMap<HostMachineId, Option<MachineNvLinkInfo>>, DatabaseError> {
     if machine_ids.is_empty() {
@@ -745,11 +757,10 @@ pub async fn find_nvlink_info_by_machine_ids(
     }
 
     let query = "SELECT id, nvlink_info FROM machines WHERE id = ANY($1)";
-    let machine_id_strings: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
 
     let rows = sqlx::query(query)
-        .bind(machine_id_strings)
-        .fetch_all(txn)
+        .bind(machine_ids)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -828,7 +839,7 @@ pub async fn remove_instance_type_associations(
 }
 
 pub async fn find_by_hostname(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     hostname: &str,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -840,7 +851,7 @@ pub async fn find_by_hostname(
 
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(hostname)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -848,7 +859,7 @@ pub async fn find_by_hostname(
 }
 
 pub async fn find_by_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: &MacAddress,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -859,7 +870,7 @@ pub async fn find_by_mac_address(
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -895,7 +906,7 @@ pub async fn find_machine_ids_by_mac_addresses(
 /// Finds the machine with this address in either loopback field.
 /// Both fields are serialized from typed IP addresses, so their stored text
 /// matches `IpAddr::to_string()`.
-/// Attached remote IPv4 ownership also identifies the machine while its
+/// Attached remote loopback ownership also identifies the machine while its
 /// configuration field needs repair. Pending provider reservations do not.
 pub async fn find_by_loopback_ip(
     txn: impl DbReader<'_>,
@@ -906,7 +917,7 @@ pub async fn find_by_loopback_ip(
             "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1
                 OR m.id IN (
                     SELECT owner_id FROM resource_pool_allocations
-                    WHERE pool_name = 'lo-ip' AND owner_type = 'machine'
+                    WHERE pool_name IN ('lo-ip', 'lo-ip-v6') AND owner_type = 'machine'
                       AND binding_id IS NOT NULL AND state = 'attached'
                       AND result->>'status' = 'allocated'
                       AND result->'result'->'value'->>'kind' = 'ip_address'
@@ -916,7 +927,7 @@ pub async fn find_by_loopback_ip(
         );
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(loopback_ip.to_string())
+        .bind(sqlx::types::Text(loopback_ip))
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
@@ -930,22 +941,22 @@ pub async fn find_by_loopback_ip(
 /// - If the query looks like a MAC address, it will look up the machine by MAC address
 /// - Otherwise, it will try to look up the Machine by hostname
 pub async fn find_by_query(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     query: &str,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     if let Ok(id) = MachineId::from_str(query) {
-        return find_one(txn, &id, MachineSearchConfig::default()).await;
+        return find_one(conn, &id, MachineSearchConfig::default()).await;
     }
 
     if let Ok(ip) = IpAddr::from_str(query) {
-        return find_by_ip(txn, &ip).await;
+        return find_by_ip(conn, &ip).await;
     }
 
     if let Ok(mac) = MacAddress::from_str(query) {
-        return find_by_mac_address(txn, &mac).await;
+        return find_by_mac_address(conn, &mac).await;
     }
 
-    find_by_hostname(txn, query).await
+    find_by_hostname(conn, query).await
 }
 
 /// Records the database statement execution time as the machine's reboot timestamp.
@@ -958,7 +969,7 @@ pub async fn update_reboot_time<ID: MachineIdSubtypeTrait>(
 ) -> Result<(), DatabaseError> {
     let query = "UPDATE machines SET last_reboot_time=clock_timestamp() WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1074,7 +1085,7 @@ pub async fn update_cleanup_time<ID: MachineIdSubtypeTrait>(
     // update time, not the transaction start time, so completed cleanup is newer than that state.
     let query = "UPDATE machines SET last_cleanup_time=clock_timestamp() WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1187,7 +1198,7 @@ pub async fn update_last_scout_observed_version(
 }
 
 pub async fn find_host_by_dpu_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     dpu_machine_id: &DpuMachineId,
 ) -> Result<Option<HostMachine>, DatabaseError> {
     lazy_static! {
@@ -1202,7 +1213,7 @@ pub async fn find_host_by_dpu_machine_id(
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(dpu_machine_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -1278,12 +1289,7 @@ impl DpuHostAssociations {
             AND mi.attached_dpu_machine_id = ANY($1)"#;
 
         let pairs: Vec<(DpuMachineId, HostMachineId)> = sqlx::query_as(query)
-            .bind(
-                dpu_machine_ids
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>(),
-            )
+            .bind(dpu_machine_ids)
             .fetch_all(conn)
             .await
             .map_err(|error| DatabaseError::query(query, error))?;
@@ -1428,13 +1434,13 @@ lazy_static! {
 /// Each attached DPU is returned once, even when several host interfaces
 /// attach to it.
 pub async fn find_dpus_by_host_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     host_machine_id: &HostMachineId,
 ) -> Result<Vec<DpuMachine>, DatabaseError> {
     let query = FIND_DPUS_BY_HOST_MACHINE_ID_QUERY.as_str();
     let machines = sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(host_machine_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -1747,9 +1753,8 @@ pub async fn clear_nvlink_status_observations(
 
     let query = "UPDATE machines SET nvlink_status_observation = NULL
                  WHERE id = ANY($1) AND nvlink_status_observation IS NOT NULL";
-    let machine_id_strings: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
     sqlx::query(query)
-        .bind(machine_id_strings)
+        .bind(machine_ids)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -2043,6 +2048,85 @@ pub async fn update_sku_validation_health_report(
     .await
 }
 
+/// Stores the complete `attestation` alert list, replacing whatever the source
+/// held before. A caller builds the whole list every time, so an empty one
+/// means the machine has nothing to report and the source is deleted.
+pub async fn update_attestation_health_report(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    health_report: &HealthReport,
+) -> Result<(), DatabaseError> {
+    if health_report.alerts.is_empty() {
+        return crate::health_report::remove_health_report(
+            txn,
+            "machines",
+            machine_id,
+            HealthReportApplyMode::Merge,
+            HealthReport::ATTESTATION_SOURCE,
+        )
+        .await;
+    }
+
+    // The stored report is the only place an alert's original `in_alert_since`
+    // survives an overwrite. The four updates above leave this to their caller,
+    // which already has the machine loaded; attestation is updated from two
+    // controllers that do not, so it happens here to keep both identical.
+    let query = "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id=$1";
+    let stored: Option<sqlx::types::Json<HealthReport>> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_one(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    let mut health_report = health_report.clone();
+    health_report.source = HealthReport::ATTESTATION_SOURCE.to_string();
+    health_report.update_in_alert_since(stored.as_deref());
+    crate::health_report::insert_health_report(
+        txn,
+        "machines",
+        machine_id,
+        HealthReportApplyMode::Merge,
+        &health_report,
+    )
+    .await
+}
+
+/// Returns the latest attestation scheduling decision, or `None` when the
+/// machine has never been scheduled.
+pub async fn get_attestation_scheduling(
+    txn: impl DbReader<'_>,
+    machine_id: &MachineId,
+) -> Result<Option<AttestationScheduling>, DatabaseError> {
+    let query = "SELECT attestation_scheduling FROM machines WHERE id=$1";
+
+    let stored: Option<sqlx::types::Json<AttestationScheduling>> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(stored.map(|sqlx::types::Json(scheduling)| scheduling))
+}
+
+/// Records what scheduling decided, replacing any earlier decision. Only the
+/// latest is kept, so this holds no history.
+pub async fn set_attestation_scheduling(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    scheduling: &AttestationScheduling,
+) -> Result<(), DatabaseError> {
+    let query = "UPDATE machines SET attestation_scheduling=$1 WHERE id=$2 RETURNING id";
+
+    sqlx::query_as::<_, ()>(query)
+        .bind(sqlx::types::Json(scheduling))
+        .bind(machine_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
 pub async fn insert_health_report(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -2160,8 +2244,8 @@ pub async fn force_cleanup(
 }
 
 /// `MachineNetworkConfigNotCurrent` means the target is missing or its network
-/// version no longer matches. The guarded backfill also rejects force deletion;
-/// the write deliberately does not distinguish these cases.
+/// version no longer matches. Lifetime-aware writes also reject ForceDeletion
+/// and replacement rows; the write deliberately does not distinguish these cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MachineNetworkConfigNotCurrent;
 
@@ -2190,15 +2274,6 @@ pub async fn try_update_network_config(
     try_update_network_config_inner(txn, machine_id, expected_version, new_state, false, None).await
 }
 
-async fn try_update_network_config_unless_force_deleting(
-    txn: &mut PgConnection,
-    machine_id: &MachineId,
-    expected_version: ConfigVersion,
-    new_state: &ManagedHostNetworkConfig,
-) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
-    try_update_network_config_inner(txn, machine_id, expected_version, new_state, true, None).await
-}
-
 /// `try_update_network_config_for_created` writes network configuration only
 /// to the same machine row and version. ForceDeletion, replacement rows,
 /// missing rows, and changed versions return `NotApplied`.
@@ -2224,18 +2299,74 @@ pub async fn try_update_network_config_for_created(
     .await
 }
 
-async fn is_force_deleting_or_deleted(
+/// Finds candidate DPUs in machine-ID order. Callers must reload each row before
+/// writing: a sibling update can advance its configuration version after this scan.
+pub async fn find_dpu_ids_without_loopback_ipv6(
+    txn: impl DbReader<'_>,
+) -> DatabaseResult<Vec<MachineId>> {
+    let query = "SELECT id FROM machines
+        WHERE starts_with(id, $1)
+          AND network_config->>'loopback_ip_v6' IS NULL
+        ORDER BY id";
+    sqlx::query_as(query)
+        .bind(MachineType::Dpu.id_prefix())
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Locks a still-present, non-deleting DPU without waiting. Call after reserving
+/// its IPv6 value; roll back the whole attempt on contention or false so a writer
+/// holding its group cannot wait on a reservation retained by this attempt.
+pub async fn try_lock_dpu_for_loopback_backfill(
     txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    let query = "SELECT id FROM machines
+        WHERE id = $1 AND controller_state != $2::jsonb
+        FOR NO KEY UPDATE NOWAIT";
+    let admitted: Option<MachineId> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(admitted.is_some())
+}
+
+/// Returns true when the machine is absent or marked for force deletion.
+/// This read takes no row lock; an attachment must still guard its final write.
+pub async fn is_force_deleting_or_deleted(
+    txn: impl DbReader<'_>,
     machine_id: &MachineId,
 ) -> Result<bool, DatabaseError> {
     let query = "SELECT controller_state = $2::jsonb FROM machines WHERE id = $1";
     let is_force_deleting: Option<bool> = sqlx::query_scalar(query)
         .bind(machine_id)
         .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
-        .fetch_optional(&mut *txn)
+        .fetch_optional(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     Ok(is_force_deleting.unwrap_or(true))
+}
+
+/// Checks deletion and IPv6 presence in one snapshot after a backfill conflict.
+/// Missing, deleting, or already configured machines need no backfill retry.
+/// This read takes no row lock; attachment must still guard its final write.
+pub async fn needs_ipv6_loopback(
+    txn: impl DbReader<'_>,
+    machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    let query = "SELECT controller_state != $2::jsonb
+        AND network_config->>'loopback_ip_v6' IS NULL
+        FROM machines WHERE id = $1";
+    let needs_loopback: Option<bool> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(needs_loopback.unwrap_or(false))
 }
 
 async fn try_update_network_config_inner(
@@ -2528,8 +2659,7 @@ pub async fn clear_failure_details(
 /// stable_machine_id.to_string().
 ///
 /// `common_pools` supplies Integrated DPU ASN and optional IPv6 allocation.
-/// Callers preparing ASNs separately use [`create_with_requested_loopback`] with
-/// [`MachineCreationPools::Ipv6Only`] to preserve IPv6 allocation during creation.
+/// Callers preparing resources separately pass `None` and attach them after interface writes.
 pub async fn create(
     txn: &mut PgConnection,
     common_pools: Option<&CommonPools>,
@@ -2538,44 +2668,8 @@ pub async fn create(
     expected_machine_data: Option<&ExpectedMachineData>,
     state_model_version: i16,
 ) -> DatabaseResult<AnyMachine> {
-    create_with_requested_loopback(
-        txn,
-        common_pools.map(MachineCreationPools::All),
-        stable_machine_id,
-        state,
-        expected_machine_data,
-        state_model_version,
-        None,
-    )
-    .await
-}
-
-/// `MachineCreationPools` selects the Integrated allocations made with a new row.
-/// Passing `None` to creation skips all allocation. IPv4 loopbacks attach separately.
-pub enum MachineCreationPools<'a> {
-    /// Preserve normal creation: best-effort ASN and optional IPv6 loopback.
-    All(&'a CommonPools),
-    /// Allocate IPv6 normally while a prepared ASN attaches after interface writes.
-    Ipv6Only(&'a CommonPools),
-}
-
-/// Create a machine with explicit IPv6 loopback intent. The caller's transaction
-/// holds the reservation lock and claims IPv4 before committing creation.
-pub async fn create_with_requested_loopback(
-    txn: &mut PgConnection,
-    common_pools: Option<MachineCreationPools<'_>>,
-    stable_machine_id: &MachineId,
-    state: ManagedHostState,
-    expected_machine_data: Option<&ExpectedMachineData>,
-    state_model_version: i16,
-    requested_loopback_v6: Option<Ipv6Addr>,
-) -> DatabaseResult<AnyMachine> {
     let stable_machine_id_string = stable_machine_id.to_string();
-    let (common_pools, asn_pool) = match common_pools {
-        Some(MachineCreationPools::All(pools)) => (Some(pools), Some(&pools.ethernet.pool_fnn_asn)),
-        Some(MachineCreationPools::Ipv6Only(pools)) => (Some(pools), None),
-        None => (None, None),
-    };
+    let asn_pool = common_pools.map(|pools| &pools.ethernet.pool_fnn_asn);
 
     let default_metadata = &Metadata::default();
     let metadata = expected_machine_data
@@ -2612,13 +2706,7 @@ pub async fn create_with_requested_loopback(
     let loopback_ip_v6 = if stable_machine_id.machine_type() == MachineType::Dpu {
         match common_pools {
             Some(common_pools) => {
-                allocate_loopback_ip_v6(
-                    common_pools,
-                    txn,
-                    &stable_machine_id_string,
-                    requested_loopback_v6,
-                )
-                .await?
+                allocate_loopback_ip_v6(common_pools, txn, &stable_machine_id_string, None).await?
             }
             None => None,
         }
@@ -2811,7 +2899,7 @@ pub async fn update_host_reprovision_explicit_start_time(
 }
 
 pub async fn get_host_reprovisioning_machines(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<HostMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
@@ -2821,7 +2909,7 @@ pub async fn get_host_reprovisioning_machines(
         );
     }
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))
 }
@@ -2836,7 +2924,7 @@ pub async fn update_firmware_update_time_window_start_end(
                         SET firmware_update_time_window_start = $2, firmware_update_time_window_end = $3, update_complete = false
                        WHERE id = ANY($1) RETURNING id"#;
     sqlx::query_as::<_, MachineId>(query)
-        .bind(machine_ids.iter().map(|x| x.to_string()).collect_vec())
+        .bind(machine_ids)
         .bind(start)
         .bind(end)
         .fetch_one(txn)
@@ -2932,10 +3020,9 @@ pub async fn restart_dpu_reprovisioning(
                                 SET reprovisioning_requested=reprovisioning_requested || $1
                         WHERE id=ANY($2) RETURNING id"#;
 
-    let str_list: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
     let _id = sqlx::query_as::<_, MachineId>(query)
         .bind(sqlx::types::Json(restart_request))
-        .bind(str_list)
+        .bind(machine_ids)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::new("restart reprovisioning_requested", e))?;
@@ -3240,7 +3327,7 @@ where
         qb.push(
             " AND jsonb_path_query_array(health_reports, '$.merges.keyvalue().key'::jsonpath) ? ",
         );
-        qb.push_bind(ovrrd_str.clone());
+        qb.push_bind(ovrrd_str);
         qb.push(" AND jsonb_array_length(health_reports->'merges'->");
         qb.push_bind(ovrrd_str);
         qb.push("->'alerts') > 0");
@@ -3377,7 +3464,7 @@ pub async fn lock_nic_firmware_state(
                     hashtextextended($1, 'machine_state_history'::regclass::bigint)\
                 )";
     sqlx::query(query)
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -3402,7 +3489,7 @@ pub async fn lock_nic_firmware_state(
 /// This takes no locks and returns false when no selected row records a failure;
 /// callers establish host existence and serialize any decision based on this read.
 pub async fn has_recorded_managed_host_failure(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     host_id: &HostMachineId,
 ) -> Result<bool, DatabaseError> {
     let query = "SELECT failure_details FROM machines
@@ -3413,7 +3500,7 @@ pub async fn has_recorded_managed_host_failure(
                  )";
     let failures: Vec<sqlx::types::Json<FailureDetails>> = sqlx::query_scalar(query)
         .bind(host_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     Ok(failures
@@ -3613,7 +3700,7 @@ pub async fn update_state(
     advance(&host, txn, new_state, Some(version)).await?;
 
     // Keep both host and dpu's states in sync.
-    let dpus = find_dpus_by_host_machine_id(txn, host_id).await?;
+    let dpus = find_dpus_by_host_machine_id(&mut *txn, host_id).await?;
 
     for dpu in dpus {
         advance(&dpu, txn, new_state, Some(version)).await?;
@@ -3692,7 +3779,7 @@ pub async fn update_failure_details_by_machine_id(
 /// Arguments
 ///
 /// * `txn` - A reference to currently open database transaction
-pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, DatabaseError> {
+pub async fn find_dpu_infos(conn: impl DbReader<'_>) -> Result<Vec<DpuInfo>, DatabaseError> {
     type DpuInfoRow = (
         String,
         String,
@@ -3715,7 +3802,7 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
         ORDER BY m.id"#;
 
     let dpu_rows: Vec<DpuInfoRow> = sqlx::query_as(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -3790,7 +3877,7 @@ pub async fn allocate_loopback_ip_v6(
     requested_value: Option<Ipv6Addr>,
 ) -> Result<Option<Ipv6Addr>, DatabaseError> {
     let pool = &common_pools.ethernet.pool_loopback_ip_v6;
-    if !crate::resource_pool::pool_has_rows(txn, pool.name()).await? {
+    if !crate::resource_pool::pool_has_rows(&mut *txn, pool.name()).await? {
         if requested_value.is_some() {
             return Err(DatabaseError::FailedPrecondition(
                 "requested IPv6 loopback requires a configured lo-ip-v6 pool".to_string(),
@@ -3903,7 +3990,7 @@ pub async fn allocate_vpc_dpu_loopback(
 }
 
 pub async fn find_by_validation_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     validation_id: &MachineValidationId,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -3917,7 +4004,7 @@ pub async fn find_by_validation_id(
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(validation_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -4285,7 +4372,7 @@ pub async fn clear_lockdown_ikm_credential_rotation_requested(
 /// host's cards to the site-wide target even when the site-wide gate is off,
 /// mirroring the idle rekey path.
 pub async fn get_lockdown_ikm_credential_rotation_requested(
-    conn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: HostMachineId,
 ) -> DatabaseResult<bool> {
     let query = "SELECT lockdown_ikm_credential_rotation_requested FROM machines WHERE id = $1";
@@ -4426,171 +4513,6 @@ pub async fn update_dpu_asns(
     }
 
     txn.commit().await?;
-
-    Ok(())
-}
-
-/// Fills the optional IPv6 loopback for DPUs created before `lo-ip-v6` was
-/// configured. Each DPU is reloaded immediately before its write because an
-/// update to one member bumps every sibling's `network_config_version` and
-/// invalidates versions loaded earlier in the pass.
-///
-/// Each DPU gets at most three fresh transactions without backoff. Visible
-/// ForceDeletion is skipped before reserving; target/group contention rolls
-/// back the reservation and retries without waiting for Machine locks. Earlier
-/// DPU commits survive, and later independent DPUs can still progress. Return
-/// the first unsettled DPU's last lock/version error after the pass; other
-/// errors return immediately. Pool allocation can still wait.
-///
-/// Startup logs failures without scheduling another pass. A later startup,
-/// pool-growth request, or DPU rediscovery can fill a remaining loopback.
-pub async fn update_dpu_loopback_ips_v6(
-    db_pool: &Pool<Postgres>,
-    common_pools: &CommonPools,
-) -> Result<(), DatabaseError> {
-    const MAX_UPDATE_ATTEMPTS: usize = 3;
-
-    let mut txn = db_pool.txn_begin().await?;
-    let pool = &common_pools.ethernet.pool_loopback_ip_v6;
-    if !crate::resource_pool::pool_has_rows(txn.as_pgconn(), pool.name()).await? {
-        txn.commit().await?;
-        return Ok(());
-    }
-
-    let query = "SELECT id FROM machines
-        WHERE starts_with(id, $1)
-          AND network_config->>'loopback_ip_v6' IS NULL
-        ORDER BY id";
-    let dpu_machine_ids: Vec<MachineId> = sqlx::query_as(query)
-        .bind(MachineType::Dpu.id_prefix())
-        .fetch_all(txn.as_pgconn())
-        .await
-        .map_err(|error| DatabaseError::query(query, error))?;
-    txn.commit().await?;
-
-    if !dpu_machine_ids.is_empty() {
-        tracing::info!(
-            dpu_count = dpu_machine_ids.len(),
-            "Updating missing IPv6 loopback IPs for DPUs"
-        );
-    }
-
-    let mut first_failure = None;
-
-    for dpu_machine_id in dpu_machine_ids {
-        let mut last_failure = None;
-
-        for _ in 0..MAX_UPDATE_ATTEMPTS {
-            let mut txn = db_pool.txn_begin().await?;
-            let (mut network_config, network_config_version) =
-                match get_network_config(txn.as_pgconn(), &dpu_machine_id).await {
-                    Ok(network_config) => network_config.take(),
-                    Err(error) if error.is_not_found() => {
-                        // Force deletion can remove a DPU after the initial ID
-                        // scan. It no longer needs a reservation.
-                        txn.commit().await?;
-                        last_failure = None;
-                        break;
-                    }
-                    Err(error) => return Err(error),
-                };
-            if network_config.loopback_ip_v6.is_some() {
-                txn.commit().await?;
-                last_failure = None;
-                break;
-            }
-
-            // A committed deletion needs no reservation, even when its row is
-            // busy or the pool is exhausted. This read takes no Machine lock.
-            if is_force_deleting_or_deleted(txn.as_pgconn(), &dpu_machine_id).await? {
-                txn.commit().await?;
-                last_failure = None;
-                break;
-            }
-
-            let loopback_ip_v6 = allocate_loopback_ip_v6(
-                common_pools,
-                txn.as_pgconn(),
-                &dpu_machine_id.to_string(),
-                None,
-            )
-            .await?
-            .ok_or_else(|| {
-                DatabaseError::FailedPrecondition(format!(
-                    "resource pool {LOOPBACK_IP_V6} disappeared during DPU IPv6 loopback backfill"
-                ))
-            })?;
-            network_config.loopback_ip_v6 = Some(loopback_ip_v6);
-
-            // This attempt already owns its reservation. Discovery can own
-            // the group before allocating, so release the reservation rather
-            // than wait for a busy target that might need the same pool row.
-            let query = "SELECT id FROM machines
-                         WHERE id = $1 AND controller_state != $2::jsonb
-                         FOR NO KEY UPDATE NOWAIT";
-            let admitted: Result<Option<MachineId>, DatabaseError> = sqlx::query_scalar(query)
-                .bind(dpu_machine_id)
-                .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
-                .fetch_optional(txn.as_pgconn())
-                .await
-                .map_err(|error| DatabaseError::query(query, error));
-            match admitted {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    txn.rollback().await?;
-                    last_failure = None;
-                    break;
-                }
-                Err(error) if error.is_lock_not_available() => {
-                    txn.rollback().await?;
-                    last_failure = Some(error);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-
-            match try_update_network_config_unless_force_deleting(
-                txn.as_pgconn(),
-                &dpu_machine_id,
-                network_config_version,
-                &network_config,
-            )
-            .await
-            {
-                Ok(ConditionalWrite::Applied(())) => {
-                    txn.commit().await?;
-                    last_failure = None;
-                    break;
-                }
-                Ok(ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent)) => {}
-                Err(error) if error.is_lock_not_available() => {
-                    // `NOWAIT` aborts the transaction, including its reservation.
-                    // Roll it back before reloading the DPU in a fresh attempt.
-                    txn.rollback().await?;
-                    last_failure = Some(error);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-
-            txn.rollback().await?;
-            last_failure = Some(DatabaseError::ConcurrentModificationError(
-                "machine",
-                network_config_version.to_string(),
-            ));
-        }
-
-        if let Some(error) = last_failure {
-            // One busy DPU should not postpone every row after it in the scan.
-            // Remember the first failure, continue the pass, and report it
-            // once the remaining DPUs have had their own chance to reconcile.
-            first_failure.get_or_insert(error);
-        }
-    }
-
-    if let Some(error) = first_failure {
-        return Err(error);
-    }
 
     Ok(())
 }
@@ -5009,6 +4931,7 @@ mod test {
     use model::resource_pool::{ResourcePool, ValueType};
 
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
 
     fn machine_id(seed: u8, ty: MachineType) -> MachineId {
         MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
@@ -5746,7 +5669,7 @@ mod test {
                         hashtextextended($1, 'machine_state_history'::regclass::bigint)\
                     )",
                     )
-                    .bind(dpu_id.to_string())
+                    .bind(dpu_id)
                     .execute(writer.as_mut())
                     .await?;
                 }
@@ -5835,7 +5758,7 @@ mod test {
                 };
                 let commit_completion = async {
                     let failure_pid = crate::test_support::postgres::wait_for_blocked_query(
-                        &pool,
+                        &mut PgPoolReader::from(pool.clone()),
                         completion_pid,
                         "UPDATE machines SET failure_details",
                     )
@@ -5855,7 +5778,7 @@ mod test {
                     // handling a signal, even though the row stays locked.
                     assert_eq!(
                         crate::test_support::postgres::wait_for_blocked_query(
-                            &pool,
+                            &mut PgPoolReader::from(pool.clone()),
                             completion_pid,
                             "UPDATE machines SET failure_details",
                         )
@@ -6047,7 +5970,7 @@ mod test {
         };
         let commit_winner = async {
             crate::test_support::postgres::wait_for_blocked_query(
-                &pool,
+                &mut PgPoolReader::from(pool.clone()),
                 winner_pid,
                 "SELECT pg_advisory_xact_lock",
             )
@@ -6158,7 +6081,7 @@ mod test {
         };
         let commit_edit = async {
             crate::test_support::postgres::wait_for_blocked_query(
-                &pool,
+                &mut PgPoolReader::from(pool.clone()),
                 writer_pid,
                 "SELECT machine_id, deleted",
             )
@@ -6347,7 +6270,7 @@ mod test {
         };
         let commit_replacement = async {
             crate::test_support::postgres::wait_for_blocked_query(
-                &pool,
+                &mut PgPoolReader::from(pool.clone()),
                 writer_pid,
                 "SELECT id FROM instances",
             )
@@ -8113,8 +8036,12 @@ mod test {
             Ok::<_, Box<dyn std::error::Error>>(claimed)
         };
         let commit_allocation = async {
-            crate::test_support::postgres::wait_for_blocked_query(&pool, blocker, "FOR UPDATE")
-                .await;
+            crate::test_support::postgres::wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker,
+                "FOR UPDATE",
+            )
+            .await;
             allocation.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(())
         };
@@ -8554,7 +8481,7 @@ mod test {
             let history_before: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM machine_state_history WHERE object_id = $1",
             )
-            .bind(machine_id.to_string())
+            .bind(machine_id)
             .fetch_one(txn.as_mut())
             .await?;
             let next_version = snapshot.state.version.increment();
@@ -8599,7 +8526,7 @@ mod test {
             let history_after: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM machine_state_history WHERE object_id = $1",
             )
-            .bind(machine_id.to_string())
+            .bind(machine_id)
             .fetch_one(txn.as_mut())
             .await?;
             assert_eq!(
@@ -8662,7 +8589,7 @@ mod test {
                 hashtextextended($1, 'machine_state_history'::regclass::bigint)\
             )",
         )
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(legacy_txn.as_mut())
         .await?;
 
@@ -8768,9 +8695,10 @@ mod test {
             Ok::<_, Box<dyn std::error::Error>>(result)
         };
         tokio::pin!(host);
+        let mut reader = PgPoolReader::from(pool.clone());
         tokio::select! {
             result = &mut host => panic!("host group bypassed the DPU gate: {result:?}"),
-            _ = wait_for_blocked_query(&pool, dpu_pid, "WITH locked_group") => {}
+            _ = wait_for_blocked_query(&mut reader, dpu_pid, "WITH locked_group") => {}
         }
         let rejected = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -8957,25 +8885,26 @@ mod test {
             });
             tokio::pin!(group, set);
             let readiness = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+                let mut reader = PgPoolReader::from(pool.clone());
                 if set_first {
                     tokio::select! {
                         () = &mut set => return Err("Set passed the lower DPU gate"),
-                        _ = wait_for_blocked_query(&pool, gate_pid, "SELECT row_to_json") => {}
+                        _ = wait_for_blocked_query(&mut reader, gate_pid, "SELECT row_to_json") => {}
                     }
                     tokio::select! {
                         () = &mut set => return Err("Set passed the lower DPU gate"),
                         () = &mut group => return Err("group did not wait behind Set"),
-                        _ = wait_for_blocked_query(&pool, set_pid, "WITH locked_group") => {}
+                        _ = wait_for_blocked_query(&mut reader, set_pid, "WITH locked_group") => {}
                     }
                 } else {
                     tokio::select! {
                         () = &mut group => return Err("group passed the lower DPU gate"),
-                        _ = wait_for_blocked_query(&pool, gate_pid, "WITH locked_group") => {}
+                        _ = wait_for_blocked_query(&mut reader, gate_pid, "WITH locked_group") => {}
                     }
                     tokio::select! {
                         () = &mut group => return Err("group passed the lower DPU gate"),
                         () = &mut set => return Err("Set did not wait behind group"),
-                        _ = wait_for_blocked_query(&pool, group_pid, "SELECT row_to_json") => {}
+                        _ = wait_for_blocked_query(&mut reader, group_pid, "SELECT row_to_json") => {}
                     }
                 }
                 Ok::<(), &str>(())
@@ -9365,7 +9294,11 @@ mod test {
         crate::resource_pool::define_all_from(txn.as_mut(), &definitions).await?;
         txn.commit().await?;
 
-        Ok(crate::resource_pool::create_common_pools(pool.clone(), HashSet::new()).await?)
+        Ok(crate::resource_pool::create_common_pools(
+            &mut PgPoolReader::from(pool.clone()),
+            HashSet::new(),
+        )
+        .await?)
     }
 
     async fn wait_until_blocked_on(pool: &sqlx::PgPool, relation: &str, expected_count: i64) {
@@ -9710,731 +9643,186 @@ mod test {
     }
 
     #[crate::sqlx_test]
-    async fn ipv6_loopback_backfill_reloads_each_dpu_and_is_idempotent(
+    async fn attestation_scheduling_is_absent_until_written_and_then_round_trips(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, Some("2001:db8:2::/125")).await?;
-        let host_machine_id =
-            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
-        let dpu_machine_ids = [
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?,
-            MachineId::from_str("fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0")?,
-        ];
+        use model::attestation_scheduling::{
+            AttestationScheduling, SchedulingDecision, SchedulingOutcome,
+        };
 
-        // These rows model DPUs that predate `loopback_ip_v6`, so create them
-        // without common pools and then connect both to the same host group.
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
         let mut txn = pool.txn_begin().await?;
         super::create(
             txn.as_mut(),
             None,
-            &host_machine_id,
+            &machine_id,
             ManagedHostState::Ready,
             None,
             2,
         )
         .await?;
-        for dpu_machine_id in &dpu_machine_ids {
-            super::create(
-                txn.as_mut(),
-                None,
-                dpu_machine_id,
-                ManagedHostState::Ready,
-                None,
-                2,
-            )
-            .await?;
-        }
 
-        let network_segment_id: NetworkSegmentId = sqlx::query_scalar(
-            "INSERT INTO network_segments (name, version)
-             VALUES ('ipv6-loopback-backfill', 'V1-T0') RETURNING id",
-        )
-        .fetch_one(txn.as_mut())
-        .await?;
-        for (index, dpu_machine_id) in dpu_machine_ids.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO machine_interfaces
-                    (machine_id, attached_dpu_machine_id, association_type,
-                     segment_id, mac_address, primary_interface, hostname)
-                 VALUES ($1, $2, 'Machine', $3, $4::macaddr, $5, $6)",
-            )
-            .bind(host_machine_id)
-            .bind(dpu_machine_id)
-            .bind(network_segment_id)
-            .bind(format!("02:00:00:00:10:{index:02x}"))
-            .bind(index == 0)
-            .bind(format!("backfill-dpu-{index}"))
-            .execute(txn.as_mut())
-            .await?;
-        }
-        txn.commit().await?;
-
-        super::update_dpu_loopback_ips_v6(&pool, &common_pools).await?;
-
-        let mut txn = pool.txn_begin().await?;
-        let host_config = super::get_network_config(txn.as_mut(), &host_machine_id).await?;
-        let first_dpu_config = super::get_network_config(txn.as_mut(), &dpu_machine_ids[0]).await?;
-        let second_dpu_config =
-            super::get_network_config(txn.as_mut(), &dpu_machine_ids[1]).await?;
-        let allocated = [
-            first_dpu_config
-                .value
-                .loopback_ip_v6
-                .expect("first DPU should be backfilled"),
-            second_dpu_config
-                .value
-                .loopback_ip_v6
-                .expect("second DPU should be backfilled"),
-        ];
-        assert_ne!(allocated[0], allocated[1]);
-        assert_eq!(host_config.value.loopback_ip_v6, None);
-        assert_eq!(host_config.version, first_dpu_config.version);
-        assert_eq!(first_dpu_config.version, second_dpu_config.version);
-        let version_after_backfill = host_config.version;
-        txn.commit().await?;
-
-        let stats_after_backfill = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-        assert_eq!(stats_after_backfill.used, 2);
-
-        // A second startup pass must preserve both reservations and avoid a
-        // version bump: `None` is the only row state the backfill owns.
-        super::update_dpu_loopback_ips_v6(&pool, &common_pools).await?;
-        let stats_after_rerun = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-        assert_eq!(stats_after_rerun, stats_after_backfill);
-
-        let mut txn = pool.txn_begin().await?;
-        let host_config = super::get_network_config(txn.as_mut(), &host_machine_id).await?;
-        let first_dpu_config = super::get_network_config(txn.as_mut(), &dpu_machine_ids[0]).await?;
-        let second_dpu_config =
-            super::get_network_config(txn.as_mut(), &dpu_machine_ids[1]).await?;
-        assert_eq!(host_config.version, version_after_backfill);
-        assert_eq!(
-            [
-                first_dpu_config.value.loopback_ip_v6.unwrap(),
-                second_dpu_config.value.loopback_ip_v6.unwrap(),
-            ],
-            allocated
-        );
-        txn.rollback().await?;
-        Ok(())
-    }
-
-    #[crate::sqlx_test]
-    async fn ipv6_loopback_backfill_skips_force_deleting_dpus(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, Some("2001:db8:5::1/128")).await?;
-        let dpu_ids = [
-            machine_id(100, MachineType::Dpu),
-            machine_id(101, MachineType::Dpu),
-        ];
-        let mut txn = pool.txn_begin().await?;
-        for id in dpu_ids {
-            super::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
-        }
-        let ordered_dpus: Vec<MachineId> =
-            sqlx::query_scalar("SELECT id FROM machines WHERE id = ANY($1) ORDER BY id")
-                .bind(dpu_ids.as_slice())
-                .fetch_all(txn.as_mut())
-                .await?;
-        let deleting_id = ordered_dpus[0];
-        let eligible_id = ordered_dpus[1];
-        sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
-            .bind(deleting_id)
-            .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
-            .execute(txn.as_mut())
-            .await?;
-        txn.commit().await?;
-        let deleting_before = super::get_network_config(&pool, &deleting_id).await?;
-
-        // Deletion is already committed. A separate owner keeps that row busy;
-        // neither contention nor later pool exhaustion should override its skip.
-        let mut gate = pool.txn_begin().await?;
-        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(deleting_id)
-            .fetch_one(gate.as_mut())
-            .await?;
-        let passes = async {
-            super::update_dpu_loopback_ips_v6(&pool, &common_pools).await?;
-            let eligible_first = super::get_network_config(&pool, &eligible_id).await?;
-            let first_stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-
-            // The independent DPU consumed the only address. The remaining
-            // candidate is still force-deleting and still locked by the gate.
-            super::update_dpu_loopback_ips_v6(&pool, &common_pools).await?;
-            let deleting_after = super::get_network_config(&pool, &deleting_id).await?;
-            let eligible_second = super::get_network_config(&pool, &eligible_id).await?;
-            let second_stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-            let deleting_allocations: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM resource_pool_allocations
-                 WHERE pool_name = $1 AND owner_id = $2",
-            )
-            .bind(LOOPBACK_IP_V6)
-            .bind(deleting_id.to_string())
-            .fetch_one(&pool)
-            .await?;
-            Ok::<_, Box<dyn std::error::Error>>((
-                eligible_first,
-                first_stats,
-                deleting_after,
-                eligible_second,
-                second_stats,
-                deleting_allocations,
-            ))
-        };
-        tokio::pin!(passes);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), &mut passes).await;
-        let released = gate.rollback().await;
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                // Join the real future after releasing its gate before failing.
-                let late_result =
-                    tokio::time::timeout(std::time::Duration::from_secs(30), &mut passes).await;
-                return Err(format!(
-                    "backfill exceeded its gated deadline: {error}; \
-                     release={released:?}; late_result={late_result:?}"
-                )
-                .into());
-            }
-        };
-        released?;
-        let (
-            eligible_first,
-            first_stats,
-            deleting_after,
-            eligible_second,
-            second_stats,
-            deleting_allocations,
-        ) = result?;
-        assert_eq!(
-            eligible_first.value.loopback_ip_v6,
-            Some("2001:db8:5::1".parse()?)
-        );
-        assert_eq!(first_stats.used, 1);
-        assert_eq!(first_stats.free, 0);
-        assert_eq!(deleting_after.value, deleting_before.value);
-        assert_eq!(deleting_after.version, deleting_before.version);
-        assert_eq!(deleting_after.value.loopback_ip_v6, None);
-        assert_eq!(deleting_allocations, 0);
-        assert_eq!(eligible_second.value, eligible_first.value);
-        assert_eq!(eligible_second.version, eligible_first.version);
-        assert_eq!(second_stats, first_stats);
-        Ok(())
-    }
-
-    #[crate::sqlx_test]
-    async fn ipv6_loopback_backfill_releases_reservation_after_late_force_deletion(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use futures::future::maybe_done;
-
-        use crate::test_support::postgres::wait_for_blocked_query;
-
-        let common_pools = common_pools(&pool, Some("2001:db8:8::1/128")).await?;
-        let dpu_ids = [
-            machine_id(102, MachineType::Dpu),
-            machine_id(103, MachineType::Dpu),
-        ];
-        let mut setup = pool.txn_begin().await?;
-        for id in dpu_ids {
-            super::create(setup.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
-        }
-        let ordered_dpus: Vec<MachineId> =
-            sqlx::query_scalar("SELECT id FROM machines WHERE id = ANY($1) ORDER BY id")
-                .bind(dpu_ids.as_slice())
-                .fetch_all(setup.as_mut())
-                .await?;
-        setup.commit().await?;
-        let deleting_id = ordered_dpus[0];
-        let later_id = ordered_dpus[1];
-        let deleting_before = super::find_one(&pool, &deleting_id, Default::default())
-            .await?
-            .expect("the first Ready DPU exists");
-        let later_before = super::get_network_config(&pool, &later_id).await?;
-        let stats_before = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-        assert_eq!(stats_before.used, 0);
-        assert_eq!(stats_before.free, 1);
-
-        // Only a fresh allocation writes this table. Observing that statement
-        // behind the gate proves the initial eligibility read has passed;
-        // neither the gate nor the backfill has locked the DPU row yet.
-        let mut gate = pool.txn_begin().await?;
-        sqlx::query("LOCK TABLE resource_pool_allocations IN SHARE MODE")
-            .execute(gate.as_mut())
-            .await?;
-        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(gate.as_mut())
-            .await?;
-        let backfill_pool = pool.clone();
-        let backfill_common_pools = Arc::clone(&common_pools);
-        let task = tokio::spawn(async move {
-            super::update_dpu_loopback_ips_v6(&backfill_pool, &backfill_common_pools).await
-        });
-        let abort_backfill = task.abort_handle();
-        let backfill = maybe_done(task);
-        tokio::pin!(backfill);
-        let at_gate = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            tokio::select! {
-                () = &mut backfill => {
-                    return Err("backfill finished before the fresh allocation gate".into());
-                }
-                _ = wait_for_blocked_query(&pool, gate_pid, "WITH allocate AS") => {}
-            }
-            let mut deletion = pool.txn_begin().await?;
-            let advanced = super::advance(
-                &deleting_before,
-                deletion.as_mut(),
-                &ManagedHostState::ForceDeletion,
-                None,
-            )
-            .await?;
-            deletion.commit().await?;
-            Ok::<_, Box<dyn std::error::Error>>(advanced)
-        })
-        .await;
-        let released = gate.rollback().await;
-        let joined_after_release =
-            tokio::time::timeout(std::time::Duration::from_secs(30), &mut backfill)
-                .await
-                .is_ok();
-        if !joined_after_release {
-            abort_backfill.abort();
-            tokio::time::timeout(std::time::Duration::from_secs(30), &mut backfill)
-                .await
-                .expect("cancelled backfill must join after releasing its allocation gate");
-        }
-        let result = backfill
-            .as_mut()
-            .take_output()
-            .expect("backfill task joined");
-        released?;
         assert!(
-            at_gate.expect("ForceDeletion must commit while allocation is gated")?,
-            "the state writer must advance the first DPU"
+            super::get_attestation_scheduling(txn.as_mut(), &machine_id)
+                .await?
+                .is_none(),
+            "a machine that has never been scheduled must read as absent"
         );
-        assert!(
-            joined_after_release,
-            "backfill required cancellation after gate release"
-        );
-        result??;
 
-        let deleting_after = super::find_one(&pool, &deleting_id, Default::default())
-            .await?
-            .expect("ForceDeletion must leave the DPU available for its controller");
-        assert_eq!(deleting_after.state.value, ManagedHostState::ForceDeletion);
+        let scheduling = AttestationScheduling {
+            decision: SchedulingDecision {
+                outcome: SchedulingOutcome::NoProfile,
+                hardware_class: Some("nvidia_mgx-power-shelf".to_string()),
+                used_any_fallback: false,
+                profile_version: None,
+            },
+            unsatisfied: None,
+            attester_override: None,
+            job_id: None,
+        };
+        super::set_attestation_scheduling(txn.as_mut(), &machine_id, &scheduling).await?;
         assert_eq!(
-            deleting_after.network_config.value,
-            deleting_before.network_config.value
+            super::get_attestation_scheduling(txn.as_mut(), &machine_id).await?,
+            Some(scheduling)
         );
-        assert_eq!(
-            deleting_after.network_config.version,
-            deleting_before.network_config.version
-        );
-        let deleting_allocations: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM resource_pool_allocations
-             WHERE pool_name = $1 AND owner_type = 'machine' AND owner_id = $2",
-        )
-        .bind(LOOPBACK_IP_V6)
-        .bind(deleting_id.to_string())
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(deleting_allocations, 0);
 
-        // The next independent DPU can use the only address only if the
-        // rejected reservation was rolled back before the scan continued.
-        let later_after = super::get_network_config(&pool, &later_id).await?;
-        let mut expected_later = later_before.value;
-        expected_later.loopback_ip_v6 = Some("2001:db8:8::1".parse()?);
-        assert_eq!(later_after.value, expected_later);
-        assert_eq!(
-            later_after.version.version_nr(),
-            later_before.version.version_nr() + 1
-        );
-        let stats_after = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-        assert_eq!(stats_after.used, 1);
-        assert_eq!(stats_after.free, 0);
+        txn.commit().await?;
         Ok(())
     }
 
     #[crate::sqlx_test]
-    async fn ipv6_loopback_backfill_retries_after_network_config_conflict(
+    async fn attestation_health_report_is_stored_under_its_source_and_deleted_when_empty(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, Some("2001:db8:6::1/128")).await?;
-        let dpu_machine_id =
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
+        use health_report::{HealthProbeAlert, HealthReport};
 
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
         let mut txn = pool.txn_begin().await?;
         super::create(
             txn.as_mut(),
             None,
-            &dpu_machine_id,
+            &machine_id,
             ManagedHostState::Ready,
             None,
             2,
         )
         .await?;
-        let reserved = super::allocate_loopback_ip_v6(
-            &common_pools,
+
+        let query = "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id=$1";
+
+        // The source is left empty to prove the function stamps it, as the four
+        // health report updates beside it do.
+        let mut report = HealthReport::empty(String::new());
+        report.alerts = vec![HealthProbeAlert::spdm_attestation_failed(
+            "HGX_ERoT_GPU_3".to_string(),
+            "Failed NRAS".to_string(),
+        )];
+        super::update_attestation_health_report(txn.as_mut(), &machine_id, &report).await?;
+
+        let stored: Option<sqlx::types::Json<HealthReport>> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+        let stored = stored
+            .expect("the report is stored under the attestation source")
+            .0;
+        assert_eq!(stored.source, HealthReport::ATTESTATION_SOURCE);
+        assert_eq!(stored.alerts.len(), 1);
+
+        super::update_attestation_health_report(
             txn.as_mut(),
-            &dpu_machine_id.to_string(),
-            None,
+            &machine_id,
+            &HealthReport::empty(String::new()),
         )
-        .await?
-        .expect("configured pool should reserve an IPv6 loopback");
-        txn.commit().await?;
-
-        // Hold the existing reservation after the backfill reads its machine
-        // version. This gives another writer a deterministic window to bump
-        // that version before the first compare-and-swap reaches the row.
-        let mut reservation_lock = pool.txn_begin().await?;
-        sqlx::query(
-            "SELECT value FROM resource_pool
-             WHERE name = $1 AND value = $2
-             FOR UPDATE",
-        )
-        .bind(LOOPBACK_IP_V6)
-        .bind(reserved.to_string())
-        .fetch_one(reservation_lock.as_mut())
         .await?;
-
-        let backfill_pool = pool.clone();
-        let backfill_common_pools = Arc::clone(&common_pools);
-        let backfill = tokio::spawn(async move {
-            super::update_dpu_loopback_ips_v6(&backfill_pool, &backfill_common_pools).await
-        });
-        wait_until_blocked_on(&pool, "resource_pool", 1).await;
-
-        let mut txn = pool.txn_begin().await?;
-        let (mut network_config, version) =
-            super::get_network_config(txn.as_mut(), &dpu_machine_id)
-                .await?
-                .take();
-        network_config.use_admin_network = Some(false);
-        assert_eq!(
-            super::try_update_network_config(
-                txn.as_mut(),
-                &dpu_machine_id,
-                version,
-                &network_config,
-            )
-            .await?,
-            crate::ConditionalWrite::Applied(())
+        let stored: Option<sqlx::types::Json<HealthReport>> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+        assert!(
+            stored.is_none(),
+            "an empty alert list must delete the source rather than store it empty"
         );
+
         txn.commit().await?;
-        reservation_lock.commit().await?;
-
-        tokio::time::timeout(std::time::Duration::from_secs(10), backfill)
-            .await??
-            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
-
-        let persisted = super::get_network_config(&pool, &dpu_machine_id).await?;
-        network_config.loopback_ip_v6 = Some(reserved);
-        assert_eq!(persisted.value, network_config);
-        assert_eq!(persisted.version.version_nr(), version.version_nr() + 2);
-        let stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-        assert_eq!(stats.used, 1);
-        assert_eq!(stats.free, 0);
         Ok(())
     }
 
     #[crate::sqlx_test]
-    async fn ipv6_loopback_backfill_rolls_back_busy_groups_and_retries_a_later_pass(
+    async fn attestation_health_report_keeps_the_original_in_alert_since_of_a_lasting_alert(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        const DROP_ATTEMPT_COUNTER: &str =
-            "DROP TRIGGER count_busy_backfill_allocation ON resource_pool_allocations;
-             DROP FUNCTION count_busy_backfill_allocation();
-             DROP SEQUENCE busy_backfill_attempts";
+        use health_report::{HealthProbeAlert, HealthReport};
 
-        let common_pools = common_pools(&pool, Some("2001:db8:7::/126")).await?;
-        for (scenario, seed, target_busy) in [("busy group", 0, false), ("busy target", 2, true)] {
-            let pool_before = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-            let host_id = machine_id(seed, MachineType::Host);
-            let dpu_ids = [
-                machine_id(seed, MachineType::Dpu),
-                machine_id(seed + 1, MachineType::Dpu),
-            ];
-            let mut setup = pool.txn_begin().await?;
-            for id in [host_id, dpu_ids[0], dpu_ids[1]] {
-                super::create(setup.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
-            }
-            let ordered_dpus: Vec<MachineId> =
-                sqlx::query_scalar("SELECT id FROM machines WHERE id = ANY($1) ORDER BY id")
-                    .bind(dpu_ids.as_slice())
-                    .fetch_all(setup.as_mut())
-                    .await?;
-            assert_eq!(ordered_dpus.len(), 2);
-            let busy_id = ordered_dpus[0];
-            let later_id = ordered_dpus[1];
-            let segment_id: NetworkSegmentId = sqlx::query_scalar(
-                "INSERT INTO network_segments (name, version)
-                 VALUES ($1, 'V1-T0') RETURNING id",
-            )
-            .bind(format!("ipv6-loopback-busy-{seed}"))
-            .fetch_one(setup.as_mut())
-            .await?;
-            sqlx::query(
-                "INSERT INTO machine_interfaces
-                    (machine_id, attached_dpu_machine_id, association_type,
-                     segment_id, mac_address, primary_interface, hostname)
-                 VALUES ($1, $2, 'Machine', $3, $4::macaddr, true, $5)",
-            )
-            .bind(host_id)
-            .bind(busy_id)
-            .bind(segment_id)
-            .bind(format!("02:00:00:00:11:{seed:02x}"))
-            .bind(format!("busy-backfill-{seed}"))
-            .execute(setup.as_mut())
-            .await?;
-            setup.commit().await?;
-            let original_host = super::get_network_config(&pool, &host_id).await?;
-            let original_dpu = super::get_network_config(&pool, &busy_id).await?;
-
-            // Each fresh attempt reserves before NOWAIT. Sequence increments
-            // survive rollback, unlike the reservation rows being counted.
-            let counter = format!(
-                r#"
-                CREATE SEQUENCE busy_backfill_attempts;
-                CREATE FUNCTION count_busy_backfill_allocation()
-                RETURNS trigger LANGUAGE plpgsql AS $$
-                BEGIN
-                    PERFORM nextval('busy_backfill_attempts');
-                    RETURN NEW;
-                END;
-                $$;
-                CREATE TRIGGER count_busy_backfill_allocation
-                AFTER INSERT ON resource_pool_allocations
-                FOR EACH ROW
-                WHEN (NEW.pool_name = '{LOOPBACK_IP_V6}'
-                      AND NEW.owner_type = 'machine' AND NEW.owner_id = '{busy_id}')
-                EXECUTE FUNCTION count_busy_backfill_allocation();
-                "#
-            );
-            // Interpolate only the internal pool name and canonical fixture ID.
-            sqlx::raw_sql(sqlx::AssertSqlSafe(counter))
-                .execute(&pool)
-                .await?;
-
-            // Hold either actual contention boundary through the retry budget.
-            // Rejection must release the reservation and any completed target write.
-            let mut group_lock = pool.txn_begin().await?;
-            sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
-                .bind(if target_busy { busy_id } else { host_id })
-                .fetch_one(group_lock.as_mut())
-                .await?;
-            let backfill = super::update_dpu_loopback_ips_v6(&pool, &common_pools);
-            tokio::pin!(backfill);
-            let reconciled =
-                tokio::time::timeout(std::time::Duration::from_secs(10), &mut backfill).await;
-            let at_gate = async {
-                let host = super::get_network_config(&pool, &host_id).await?;
-                let dpu = super::get_network_config(&pool, &busy_id).await?;
-                let later = super::get_network_config(&pool, &later_id).await?;
-                let stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-                let busy_allocations: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM resource_pool_allocations
-                     WHERE pool_name = $1 AND owner_id = $2",
-                )
-                .bind(LOOPBACK_IP_V6)
-                .bind(busy_id.to_string())
-                .fetch_one(&pool)
-                .await?;
-                let attempts: i64 = sqlx::query_scalar(
-                    "SELECT COALESCE(pg_sequence_last_value('busy_backfill_attempts'), 0)",
-                )
-                .fetch_one(&pool)
-                .await?;
-                Ok::<_, Box<dyn std::error::Error>>((
-                    host,
-                    dpu,
-                    later,
-                    stats,
-                    busy_allocations,
-                    attempts,
-                ))
-            }
-            .await;
-            let released = group_lock.rollback().await;
-            released?;
-            let reconciled = match reconciled {
-                Ok(result) => result,
-                Err(error) => {
-                    let late_result =
-                        tokio::time::timeout(std::time::Duration::from_secs(30), &mut backfill)
-                            .await?;
-                    tracing::info!(
-                        scenario,
-                        ?late_result,
-                        "Joined backfill after releasing its gate"
-                    );
-                    sqlx::raw_sql(DROP_ATTEMPT_COUNTER).execute(&pool).await?;
-                    return Err(error.into());
-                }
-            };
-            sqlx::raw_sql(DROP_ATTEMPT_COUNTER).execute(&pool).await?;
-            let error =
-                reconciled.expect_err("persistent contention must remain visible after the pass");
-            match error {
-                crate::DatabaseError::Sqlx(error) => assert_eq!(
-                    error
-                        .source
-                        .as_database_error()
-                        .and_then(|error| error.code())
-                        .as_deref(),
-                    Some("55P03"),
-                    "{scenario}: retain the original NOWAIT error"
-                ),
-                error => panic!("{scenario}: expected a NOWAIT error, got {error:?}"),
-            }
-
-            let (
-                host_after_contention,
-                dpu_after_contention,
-                later_config,
-                stats,
-                busy_allocations,
-                attempts,
-            ) = at_gate?;
-            assert_eq!(
-                attempts, 3,
-                "{scenario}: each NOWAIT retry makes a fresh reservation"
-            );
-            assert_eq!(host_after_contention.value, original_host.value);
-            assert_eq!(host_after_contention.version, original_host.version);
-            assert_eq!(dpu_after_contention.value, original_dpu.value);
-            assert_eq!(dpu_after_contention.version, original_dpu.version);
-            let later_address = later_config
-                .value
-                .loopback_ip_v6
-                .expect("an independent later DPU must still commit");
-            assert_eq!(stats.used, pool_before.used + 1, "{scenario}");
-            assert_eq!(stats.free, pool_before.free - 1, "{scenario}");
-            assert_eq!(
-                busy_allocations, 0,
-                "failed attempts must release the reservation"
-            );
-
-            // Change the config before the next pass to check that recovery
-            // preserves it.
-            let mut change = pool.txn_begin().await?;
-            let (mut current_config, current_version) =
-                super::get_network_config(change.as_mut(), &busy_id)
-                    .await?
-                    .take();
-            current_config.use_admin_network = Some(false);
-            assert_eq!(
-                super::try_update_network_config(
-                    change.as_mut(),
-                    &busy_id,
-                    current_version,
-                    &current_config,
-                )
-                .await?,
-                crate::ConditionalWrite::Applied(())
-            );
-            change.commit().await?;
-            let changed_config = super::get_network_config(&pool, &busy_id).await?;
-            super::update_dpu_loopback_ips_v6(&pool, &common_pools).await?;
-
-            let host_after_retry = super::get_network_config(&pool, &host_id).await?;
-            let dpu_after_retry = super::get_network_config(&pool, &busy_id).await?;
-            let assigned = dpu_after_retry
-                .value
-                .loopback_ip_v6
-                .expect("the next pass must backfill the released group");
-            current_config.loopback_ip_v6 = Some(assigned);
-            assert_eq!(dpu_after_retry.value, current_config);
-            assert_eq!(host_after_retry.value, original_host.value);
-            assert_eq!(host_after_retry.version, dpu_after_retry.version);
-            assert_eq!(
-                dpu_after_retry.version.version_nr(),
-                changed_config.version.version_nr() + 1
-            );
-            assert_ne!(assigned, later_address);
-            let later_after_retry = super::get_network_config(&pool, &later_id).await?;
-            assert_eq!(later_after_retry.value, later_config.value);
-            assert_eq!(later_after_retry.version, later_config.version);
-            let stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-            assert_eq!(stats.used, pool_before.used + 2, "{scenario}");
-            assert_eq!(stats.free, pool_before.free - 2, "{scenario}");
-        }
-        Ok(())
-    }
-
-    #[crate::sqlx_test]
-    async fn ipv6_loopback_backfill_preserves_completed_rows_when_pool_exhausts(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, Some("2001:db8:3::1/128")).await?;
-        let dpu_machine_ids = [
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?,
-            MachineId::from_str("fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0")?,
-        ];
-
-        // Passing no common pools recreates rows from before the IPv6 pool was
-        // configured without consuming its only address during insertion.
-        let mut txn = pool.txn_begin().await?;
-        for dpu_machine_id in &dpu_machine_ids {
-            super::create(
-                txn.as_mut(),
-                None,
-                dpu_machine_id,
-                ManagedHostState::Ready,
-                None,
-                2,
-            )
-            .await?;
-        }
-        txn.commit().await?;
-
-        let error = super::update_dpu_loopback_ips_v6(&pool, &common_pools)
-            .await
-            .expect_err("one address cannot backfill two DPUs");
-        assert!(matches!(error, crate::DatabaseError::ResourceExhausted(_)));
-
-        let mut txn = pool.txn_begin().await?;
-        let configs_after_first_pass = [
-            super::get_network_config(txn.as_mut(), &dpu_machine_ids[0])
-                .await?
-                .value,
-            super::get_network_config(txn.as_mut(), &dpu_machine_ids[1])
-                .await?
-                .value,
-        ];
-        assert_eq!(
-            configs_after_first_pass
+        fn report(attesters: &[&str]) -> HealthReport {
+            let mut report = HealthReport::empty(String::new());
+            report.alerts = attesters
                 .iter()
-                .filter(|config| config.loopback_ip_v6.is_some())
-                .count(),
-            1
-        );
-        txn.commit().await?;
-        let stats_after_first_pass = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
-        assert_eq!(stats_after_first_pass.used, 1);
-        assert_eq!(stats_after_first_pass.free, 0);
+                .map(|attester| {
+                    HealthProbeAlert::spdm_attestation_failed(
+                        (*attester).to_string(),
+                        "Failed NRAS".to_string(),
+                    )
+                })
+                .collect();
+            report
+        }
 
-        let error = super::update_dpu_loopback_ips_v6(&pool, &common_pools)
-            .await
-            .expect_err("the remaining DPU must continue to report exhaustion");
-        assert!(matches!(error, crate::DatabaseError::ResourceExhausted(_)));
-
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
         let mut txn = pool.txn_begin().await?;
-        let configs_after_second_pass = [
-            super::get_network_config(txn.as_mut(), &dpu_machine_ids[0])
-                .await?
-                .value,
-            super::get_network_config(txn.as_mut(), &dpu_machine_ids[1])
-                .await?
-                .value,
-        ];
-        txn.commit().await?;
-        assert_eq!(configs_after_second_pass, configs_after_first_pass);
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        let query = "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id=$1";
+
+        super::update_attestation_health_report(txn.as_mut(), &machine_id, &report(&["GPU_3"]))
+            .await?;
+        let first: sqlx::types::Json<HealthReport> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+
+        // The second update rebuilds the alert for GPU_3 from scratch, as every
+        // update does, and adds one for an attester that has just failed.
+        super::update_attestation_health_report(
+            txn.as_mut(),
+            &machine_id,
+            &report(&["GPU_3", "GPU_4"]),
+        )
+        .await?;
+        let second: sqlx::types::Json<HealthReport> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+
+        let since = |report: &HealthReport, attester: &str| {
+            report
+                .alerts
+                .iter()
+                .find(|alert| alert.target.as_deref() == Some(attester))
+                .and_then(|alert| alert.in_alert_since)
+        };
         assert_eq!(
-            crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?,
-            stats_after_first_pass
+            since(&second, "GPU_3"),
+            since(&first, "GPU_3"),
+            "an attester that was already failing must keep the time it started"
         );
+        assert!(
+            since(&second, "GPU_4").is_some(),
+            "a newly failing attester must be timestamped"
+        );
+
+        txn.commit().await?;
         Ok(())
     }
 }

@@ -27,14 +27,16 @@ pub(super) async fn delete_endpoint(api_client: &ApiClient, opts: Args) -> Carbi
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "Endpoint deleted successfully.".to_string())
+                .as_deref()
+                .unwrap_or("Endpoint deleted successfully.")
         );
     } else {
         eprintln!(
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "Failed to delete endpoint.".to_string())
+                .as_deref()
+                .unwrap_or("Failed to delete endpoint.")
         );
     }
     Ok(())

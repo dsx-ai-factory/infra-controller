@@ -159,7 +159,7 @@ async fn generic_nic_results_without_admission_are_ignored_without_dpa(pool: sql
         .unwrap()
         .unwrap();
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -188,7 +188,7 @@ async fn generic_nic_results_without_admission_are_ignored_without_dpa(pool: sql
         assert_eq!(after.state.value, before.state.value);
         assert_eq!(after.state.version, before.state.version);
         let queued: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM machine_state_controller_queued_objects WHERE object_id = $1)")
-            .bind(host_id.to_string()).fetch_one(&env.pool).await.unwrap();
+            .bind(host_id).fetch_one(&env.pool).await.unwrap();
         assert!(!queued);
     }
     assert!(
@@ -1438,12 +1438,7 @@ async fn firmware_observation_waits_for_current_card_state(pool: sqlx::PgPool) {
     let commit_receipt = async {
         // Waiting at the locked read, rather than only at UPDATE, proves the
         // omission cannot be merged against the earlier empty card state.
-        db::test_support::postgres::wait_for_blocked_query(
-            &env.pool,
-            writer_pid,
-            "ORDER BY id FOR UPDATE",
-        )
-        .await;
+        crate::tests::wait_for_blocked_query(&env.pool, writer_pid, "ORDER BY id FOR UPDATE").await;
         locked_card.card_state = Some(CardState {
             firmware_report: operation.report.clone().map(Into::into),
             firmware_operation: Some(operation.clone().try_into().unwrap()),
@@ -2025,6 +2020,46 @@ async fn live_mlx_hardware_dispatch_survives_a_lost_caller(pool: sqlx::PgPool) {
     assert_eq!(settled.token, saved.token);
     assert_eq!(settled.owner, saved.owner);
     assert!(settled.settled_at.is_some());
+
+    // A retained ordinary reboot can share this host's stream identity, but an
+    // exact-token MLX success still cannot establish its completion.
+    let current = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let reboot_owner = HardwareDispatchOwner::InstanceReboot {
+        machine_id: host_id,
+        instance_id: carbide_uuid::instance::InstanceId::new(),
+        bmc: current.status.bmc_info,
+        last_attempt_at: Some(chrono::Utc::now()),
+        reconcile_after: Some(chrono::Utc::now() + chrono::Duration::minutes(9)),
+    };
+    let reboot_token = uuid::Uuid::new_v4();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::hardware_dispatch::begin(txn.as_mut(), reboot_token, &reboot_owner)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    let reboot = saved_dispatch(&env.pool, host_id).await;
+    other_sender
+        .send(config_set_reply(Some(reboot_token.into())))
+        .await
+        .unwrap();
+    ping_barrier(&env.api, host_machine, &other_sender, &mut other_requests).await;
+    assert_eq!(saved_dispatch(&env.pool, host_id).await, reboot);
+    assert!(reboot.is_pending());
+
+    // The shared public MLX entrypoint also respects that other owner's exclusion.
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch_config_set(&env.api, host_machine),
+    )
+    .await
+    .expect("a queued reboot must reject MLX work without waiting for Scout")
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("reserved by hardware command"));
+    assert_eq!(saved_dispatch(&env.pool, host_id).await, reboot);
 }
 
 /// Drive the public mutation boundary without repeating its request fixture.
@@ -2144,6 +2179,31 @@ async fn live_mlx_hardware_dispatch_settles_a_rejected_dpu_enqueue(pool: sqlx::P
     );
     assert!(!saved.token.is_nil());
     env.api.scout_stream_registry.unregister(machine_id).await;
+
+    // FindMachinesByIds returns the retained reservation on its host, even for a DPU target.
+    let machines = env
+        .api
+        .find_machines_by_ids(Request::new(rpc::forge::MachinesByIdsRequest {
+            machine_ids: vec![host_id.into(), machine_id],
+            include_history: false,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .machines;
+    let dispatch_for = |id| {
+        machines
+            .iter()
+            .find(|machine| machine.id == Some(id))
+            .unwrap()
+            .status
+            .as_ref()
+            .unwrap()
+            .nic_firmware_dispatch
+            .as_ref()
+    };
+    assert_eq!(dispatch_for(host_id.into()), Some(&saved.into()));
+    assert_eq!(dispatch_for(machine_id), None);
 }
 
 /// An unattached DPU has no host reservation. Preserve its unbounded stream wait
@@ -2493,7 +2553,7 @@ async fn hardware_dispatch_settlement_failure_keeps_stream_usable(pool: sqlx::Pg
         .send(config_set_reply(request.flow_uuid.clone()))
         .await
         .unwrap();
-    db::test_support::postgres::wait_for_blocked_query(
+    crate::tests::wait_for_blocked_query(
         &env.pool,
         blocker,
         "UPDATE machines SET hardware_dispatch",

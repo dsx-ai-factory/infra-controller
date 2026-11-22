@@ -140,6 +140,17 @@ async fn public_commands_and_output() {
             ] {
                 assert!(output.contains(value), "missing {value}: {output}");
             }
+            if format == OutputFormat::Csv {
+                let mut reader = csv::Reader::from_reader(output.as_bytes());
+                let row = reader.records().next().unwrap().unwrap();
+                assert_eq!(&row[3], "0:0:Compute, 0:0:Switch");
+            } else {
+                let row = output.lines().find(|line| line.contains(id)).unwrap();
+                assert_eq!(
+                    row.split('|').nth(4).unwrap().trim(),
+                    "0:0:Compute, 0:0:Switch"
+                );
+            }
             if name.is_some() {
                 assert!(output.contains("mini-a"));
             } else if format == OutputFormat::Csv {

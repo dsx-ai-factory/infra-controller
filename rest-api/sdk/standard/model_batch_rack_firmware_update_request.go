@@ -32,8 +32,11 @@ type BatchRackFirmwareUpdateRequest struct {
 	Version NullableString `json:"version,omitempty"`
 	// Optional firmware sub-parts selected within the operation rule, resolved inventory and per-tray version scope. Names are matched separately for each tray type; each receives only its applicable subset. A type with no matching sub-parts skips all its rule steps, including power actions. For example, bios selects Compute and Switch BIOS and skips PowerShelf; nvos selects only Switch; dpu selects only Compute; pmc selects only PowerShelf. Each requested name must match a firmware action in this scope. Unknown names and selections with no matching devices are rejected before dispatch. Selected backend options are also checked before dispatch; a backend restriction is an error, not a reason to skip otherwise applicable devices. Hardware or backend execution errors can still cause partial completion after dispatch.  Supported names by tray type:   - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,     combined_bmc_uefi, gpu, cx7, dpu   - switch: bmc, cpld, bios, nvos   - powershelf: pmc, psu  Omitted or empty keeps backend defaults for the selected rule: compute and switch use their default firmware selection, and nico PowerShelf defaults to PMC. DPU reprovisioning requires an explicit dpu; dpu-only Compute selection skips compute-tray firmware and uses the site-configured DPU version. The opt-in nicolegacy compute manager rejects non-DPU compute sub-target selections before task creation. A version may be omitted to use configured firmware defaults for rack-scale RMS components.
 	Targets []string `json:"targets,omitempty"`
-	// Optional, write-only authentication data for firmware downloads. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	// Deprecated alias of downloadCredentials. Supply at most one non-null alias. Retained for existing clients.
+	// Deprecated
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
+	// Optional authentication for downloading firmware files, independent of device login credentials. Mutually exclusive with a non-null authenticationData. Omitted or null means no download authentication. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	DownloadCredentials NullableFirmwareAuthenticationData `json:"downloadCredentials,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this batch to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
 	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
@@ -202,6 +205,7 @@ func (o *BatchRackFirmwareUpdateRequest) SetTargets(v []string) {
 }
 
 // GetAuthenticationData returns the AuthenticationData field value if set, zero value otherwise (both if not set or set to explicit null).
+// Deprecated
 func (o *BatchRackFirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthenticationData {
 	if o == nil || IsNil(o.AuthenticationData.Get()) {
 		var ret FirmwareAuthenticationData
@@ -213,6 +217,7 @@ func (o *BatchRackFirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthent
 // GetAuthenticationDataOk returns a tuple with the AuthenticationData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
+// Deprecated
 func (o *BatchRackFirmwareUpdateRequest) GetAuthenticationDataOk() (*FirmwareAuthenticationData, bool) {
 	if o == nil {
 		return nil, false
@@ -230,6 +235,7 @@ func (o *BatchRackFirmwareUpdateRequest) HasAuthenticationData() bool {
 }
 
 // SetAuthenticationData gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the AuthenticationData field.
+// Deprecated
 func (o *BatchRackFirmwareUpdateRequest) SetAuthenticationData(v FirmwareAuthenticationData) {
 	o.AuthenticationData.Set(&v)
 }
@@ -242,6 +248,49 @@ func (o *BatchRackFirmwareUpdateRequest) SetAuthenticationDataNil() {
 // UnsetAuthenticationData ensures that no value is present for AuthenticationData, not even an explicit nil
 func (o *BatchRackFirmwareUpdateRequest) UnsetAuthenticationData() {
 	o.AuthenticationData.Unset()
+}
+
+// GetDownloadCredentials returns the DownloadCredentials field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchRackFirmwareUpdateRequest) GetDownloadCredentials() FirmwareAuthenticationData {
+	if o == nil || IsNil(o.DownloadCredentials.Get()) {
+		var ret FirmwareAuthenticationData
+		return ret
+	}
+	return *o.DownloadCredentials.Get()
+}
+
+// GetDownloadCredentialsOk returns a tuple with the DownloadCredentials field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchRackFirmwareUpdateRequest) GetDownloadCredentialsOk() (*FirmwareAuthenticationData, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DownloadCredentials.Get(), o.DownloadCredentials.IsSet()
+}
+
+// HasDownloadCredentials returns a boolean if a field has been set.
+func (o *BatchRackFirmwareUpdateRequest) HasDownloadCredentials() bool {
+	if o != nil && o.DownloadCredentials.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDownloadCredentials gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the DownloadCredentials field.
+func (o *BatchRackFirmwareUpdateRequest) SetDownloadCredentials(v FirmwareAuthenticationData) {
+	o.DownloadCredentials.Set(&v)
+}
+
+// SetDownloadCredentialsNil sets the value for DownloadCredentials to be an explicit nil
+func (o *BatchRackFirmwareUpdateRequest) SetDownloadCredentialsNil() {
+	o.DownloadCredentials.Set(nil)
+}
+
+// UnsetDownloadCredentials ensures that no value is present for DownloadCredentials, not even an explicit nil
+func (o *BatchRackFirmwareUpdateRequest) UnsetDownloadCredentials() {
+	o.DownloadCredentials.Unset()
 }
 
 // GetRuleId returns the RuleId field value if set, zero value otherwise.
@@ -362,6 +411,9 @@ func (o BatchRackFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) 
 	}
 	if o.AuthenticationData.IsSet() {
 		toSerialize["authenticationData"] = o.AuthenticationData.Get()
+	}
+	if o.DownloadCredentials.IsSet() {
+		toSerialize["downloadCredentials"] = o.DownloadCredentials.Get()
 	}
 	if !IsNil(o.RuleId) {
 		toSerialize["ruleId"] = o.RuleId

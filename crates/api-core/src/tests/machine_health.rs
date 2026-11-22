@@ -864,8 +864,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
 
     let (host_machine_id, _) = create_managed_host(&env).await.into();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
+    let machine_ids = db::managed_host::load_host_ids(&env.pool).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -878,13 +877,12 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
         },
     };
     let all_machines =
-        db::managed_host::load_by_machine_ids(txn.as_mut(), &machine_ids, options).await?;
+        db::managed_host::load_by_machine_ids(&mut env.db_reader(), &machine_ids, options).await?;
 
     assert_eq!(
         db::machine::count_healthy_unhealthy_host_machines(&all_machines),
         (1, 0)
     );
-    txn.commit().await?;
 
     let r#override = hr(
         "add-host-failure",
@@ -912,8 +910,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
     )
     .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
+    let machine_ids = db::managed_host::load_host_ids(&env.pool).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -926,13 +923,12 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
         },
     };
     let all_machines =
-        db::managed_host::load_by_machine_ids(txn.as_mut(), &machine_ids, options).await?;
+        db::managed_host::load_by_machine_ids(&mut env.db_reader(), &machine_ids, options).await?;
 
     assert_eq!(
         db::machine::count_healthy_unhealthy_host_machines(&all_machines),
         (1, 1)
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -956,14 +952,14 @@ fn hr(
         successes: successes
             .into_iter()
             .map(|(id, target)| health_report::HealthProbeSuccess {
-                id: id.to_string().parse().unwrap(),
+                id: id.parse().unwrap(),
                 target: target.map(|t| t.to_string()),
             })
             .collect(),
         alerts: alerts
             .into_iter()
             .map(|(id, target, message)| health_report::HealthProbeAlert {
-                id: id.to_string().parse().unwrap(),
+                id: id.parse().unwrap(),
                 target: target.map(|t| t.to_string()),
                 in_alert_since: None,
                 message: message.to_string(),
@@ -1200,8 +1196,8 @@ async fn test_tenant_reported_issue_health_override_template(
         "TenantReportedIssue"
     );
     assert_eq!(
-        aggregate_health.alerts[0].target,
-        Some("tenant-reported".to_string())
+        aggregate_health.alerts[0].target.as_deref(),
+        Some("tenant-reported")
     );
     assert_eq!(
         aggregate_health.alerts[0].message,
@@ -1281,8 +1277,8 @@ async fn test_request_repair_health_override_template(
     assert_eq!(aggregate_health.alerts.len(), 1);
     assert_eq!(aggregate_health.alerts[0].id.to_string(), "RequestRepair");
     assert_eq!(
-        aggregate_health.alerts[0].target,
-        Some("repair-requested".to_string())
+        aggregate_health.alerts[0].target.as_deref(),
+        Some("repair-requested")
     );
     assert_eq!(
         aggregate_health.alerts[0].message,
@@ -1371,16 +1367,16 @@ async fn test_tenant_reported_issue_and_request_repair_combined(
 
     // Check that both overrides were stored
     assert_eq!(machine.status.as_ref().unwrap().health_sources.len(), 3);
-    let sources: Vec<String> = machine
+    let sources: Vec<&str> = machine
         .status
         .as_ref()
         .unwrap()
         .health_sources
         .iter()
-        .map(|o| o.source.clone())
+        .map(|o| o.source.as_str())
         .collect();
-    assert!(sources.contains(&"tenant-reported-issue".to_string()));
-    assert!(sources.contains(&health_report::REPAIR_REQUEST_MERGE_SOURCE.to_string()));
+    assert!(sources.contains(&"tenant-reported-issue"));
+    assert!(sources.contains(&health_report::REPAIR_REQUEST_MERGE_SOURCE));
 
     // All should be merge mode
     for override_entry in &machine.status.as_ref().unwrap().health_sources {
@@ -1389,13 +1385,13 @@ async fn test_tenant_reported_issue_and_request_repair_combined(
     assert_eq!(aggregate_health.alerts.len(), 2);
 
     // Find both alerts by ID
-    let alert_ids: Vec<String> = aggregate_health
+    let alert_ids: Vec<&str> = aggregate_health
         .alerts
         .iter()
-        .map(|alert| alert.id.to_string())
+        .map(|alert| alert.id.as_str())
         .collect();
-    assert!(alert_ids.contains(&"TenantReportedIssue".to_string()));
-    assert!(alert_ids.contains(&"RequestRepair".to_string()));
+    assert!(alert_ids.contains(&"TenantReportedIssue"));
+    assert!(alert_ids.contains(&"RequestRepair"));
 
     // Verify all alerts have SuppressExternalAlerting
     for alert in &aggregate_health.alerts {
@@ -1472,14 +1468,14 @@ async fn test_find_health_alerts_by_time_range(
     let health2 = all_alerts[0].health.as_ref().unwrap();
     assert_eq!(health2.alerts.len(), 1);
     assert_eq!(health2.alerts[0].id, "Failure3");
-    assert_eq!(health2.alerts[0].target, Some("TestComponent3".to_string()));
+    assert_eq!(health2.alerts[0].target.as_deref(), Some("TestComponent3"));
     assert_eq!(health2.source, "aggregate-host-health");
 
     // Verify second record has 1 alert (success filtered out!)
     let health1 = all_alerts[1].health.as_ref().unwrap();
     assert_eq!(health1.alerts.len(), 1);
     assert_eq!(health1.alerts[0].id, "Fan");
-    assert_eq!(health1.alerts[0].target, Some("TestFan".to_string()));
+    assert_eq!(health1.alerts[0].target.as_deref(), Some("TestFan"));
     assert_eq!(health1.alerts[0].message, "Fan failure detected");
     assert_eq!(health1.source, "aggregate-host-health");
 
@@ -1487,7 +1483,7 @@ async fn test_find_health_alerts_by_time_range(
     let health0 = all_alerts[2].health.as_ref().unwrap();
     assert_eq!(health0.alerts.len(), 2);
     assert_eq!(health0.alerts[0].id, "Failure1");
-    assert_eq!(health0.alerts[0].target, Some("TestComponent1".to_string()));
+    assert_eq!(health0.alerts[0].target.as_deref(), Some("TestComponent1"));
     assert_eq!(health0.alerts[0].message, "First test failure");
     assert_eq!(health0.alerts[1].id, "Failure2");
     assert_eq!(health0.source, "aggregate-host-health");

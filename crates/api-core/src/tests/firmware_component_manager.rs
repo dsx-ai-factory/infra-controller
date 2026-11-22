@@ -138,6 +138,10 @@ impl ComputeTrayManager for RecordingComputeTrayManager {
         &self,
         endpoints: &[ComputeTrayEndpoint],
     ) -> Result<Vec<ComputeTrayFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.bmc_credentials.clone()));
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -204,6 +208,11 @@ impl NvSwitchManager for RecordingNvSwitchManager {
         &self,
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<SwitchFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials.lock().unwrap().extend(
+            endpoints
+                .iter()
+                .flat_map(|ep| [ep.bmc_credentials.clone(), ep.nvos_credentials.clone()]),
+        );
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -301,6 +310,10 @@ impl PowerShelfManager for RecordingPowerShelfManager {
         &self,
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.pmc_credentials.clone()));
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -428,12 +441,22 @@ struct FirmwareObjectFixture {
 async fn create_firmware_object_fixture(
     pool: sqlx::PgPool,
 ) -> Result<FirmwareObjectFixture, Box<dyn std::error::Error>> {
+    create_firmware_object_fixture_with_compute_backend(pool, Backend::Rms).await
+}
+
+async fn create_firmware_object_fixture_with_compute_backend(
+    pool: sqlx::PgPool,
+    backend: Backend,
+) -> Result<FirmwareObjectFixture, Box<dyn std::error::Error>> {
     let fetcher = Arc::new(StaticFirmwareObjectFetcher {
         response: Mutex::new(Ok(FIRMWARE_OBJECT.to_owned())),
         requested_urls: Mutex::new(Vec::new()),
     });
 
-    let compute_tray_manager = Arc::new(RecordingComputeTrayManager::default());
+    let compute_tray_manager = Arc::new(RecordingComputeTrayManager {
+        backend,
+        ..Default::default()
+    });
     let nv_switch_manager = Arc::new(RecordingNvSwitchManager::default());
     let power_shelf_manager = Arc::new(RecordingPowerShelfManager::default());
     let mut config = get_config_with_rack_profiles();
@@ -637,7 +660,7 @@ async fn assert_rack_activity_version(
     fixture: &FirmwareObjectFixture,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut rack = db::rack::find_by(
-        fixture.env.api.db_reader().as_mut(),
+        fixture.env.api.pg_pool(),
         db::ObjectColumnFilter::One(db::rack::IdColumn, &fixture.rack_id),
     )
     .await?
@@ -1250,6 +1273,17 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                 FirmwareTarget::Racks(_) => unreachable!(),
             };
             firmware.credential_overrides = Some(request_credentials(true));
+            use rpc::get_component_firmware_status_request::Target as StatusTarget;
+            let status_target = match &power_target {
+                PowerTarget::MachineIds(ids) => StatusTarget::MachineIds(ids.clone()),
+                PowerTarget::SwitchIds(ids) => StatusTarget::SwitchIds(ids.clone()),
+                PowerTarget::PowerShelfIds(ids) => StatusTarget::PowerShelfIds(ids.clone()),
+                PowerTarget::ComputeBmcMacs(macs) => StatusTarget::ComputeBmcMacs(macs.clone()),
+                PowerTarget::SwitchBmcMacs(macs) => StatusTarget::SwitchBmcMacs(macs.clone()),
+                PowerTarget::PowerShelfPmcMacs(macs) => {
+                    StatusTarget::PowerShelfPmcMacs(macs.clone())
+                }
+            };
             let power = rpc::ComponentPowerControlRequest {
                 target: Some(power_target),
                 action: ::rpc::common::SystemPowerControl::On as i32,
@@ -1280,6 +1314,27 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                     "{results:?}"
                 );
             }
+            let statuses = crate::handlers::component_manager::get_component_firmware_status(
+                &fixture.env.api,
+                Request::new(rpc::GetComponentFirmwareStatusRequest {
+                    target: Some(status_target),
+                    credential_overrides: Some(request_credentials(true)),
+                }),
+            )
+            .await?
+            .into_inner()
+            .statuses;
+            assert!(!statuses.is_empty(), "{mac}, ingested={ingested}");
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.status
+                            == rpc::ComponentManagerStatusCode::Success as i32)),
+                "{statuses:?}"
+            );
             let expected: Vec<_> = [expected.bmc, expected.nvos]
                 .into_iter()
                 .flatten()
@@ -1287,7 +1342,7 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                 .collect();
             assert_eq!(
                 *recorded.lock().unwrap(),
-                [expected.clone(), expected].concat(),
+                [expected.clone(), expected.clone(), expected].concat(),
                 "{mac}, ingested={ingested}"
             );
             recorded.lock().unwrap().clear();
@@ -1417,7 +1472,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
         model::machine::MachineMaintenanceOperation::PowerOff { graceful: false }
     ));
     let switches = db::switch::find_by(
-        &mut *pool.acquire().await?,
+        &pool,
         db::ObjectColumnFilter::One(db::switch::IdColumn, &fixture.switch_id),
     )
     .await?;
@@ -1430,7 +1485,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
         model::switch::SwitchMaintenanceOperation::PowerOff { graceful: false }
     ));
     let shelves = db::power_shelf::find_by(
-        &mut *pool.acquire().await?,
+        &pool,
         db::ObjectColumnFilter::One(db::power_shelf::IdColumn, &fixture.power_shelf_id),
     )
     .await?;
@@ -1488,6 +1543,54 @@ async fn credential_overrides_are_ignored_for_rack_updates_and_standalone_reprov
         .unwrap();
     assert_eq!(after.config.firmware_autoupdate, Some(true));
     assert_rack_activity_version(&fixture).await?;
+    assert!(
+        fixture
+            .compute_tray_manager
+            .submitted_credentials
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn core_compute_firmware_status_rejects_device_overrides(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rpc::get_component_firmware_status_request::Target;
+
+    let fixture = create_firmware_object_fixture_with_compute_backend(pool, Backend::Core).await?;
+    let ids = Target::MachineIds(::rpc::common::HostMachineIdList {
+        machine_ids: vec![fixture.machine_id],
+    });
+    for (target, overrides) in [
+        (ids.clone(), None),
+        (ids, Some(request_credentials(false))),
+        (
+            Target::ComputeBmcMacs(rpc::MacAddressList {
+                mac_addresses: vec!["02:00:00:00:00:03".to_owned()],
+            }),
+            Some(request_credentials(false)),
+        ),
+    ] {
+        let expects_error = overrides.is_some();
+        let result = crate::handlers::component_manager::get_component_firmware_status(
+            &fixture.env.api,
+            Request::new(rpc::GetComponentFirmwareStatusRequest {
+                target: Some(target),
+                credential_overrides: overrides,
+            }),
+        )
+        .await;
+        if expects_error {
+            let error = result.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(error.message().contains("core compute tray backend"));
+        } else {
+            assert_eq!(result?.into_inner().statuses.len(), 1);
+        }
+    }
     assert!(
         fixture
             .compute_tray_manager

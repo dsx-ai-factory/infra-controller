@@ -36,12 +36,14 @@ use serde::{Deserialize, Serialize};
 pub mod address_selection_strategy;
 pub mod allocation_type;
 pub mod attestation;
+pub mod attestation_scheduling;
 pub mod bmc_info;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod component_manager;
 pub mod compute_allocation;
 pub mod controller_outcome;
+pub mod dhcp_option_set;
 pub mod dhcp_record;
 pub mod dns;
 pub mod dpa_interface;
@@ -264,6 +266,8 @@ impl Serialize for SerializableMacAddress {
     where
         S: serde::Serializer,
     {
+        // mac_address's Display discards formatter errors; serialize the complete
+        // string so a fallible serializer still propagates its write errors.
         serializer.serialize_str(&self.0.to_string())
     }
 }
@@ -273,14 +277,70 @@ impl<'de> Deserialize<'de> for SerializableMacAddress {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
+        struct StringVisitor;
 
-        let str_value = String::deserialize(deserializer)?;
-        let mac: MacAddress = str_value
-            .parse()
-            .map_err(|_| Error::custom(format!("Invalid MAC address: {str_value}")))?;
-        Ok(SerializableMacAddress(mac))
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = Result<SerializableMacAddress, String>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(value
+                    .parse()
+                    .map(SerializableMacAddress)
+                    .map_err(|_| format!("Invalid MAC address: {value}")))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        // Convert domain errors after the string read to preserve diagnostic positions.
+        deserializer
+            .deserialize_string(StringVisitor)?
+            .map_err(serde::de::Error::custom)
     }
+}
+
+fn deserialize_from_str<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+    D: serde::Deserializer<'de>,
+{
+    struct StringVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<T> serde::de::Visitor<'_> for StringVisitor<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        type Value = Result<T, T::Err>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(value.parse())
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            let value = std::str::from_utf8(value)
+                .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+            self.visit_str(value)
+        }
+    }
+
+    // Convert domain errors after the string read to preserve diagnostic positions.
+    deserializer
+        .deserialize_string(StringVisitor(std::marker::PhantomData))?
+        .map_err(serde::de::Error::custom)
 }
 
 /// Specifies the SLA for a resource in a specific state
@@ -320,6 +380,7 @@ impl StateSla {
 mod tests {
     use carbide_test_support::value_scenarios;
     use carbide_uuid::{DbColumns, DbTable};
+    use itertools::Itertools;
 
     use super::*;
     use crate::network_devices::NetworkDevice;
@@ -335,9 +396,10 @@ mod tests {
                 columns
                     .as_slice()
                     .iter()
-                    .map(|column| format!("{alias}.{column}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                    .format_with(", ", |column, formatter| {
+                        formatter(&format_args!("{alias}.{column}"))
+                    })
+                    .to_string(),
             )
         };
             "manual column mappings" {
@@ -366,6 +428,72 @@ mod tests {
     }
 
     #[test]
+    fn dpu_model_display_uses_stable_spellings() {
+        value_scenarios!(run = |model: DpuModel| model.to_string();
+            "BF2" { DpuModel::BlueField2 => "bluefield2".to_string(), }
+            "BF3" { DpuModel::BlueField3 => "bluefield3".to_string(), }
+            "unknown" { DpuModel::Unknown => "unknown".to_string(), }
+        );
+    }
+
+    #[test]
+    fn text_models_preserve_reader_owned_and_byte_inputs() {
+        fn check<T: serde::de::DeserializeOwned + Serialize>(text: &str, expected: &str) {
+            use serde::de::value::{
+                BorrowedBytesDeserializer, Error, StrDeserializer, StringDeserializer,
+            };
+
+            let json = serde_json::to_string(text).unwrap();
+            // An escape forces serde_json to pass transient text to the string visitor.
+            let escaped = json.replacen(&text[..1], &format!("\\u{:04x}", text.as_bytes()[0]), 1);
+            let cases = [
+                (
+                    "reader",
+                    serde_json::from_reader::<_, T>(json.as_bytes()).map_err(|e| e.to_string()),
+                ),
+                (
+                    "escaped",
+                    serde_json::from_str::<T>(&escaped).map_err(|e| e.to_string()),
+                ),
+                (
+                    "transient",
+                    T::deserialize(StrDeserializer::<Error>::new(text)).map_err(|e| e.to_string()),
+                ),
+                (
+                    "owned",
+                    T::deserialize(StringDeserializer::<Error>::new(text.to_string()))
+                        .map_err(|e| e.to_string()),
+                ),
+                (
+                    "bytes",
+                    T::deserialize(BorrowedBytesDeserializer::<Error>::new(text.as_bytes()))
+                        .map_err(|e| e.to_string()),
+                ),
+            ];
+            for (scenario, parsed) in cases {
+                assert_eq!(
+                    serde_json::to_string(&parsed.unwrap()).unwrap(),
+                    expected,
+                    "{scenario}"
+                );
+            }
+            let error = T::deserialize(BorrowedBytesDeserializer::<Error>::new(&[0xff]))
+                .err()
+                .unwrap();
+            let expected_error =
+                String::deserialize(BorrowedBytesDeserializer::<Error>::new(&[0xff])).unwrap_err();
+            assert_eq!(error.to_string(), expected_error.to_string());
+        }
+
+        check::<SerializableMacAddress>("0A:02:03:04:05:FF", r#""0A:02:03:04:05:FF""#);
+        check::<crate::ib_partition::PartitionKey>("0x7ABC", r#""0x7abc""#);
+        check::<crate::hardware_info::TpmEkCertificate>("AAH/", r#""AAH/""#);
+        check::<crate::errors::ErrorCode>("NICO-SITEEXPLORER-145", r#""NICO-SITEEXPLORER-145""#);
+        check::<crate::rack_type::RackProductFamily>(" gb400 ", r#""gb400""#);
+        check::<crate::nic_firmware::NicFirmwareProfileId>("profile-v1", r#""profile-v1""#);
+    }
+
+    #[test]
     fn serialize_mac_address() {
         let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
         let serialized = serde_json::to_string(&SerializableMacAddress::from(mac)).unwrap();
@@ -376,6 +504,108 @@ mod tests {
                 .into_inner(),
             mac
         );
+    }
+
+    #[test]
+    fn mac_json_errors_match_former_string_decoder() {
+        #[derive(Debug)]
+        struct FormerMac;
+
+        impl<'de> Deserialize<'de> for FormerMac {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = String::deserialize(deserializer)?;
+                value
+                    .parse::<MacAddress>()
+                    .map(|_| Self)
+                    .map_err(|_| serde::de::Error::custom(format!("Invalid MAC address: {value}")))
+            }
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct Envelope<T> {
+            #[serde(rename = "mac_address")]
+            _mac_address: Option<T>,
+            #[serde(rename = "following")]
+            _following: bool,
+        }
+
+        let json = r#"{"mac_address":"invalid","following":true}"#;
+        let current = serde_json::from_str::<Envelope<SerializableMacAddress>>(json)
+            .expect_err("invalid MAC should fail");
+        let former = serde_json::from_str::<Envelope<FormerMac>>(json)
+            .expect_err("former decoder rejects invalid MAC");
+        assert_eq!(current.to_string(), former.to_string());
+    }
+
+    #[test]
+    fn mac_serialization_propagates_writer_errors() {
+        struct FailOnce {
+            remaining: usize,
+            failed: bool,
+        }
+
+        impl std::io::Write for FailOnce {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.failed {
+                    return Ok(bytes.len());
+                }
+                if self.remaining == 0 {
+                    self.failed = true;
+                    return Err(std::io::Error::other("injected MAC write failure"));
+                }
+                let written = bytes.len().min(self.remaining);
+                self.remaining -= written;
+                Ok(written)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        type SerializeCase = fn(&mut dyn std::io::Write) -> serde_json::Result<()>;
+        let cases: [(&str, SerializeCase); 2] = [
+            ("MAC wrapper", |writer| {
+                serde_json::to_writer(
+                    writer,
+                    &SerializableMacAddress::from(MacAddress::new([1, 2, 3, 4, 5, 6])),
+                )
+            }),
+            ("optional explored DPU MAC", |writer| {
+                serde_json::to_writer(
+                    writer,
+                    &crate::site_explorer::ExploredDpu {
+                        bmc_ip: "192.0.2.1".parse().unwrap(),
+                        host_pf_mac_address: Some(MacAddress::new([1, 2, 3, 4, 5, 6])),
+                        host_chassis_id: None,
+                        report: Default::default(),
+                    },
+                )
+            }),
+        ];
+
+        for (scenario, serialize) in cases {
+            let mut baseline = Vec::new();
+            serialize(&mut baseline).unwrap();
+            let mac_offset = baseline
+                .windows(17)
+                .position(|bytes| bytes == b"01:02:03:04:05:06")
+                .expect("serialized MAC");
+            // Fail inside the MAC, then accept later writes so a swallowed
+            // error cannot be hidden by another failure at the closing quote.
+            let mut writer = FailOnce {
+                remaining: mac_offset + 3,
+                failed: false,
+            };
+            let result = serialize(&mut writer);
+            assert!(writer.failed, "{scenario}: failure was injected");
+            let error = result.expect_err(scenario);
+            assert!(error.is_io(), "{scenario}: {error}");
+            assert!(
+                error.to_string().contains("injected MAC write failure"),
+                "{scenario}: {error}"
+            );
+        }
     }
 }
 
@@ -402,6 +632,10 @@ where
 
 impl fmt::Display for DpuModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", format!("{self:?}").to_lowercase())
+        f.write_str(match self {
+            Self::BlueField2 => "bluefield2",
+            Self::BlueField3 => "bluefield3",
+            Self::Unknown => "unknown",
+        })
     }
 }

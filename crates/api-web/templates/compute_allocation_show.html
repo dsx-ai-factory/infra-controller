@@ -22,7 +22,7 @@
 		<tr>
 			<td>
 				<a href="/admin/compute-allocation/{{ allocation.id }}">{% if allocation.name.is_empty() %}{{ allocation.id }}{% else %}{{ allocation.name }}{% endif %}</a>
-				{% if !allocation.name.is_empty() %}<span class="cell-sub">{{ allocation.id }}</span>{% endif %}
+				{% if !allocation.name.is_empty() %}<code class="cell-chip cell-chip-id">{{ allocation.id }}</code>{% endif %}
 				{% if !allocation.description.is_empty() %}<span class="cell-sub">{{ allocation.description }}</span>{% endif %}
 			</td>
 			<td><a href="/admin/tenant/{{ allocation.tenant_organization_id }}">{{ allocation.tenant_organization_id }}</a></td>

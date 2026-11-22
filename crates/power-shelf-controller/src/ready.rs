@@ -20,6 +20,7 @@
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
 use db::{TransactionVending as _, power_shelf as db_power_shelf};
+use model::machine::PowerState;
 use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState,
     PowerShelfRackReprovisioningSkip, PowerShelfStatus,
@@ -259,7 +260,6 @@ async fn poll_power_state(
         }
     };
 
-    let rack_id_str = rack_id.to_string();
     let results = match component_manager
         .power_shelf
         .get_power_state(std::slice::from_ref(&endpoint))
@@ -269,7 +269,7 @@ async fn poll_power_state(
         Err(error) => {
             tracing::warn!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 error = %error,
                 "Power shelf get power state transport error",
@@ -280,20 +280,28 @@ async fn poll_power_state(
 
     match interpret_power_state_poll(results) {
         PowerStatePollOutcome::Observed(observed_power_state) => {
-            let observed_power_state = observed_power_state.to_string().to_lowercase();
+            let observed_power_state = match observed_power_state {
+                PowerState::Off => "off",
+                PowerState::On => "on",
+                PowerState::PoweringOff => "poweringoff",
+                PowerState::PoweringOn => "poweringon",
+                PowerState::Paused => "paused",
+                PowerState::Reset => "reset",
+                PowerState::Unknown => "unknown",
+            };
             tracing::info!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 power_state = %observed_power_state,
                 "Power shelf get power state succeeded",
             );
-            persist_observed_power_state(power_shelf_id, state, ctx, &observed_power_state).await
+            persist_observed_power_state(power_shelf_id, state, ctx, observed_power_state).await
         }
         PowerStatePollOutcome::BackendError(error) => {
             tracing::warn!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 error = %error,
                 "Power shelf get power state returned an error result",
@@ -332,6 +340,19 @@ async fn persist_observed_power_state(
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     observed_power_state: &str,
 ) -> Option<db::Transaction<'static>> {
+    if state
+        .status
+        .as_ref()
+        .is_some_and(|s| s.power_state == observed_power_state)
+    {
+        tracing::debug!(
+            power_shelf_id = %power_shelf_id,
+            power_state = %observed_power_state,
+            "PowerShelf status power_state unchanged; skipping DB write",
+        );
+        return None;
+    }
+
     let new_status = match state.status.as_ref() {
         Some(existing) => PowerShelfStatus {
             shelf_name: existing.shelf_name.clone(),
@@ -344,19 +365,6 @@ async fn persist_observed_power_state(
             health_status: String::new(),
         },
     };
-
-    if state
-        .status
-        .as_ref()
-        .is_some_and(|s| s.power_state == new_status.power_state)
-    {
-        tracing::debug!(
-            power_shelf_id = %power_shelf_id,
-            power_state = %new_status.power_state,
-            "PowerShelf status power_state unchanged; skipping DB write",
-        );
-        return None;
-    }
 
     let previous_status = state.status.replace(new_status);
 

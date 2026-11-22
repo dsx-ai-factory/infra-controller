@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"testing"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 func TestAPIFirmwareAuthenticationData_UnmarshalJSON(t *testing.T) {
@@ -55,6 +58,9 @@ func TestAPIFirmwareAuthenticationData_UnmarshalJSON(t *testing.T) {
 }
 
 func TestAPIUpdateFirmwareRequest_Validate(t *testing.T) {
+	t.Run("credential fields", func(t *testing.T) {
+		testFirmwareRequestCredentialFields(t, func() interface{ Validate() error } { return &APIUpdateFirmwareRequest{} })
+	})
 	tests := []struct {
 		name    string
 		request APIUpdateFirmwareRequest
@@ -176,6 +182,9 @@ func TestAPIFirmwareAuthenticationDataToProto(t *testing.T) {
 }
 
 func TestAPIBatchTrayFirmwareUpdateRequest_Validate(t *testing.T) {
+	t.Run("credential fields", func(t *testing.T) {
+		testFirmwareRequestCredentialFields(t, func() interface{ Validate() error } { return &APIBatchTrayFirmwareUpdateRequest{} })
+	})
 	tests := []struct {
 		name    string
 		request APIBatchTrayFirmwareUpdateRequest
@@ -272,6 +281,7 @@ func TestNewAPIUpdateFirmwareResponse(t *testing.T) {
 }
 
 func TestAPIBatchRackFirmwareUpdateRequest_Validate(t *testing.T) {
+	t.Run("credential fields", func(t *testing.T) { testRackFirmwareRequestCredentialFields(t, &APIBatchRackFirmwareUpdateRequest{}) })
 	tests := []struct {
 		name    string
 		request APIBatchRackFirmwareUpdateRequest
@@ -311,3 +321,124 @@ func TestAPIBatchRackFirmwareUpdateRequest_Validate(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func testFirmwareRequestCredentialFields(t *testing.T, newRequest func() interface{ Validate() error }) {
+	t.Helper()
+	cases := []struct {
+		name, body string
+		valid      bool
+	}{
+		{"new download name", `{"siteId":"site","downloadCredentials":{"shared":"download-value"}}`, true},
+		{"legacy download name", `{"siteId":"site","authenticationData":{"shared":"download-value"}}`, true},
+		{"aliases conflict", `{"siteId":"site","downloadCredentials":{"shared":"a"},"authenticationData":{"shared":"b"}}`, false},
+		{"null alias is absent", `{"siteId":"site","authenticationData":null,"downloadCredentials":{"shared":"download-value"}}`, true},
+		{"null credentials are absent", `{"siteId":"site","authenticationData":null,"downloadCredentials":null,"deviceCredentialOverrides":null}`, true},
+		{"device pair", `{"siteId":"site","overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-value"}}}`, true},
+		{"missing direct routing", `{"siteId":"site","deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-value"}}}`, false},
+		{"empty overrides", `{"siteId":"site","overrideReadinessCheck":true,"deviceCredentialOverrides":{}}`, false},
+		{"incomplete pair", `{"siteId":"site","overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator"}}}`, false},
+		{"unknown credential field", `{"siteId":"site","overrideReadinessCheck":true,"deviceCredentialOverrides":{"token":"secret"}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newRequest()
+			err := json.Unmarshal([]byte(tc.body), req)
+			if err == nil {
+				err = req.Validate()
+			}
+			if tc.valid {
+				require.NoError(t, err)
+				downloader, ok := req.(interface {
+					DownloadCredentialsToProto() *flowv1.FirmwareAuthenticationData
+				})
+				if ok && (tc.name == "new download name" || tc.name == "legacy download name" || tc.name == "null alias is absent") {
+					require.Equal(t, "download-value", downloader.DownloadCredentialsToProto().GetShared())
+				}
+			} else {
+				require.Error(t, err)
+				if tc.name == "missing direct routing" {
+					var fields validation.Errors
+					require.ErrorAs(t, err, &fields)
+					require.Contains(t, fields, "deviceCredentialOverrides")
+					require.NotContains(t, fields, "authenticationData")
+					require.EqualError(t, fields["deviceCredentialOverrides"], "requires overrideReadinessCheck")
+				}
+			}
+		})
+	}
+}
+
+func TestAPIDeviceCredentialOverrides_ToProto(t *testing.T) {
+	cases := []struct {
+		name  string
+		value *APIDeviceCredentialOverrides
+	}{
+		{"absent", nil},
+		{"bmc", &APIDeviceCredentialOverrides{BMC: &APIDeviceLogin{Username: "bmc-user", Password: "bmc-value"}}},
+		{"nvos", &APIDeviceCredentialOverrides{NVOS: &APIDeviceLogin{Username: "nvos-user", Password: "nvos-value"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.value.ToProto()
+			if tc.value == nil {
+				require.Nil(t, got)
+				return
+			}
+			if tc.value.BMC != nil {
+				require.Equal(t, "bmc-user", got.GetBmc().GetUsername())
+				require.Equal(t, "bmc-value", got.GetBmc().GetPassword())
+				require.Nil(t, got.Nvos)
+			}
+			if tc.value.NVOS != nil {
+				require.Equal(t, "nvos-user", got.GetNvos().GetUsername())
+				require.Equal(t, "nvos-value", got.GetNvos().GetPassword())
+				require.Nil(t, got.Bmc)
+			}
+		})
+	}
+}
+
+func testRackFirmwareRequestCredentialFields(t *testing.T, req interface{ Validate() error }) {
+	t.Helper()
+	for _, value := range []string{`{"bmc":{"username":"operator","password":"device-value"}}`, `{"unknown":"ignored"}`, `42`} {
+		t.Run(value, func(t *testing.T) {
+			body := `{"siteId":"site","deviceCredentialOverrides":` + value + `}`
+			require.NoError(t, json.Unmarshal([]byte(body), req))
+			require.NoError(t, req.Validate())
+		})
+	}
+}
+
+func TestAPIRackFirmwareUpdateRequest_Validate(t *testing.T) {
+	testRackFirmwareRequestCredentialFields(t, &APIRackFirmwareUpdateRequest{})
+}
+
+func TestAPIUpdateFirmwareRequest_UnmarshalJSON(t *testing.T) {
+	testFirmwareRequestAliasErrors(t, func() interface{} { return &APIUpdateFirmwareRequest{} })
+}
+
+func TestAPIRackFirmwareUpdateRequest_UnmarshalJSON(t *testing.T) {
+	testFirmwareRequestAliasErrors(t, func() interface{} { return &APIRackFirmwareUpdateRequest{} })
+}
+
+func TestAPIBatchRackFirmwareUpdateRequest_UnmarshalJSON(t *testing.T) {
+	testFirmwareRequestAliasErrors(t, func() interface{} { return &APIBatchRackFirmwareUpdateRequest{} })
+}
+
+func TestAPIBatchTrayFirmwareUpdateRequest_UnmarshalJSON(t *testing.T) {
+	testFirmwareRequestAliasErrors(t, func() interface{} { return &APIBatchTrayFirmwareUpdateRequest{} })
+}
+
+func testFirmwareRequestAliasErrors(t *testing.T, newRequest func() interface{}) {
+	t.Helper()
+	for _, tc := range []struct{ name, body, want string }{
+		{"preferred", `{"downloadCredentials":{"bogus":"not-a-secret"}}`, `downloadCredentials contains unknown field "bogus"`},
+		{"legacy", `{"authenticationData":{"bogus":"not-a-secret"}}`, `authenticationData contains unknown field "bogus"`},
+		{"preferred nested", `{"downloadCredentials":{"perComponent":{"bogus":"not-a-secret"}}}`, `downloadCredentials.perComponent contains unknown field "bogus"`},
+		{"legacy nested", `{"authenticationData":{"perComponent":{"bogus":"not-a-secret"}}}`, `authenticationData.perComponent contains unknown field "bogus"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.EqualError(t, json.Unmarshal([]byte(tc.body), newRequest()), tc.want)
+		})
+	}
+}

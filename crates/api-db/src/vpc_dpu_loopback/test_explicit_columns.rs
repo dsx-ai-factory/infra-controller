@@ -220,7 +220,7 @@ async fn assert_loopback_allocations(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for expected in loopbacks {
         let retained = retained_vpc_ids.contains(&expected.vpc_id);
-        let found = find(connection, &expected.dpu_id, &expected.vpc_id).await?;
+        let found = find(&mut *connection, &expected.dpu_id, &expected.vpc_id).await?;
         assert_eq!(found.is_some(), retained, "{}", expected.vpc_id);
         if let Some(found) = found {
             assert_eq!(found.dpu_id, expected.dpu_id);

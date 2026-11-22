@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 use carbide_uuid::machine::MachineId;
@@ -177,11 +178,42 @@ pub async fn find_by_ips(
         .map_err(|e| DatabaseError::new("explored_endpoints::find_by_ips", e))
 }
 
-/// Fetches explored DPU endpoints whose reported system serial number is in
-/// `serials`. Resolves the host-to-DPU serial join for a page of hosts without
-/// loading every explored endpoint. Constrained to DPU reports
-/// (`Systems[0].Id == "Bluefield"`) so a host endpoint with a coincidentally
-/// matching serial is not pulled in.
+// PostgreSQL's default trim removes only ASCII space. Match Rust's `str::trim`
+// when selecting candidates, including its Unicode whitespace characters.
+const PAIRING_SERIAL_TRIM_CHARACTERS: &str = concat!(
+    "\t\n\u{b}\u{c}\r \u{85}\u{a0}\u{1680}",
+    "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}",
+    "\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}",
+    "\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}",
+);
+
+// Keep the system IDs aligned with `model::site_explorer::is_bluefield_system`.
+// All chassis serials can supply candidates; the model applies product-chassis
+// eligibility and system-serial precedence after the read.
+const FIND_BY_DPU_SERIAL_NUMBERS_QUERY: &str = r#"SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE exploration_report->'Systems'->0->>'Id' IN ('Bluefield', 'BlueField_0')
+          AND EXISTS (
+            SELECT 1 FROM (
+                SELECT exploration_report->'Systems'->0->>'SerialNumber' AS serial
+                UNION ALL
+                SELECT chassis->>'SerialNumber'
+                FROM jsonb_array_elements(exploration_report->'Chassis') AS chassis
+            ) AS reported
+            WHERE btrim(reported.serial, $2) = ANY($1)
+          )"#;
+
+/// Fetches all explored DPU endpoints matching the supplied trimmed `serials`.
+/// Resolves the host-to-DPU serial join used by MLX inventory.
+/// System serials take precedence over product-chassis serials, as defined by
+/// [`EndpointExplorationReport::dpu_pairing_serial_number`]. Host endpoints with
+/// a coincidentally matching serial are excluded.
+/// Each address appears once; distinct endpoints sharing a serial are retained
+/// so the caller can detect ambiguous associations. Empty input performs no read.
 ///
 /// `exploration_report` is the constantly-rewritten site-exploration blob, so we
 /// deliberately do not index this JSON path: DPU-endpoint cardinality per site is
@@ -191,21 +223,27 @@ pub async fn find_by_dpu_serial_numbers(
     db: impl DbReader<'_>,
     serials: Vec<String>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT
-            address, exploration_report, version, preingestion_state,
-            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
-            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
-            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
-        FROM explored_endpoints
-        WHERE exploration_report->'Systems'->0->>'SerialNumber' = ANY($1)
-          AND exploration_report->'Systems'->0->>'Id' = 'Bluefield'";
+    if serials.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    sqlx::query_as::<_, DbExploredEndpoint>(query)
-        .bind(serials)
+    let endpoints = sqlx::query_as::<_, DbExploredEndpoint>(FIND_BY_DPU_SERIAL_NUMBERS_QUERY)
+        .bind(&serials)
+        .bind(PAIRING_SERIAL_TRIM_CHARACTERS)
         .fetch_all(db)
         .await
-        .map(|endpoints| endpoints.into_iter().map(Into::into).collect())
-        .map_err(|e| DatabaseError::new("explored_endpoints::find_by_dpu_serial_numbers", e))
+        .map_err(|e| DatabaseError::new("explored_endpoints::find_by_dpu_serial_numbers", e))?;
+    let requested_serials: HashSet<_> = serials.into_iter().collect();
+    Ok(endpoints
+        .into_iter()
+        .map(ExploredEndpoint::from)
+        .filter(|endpoint| {
+            endpoint
+                .report
+                .dpu_pairing_serial_number()
+                .is_some_and(|serial| requested_serials.contains(serial))
+        })
+        .collect())
 }
 
 /// find_all returns all explored endpoints that site explorer has been able to probe
@@ -340,7 +378,7 @@ pub async fn count_preingest_installing(txn: impl DbReader<'_>) -> Result<i64, D
 
 /// find_all_no_upgrades returns all explored endpoints that site explorer has been able to probe, but ignores anything currently undergoing an upgrade
 pub async fn find_all_preingestion_complete(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     let query = "SELECT
             address, exploration_report, version, preingestion_state,
@@ -351,7 +389,7 @@ pub async fn find_all_preingestion_complete(
         WHERE preingestion_state->'state' = '\"complete\"'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map(|endpoints| endpoints.into_iter().map(Into::into).collect())
         .map_err(|e| DatabaseError::new("explored_endpoints find_all_preingestion_complete", e))
@@ -360,7 +398,7 @@ pub async fn find_all_preingestion_complete(
 /// find_all_by_ip returns a list of explored endpoints that match the ip (should be a list of one)
 pub async fn find_all_by_ip(
     address: IpAddr,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     let query = "SELECT
             address, exploration_report, version, preingestion_state,
@@ -372,7 +410,7 @@ pub async fn find_all_by_ip(
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map(|endpoints| endpoints.into_iter().map(Into::into).collect())
         .map_err(|e| DatabaseError::new("explored_endpoints find_all_by_ip", e))
@@ -1215,10 +1253,153 @@ pub async fn set_pause_ingestion_and_poweron(
 
 #[cfg(test)]
 mod tests {
-    use model::site_explorer::{Chassis, EndpointExplorationError, EndpointType, NetworkAdapter};
+    use model::site_explorer::{
+        Chassis, ComputerSystem, EndpointExplorationError, EndpointType, NetworkAdapter,
+    };
 
     use super::*;
     use crate::TransactionVending as _;
+
+    #[test]
+    fn sql_serial_whitespace_matches_rust_trim() {
+        let whitespace: String = (char::MIN..=char::MAX)
+            .filter(|c| c.is_whitespace())
+            .collect();
+        assert_eq!(PAIRING_SERIAL_TRIM_CHARACTERS, whitespace);
+    }
+
+    #[crate::sqlx_test]
+    async fn dpu_serial_lookup_uses_effective_pairing_serial(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        struct Case {
+            scenario: &'static str,
+            system_id: &'static str,
+            system_serial: Option<&'static str>,
+            chassis: &'static [(&'static str, &'static str)],
+            candidate_expected: bool,
+            expected: bool,
+        }
+
+        let cases = [
+            Case {
+                scenario: "one endpoint matching several serial fields",
+                system_id: "BlueField_0",
+                system_serial: Some("wanted"),
+                chassis: &[("Card1", "wanted"), ("Bluefield_BMC", "wanted")],
+                candidate_expected: true,
+                expected: true,
+            },
+            Case {
+                scenario: "leading ASCII whitespace in system serial",
+                system_id: "Bluefield",
+                system_serial: Some(" \twanted"),
+                chassis: &[],
+                candidate_expected: true,
+                expected: true,
+            },
+            Case {
+                scenario: "trailing Unicode whitespace in chassis serial",
+                system_id: "Bluefield",
+                system_serial: Some(""),
+                chassis: &[("Bluefield_BMC", "wanted\u{00a0}")],
+                candidate_expected: true,
+                expected: true,
+            },
+            Case {
+                scenario: "system serial wins over Card1 serial",
+                system_id: "Bluefield",
+                system_serial: Some("éwanted"),
+                chassis: &[("Card1", "wanted")],
+                candidate_expected: true,
+                expected: false,
+            },
+            Case {
+                scenario: "unrelated padded serial is not a candidate",
+                system_id: "Bluefield",
+                system_serial: Some("other "),
+                chassis: &[],
+                candidate_expected: false,
+                expected: false,
+            },
+            Case {
+                scenario: "component chassis is not a pairing source",
+                system_id: "Bluefield",
+                system_serial: None,
+                chassis: &[("Bluefield_ERoT", "wanted")],
+                candidate_expected: true,
+                expected: false,
+            },
+            Case {
+                scenario: "host serial is not a DPU candidate",
+                system_id: "Host",
+                system_serial: Some("wanted"),
+                chassis: &[],
+                candidate_expected: false,
+                expected: false,
+            },
+            Case {
+                scenario: "whitespace-only system serial allows chassis fallback",
+                system_id: "Bluefield",
+                system_serial: Some("\t\u{85} "),
+                chassis: &[("Bluefield_BMC", "wanted")],
+                candidate_expected: true,
+                expected: true,
+            },
+        ];
+        let mut txn = pool.txn_begin().await?;
+        let mut addresses = Vec::new();
+        for (index, case) in cases.iter().enumerate() {
+            let address: IpAddr = format!("192.0.2.{}", index + 1).parse()?;
+            let report = EndpointExplorationReport {
+                endpoint_type: EndpointType::Bmc,
+                systems: vec![ComputerSystem {
+                    id: case.system_id.to_string(),
+                    serial_number: case.system_serial.map(str::to_string),
+                    ..Default::default()
+                }],
+                chassis: case
+                    .chassis
+                    .iter()
+                    .map(|(id, serial)| Chassis {
+                        id: (*id).to_string(),
+                        serial_number: Some((*serial).to_string()),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            insert(address, &report, false, &mut txn).await?;
+            addresses.push(address);
+        }
+
+        let candidates = sqlx::query_as::<_, DbExploredEndpoint>(FIND_BY_DPU_SERIAL_NUMBERS_QUERY)
+            .bind(vec!["wanted"])
+            .bind(PAIRING_SERIAL_TRIM_CHARACTERS)
+            .fetch_all(txn.as_mut())
+            .await?;
+        let found = find_by_dpu_serial_numbers(&mut txn, vec!["wanted".to_string()]).await?;
+        for (case, address) in cases.iter().zip(addresses) {
+            assert_eq!(
+                candidates.iter().filter(|ep| ep.address == address).count(),
+                usize::from(case.candidate_expected),
+                "SQL candidates: {}",
+                case.scenario,
+            );
+            assert_eq!(
+                found.iter().filter(|ep| ep.address == address).count(),
+                usize::from(case.expected),
+                "effective pairing serial: {}",
+                case.scenario,
+            );
+        }
+        assert_eq!(
+            candidates.len(),
+            cases.iter().filter(|c| c.candidate_expected).count()
+        );
+        assert_eq!(found.len(), cases.iter().filter(|c| c.expected).count());
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn reset_failed_preingestion_reports_applied_or_not_applicable(pool: sqlx::PgPool) {

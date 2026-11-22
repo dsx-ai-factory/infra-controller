@@ -1679,7 +1679,7 @@ func TestReplaceAllExpectedSwitchesHandler_Handle(t *testing.T) {
 			pool := sc.NewClientPool(nil)
 			pool.IDClientMap[site.ID.String()] = client
 			handler := NewReplaceAllExpectedSwitchesHandler(dbSession, pool, common.GetTestConfig())
-			rec := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-switch/all", string(body), "", handler.Handle)
+			rec := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-switch/all", bytes.NewReader(body), "", handler.Handle)
 			require.Equal(t, tt.status, rec.Code, rec.Body.String())
 			after, _, readErr := dao.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{}, paginator.PageInput{}, nil)
 			require.NoError(t, readErr)

@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use carbide_resource_pool::grpc::GrpcResourcePoolError;
+use carbide_resource_pool::value::ResourcePoolEligibility;
 use carbide_resource_pool::{PoolDefinitionSource, registration};
 use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::ResourcePool as ProviderResourcePool;
@@ -13,10 +15,13 @@ use carbide_utils::test_support::test_meter::TestMeter;
 use db::resource_pool::{binding, registration as stored_registration, remote};
 use db::{ConditionalWrite, TransactionVending as _};
 use futures::StreamExt;
+use model::ib::DEFAULT_IB_FABRIC_NAME;
 use model::resource_pool::allocation::{AllocationSource, AllocationState};
 use model::resource_pool::registration::ResourcePoolRegistration;
 use model::resource_pool::remote::AllocationResult;
-use model::resource_pool::{OwnerType, ResourcePool, ResourcePoolDef, ResourcePoolType, ValueType};
+use model::resource_pool::{
+    OwnerType, Range, ResourcePool, ResourcePoolDef, ResourcePoolType, ValueType,
+};
 use prost::Message;
 use rpc::forge;
 use rpc::forge::forge_server::Forge;
@@ -26,9 +31,11 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
-use crate::resource_pool::ResourcePoolMonitor;
+use crate::resource_pool::{ResourcePoolMonitor, ib_fabric_pool_definitions};
 use crate::test_support::builder::TestApiBuilder;
-use crate::tests::common::resource_pool::{REMOTE_POOL, RemotePoolFixture, SECOND_REMOTE_POOL};
+use crate::tests::common::resource_pool::{
+    REMOTE_POOL, RemotePool, RemotePoolFixture, SECOND_REMOTE_POOL,
+};
 use crate::tests::resource_pool::pool_database_snapshot;
 
 /// Startup retries the saved definition after losing its acknowledgement. Edited
@@ -313,6 +320,7 @@ async fn registration_restart_keeps_seed_and_pending_request(database: PgPool) -
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     txn.commit().await?;
@@ -383,6 +391,7 @@ async fn registration_rejects_missing_or_empty_saved_seed(database: PgPool) -> e
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     txn.commit().await?;
@@ -414,6 +423,7 @@ async fn registration_rejects_missing_or_empty_saved_seed(database: PgPool) -> e
             .register_pools(
                 &registry,
                 PoolDefinitionSource::SeedConfiguration,
+                &HashMap::new(),
                 &fixture.cancel,
             )
             .await
@@ -661,6 +671,7 @@ async fn registration_cancellation_preserves_provider_acceptance(
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     db::resource_pool::reconcile_pool_defs(
@@ -683,9 +694,11 @@ async fn registration_cancellation_preserves_provider_acceptance(
         .pause_next
         .store(true, Ordering::SeqCst);
     let cancel = CancellationToken::new();
+    let initial_definitions = HashMap::new();
     let mut registration = Box::pin(monitor.register_pools(
         &registry,
         PoolDefinitionSource::SeedConfiguration,
+        &initial_definitions,
         &cancel,
     ));
     tokio::select! {
@@ -753,6 +766,171 @@ async fn registration_cancellation_preserves_provider_acceptance(
     fixture.stop().await
 }
 
+/// Fabric-only ranges register without an ordinary seed snapshot or drift
+/// warnings. Cancelling an additive Define leaves that request for restart.
+#[crate::sqlx_test]
+async fn fabric_pkey_registration_and_cancelled_growth_survive_restart(
+    database: PgPool,
+) -> eyre::Result<()> {
+    const PKEY_POOL: &str = "ib_fabrics.default.pkey";
+    let mut fixture = RemotePoolFixture::start_with_values(
+        database,
+        &[RemotePool {
+            name: PKEY_POOL,
+            start: 2000,
+            auto_assign: true,
+        }],
+        &[2000, 2001, 2002, 2003],
+        None,
+    )
+    .await?;
+    fixture.definitions.remove(PKEY_POOL);
+    let mut fabrics = fixture.env.config.ib_fabrics.clone();
+    let fabric = fabrics
+        .get_mut(DEFAULT_IB_FABRIC_NAME)
+        .expect("default fabric");
+    fabric.pkeys = vec![Range {
+        start: "2000".into(),
+        end: "2002".into(),
+        auto_assign: true,
+    }];
+    let initial_definitions = ib_fabric_pool_definitions(&fabrics);
+    let logs = fixture
+        .initialize_with_registration_definitions(
+            PoolDefinitionSource::SeedConfiguration,
+            &initial_definitions,
+        )
+        .await?;
+    assert!(!logs.iter().any(|log| {
+        log.metadata_name == "config_definition_drifted" && log.field("name") == Some(PKEY_POOL)
+    }));
+    assert_eq!(
+        db::resource_pool::stored_def(&fixture.env.pool, PKEY_POOL).await?,
+        None
+    );
+    let binding = binding::load(&fixture.env.pool, PKEY_POOL)
+        .await?
+        .expect("fabric binding");
+    let initial = registration::latest_accepted(&fixture.env.pool, &binding)
+        .await?
+        .expect("fabric registration");
+    assert_eq!(
+        initial.eligibility,
+        ResourcePoolEligibility::try_from(initial_definitions[PKEY_POOL].clone())?.entries
+    );
+    assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 1);
+
+    // Rebuilding startup with edited fabric ranges must retain the first
+    // registration. Growth supplies the next revision after startup resumes it.
+    fabrics
+        .get_mut(DEFAULT_IB_FABRIC_NAME)
+        .expect("default fabric")
+        .pkeys[0]
+        .end = "2004".into();
+    let expanded_definitions = ib_fabric_pool_definitions(&fabrics);
+    let logs = fixture
+        .initialize_with_registration_definitions(
+            PoolDefinitionSource::SeedConfiguration,
+            &expanded_definitions,
+        )
+        .await?;
+    assert!(!logs.iter().any(|log| {
+        log.metadata_name == "config_definition_drifted" && log.field("name") == Some(PKEY_POOL)
+    }));
+    assert_eq!(
+        registration::latest_accepted(&fixture.env.pool, &binding).await?,
+        Some(initial.clone())
+    );
+    assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 1);
+
+    fixture
+        .provider
+        .define_pause
+        .pause_next
+        .store(true, Ordering::SeqCst);
+    let cancel = CancellationToken::new();
+    let mut growth = Box::pin(
+        fixture
+            .env
+            .api
+            .resource_pool_monitor
+            .initialize_ib_pkey_pools(&fixture.env.api.resource_pool_registry, &fabrics, &cancel),
+    );
+    tokio::select! {
+        result = &mut growth => panic!("Define passed its pause: {result:?}"),
+        result = tokio::time::timeout(Duration::from_secs(5), fixture.provider.define_pause.entered.notified()) => { result?; }
+    }
+    cancel.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(5), growth)
+        .await?
+        .expect_err("fabric growth cancelled");
+    assert!(
+        error
+            .to_string()
+            .contains("PKey pool initialization cancelled"),
+        "{error:#}"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.provider.define_pause.dropped.cancelled(),
+    )
+    .await?;
+    let pending = stored_registration::latest(&fixture.env.pool, binding.binding_id)
+        .await?
+        .expect("saved fabric growth request");
+    assert!(!pending.accepted);
+    assert_eq!(pending.revision, 2);
+    let mut expected = initial.eligibility;
+    expected.extend(
+        ResourcePoolEligibility::try_from(expanded_definitions[PKEY_POOL].clone())?.entries,
+    );
+    assert_eq!(
+        v1::DefineRequest::decode(pending.request.as_slice())?.eligibility,
+        expected
+    );
+
+    // Registration must accept the exact saved request without fallback input.
+    // Check it before growth, which can also retry the pending Define.
+    let mut accepted = pending;
+    accepted.accepted = true;
+    for _ in 0..2 {
+        let logs = fixture
+            .initialize_with_registration_definitions(
+                PoolDefinitionSource::SeedConfiguration,
+                &HashMap::new(),
+            )
+            .await?;
+        assert!(!logs.iter().any(|log| {
+            log.metadata_name == "config_definition_drifted" && log.field("name") == Some(PKEY_POOL)
+        }));
+        assert_eq!(
+            stored_registration::latest(&fixture.env.pool, binding.binding_id).await?,
+            Some(accepted.clone())
+        );
+        assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 3);
+        fixture
+            .env
+            .api
+            .resource_pool_monitor
+            .initialize_ib_pkey_pools(
+                &fixture.env.api.resource_pool_registry,
+                &fabrics,
+                &fixture.cancel,
+            )
+            .await?;
+        assert_eq!(
+            db::resource_pool::stored_def(&fixture.env.pool, PKEY_POOL).await?,
+            None
+        );
+        assert_eq!(
+            stored_registration::latest(&fixture.env.pool, binding.binding_id).await?,
+            Some(accepted.clone())
+        );
+        assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 3);
+    }
+    fixture.stop().await
+}
+
 /// `start_recovery` shares one worker between two pools using the same provider
 /// and starts one cleanup sampler. Only those tasks finish the queued release.
 /// Cancellation stops an active release; restarting finishes that same request.
@@ -763,12 +941,10 @@ async fn startup_joins_shared_recovery_and_cleanup_sampler(database: PgPool) -> 
     let owner_id = Uuid::new_v4().to_string();
     let pool = ResourcePool::<i32>::new(REMOTE_POOL.to_owned(), ValueType::Integer);
     let registry = &fixture.env.api.resource_pool_registry;
-    let mut txn = fixture.env.pool.txn_begin().await?;
     let selected = registry
-        .select(&mut txn, &pool)
+        .select(&mut fixture.env.db_reader(), &pool)
         .await?
         .expect("registered test pool");
-    txn.commit().await?;
     let allocation = selected
         .prepare_allocation(
             &fixture.env.pool,

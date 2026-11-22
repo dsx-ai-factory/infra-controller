@@ -34,6 +34,7 @@ use chrono::{DateTime, Duration, Utc};
 use config_version::{ConfigVersion, Versioned};
 use duration_str::deserialize_duration_chrono;
 use health_report::HealthReport;
+use itertools::Itertools;
 use json::MachineSnapshotPgJson;
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize, Serializer};
@@ -127,11 +128,7 @@ type DpuDeviceMappings = (
 );
 
 pub fn get_display_ids(machines: &[Machine<impl MachineIdSubtypeTrait>]) -> String {
-    machines
-        .iter()
-        .map(|x| x.id.to_string())
-        .collect::<Vec<String>>()
-        .join("/")
+    machines.iter().map(|x| x.id).join("/")
 }
 
 fn default_true() -> bool {
@@ -1316,10 +1313,10 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     /// e.g. `9C:63:C0:E6:B4:3D` -> `9c-63-c0-e6-b4-3d`.
     /// Not using Machine ID because it's too long, and not using IP because it's not stable.
     pub fn dpf_id(&self) -> Option<String> {
-        self.status
-            .bmc_info
-            .mac
-            .map(|mac| mac.to_string().to_lowercase().replace(':', "-"))
+        self.status.bmc_info.mac.map(|mac| {
+            let [a, b, c, d, e, f] = mac.bytes();
+            format!("{a:02x}-{b:02x}-{c:02x}-{d:02x}-{e:02x}-{f:02x}")
+        })
     }
 
     pub fn loopback_ip(&self) -> Option<IpAddr> {
@@ -1421,14 +1418,12 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
             ));
         }
 
-        let hardware_info =
-            self.status
-                .hardware_info
-                .as_ref()
-                .ok_or(ModelError::DpuMappingError(format!(
-                    "Missing hardware information for machine {}",
-                    self.id
-                )))?;
+        let hardware_info = self.status.hardware_info.as_ref().ok_or_else(|| {
+            ModelError::DpuMappingError(format!(
+                "Missing hardware information for machine {}",
+                self.id
+            ))
+        })?;
 
         let mut id_to_device_map: HashMap<DpuMachineId, String> = HashMap::default();
         let mut device_to_id_map: HashMap<String, Vec<DpuMachineId>> = HashMap::default();
@@ -1735,10 +1730,10 @@ pub enum DeconfiguringDpuState {
 }
 
 /// Sub-states of [`ManagedHostState::Reset`]: wait for Admin networking before
-/// deleting the tenant Instance, then remove the DPF CRs before re-ingestion.
+/// deleting the tenant Instance, then remove the DPF CRs and credential Secrets before re-ingestion.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-#[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
+#[allow(clippy::enum_variant_names)] // Each step deletes a different owned resource.
 pub enum ResetState {
     /// Retains the Instance and its network resources until every topology DPU
     /// acknowledges Admin networking, then deletes them before host cleanup.
@@ -1748,6 +1743,9 @@ pub enum ResetState {
     /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain
     /// rather than for the delete to be accepted.
     DeletingCrs,
+    /// Deletes NICo-owned per-DPU BMC credential Secrets after DPF resources are gone,
+    /// and waits for Secret finalizers before re-ingestion.
+    DeletingBmcCredentialSecrets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2299,7 +2297,7 @@ pub enum HostReprovisionState {
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
-        result: Option<ScoutUpgradeResult>,
+        result: Option<Box<ScoutUpgradeResult>>,
     },
 }
 
@@ -3250,23 +3248,18 @@ impl Display for ManagedHostState {
             ManagedHostState::DpuDiscoveringState { dpu_states } => {
                 // Min state indicates the least processed DPU. The state machine is blocked
                 // becasue of this.
-                let dpu_lowest_state = dpu_states
-                    .states
-                    .values()
-                    .min()
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown".to_string());
-
-                write!(f, "DPUDiscovering/{dpu_lowest_state}")
+                f.write_str("DPUDiscovering/")?;
+                match dpu_states.states.values().min() {
+                    Some(state) => write!(f, "{state}"),
+                    None => f.write_str("Unknown"),
+                }
             }
             ManagedHostState::DPUInit { dpu_states } => {
-                let dpu_lowest_state = dpu_states
-                    .states
-                    .values()
-                    .min()
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown".to_string());
-                write!(f, "DPUInitializing/{dpu_lowest_state}")
+                f.write_str("DPUInitializing/")?;
+                match dpu_states.states.values().min() {
+                    Some(state) => write!(f, "{state}"),
+                    None => f.write_str("Unknown"),
+                }
             }
             ManagedHostState::HostInit { machine_state } => {
                 write!(f, "HostInitializing/{machine_state}")
@@ -3289,13 +3282,11 @@ impl Display for ManagedHostState {
             }
             ManagedHostState::Assigned { instance_state, .. } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
-                    let dpu_lowest_state = dpu_states
-                        .states
-                        .values()
-                        .min()
-                        .map(|x| x.to_string())
-                        .unwrap_or("Unknown".to_string());
-                    write!(f, "Assigned/Reprovision/{dpu_lowest_state}")
+                    f.write_str("Assigned/Reprovision/")?;
+                    match dpu_states.states.values().min() {
+                        Some(state) => write!(f, "{state}"),
+                        None => f.write_str("Unknown"),
+                    }
                 }
                 _ => {
                     write!(f, "Assigned/{instance_state}")
@@ -3309,13 +3300,11 @@ impl Display for ManagedHostState {
                 write!(f, "Failed/{}", details.cause)
             }
             ManagedHostState::DPUReprovision { dpu_states } => {
-                let dpu_lowest_state = dpu_states
-                    .states
-                    .values()
-                    .min()
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown".to_string());
-                write!(f, "Reprovisioning/{dpu_lowest_state}")
+                f.write_str("Reprovisioning/")?;
+                match dpu_states.states.values().min() {
+                    Some(state) => write!(f, "{state}"),
+                    None => f.write_str("Unknown"),
+                }
             }
             ManagedHostState::HostReprovision {
                 reprovision_state, ..
@@ -3377,15 +3366,11 @@ impl ManagedHostState {
                 .states
                 .get(dpu_id)
                 .map(|x| x.to_string())
-                .unwrap_or("Unknown DPU".to_string()),
-            ManagedHostState::DPUInit { dpu_states } => format!(
-                "DPUInitializing/{}",
-                dpu_states
-                    .states
-                    .get(dpu_id)
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown DPU".to_string())
-            ),
+                .unwrap_or_else(|| "Unknown DPU".to_string()),
+            ManagedHostState::DPUInit { dpu_states } => match dpu_states.states.get(dpu_id) {
+                Some(state) => format!("DPUInitializing/{state}"),
+                None => "DPUInitializing/Unknown DPU".to_string(),
+            },
             ManagedHostState::HostInit { machine_state } => {
                 format!("HostInitializing/{machine_state}")
             }
@@ -3405,14 +3390,10 @@ impl ManagedHostState {
             ManagedHostState::NicFirmwareUpdating { .. } => self.to_string(),
             ManagedHostState::Assigned { instance_state } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
-                    format!(
-                        "Assigned/Reprovision/{}",
-                        dpu_states
-                            .states
-                            .get(dpu_id)
-                            .map(|x| x.to_string())
-                            .unwrap_or("Unknown DPU".to_string())
-                    )
+                    match dpu_states.states.get(dpu_id) {
+                        Some(state) => format!("Assigned/Reprovision/{state}"),
+                        None => "Assigned/Reprovision/Unknown DPU".to_string(),
+                    }
                 }
                 _ => format!("Assigned/{instance_state}"),
             },
@@ -3424,14 +3405,10 @@ impl ManagedHostState {
                 format!("Failed/{}", details.cause)
             }
             ManagedHostState::DPUReprovision { dpu_states } => {
-                format!(
-                    "Reprovisioning/{}",
-                    dpu_states
-                        .states
-                        .get(dpu_id)
-                        .map(|x| x.to_string())
-                        .unwrap_or("Unknown DPU".to_string())
-                )
+                match dpu_states.states.get(dpu_id) {
+                    Some(state) => format!("Reprovisioning/{state}"),
+                    None => "Reprovisioning/Unknown DPU".to_string(),
+                }
             }
             ManagedHostState::HostReprovision {
                 reprovision_state, ..
@@ -3981,7 +3958,7 @@ fn as_duration<S>(d: &Duration, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{}s", d.num_seconds()))
+    serializer.collect_str(&format_args!("{}s", d.num_seconds()))
 }
 
 impl Default for HostHealthConfig {
@@ -4175,6 +4152,48 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(roundtrip, state);
     }
+
+    #[test]
+    fn dpu_state_display_preserves_lowest_state_and_missing_labels() {
+        let dpu_id = dpu_machine_id(1);
+        let states = DpuReprovisionStates {
+            states: HashMap::new(),
+        };
+        value_scenarios!(run = |state: ManagedHostState| (state.to_string(), state.dpu_state_string(&dpu_id));
+            "discovery without observations" {
+                ManagedHostState::DpuDiscoveringState { dpu_states: DpuDiscoveringStates { states: HashMap::new() } }
+                    => ("DPUDiscovering/Unknown".to_string(), "Unknown DPU".to_string()),
+            }
+            "discovery selects the lowest observation" {
+                ManagedHostState::DpuDiscoveringState { dpu_states: DpuDiscoveringStates { states: HashMap::from([(dpu_id, DpuDiscoveringState::EnableRshim), (dpu_machine_id(2), DpuDiscoveringState::Initializing)]) } }
+                    => ("DPUDiscovering/Initializing".to_string(), "EnableRshim".to_string()),
+            }
+            "initialization without observations" {
+                ManagedHostState::DPUInit { dpu_states: DpuInitStates { states: HashMap::new() } }
+                    => ("DPUInitializing/Unknown".to_string(), "DPUInitializing/Unknown DPU".to_string()),
+            }
+            "initialization for the requested DPU" {
+                ManagedHostState::DPUInit { dpu_states: DpuInitStates { states: HashMap::from([(dpu_id, DpuInitState::Init)]) } }
+                    => ("DPUInitializing/Init".to_string(), "DPUInitializing/Init".to_string()),
+            }
+            "reprovision without observations" {
+                ManagedHostState::DPUReprovision { dpu_states: states.clone() }
+                    => ("Reprovisioning/Unknown".to_string(), "Reprovisioning/Unknown DPU".to_string()),
+            }
+            "assigned reprovision without observations" {
+                ManagedHostState::Assigned { instance_state: InstanceState::DPUReprovision { dpu_states: states } }
+                    => ("Assigned/Reprovision/Unknown".to_string(), "Assigned/Reprovision/Unknown DPU".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn dpf_id_uses_lowercase_mac_octets_and_hyphens() {
+        let mut machine = dpu_machine(1);
+        machine.status.bmc_info.mac = Some(MacAddress::new([0x0a, 0, 1, 0xb0, 0xcd, 0xff]));
+        assert_eq!(machine.dpf_id().as_deref(), Some("0a-00-01-b0-cd-ff"));
+    }
+
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
         part_number: &'static str,
@@ -4310,6 +4329,7 @@ mod tests {
                 network: Default::default(),
                 infiniband: Default::default(),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 extension_services: Default::default(),
                 nvlink: Default::default(),
                 spxconfig: Default::default(),
@@ -5746,7 +5766,7 @@ mod tests {
         };
 
         check_values(
-            [
+            vec![
                 Check {
                     scenario: "one exclusion among several alerts suppresses a failed-state SLA",
                     input: Inputs {

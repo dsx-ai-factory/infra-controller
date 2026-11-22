@@ -17,7 +17,7 @@
 
 use std::net::SocketAddr;
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
@@ -56,6 +56,28 @@ pub trait EndpointExplorer: Send + Sync + 'static {
     ) -> Result<EndpointExplorationReport, EndpointExplorationError>;
 }
 
+/// Core has prepared its client and any IPMI restart credential. When Redfish uses
+/// nico-bmc-proxy, the proxy authenticates upstream during forwarding. The selected
+/// backend may read live state or issue multiple requests when invoked.
+pub struct PreparedPowerControl {
+    /// The port to recheck if the selected driver can use IPMI for this action.
+    pub ipmi_port: Option<u16>,
+    /// Await to invoke the prepared backend. Dropping this future before polling suppresses the send.
+    pub send: futures_util::future::BoxFuture<'static, Result<(), EndpointExplorationError>>,
+}
+
+impl PreparedPowerControl {
+    /// An IPMI restart requires the effective port of the latest identifying report.
+    /// Unrelated exploration details cannot invalidate this socket.
+    pub fn matches_ipmi_report(&self, report: Option<&EndpointExplorationReport>) -> bool {
+        self.ipmi_port.is_none_or(|port| {
+            report
+                .filter(|report| report.service_root.is_some())
+                .is_some_and(|report| bmc_runtime::ipmi_port(report) == port)
+        })
+    }
+}
+
 /// Authenticated BMC operations, resolving stored credentials from the
 /// endpoint's interface. Kept separate from [`EndpointExplorer`] so BMC ops
 /// don't route through the explorer.
@@ -91,13 +113,29 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         report: Option<&EndpointExplorationReport>,
     ) -> Result<Option<PowerState>, EndpointExplorationError>;
 
+    /// Select the configured backend and synchronously invoke the requested action.
     async fn redfish_power_control(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
         report: Option<&EndpointExplorationReport>,
         action: ResetType,
-    ) -> Result<(), EndpointExplorationError>;
+    ) -> Result<(), EndpointExplorationError> {
+        self.prepare_redfish_power_control(address, interface, report, action)
+            .await?
+            .send
+            .await
+    }
+
+    /// Resolve credentials and select the actual mutation client before the caller
+    /// checks whether this endpoint is still authorized to receive the command.
+    async fn prepare_redfish_power_control(
+        &self,
+        address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
+    ) -> Result<PreparedPowerControl, EndpointExplorationError>;
 
     /// Reset a Redfish Chassis (e.g. an HGX baseboard) out-of-band via the BMC at
     /// `address`, resolving credentials from `interface`. `chassis_id` is the
@@ -114,23 +152,33 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
 
     async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool;
 
+    /// Turns secure boot off for the next boot. `report` selects the drivers;
+    /// without one that identifies the BMC the drivers backend fails.
     async fn disable_secure_boot(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Moves the platform's full lockdown to `desired`. `report` selects the
+    /// drivers; without one that identifies the BMC the drivers backend
+    /// fails, as lockdown has no plain Redfish form.
     async fn lockdown(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        action: libredfish::EnabledDisabled,
+        report: Option<&EndpointExplorationReport>,
+        desired: LockdownDesiredState,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Reads the platform's lockdown. `report` selects the drivers as for
+    /// [`Self::lockdown`].
     async fn lockdown_status(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<LockdownStatus, EndpointExplorationError>;
 
     async fn enable_infinite_boot(
@@ -162,10 +210,13 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         boot_interface: &BootInterfaceTarget,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Moves the DPU to `mode`. `report` selects the drivers; without one that
+    /// identifies the BMC the drivers backend fails.
     async fn set_nic_mode(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         mode: BlueFieldOperatingMode,
     ) -> Result<(), EndpointExplorationError>;
 

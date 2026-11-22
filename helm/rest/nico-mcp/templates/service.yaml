@@ -15,5 +15,10 @@ spec:
       targetPort: {{ .Values.service.port }}
       name: mcp
       appProtocol: agentgateway.dev/mcp
+    {{- if .Values.metrics.enabled }}
+    - port: {{ .Values.metrics.port }}
+      targetPort: {{ .Values.metrics.port }}
+      name: metrics
+    {{- end }}
   selector:
     {{- include "nico-mcp.selectorLabels" . | nindent 4 }}

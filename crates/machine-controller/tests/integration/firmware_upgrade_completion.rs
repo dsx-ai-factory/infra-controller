@@ -105,7 +105,7 @@ impl TestManagedHostFirmwareExt for TestManagedHost {
                 deadline,
                 delivered_at: Some(chrono::Utc::now()),
                 task_json: String::new(),
-                result,
+                result: result.map(Box::new),
             },
             retry_count: 0,
         })
@@ -620,7 +620,8 @@ async fn scout_delivery_contact_window(pool: PgPool) {
 #[sqlx_test]
 async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgPool) {
     const RETRIES_TOTAL: &str = "carbide_host_reprovision_retries_total";
-    let retry_interval = chrono::TimeDelta::hours(1);
+    // Ages on both sides of a nondefault interval distinguish it from the production default.
+    let retry_interval = chrono::TimeDelta::minutes(15);
     let TestContext { mut env, mh } = TestContext::init_with_runtime(pool, |config| {
         config.firmware_global.host_firmware_upgrade_retry_interval = retry_interval;
     })
@@ -629,7 +630,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
 
     // Still inside the retry interval: the machine stays put and nothing is
     // counted.
-    mh.put_in_failed_firmware_upgrade(chrono::Utc::now(), 0)
+    mh.put_in_failed_firmware_upgrade(chrono::Utc::now() - chrono::TimeDelta::minutes(10), 0)
         .await;
     env.run_single_iteration().await;
     let machine = mh.host.machine().await;
@@ -652,7 +653,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
 
     // Past the retry interval with budget left: one retry is taken and
     // counted, and the consumed attempt lands in the state's retry_count.
-    mh.put_in_failed_firmware_upgrade(chrono::Utc::now() - retry_interval * 2, 0)
+    mh.put_in_failed_firmware_upgrade(chrono::Utc::now() - chrono::TimeDelta::minutes(20), 0)
         .await;
     env.run_single_iteration().await;
     let machine = mh.host.machine().await;
@@ -676,7 +677,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
     // Past the retry interval with the budget exhausted: the machine parks in
     // the failure state and the counter does not move again.
     mh.put_in_failed_firmware_upgrade(
-        chrono::Utc::now() - retry_interval * 2,
+        chrono::Utc::now() - chrono::TimeDelta::minutes(20),
         MAX_FIRMWARE_UPGRADE_RETRIES,
     )
     .await;

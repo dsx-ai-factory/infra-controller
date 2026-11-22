@@ -42,7 +42,7 @@ carbide-tls = { path = "../tls" }
 carbide-secrets = { path = "../secrets" }
 carbide-utils = { path = "../utils" }
 metrics-endpoint = { path = "../metrics-endpoint" }
-rms-mock = { package = "carbide-rms-mock", path = "../rms-mock" }
+rms-mock = { package = "carbide-rms-mock", path = "../rms-mock", features = ["test-support"] }
 carbide-uuid = { path = "../uuid" }
 
 chrono = { workspace = true }

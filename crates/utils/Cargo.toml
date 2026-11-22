@@ -40,7 +40,6 @@ carbide-instrument = { path = "../instrument" }
 base64 = { workspace = true }
 byte-unit = { workspace = true }
 chrono = { workspace = true }
-ipnetwork = { workspace = true }
 mac_address = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-prometheus = { workspace = true, optional = true }
@@ -60,6 +59,8 @@ carbide-network = { path = "../network" }
 carbide-test-support = { path = "../test-support" }
 
 clap = { workspace = true }
+ipnetwork = { workspace = true }
+serde_yaml = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

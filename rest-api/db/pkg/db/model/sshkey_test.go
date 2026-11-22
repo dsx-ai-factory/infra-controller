@@ -527,7 +527,7 @@ func TestSSHKeySQLDAO_Update(t *testing.T) {
 			if err == nil {
 				assert.Equal(t, *tc.expectedName, got.Name)
 				assert.Equal(t, *tc.expectedOrg, got.Org)
-				assert.Equal(t, tc.expectedTenantID.String(), got.TenantID.String())
+				assert.Equal(t, *tc.expectedTenantID, got.TenantID)
 
 				assert.Equal(t, *tc.expectedPublicKey, got.PublicKey)
 
@@ -601,6 +601,77 @@ func TestSSHKeySQLDAO_Delete(t *testing.T) {
 				err := db.GetIDB(nil, dbSession).NewSelect().Model(sk).WhereAllWithDeleted().Where("sk.id = ?", tc.id).Scan(ctx)
 				assert.Nil(t, err)
 				assert.Equal(t, "", sk.PublicKey)
+			}
+			if tc.verifyChildSpanner {
+				span := otrace.SpanFromContext(ctx)
+				assert.True(t, span.SpanContext().IsValid())
+			}
+		})
+	}
+}
+
+func TestSSHKeySQLDAO_Clear(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceInitDB(t)
+	defer dbSession.Close()
+	testSSHKeySetupSchema(t, dbSession)
+	tenant := testOperatingSystemBuildTenant(t, dbSession, "testTenant")
+	user := testOperatingSystemBuildUser(t, dbSession, "testUser")
+
+	sksd := NewSSHKeyDAO(dbSession)
+	sk1, err := sksd.Create(ctx, nil, SSHKeyCreateInput{
+		Name:      "test-clear",
+		TenantOrg: "test",
+		TenantID:  tenant.ID,
+		PublicKey: "testkey",
+		CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sksd.Delete(ctx, nil, sk1.ID))
+
+	sk2, err := sksd.Create(ctx, nil, SSHKeyCreateInput{
+		Name:      "test-clear-noop",
+		TenantOrg: "test",
+		TenantID:  tenant.ID,
+		PublicKey: "testkey2",
+		CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sksd.Delete(ctx, nil, sk2.ID))
+
+	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		desc               string
+		input              SSHKeyClearInput
+		expectError        bool
+		verifyChildSpanner bool
+	}{
+		{
+			desc:               "clears deleted timestamp on soft-deleted SSHKey",
+			input:              SSHKeyClearInput{SSHKeyID: sk1.ID, Deleted: true},
+			expectError:        false,
+			verifyChildSpanner: true,
+		},
+		{
+			desc:        "returns error when Deleted is false on soft-deleted SSHKey",
+			input:       SSHKeyClearInput{SSHKeyID: sk2.ID, Deleted: false},
+			expectError: true,
+		},
+		{
+			desc:        "returns error when SSHKey ID does not exist",
+			input:       SSHKeyClearInput{SSHKeyID: uuid.New(), Deleted: true},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := sksd.Clear(ctx, nil, tc.input)
+			assert.Equal(t, tc.expectError, err != nil)
+			if !tc.expectError {
+				require.NotNil(t, got)
+				assert.Nil(t, got.Deleted)
 			}
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

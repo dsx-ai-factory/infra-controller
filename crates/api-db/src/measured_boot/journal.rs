@@ -53,10 +53,10 @@ pub async fn new(
 /// instance from data in the database for the given
 /// journal ID.
 pub async fn from_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     journal_id: MeasurementJournalId,
 ) -> DatabaseResult<MeasurementJournal> {
-    get_measurement_journal_by_id(txn, journal_id).await
+    get_measurement_journal_by_id(conn, journal_id).await
 }
 
 pub async fn delete_where_id(
@@ -131,10 +131,10 @@ pub(crate) async fn update_measurement_journal(
 /// get_measurement_journal_by_id does the work of populating a full
 /// MeasurementJournal instance, with values and all.
 async fn get_measurement_journal_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     journal_id: MeasurementJournalId,
 ) -> DatabaseResult<MeasurementJournal> {
-    match get_measurement_journal_record_by_id(txn, journal_id).await? {
+    match get_measurement_journal_record_by_id(conn, journal_id).await? {
         Some(info) => Ok(MeasurementJournal {
             journal_id: info.journal_id,
             machine_id: info.machine_id,
@@ -152,10 +152,10 @@ async fn get_measurement_journal_by_id(
 }
 
 pub async fn get_journal_for_report_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     report_id: MeasurementReportId,
 ) -> DatabaseResult<MeasurementJournal> {
-    match get_measurement_journal_record_by_report_id(txn, report_id).await? {
+    match get_measurement_journal_record_by_report_id(conn, report_id).await? {
         Some(info) => Ok(MeasurementJournal {
             journal_id: info.journal_id,
             machine_id: info.machine_id,
@@ -224,29 +224,29 @@ pub async fn get_latest_journal_for_id(
 }
 
 pub async fn get_all_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> DatabaseResult<Vec<MeasurementJournal>> {
-    get_measurement_journals_for_machine_id(txn, machine_id).await
+    get_measurement_journals_for_machine_id(conn, machine_id).await
 }
 
 pub async fn get_latest_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> DatabaseResult<Option<MeasurementJournal>> {
-    get_latest_journal_for_id(txn, machine_id).await
+    get_latest_journal_for_id(conn, machine_id).await
 }
 
 /// get_measurement_journals_for_machine_id returns all fully populated
 /// journal instances for a given machine ID, which is used by the
 /// `journal show` CLI option.
 async fn get_measurement_journals_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> DatabaseResult<Vec<MeasurementJournal>> {
     let records =
         crate::measured_boot::interface::journal::get_measurement_journal_records_for_machine_id(
-            txn, machine_id,
+            conn, machine_id,
         )
         .await?;
     Ok(records

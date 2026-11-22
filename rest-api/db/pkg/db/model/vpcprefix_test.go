@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -854,6 +855,12 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := vpsd.GetByID(ctx, nil, tc.id, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := vpsd.Update(
 				ctx, nil, VpcPrefixUpdateInput{
 					VpcPrefixID:     tc.id,
@@ -888,9 +895,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, *tc.expectedIsMissingOnSite, got.IsMissingOnSite)
 
-				if got.Updated.String() == VpcPrefix1.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			} else {
 				assert.Nil(t, got)

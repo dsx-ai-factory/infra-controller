@@ -798,11 +798,15 @@ dependencies = [
  "bmc-runtime",
  "carbide-api-model",
  "carbide-redfish",
+ "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
  "http",
  "libredfish",
+ "mac_address",
  "nv-redfish",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1276,13 +1280,13 @@ dependencies = [
  "bmc-backend",
  "bmc-drivers",
  "bmc-explorer",
+ "bmc-mock",
  "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "byteorder",
  "carbide-api-db",
  "carbide-api-model",
- "carbide-api-test-helper",
  "carbide-authn",
  "carbide-credential-rotation",
  "carbide-dpa",
@@ -1317,6 +1321,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-resource-pool",
  "carbide-resource-pool-api",
+ "carbide-rms-mock",
  "carbide-rpc",
  "carbide-rpc-utils",
  "carbide-secrets",
@@ -1576,6 +1581,7 @@ dependencies = [
 name = "carbide-api-model"
 version = "0.0.0"
 dependencies = [
+ "arrayvec",
  "async-trait",
  "base64",
  "bmc-vendor",
@@ -2123,6 +2129,7 @@ dependencies = [
  "tower-test",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
@@ -2545,6 +2552,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ib-fabric",
  "carbide-instrument",
+ "carbide-resource-pool",
  "carbide-test-support",
  "carbide-uuid",
  "config-version",
@@ -2602,6 +2610,8 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -3349,6 +3359,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "chrono",
+ "futures-util",
  "http",
  "libredfish",
  "mac_address",
@@ -3430,6 +3441,7 @@ dependencies = [
 name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
  "carbide-test-support",
  "eyre",
@@ -3717,6 +3729,7 @@ dependencies = [
  "component-manager",
  "config-version",
  "duration-str",
+ "eyre",
  "futures-util",
  "http",
  "itertools 0.14.0",
@@ -3803,10 +3816,14 @@ dependencies = [
  "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-health-report",
  "carbide-instrument",
+ "carbide-macros",
  "carbide-redfish",
+ "carbide-sqlx-testing",
  "carbide-test-support",
  "carbide-utils",
+ "carbide-uuid",
  "chrono",
  "config-version",
  "itertools 0.14.0",
@@ -3816,6 +3833,7 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4087,6 +4105,7 @@ dependencies = [
  "rcgen",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",

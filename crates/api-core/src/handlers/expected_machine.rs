@@ -57,18 +57,16 @@ pub(crate) async fn get(
         .try_into()
         .map_err(|e| CarbideError::InvalidArgument(format!("{}", e)))?;
 
-    let target_id = req
-        .id
-        .map(|u| u.to_string())
-        .or(req.bmc_mac_address.map(|m| m.to_string()))
-        .unwrap_or_default();
-
     let expected_machine = db::expected_machine::find(&api.database_connection, &req)
         .await
         .map_err(CarbideError::from)?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "expected_machine",
-            id: target_id,
+            id: req
+                .id
+                .map(|id| id.to_string())
+                .or_else(|| req.bmc_mac_address.map(|mac| mac.to_string()))
+                .unwrap_or_default(),
         })?;
 
     let response = rpc::ExpectedMachine::from(expected_machine);
@@ -397,7 +395,7 @@ where
         }
         model::resource_pool::ResourcePoolEntryState::Allocated { .. } => {
             Err(CarbideError::FailedPrecondition(format!(
-                "loopback address {value_text} is already allocated to another DPU"
+                "cannot verify that the DPU with OS/admin MAC {intended_dpu_oob_net0_mac} owns allocated loopback address {value_text}"
             )))
         }
     }
@@ -417,11 +415,7 @@ async fn pool_owner_is_dpu_oob_net0_mac(
         );
         return Ok(false);
     };
-    let interfaces =
-        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_oob_net0_mac).await?;
-    Ok(interfaces
-        .iter()
-        .any(|interface| interface.machine_id == Some(owner_id.into())))
+    Ok(db::machine_interface::dpu_owns_oob_mac(txn, &owner_id, intended_dpu_oob_net0_mac).await?)
 }
 
 /// Replace-all recreates parent rows. Preserve loopbacks that an older client
@@ -457,21 +451,20 @@ fn preserve_omitted_dpu_loopback_reservations(
 /// currently purely used by the expected_machines.json import path only, but
 /// lives here so it shares the same validation codepath as the API handler --
 /// including rejecting a DPU loopback reservation whose address is outside its
-/// pool, auto-assignable, or already allocated, rather than deferring that
-/// failure to DPU discovery.
+/// pool, auto-assignable, or allocated without proof of ownership by the intended DPU.
 pub(crate) async fn create_missing_from(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
     expected_machines: &[ExpectedMachine],
 ) -> Result<(), CarbideError> {
-    let existing_macs: HashSet<String> = db::expected_machine::find_all(&mut *txn)
+    let existing_macs: HashSet<MacAddress> = db::expected_machine::find_all(&mut *txn)
         .await?
         .into_iter()
-        .map(|m| m.bmc_mac_address.to_string())
+        .map(|m| m.bmc_mac_address)
         .collect();
 
     for expected_machine in expected_machines {
-        if existing_macs.contains(&expected_machine.bmc_mac_address.to_string()) {
+        if existing_macs.contains(&expected_machine.bmc_mac_address) {
             tracing::debug!(
                 bmc_mac_address = %expected_machine.bmc_mac_address,
                 "Expected machine already exists; not overwriting",
@@ -1720,11 +1713,8 @@ pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<ExpectedMachine>, CarbideError> {
-    let mut txn = api.txn_begin().await?;
-
-    let mut expected = db::expected_machine::find_many_by_bmc_mac_address(&mut txn, &[mac]).await?;
-
-    txn.commit().await?;
+    let mut expected =
+        db::expected_machine::find_many_by_bmc_mac_address(api.pg_pool(), &[mac]).await?;
 
     Ok(expected.remove(&mac))
 }

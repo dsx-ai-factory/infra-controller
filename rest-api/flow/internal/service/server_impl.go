@@ -9,6 +9,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,6 +49,7 @@ import (
 // It acts as an adapter between gRPC protobuf messages and the internal managers,
 // handling protobuf conversion and delegating business logic to the InventoryManager.
 type FlowServerImpl struct {
+	firmwareReader             componentFirmwareReader     // Shared NICo client for passive firmware details
 	powerReader                componentPowerReader        // Shared NICo client for passive power details
 	inventoryManager           inventorymanager.Manager    // Business logic manager for inventory operations
 	taskManager                taskmanager.Manager         // Task manager for orchestrating task lifecycle
@@ -69,7 +71,7 @@ type FlowServerImpl struct {
 //   - taskManager: The Task manager for orchestrating task lifecycle
 //   - taskStore: The task store for task queries
 //   - operationRunManager: The operation-run manager for planning and persisting operation runs
-//   - powerReader: Shared passive Core reader, or nil when the NICo provider is absent
+//   - coreReader: Shared passive Core reader, or nil when the NICo provider is absent
 //
 // Returns:
 //   - *FlowServerImpl: A new server implementation instance
@@ -83,7 +85,7 @@ func newServerImplementation(
 	operationRunManager operationrunmanager.Manager,
 	eventRuleManager eventRuleManager,
 	dataCipher *secret.Cipher,
-	powerReader componentPowerReader,
+	coreReader componentDetailsReader,
 ) (*FlowServerImpl, error) {
 	return &FlowServerImpl{
 		inventoryManager:       inventoryManager,
@@ -94,7 +96,8 @@ func newServerImplementation(
 		operationRunManager:    operationRunManager,
 		eventRuleManager:       eventRuleManager,
 		dataCipher:             dataCipher,
-		powerReader:            powerReader,
+		powerReader:            coreReader,
+		firmwareReader:         coreReader,
 		conflictResolver:       conflict.NewResolver(taskStore),
 	}, nil
 }
@@ -1576,6 +1579,20 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	if ruleID != nil {
 		info.RuleID = ruleID.String()
 	}
+	if req.GetDeviceCredentialOverrides() != nil {
+		if !req.GetOverrideReadinessCheck() {
+			return nil, status.Error(codes.InvalidArgument, "device credential overrides require override_readiness_check")
+		}
+		for _, subTarget := range req.GetSubTargets() {
+			if subTarget == "dpu" {
+				return nil, status.Error(codes.InvalidArgument, "device credential overrides do not support DPU updates")
+			}
+		}
+		info.DeviceCredentials, err = firmwareauth.EncryptDeviceCredentials(rs.dataCipher, req.GetDeviceCredentialOverrides())
+		if err != nil {
+			return nil, firmwareAuthenticationStatusError(err)
+		}
+	}
 	err = rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {
 		return nil, firmwareAuthenticationStatusError(err)
@@ -1917,7 +1934,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 		if leftKey != rightKey {
 			return leftKey < rightKey
 		}
-		return left.ID.String() < right.ID.String()
+		return bytes.Compare(left.ID[:], right.ID[:]) < 0
 	})
 
 	// Convert store drifts to proto response
@@ -2179,7 +2196,7 @@ func (rs *FlowServerImpl) sortComponents(components []*component.Component, orde
 	}
 	less := func(i, j int, left, right string) bool {
 		if left == right {
-			return components[i].Info.ID.String() < components[j].Info.ID.String()
+			return bytes.Compare(components[i].Info.ID[:], components[j].Info.ID[:]) < 0
 		}
 		if effectiveOrderBy.Direction == dbquery.OrderAscending {
 			return left < right

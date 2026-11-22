@@ -20,6 +20,7 @@ use carbide_authn::middleware::{ConnectionAttributes, Principal};
 use carbide_instrument::Instrumentation;
 use futures_util::future::BoxFuture;
 use hyper::{Request, Response, StatusCode};
+use itertools::Itertools;
 use tonic::service::AxumBody;
 use tower_http::auth::AsyncAuthorizeRequest;
 
@@ -197,7 +198,6 @@ where
                                 principals: principals
                                     .iter()
                                     .map(Principal::audit_identity)
-                                    .collect::<Vec<_>>()
                                     .join(","),
                                 client_address: client_address(peer_address),
                                 reason: e.to_string(),
@@ -324,11 +324,7 @@ where
                             principal_class: PrincipalClass::classify(principals),
                             authorizer: Authorizer::InternalRbac,
                             method: method_name,
-                            principals: principals
-                                .iter()
-                                .map(Principal::audit_identity)
-                                .collect::<Vec<_>>()
-                                .join(","),
+                            principals: principals.iter().map(Principal::audit_identity).join(","),
                             client_address: client_address(request_peer_address),
                             reason: "no internal RBAC rule permits these principals".to_string(),
                         });
