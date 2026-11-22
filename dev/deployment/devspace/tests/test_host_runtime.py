@@ -210,6 +210,7 @@ start_core_postgres() {''' + function + '\n}\nstart_core_postgres\n'
             ("expired-key", "expired", "1", False),
             ("revoked-key", "revoked", "1", False),
             ("loose-match-key", "loose", "1", False),
+            ("extra-primary-key", "extra", "1", False),
             ("whitespace-valid-key", "whitespace", "1", True),
             ("valid-key", "valid", "1", True),
         )
@@ -254,12 +255,13 @@ gpg() {{
     content="$(cat "$target")"
     case "$content" in
       *corrupt*) return 2 ;;
-      *wrong*|*stale*) printf 'fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\\n' ;;
+      *wrong*|*stale*) printf 'pub:-:4096:1:AAAAAAAAAAAAAAAA:1611340798:::-:::scESC::::::23:\\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\\n' ;;
       *expired*) printf 'pub:e:4096:1:798AEC654E5C1542:1611340798:1674412798::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
       *revoked*) printf 'pub:r:4096:1:798AEC654E5C1542:1611340798:1674412798::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
-      *loose*) printf 'fpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560EXTRA:\\n' ;;
-      *whitespace*) printf 'fpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:  \\r\\n' ;;
-      *valid*) printf 'fpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
+      *loose*) printf 'pub:-:4096:1:FC9CA96ACA026560:1611340798:::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560EXTRA:\\n' ;;
+      *extra*) printf 'pub:-:4096:1:FC9CA96ACA026560:1611340798:::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\npub:-:4096:1:BBBBBBBBBBBBBBBB:1611340798:::-:::scESC::::::23:\\nfpr:::::::::BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB:\\n' ;;
+      *whitespace*) printf 'pub:-:4096:1:FC9CA96ACA026560:1611340798:::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:  \\r\\n' ;;
+      *valid*) printf 'pub:-:4096:1:FC9CA96ACA026560:1611340798:::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
       *) return 2 ;;
     esac
     return 0
@@ -372,11 +374,11 @@ gpg() {{
     content="$(cat "$target")"
     case "$content" in
       *corrupt*) return 2 ;;
-      *wrong*|*stale*) printf 'fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\\n' ;;
+      *wrong*|*stale*) printf 'pub:-:4096:1:AAAAAAAAAAAAAAAA:1611340798:::-:::scESC::::::23:\\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\\n' ;;
       *expired*) printf 'pub:e:4096:1:798AEC654E5C1542:1611340798:1674412798::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
       *revoked*) printf 'pub:r:4096:1:798AEC654E5C1542:1611340798:1674412798::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
-      *loose*) printf 'fpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560EXTRA:\\n' ;;
-      *valid*) printf 'fpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
+      *loose*) printf 'pub:-:4096:1:FC9CA96ACA026560:1611340798:::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560EXTRA:\\n' ;;
+      *valid*) printf 'pub:-:4096:1:FC9CA96ACA026560:1611340798:::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
       *) return 2 ;;
     esac
     return 0
@@ -521,8 +523,8 @@ gpg() {{
     local content
     content="$(cat "$target")"
     case "$content" in
-      *stale*) printf 'fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\\n' ;;
-      *valid*) printf 'fpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
+      *stale*) printf 'pub:-:4096:1:AAAAAAAAAAAAAAAA:1611340798:::-:::scESC::::::23:\\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\\n' ;;
+      *valid*) printf 'pub:-:4096:1:FC9CA96ACA026560:1611340798:::-:::scESC::::::23:\\nfpr:::::::::D55C0D1AC78A8D8126CB631CFC9CA96ACA026560:\\n' ;;
       *) return 2 ;;
     esac
     return 0

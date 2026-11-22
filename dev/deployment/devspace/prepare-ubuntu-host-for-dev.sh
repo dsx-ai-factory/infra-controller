@@ -246,11 +246,13 @@ is_valid_hashicorp_keyring() {
   [[ -f "${keyring}" && -s "${keyring}" ]] || return 1
   local keys
   keys="$(gpg --batch --with-colons --show-keys "${keyring}" 2>/dev/null)" || return 1
+  # APT trusts every key in the keyring, so the pinned key must be the only primary key.
   awk -F: -v expected="fpr:::::::::${HASHICORP_GPG_FINGERPRINT}:" '
     { sub(/[ \t\r]+$/, "") }
+    $1 == "pub" { primaries++ }
     $0 == expected { matched = 1 }
     $2 == "r" || $2 == "e" { invalid = 1 }
-    END { exit (matched && !invalid ? 0 : 1) }
+    END { exit (primaries == 1 && matched && !invalid ? 0 : 1) }
   ' <<<"${keys}"
 }
 
