@@ -342,15 +342,26 @@ func TestClient_Do(t *testing.T) {
 	}
 }
 
-// TestClient_do protects the per-request notification that MCP metrics count.
+// TestClient_do protects the per-request notification that MCP metrics count
+// and the headers every request carries.
 func TestClient_do(t *testing.T) {
+	const traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 	transportErr := errors.New("connection refused")
 	readErr := errors.New("body read failure")
+	okResponse := func() (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[]`))}, nil
+	}
 	for _, tc := range []struct {
-		name       string
-		response   func() (*http.Response, error)
-		wantStatus int
-		wantErr    error
+		name string
+		// noToken clears the client's bearer token.
+		noToken      bool
+		extraHeaders http.Header
+		response     func() (*http.Response, error)
+		wantStatus   int
+		wantErr      error
+		// wantHeader is the complete header of the request sent; nil means
+		// only the client's own Accept and bearer token.
+		wantHeader http.Header
 	}{
 		{name: "success reports its status", response: func() (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[]`))}, nil
@@ -366,11 +377,27 @@ func TestClient_do(t *testing.T) {
 		{name: "body read failure reports the error", response: func() (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: &errorReadCloser{err: readErr}}, nil
 		}, wantErr: readErr},
+		// MCP trace context reaches NICo REST as an extra header beside the client's own.
+		{name: "extra headers are sent with the client's own", extraHeaders: http.Header{"Traceparent": {traceparent}},
+			response: okResponse, wantStatus: http.StatusOK, wantHeader: http.Header{
+				"Accept": {"application/json"}, "Authorization": {"Bearer test-token"}, "Traceparent": {traceparent}}},
+		// An extra header must not replace the bearer token or the response format the client asks for.
+		{name: "extra headers do not replace the client's own", extraHeaders: http.Header{"authorization": {"Bearer extra"}, "Accept": {"text/plain"}},
+			response: okResponse, wantStatus: http.StatusOK},
+		// A client with no token must stay unauthenticated.
+		{name: "extra Authorization is dropped when the client has no token", noToken: true, extraHeaders: http.Header{"Authorization": {"Bearer extra"}},
+			response: okResponse, wantStatus: http.StatusOK, wantHeader: http.Header{"Accept": {"application/json"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				client := NewClient("https://api.example.com", "test-org", "test-token", nil, false)
-				client.HTTPClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				if tc.noToken {
+					client.Token = ""
+				}
+				client.ExtraHeaders = tc.extraHeaders
+				var sent http.Header
+				client.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					sent = request.Header.Clone()
 					time.Sleep(3 * time.Second)
 					return tc.response()
 				})
@@ -386,6 +413,11 @@ func TestClient_do(t *testing.T) {
 				assert.Equal(t, tc.wantStatus, events[0].StatusCode)
 				assert.ErrorIs(t, events[0].Err, tc.wantErr)
 				assert.Equal(t, 3*time.Second, events[0].Duration)
+				wantHeader := tc.wantHeader
+				if wantHeader == nil {
+					wantHeader = http.Header{"Accept": {"application/json"}, "Authorization": {"Bearer test-token"}}
+				}
+				assert.Equal(t, wantHeader, sent)
 			})
 		})
 	}

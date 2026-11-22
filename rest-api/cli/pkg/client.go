@@ -36,6 +36,10 @@ type Client struct {
 	// RequestNotify, when set, is called once for every HTTP request the
 	// client sends, after the response body is read or the request fails.
 	RequestNotify func(RequestEvent)
+	// ExtraHeaders, when set, is added to every HTTP request the client
+	// sends, including retries. An Authorization value in it is dropped:
+	// Token is the only source of that header.
+	ExtraHeaders http.Header
 }
 
 // RequestEvent describes one finished HTTP request for RequestNotify.
@@ -310,6 +314,15 @@ func (c *Client) do(ctx context.Context, method, pathTemplate string, pathParams
 		return nil, nil, fmt.Errorf("creating request: %w", err)
 	}
 
+	// Extra headers go first, so the headers the client sets below replace
+	// any extra value of the same name. Authorization is removed because the
+	// client sets it only when it has a token.
+	for name, values := range c.ExtraHeaders {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
+	req.Header.Del("Authorization")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

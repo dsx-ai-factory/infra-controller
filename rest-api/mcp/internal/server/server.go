@@ -29,6 +29,7 @@ import (
 	urfave "github.com/urfave/cli/v2"
 
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 // toolReadTimeout bounds all REST attempts together while leaving room after the REST workflow wait.
@@ -71,6 +72,11 @@ func BuildServer(specData []byte, opts Options) (*mcp.Server, error) {
 		tools[registerGET(server, path, item, opts)] = true
 	}
 	server.AddReceivingMiddleware(opts.Metrics.toolCallMiddleware(tools))
+	// Added last, so the span wraps the metrics middleware and covers the
+	// whole tool call.
+	if cotel.TransportEnabled() {
+		server.AddReceivingMiddleware(traceToolCalls(tools))
+	}
 	return server, nil
 }
 
@@ -168,6 +174,23 @@ func ServeFlags() []urfave.Flag {
 // tests can drive it directly.
 func Run(c *urfave.Context, specData []byte) error {
 	opts := buildServeOptions(c)
+
+	// Tracing starts before BuildServer, which traces tool calls only when it
+	// is on. A tracing failure is logged and the server runs without it.
+	shutdownTracing, err := cotel.Bootstrap(c.Context, cotel.ExporterConfigured(), tracingServiceName)
+	if err != nil {
+		opts.Log.Errorf("nico-mcp: failed to initialize tracing: %v", err)
+	}
+	// Deferred first so it runs last: queued spans are flushed after the HTTP
+	// servers have drained, with a timeout of their own.
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), tracingShutdownTimeout)
+		defer cancel()
+		flushErr := shutdownTracing(flushCtx)
+		if flushErr != nil {
+			opts.Log.Errorf("nico-mcp: failed to shut down tracing: %v", flushErr)
+		}
+	}()
 
 	server, err := BuildServer(specData, opts)
 	if err != nil {
@@ -290,6 +313,12 @@ func callGET(ctx context.Context, req *mcp.CallToolRequest, in map[string]any, t
 	client.APIName = cfg.APIName
 	client.RequestNotify = func(event appcli.RequestEvent) {
 		opts.Metrics.observeRESTRequest(tool, event)
+	}
+	// Trace context goes only to the configured base URL. Like an inherited
+	// credential, it is not sent to a destination the caller selects, because
+	// it carries the caller's tracestate and baggage.
+	if normalizeBaseURL(opts.BaseURL) != "" {
+		client.ExtraHeaders = traceHeaders(ctx)
 	}
 
 	pathParams, queryParams, err := splitArgs(in, allParams)

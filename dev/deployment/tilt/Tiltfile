@@ -1094,7 +1094,7 @@ rest_image(
 rest_image(
     'nico-mcp',
     'Dockerfile.nico-mcp',
-    ['mcp', 'cli', 'openapi'],
+    ['mcp', 'cli', 'openapi', 'common/pkg/util/redact', 'common/pkg/otel'],
 )
 
 core_global = all_values['global']
