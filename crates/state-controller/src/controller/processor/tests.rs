@@ -17,7 +17,6 @@
 
 use std::sync::atomic::Ordering;
 
-use ::db::TransactionVending as _;
 use carbide_utils::test_support::test_meter::TestMeter;
 use config_version::ConfigVersion;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -32,7 +31,10 @@ use crate::tests::{
 
 fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
     StateProcessor {
-        pool,
+        database: crate::controller::ControllerDatabase {
+            pool,
+            instrumentation: carbide_instrument::Instrumentation::noop(),
+        },
         handler_services: Arc::new(()),
         io: Arc::new(TestStateControllerIO::default()),
         state_handler: Arc::new(NoopStateHandler::default()),
@@ -418,7 +420,11 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("identity-change-test".to_string())
@@ -608,7 +614,11 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
     txn.commit().await?;
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("late-result-test".to_string())
@@ -749,7 +759,11 @@ async fn failed_object_id_read_preserves_existing_object_error_metrics(
     txn.commit().await?;
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool, work_lock_manager_handle)
+        .database(
+            pool,
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("failed-object-id-read-test".to_string())
@@ -862,7 +876,11 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
     )
     .await?;
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool, work_lock_manager_handle)
+        .database(
+            pool,
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .filter_metrics_by_existing_object_ids()
         .processor_id("non-lock-winner-test".to_string())
         .services(Arc::new(()))
@@ -911,6 +929,7 @@ async fn expired_task_does_not_start_object_io() {
 #[derive(Debug)]
 struct WaitingHandler {
     started: Semaphore,
+    expected_deadline: tokio::time::Instant,
 }
 
 #[async_trait::async_trait]
@@ -925,8 +944,9 @@ impl StateHandler for WaitingHandler {
         _object_id: &String,
         _state: &mut TestObject,
         _controller_state: &TestObjectControllerState,
-        _ctx: &mut StateHandlerContext<Self::ContextObjects>,
+        ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<TestObjectControllerState>, StateHandlerError> {
+        assert_eq!(ctx.deadline, self.expected_deadline);
         self.started.add_permits(1);
         std::future::pending().await
     }
@@ -1097,13 +1117,14 @@ async fn dispatched_handler_keeps_the_claim_deadline(pool: sqlx::PgPool) -> eyre
     create_test_object("host".to_string(), &mut txn).await;
     txn.commit().await?;
     let mut processor = processor(pool);
+    // Five seconds remain from the claim's original 180-second budget. The handler
+    // must receive that exact deadline rather than start a fresh budget for substeps.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let handler = Arc::new(WaitingHandler {
         started: Semaphore::new(0),
+        expected_deadline: deadline,
     });
     processor.state_handler = handler.clone();
-
-    // Five seconds remain from the claim's original 180-second budget.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     processor.dispatch_object_handling_task("host".to_string(), deadline);
     tokio::time::timeout(Duration::from_secs(5), handler.started.acquire())
         .await??

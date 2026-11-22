@@ -608,9 +608,8 @@ pub(crate) async fn find_state_histories(
         .into());
     }
 
-    let mut txn = api.txn_begin().await?;
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::SitePrefix,
         &site_prefix_ids,
     )
@@ -624,7 +623,6 @@ pub(crate) async fn find_state_histories(
             },
         );
     }
-    txn.commit().await?;
 
     Ok(Response::new(response))
 }

@@ -150,7 +150,7 @@ func createSingleRule() error {
 	}
 
 	fmt.Printf("Successfully created rule\n")
-	fmt.Printf("ID:   %s\n", ruleID.String())
+	fmt.Printf("ID:   %s\n", ruleID)
 	fmt.Printf("Name: %s\n", createName)
 
 	return nil

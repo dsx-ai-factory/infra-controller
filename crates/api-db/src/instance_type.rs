@@ -26,9 +26,10 @@ use model::metadata::Metadata;
 use sqlx::{PgConnection, Postgres};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 pub async fn get_association_details(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     instance_type_ids: &[InstanceTypeId],
 ) -> Result<HashMap<InstanceTypeId, InstanceTypeAssociationDetails>, DatabaseError> {
     let mut builder =
@@ -49,7 +50,7 @@ pub async fn get_association_details(
 
     let details: Vec<InstanceTypeAssociationDetails> = builder
         .build_query_as()
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|err: sqlx::Error| DatabaseError::query(builder.sql(), err))?;
 

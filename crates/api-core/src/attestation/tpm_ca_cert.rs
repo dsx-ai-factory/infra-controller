@@ -38,11 +38,11 @@ pub(crate) fn extract_ca_fields(
         .1;
 
     Ok((
-        DateTime::<Utc>::from_timestamp(ca_cert.validity.not_before.timestamp(), 0).ok_or(
-            CarbideError::internal("could not parse CA's NOT BEFORE field".to_string()),
+        DateTime::<Utc>::from_timestamp(ca_cert.validity.not_before.timestamp(), 0).ok_or_else(
+            || CarbideError::internal("could not parse CA's NOT BEFORE field".to_string()),
         )?,
-        DateTime::<Utc>::from_timestamp(ca_cert.validity.not_after.timestamp(), 0).ok_or(
-            CarbideError::internal("could not parse CA's NOT AFTER field".to_string()),
+        DateTime::<Utc>::from_timestamp(ca_cert.validity.not_after.timestamp(), 0).ok_or_else(
+            || CarbideError::internal("could not parse CA's NOT AFTER field".to_string()),
         )?,
         (*(ca_cert.subject.as_raw())).to_vec(),
     ))
@@ -63,7 +63,7 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
     // try obtaining the relevant CA cert from the DB and check the signature
     let mut found_signing_ca = false;
     let mut ca_id: Option<i32> = None;
-    match db_attest::tpm_ca_certs::get_by_subject(txn, ek_issuer_bytes.as_slice()).await? {
+    match db_attest::tpm_ca_certs::get_by_subject(&mut *txn, ek_issuer_bytes.as_slice()).await? {
         Some(ca_cert_db_entry) => {
             let ca_cert = X509Certificate::from_der(ca_cert_db_entry.ca_cert_der.as_slice())
                 .map_err(|e| {
@@ -78,8 +78,8 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
                 }
                 Err(e) => tracing::error!(
                     ek_certificate_serial = %ek_cert.raw_serial_as_string(),
-                    issuer = %ek_cert.issuer.to_string(),
-                    subject = %ca_cert.subject.to_string(),
+                    issuer = %ek_cert.issuer,
+                    subject = %ca_cert.subject,
                     error = %e,
                     "Could not verify signature for EK certificate",
                 ),
@@ -87,7 +87,7 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
         }
         None => tracing::info!(
             ek_certificate_serial = %ek_cert.raw_serial_as_string(),
-            issuer = %ek_cert.issuer.to_string(),
+            issuer = %ek_cert.issuer,
             "No CA certificate found for EK certificate",
         ),
     }
@@ -97,7 +97,7 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
     hasher.update(tpm_ek_cert.as_bytes());
     let tpm_ek_cert_sha256 = hasher.finalize();
 
-    if ek_cert_verification_status::get_by_ek_sha256(txn, &tpm_ek_cert_sha256)
+    if ek_cert_verification_status::get_by_ek_sha256(&mut *txn, &tpm_ek_cert_sha256)
         .await?
         .is_some()
     {
@@ -113,7 +113,7 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
         tracing::info!(
             found_signing_ca,
             ek_certificate_serial = %ek_cert.raw_serial_as_string(),
-            issuer = %ek_cert.issuer.to_string(),
+            issuer = %ek_cert.issuer,
             "Set CA verification status for EK certificate",
         );
     } else {
@@ -155,7 +155,7 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
 
         tracing::info!(
             ek_certificate_serial = %ek_cert.raw_serial_as_string(),
-            issuer = %ek_cert.issuer.to_string(),
+            issuer = %ek_cert.issuer,
             found_signing_ca,
             "Added new CA verification status for EK certificate",
         );
@@ -189,8 +189,8 @@ pub(crate) async fn match_update_existing_ek_cert_status_against_ca(
     if let Err(e) = ek_cert.verify_signature(Some(ca_cert.public_key())) {
         tracing::error!(
             ek_certificate_serial = %ek_cert.raw_serial_as_string(),
-            issuer = %ek_cert.issuer.to_string(),
-            subject = %ca_cert.subject.to_string(),
+            issuer = %ek_cert.issuer,
+            subject = %ca_cert.subject,
             error = %e,
             "Could not verify signature for EK certificate",
         );
@@ -216,7 +216,7 @@ pub(crate) async fn match_update_existing_ek_cert_status_against_ca(
 
     tracing::info!(
         ek_certificate_serial = %ek_cert.raw_serial_as_string(),
-        issuer = %ek_cert.issuer.to_string(),
+        issuer = %ek_cert.issuer,
         "Set CA verification status for EK certificate",
     );
 

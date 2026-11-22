@@ -36,7 +36,7 @@ use db::vpc::{self};
 use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
 use model::dns::DnsZone;
 use model::resource_pool;
-use model::tenant::{InvalidTenantOrg, Tenant};
+use model::tenant::{InvalidTenantOrg, Tenant, TenantOrganizationId};
 use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, UpdateVpc, UpdateVpcVirtualization,
     VpcRoutingProfileOverrides, VpcStatus, VpcVirtualizationTypeCapabilities,
@@ -49,6 +49,9 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::cfg::file::FnnConfig;
 
+/// Leave time for the Site proxy's forty-second activity deadline to return the result.
+const CANCEL_CREATION_TIMEOUT: Duration = Duration::from_secs(35);
+
 /// `create` checks admission, prepares a VNI, then saves it with the VPC.
 /// Admission is checked again because it can change during provider work.
 pub(crate) async fn create(
@@ -60,6 +63,105 @@ pub(crate) async fn create(
     let created = created
         .ok_or_else(|| CarbideError::internal("API VPC creation skipped insertion".to_owned()))?;
     Ok(Response::new(created))
+}
+
+/// Return a committed VPC, or cancel its unfinished creation. The saved
+/// cancellation also blocks requests delayed before allocation preparation.
+/// Thirty-five seconds bounds database waits and provider cleanup together,
+/// leaving time for the Site proxy's forty-second activity deadline. A committed
+/// cancellation survives later cleanup errors. Earlier errors may leave no saved
+/// decision, so callers must retry rather than assume cancellation succeeded.
+/// No transaction spans provider I/O.
+pub(crate) async fn cancel_creation(
+    api: &Api,
+    request: Request<rpc::CancelVpcCreationRequest>,
+) -> Result<Response<rpc::CancelVpcCreationResponse>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+    let id = request.id.ok_or(CarbideError::MissingArgument("id"))?;
+    if request.tenant_organization_id.is_empty() {
+        return Err(CarbideError::MissingArgument("tenant_organization_id").into());
+    }
+    let cancellation = async {
+        let mut txn = database_transaction(&api.database_connection).await?;
+        db::vpc::creation::lock(&mut txn, id).await?;
+        if let Some(vpc) = db::vpc::find_by_id_including_deleted(txn.as_pgconn(), id).await? {
+            if vpc.config.tenant_organization_id != request.tenant_organization_id {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "VPC `{id}` belongs to another tenant",
+                )));
+            }
+            if vpc.deleted.is_none() {
+                let private_dns_zone = find_private_dns_zone(txn.as_pgconn(), id).await?;
+                let created_vpc = vpc_to_rpc(
+                    vpc,
+                    private_dns_zone,
+                    api.runtime_config.fnn.as_ref(),
+                    EffectiveProfileErrorPolicy::OmitRetained,
+                )?;
+                txn.commit().await?;
+                return Ok(rpc::CancelVpcCreationResponse {
+                    result: Some(rpc::cancel_vpc_creation_response::Result::CreatedVpc(
+                        created_vpc,
+                    )),
+                });
+            }
+        }
+        db::vpc::creation::cancel(&mut txn, id, &request.tenant_organization_id).await?;
+        let cleanup = api
+            .resource_pool_registry
+            .request_cancellation(
+                &mut txn,
+                resource_pool::OwnerType::Vpc,
+                &id.to_string(),
+                vni::VNI_SLOT,
+            )
+            .await?;
+        txn.commit().await?;
+        cleanup
+            .wait(
+                &api.resource_pool_registry,
+                &api.database_connection,
+                &api.cancel_token,
+            )
+            .await?;
+        // A cancelled newer attempt can hide an older VNI still being released.
+        // The committed creation fence prevents new attempts while we check all
+        // generations. Recovery owns any remaining releases; callers must retry.
+        let mut txn = database_transaction(&api.database_connection).await?;
+        ensure_vni_cleanup_finished(api, &mut txn, id).await?;
+        txn.commit().await?;
+        Ok::<_, CarbideError>(rpc::CancelVpcCreationResponse {
+            result: Some(rpc::cancel_vpc_creation_response::Result::Cancelled(())),
+        })
+    };
+    let response = match api
+        .cancel_token
+        .run_until_cancelled(tokio::time::timeout(CANCEL_CREATION_TIMEOUT, cancellation))
+        .await
+    {
+        None => Err(CarbideError::ResourcePoolCancelled {
+            operation: "VPC creation cancellation",
+        }),
+        Some(Err(_)) => Err(CarbideError::ResourcePoolDeadlineExceeded {
+            operation: "VPC creation cancellation",
+        }),
+        Some(Ok(result)) => result.map_err(|error| {
+            // Any cancellation SQL statement can expire before the RPC timer,
+            // including the allocation-row write after acquiring the creation lock.
+            if matches!(&error, CarbideError::DBError(error)
+                if error.source.as_database_error().and_then(|error| error.code()).as_deref()
+                    == Some("57014"))
+            {
+                CarbideError::ResourcePoolDeadlineExceeded {
+                    operation: "VPC creation cancellation database operation",
+                }
+            } else {
+                error
+            }
+        }),
+    }?;
+    Ok(Response::new(response))
 }
 
 /// `create_configured` uses the shared creation flow with startup's defaults.
@@ -130,10 +232,31 @@ async fn create_vpc(
     api: &Api,
     mut creation: VpcCreation,
 ) -> Result<Option<rpc::Vpc>, CarbideError> {
+    let id = match &mut creation {
+        VpcCreation::Api(request) => *request.id.get_or_insert_with(VpcId::new),
+        VpcCreation::Configured(new_vpc) => new_vpc.id,
+    };
+    // Tenant and NSG admission retain the site's database wait policy. Only
+    // the later creation-lock and allocation-request transaction gets our cap.
     let mut txn = api.txn_begin().await?;
     let CreateAdmission {
         new_vpc, internal, ..
     } = creation.admission(api, &mut txn).await?;
+    txn.commit().await?;
+
+    let mut txn = database_transaction(&api.database_connection).await?;
+    db::vpc::creation::lock(&mut txn, id).await?;
+    // Another create can commit after admission releases its locks. Reject it
+    // before recording a new attempt or asking the provider for a reservation.
+    if db::vpc::find_by_id_including_deleted(txn.as_pgconn(), id)
+        .await?
+        .is_some()
+    {
+        return Err(CarbideError::AlreadyFoundError {
+            kind: "Vpc",
+            id: id.to_string(),
+        });
+    }
     let pool = if internal {
         &api.common_pools.ethernet.pool_vpc_vni
     } else {
@@ -141,10 +264,6 @@ async fn create_vpc(
     };
     let owner_id = new_vpc.id.to_string();
     let requested_vni = new_vpc.vni;
-    // Admission must recheck the ID that owns this attempt's reservation.
-    if let VpcCreation::Api(request) = &mut creation {
-        request.id = Some(new_vpc.id);
-    }
     let map_error = |error| match error {
         ResourcePoolBackendError::Integrated(error) => {
             creation.allocation_error(&api.instrumentation, pool, &owner_id, requested_vni, error)
@@ -178,17 +297,29 @@ async fn create_vpc(
         }
         Err(error) => return Err(error.into()),
     };
-    txn.commit().await?;
-
-    let allocation = selected
-        .prepare_allocation(
-            &api.database_connection,
+    // Remote work needs a saved creation request before dispatch. Integrated
+    // allocates in the entity transaction, where begin checks cancellation and
+    // rolls back its request together with any failed allocation or VPC write.
+    if api
+        .resource_pool_registry
+        .get(pool.name())
+        .is_some_and(|registered| registered.backend.remote().is_some())
+    {
+        db::vpc::creation::begin(&mut txn, id, &new_vpc.tenant_organization_id).await?;
+    }
+    let prepared = selected
+        .prepare_foreground_request(
+            &mut txn,
             resource_pool::OwnerType::Vpc,
             &owner_id,
             vni::VNI_SLOT,
             requested_vni,
-            &api.cancel_token,
         )
+        .await
+        .map_err(map_error)?;
+    txn.commit().await?;
+    let allocation = prepared
+        .resolve(&api.database_connection, &api.cancel_token)
         .await
         .map_err(map_error)?;
 
@@ -203,6 +334,8 @@ async fn create_vpc(
         } else {
             api.txn_begin().await?
         };
+        db::vpc::creation::lock(&mut txn, id).await?;
+        db::vpc::creation::begin(&mut txn, id, &new_vpc.tenant_organization_id).await?;
         if let VpcCreation::Configured(new_vpc) = &creation {
             // Hold this lock only while checking and inserting, never during
             // provider work. Another startup may have created the name meanwhile.
@@ -211,6 +344,9 @@ async fn create_vpc(
                 .await?
                 .is_empty()
             {
+                // Startup discarded this unused ID because its named VPC exists.
+                db::vpc::creation::complete(&mut txn, id).await?;
+                txn.commit().await?;
                 return Ok(None);
             }
         }
@@ -242,6 +378,7 @@ async fn create_vpc(
                 )?
             }
         };
+        db::vpc::creation::complete(&mut txn, id).await?;
         txn.commit().await?;
         Ok::<_, CarbideError>(Some(response))
     };
@@ -364,6 +501,29 @@ async fn prepare_create(
     let requested_profile_type = vpc_creation_request.routing_profile_type.clone();
     let mut new_vpc = NewVpc::try_from(vpc_creation_request.clone())?;
 
+    if let Some(ref id) = new_vpc.dhcp_option_set_id {
+        let tenant_org = new_vpc
+            .tenant_organization_id
+            .parse::<TenantOrganizationId>()
+            .map_err(|e: InvalidTenantOrg| {
+                CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
+            })?;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut *txn,
+            std::slice::from_ref(id),
+            Some(&tenant_org),
+            true,
+        )
+        .await?
+        .is_empty()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
+            )));
+        }
+    }
+
     let ResolvedVpcRouting {
         profile_type: resolved_profile_type,
         internal,
@@ -466,6 +626,8 @@ pub(crate) async fn update(
     if nsg_locked {
         let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
     }
+    // Like the NSG, the option set is locked before the VPC row.
+    let _ = find_vpc_update_dhcp_option_set(&mut txn, &observed_vpc, &vpc_update, true).await?;
     let mut current_vpc = db::vpc::find_by_with_lock(
         &mut txn,
         ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
@@ -511,6 +673,7 @@ pub(crate) async fn update(
             db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
         }
         let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
+        let _ = find_vpc_update_dhcp_option_set(&mut txn, &observed_vpc, &vpc_update, true).await?;
         current_vpc = db::vpc::find_by_with_lock(
             &mut txn,
             ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
@@ -529,6 +692,7 @@ pub(crate) async fn update(
     {
         tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, &policy.candidate).await?;
     }
+
     vpc_update.if_version_match = Some(current_vpc.version);
     let vpc = db::vpc::update(&vpc_update, &mut txn).await?;
     validate_requested_route_targets(
@@ -584,6 +748,39 @@ async fn find_vpc_update_nsg(
     .ok_or_else(|| {
         CarbideError::FailedPrecondition(format!(
             "NetworkSecurityGroup `{id}` does not exist or is not owned by tenant `{}`",
+            vpc.config.tenant_organization_id
+        ))
+    })
+}
+
+async fn find_vpc_update_dhcp_option_set(
+    txn: &mut PgConnection,
+    vpc: &model::vpc::Vpc,
+    update: &UpdateVpc,
+    for_update: bool,
+) -> Result<Option<model::dhcp_option_set::DhcpOptionSet>, CarbideError> {
+    let Some(id) = update.dhcp_option_set_id.as_ref() else {
+        return Ok(None);
+    };
+    db::dhcp_option_set::find_by_ids(
+        txn,
+        std::slice::from_ref(id),
+        Some(
+            &vpc.config
+                .tenant_organization_id
+                .parse()
+                .map_err(|e: InvalidTenantOrg| {
+                    CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
+                })?,
+        ),
+        for_update,
+    )
+    .await?
+    .pop()
+    .map(Some)
+    .ok_or_else(|| {
+        CarbideError::FailedPrecondition(format!(
+            "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{}`",
             vpc.config.tenant_organization_id
         ))
     })
@@ -1105,7 +1302,7 @@ async fn validate_routing_change_attachments(
             "routing-profile changes do not support VPC routing overrides".to_string(),
         ));
     }
-    if db::vpc_prefix::has_tenant_managed_site_prefix(txn, vpc.id).await? {
+    if db::vpc_prefix::has_tenant_managed_site_prefix(&mut *txn, vpc.id).await? {
         return Err(CarbideError::FailedPrecondition(
             "routing-profile changes do not support tenant-managed SitePrefix attachments"
                 .to_string(),
@@ -1404,7 +1601,8 @@ async fn find_vpc_vni_allocations<'a>(
 }
 
 /// Reject unfinished cancellation or release in every allocation generation.
-/// Hold the VPC row lock: an older retained release can outlast a newer assignment.
+/// Hold the VPC row lock, or commit its creation cancellation first, so no new
+/// assignment can appear. An older retained release can outlast a newer attempt.
 async fn ensure_vni_cleanup_finished(
     api: &Api,
     txn: &mut PgConnection,
@@ -2204,7 +2402,7 @@ mod tests {
         tokio::pin!(phase);
         tokio::select! {
             result = &mut phase => panic!("phase passed a held database lock: {result:?}"),
-            _ = db::test_support::postgres::wait_for_blocked_queries(
+            _ = crate::tests::wait_for_blocked_queries(
                 &pool, pid, "pg_advisory_xact_lock", 1) => {},
         }
         tokio::time::pause();
@@ -2286,6 +2484,7 @@ mod tests {
                 tenant_keyset_id: None,
                 network_virtualization_type: VpcVirtualizationType::Fnn,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
                 vni: None,
                 routing_profile_type: Some("INTERNAL".to_string()),

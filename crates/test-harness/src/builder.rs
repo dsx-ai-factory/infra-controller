@@ -22,6 +22,7 @@ use carbide_api_core::test_support::ApiMetricsEmitter;
 use carbide_api_core::test_support::builder::TestApiBuilder;
 use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_utils::test_support::test_meter::TestMeter;
+use db::db_read::PgPoolReader;
 use db::{TransactionVending as _, work_lock_manager};
 use model::resource_pool::ResourcePoolDef;
 use sqlx::PgPool;
@@ -97,7 +98,7 @@ impl TestHarnessBuilder {
 
         let ib_fabric_ids = ["default"];
         let common_pools = db::resource_pool::create_common_pools(
-            db_pool.clone(),
+            &mut PgPoolReader::from(db_pool.clone()),
             HashSet::from_iter(ib_fabric_ids.into_iter().map(ToString::to_string)),
         )
         .await

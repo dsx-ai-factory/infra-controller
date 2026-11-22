@@ -147,11 +147,9 @@ impl From<Delete> for DeleteMeasurementJournalRequest {
 impl TryFrom<Show> for ShowMeasurementJournalRequest {
     type Error = CarbideCliError;
     fn try_from(show: Show) -> Result<Self, Self::Error> {
-        let journal_id = show
-            .journal_id
-            .ok_or(CarbideCliError::GenericError(String::from(
-                "journal_id must be set to get a journal",
-            )))?;
+        let journal_id = show.journal_id.ok_or_else(|| {
+            CarbideCliError::GenericError(String::from("journal_id must be set to get a journal"))
+        })?;
         Ok(Self {
             selector: Some(show_measurement_journal_request::Selector::JournalId(
                 journal_id,

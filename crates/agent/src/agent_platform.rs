@@ -58,10 +58,12 @@ impl ManagedFile {
     /// Checks if the file exists, and if not copies it from source_path. No
     /// comparison of timestamps or contents is performed.
     pub fn copy_if_not_present(self, source_path: &Path) -> eyre::Result<()> {
-        let destination_exists = self.path.try_exists().context(format!(
-            "couldn't check existence of destination file {f}",
-            f = self.path.display()
-        ))?;
+        let destination_exists = self.path.try_exists().with_context(|| {
+            format!(
+                "couldn't check existence of destination file {f}",
+                f = self.path.display()
+            )
+        })?;
         if !destination_exists {
             safe_copy(self.path.as_path(), source_path).inspect(|_| {
                 tracing::info!(
@@ -270,7 +272,7 @@ pub mod containerd {
                 let matching_image = images.iter().find_map(|image| {
                     let name = image.name.as_str();
                     name.contains(image_base_name_pattern.as_str())
-                        .then_some(name.to_owned())
+                        .then(|| name.to_owned())
                 });
                 if let Some(image_name) = matching_image {
                     return Ok(image_name);

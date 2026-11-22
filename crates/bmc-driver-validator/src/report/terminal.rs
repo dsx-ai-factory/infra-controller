@@ -72,7 +72,8 @@ impl Terminal {
         }
         eprintln!(
             "    {} {step}",
-            format!("{check} +{:.1}s", started.elapsed().as_secs_f64()).dimmed(),
+            ColoredString::from(format!("{check} +{:.1}s", started.elapsed().as_secs_f64()))
+                .dimmed(),
         );
     }
 
@@ -88,7 +89,7 @@ impl Terminal {
     pub(super) fn row(&self, key: &str, value: &str) {
         self.line(&format!(
             "  {} {value}",
-            format!("{key:<KEY_WIDTH$}").dimmed()
+            ColoredString::from(format!("{key:<KEY_WIDTH$}")).dimmed()
         ));
     }
 
@@ -154,7 +155,7 @@ impl Terminal {
                 let columns = format!(
                     "{:indent$}{}{:FIELD_GAP$}",
                     "",
-                    format!("{name:<name_width$}").dimmed(),
+                    ColoredString::from(format!("{name:<name_width$}")).dimmed(),
                     ""
                 );
                 self.print_in_column(&columns, indent + name_width + FIELD_GAP, value, |line| {
@@ -169,7 +170,7 @@ impl Terminal {
                 .map(|(name, value)| {
                     format!(
                         "{}{:FIELD_GAP$}{value:<value_width$}",
-                        format!("{name:<name_width$}").dimmed(),
+                        ColoredString::from(format!("{name:<name_width$}")).dimmed(),
                         ""
                     )
                 })

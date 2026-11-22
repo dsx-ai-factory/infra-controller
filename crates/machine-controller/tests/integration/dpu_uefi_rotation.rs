@@ -160,8 +160,7 @@ async fn ready_dpu_converges_uefi_to_site_target(
 
     // The device lags the staged target before the controller runs.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -188,8 +187,7 @@ async fn ready_dpu_converges_uefi_to_site_target(
 
     // The DPU is recorded converged at the target version.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "DPU should be converged after rotation");
@@ -230,8 +228,7 @@ async fn feature_flag_off_suppresses_passive_dpu_uefi_rotation(
         mh.host.machine().await.state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -296,8 +293,7 @@ async fn force_request_converges_quarantined_dpu_uefi_when_disabled(
     // The DPU converged despite its quarantine, and the one-shot request was
     // cleared so it does not re-enter.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "forced DPU should be converged");
@@ -355,8 +351,7 @@ async fn dpu_uefi_change_failure_quarantines_and_returns_to_ready(
     // The DPU did not converge; it is quarantined with a recorded, redacted error
     // and an incremented attempt count.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -427,8 +422,7 @@ async fn dpu_uefi_client_creation_failure_retries_without_quarantine(
         mh.host.machine().await.state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -446,8 +440,7 @@ async fn dpu_uefi_client_creation_failure_retries_without_quarantine(
     env.redfish_sim.clear_create_client_error();
     run_until_ready(&mut env, &mh).await;
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "the retried rotation should converge");

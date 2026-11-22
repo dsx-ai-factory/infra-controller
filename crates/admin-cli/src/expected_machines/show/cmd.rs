@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use clap::ValueEnum;
@@ -96,7 +97,7 @@ pub(super) async fn show_expected_machines(
                     x.bmc_ip,
                     x.machine_id
                         .map(|x| x.to_string())
-                        .unwrap_or("Unlinked".to_string()),
+                        .unwrap_or_else(|| "Unlinked".to_string()),
                 )
             }),
     );
@@ -158,26 +159,31 @@ async fn convert_and_print_into_nice_table(
         let labels = crate::metadata::fmt_labels_as_kv_pairs(expected_machine.metadata.as_ref());
 
         let dpu_policy_display = dpu_policy_display(expected_machine.dpu_mode);
-        let loopback_reservations = expected_machine
+        let mut loopback_reservations = String::new();
+        for (index, (mac_address, fixed_ip)) in expected_machine
             .host_nics
             .iter()
             .filter(|interface| interface.role() == ExpectedInterfaceRole::DpuLoopback)
             .filter_map(|interface| {
-                Some(format!(
-                    "{}: {}",
+                Some((
                     interface.mac_address.as_deref()?,
-                    interface.fixed_ip.as_deref()?
+                    interface.fixed_ip.as_deref()?,
                 ))
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .enumerate()
+        {
+            if index != 0 {
+                loopback_reservations.push('\n');
+            }
+            write!(loopback_reservations, "{mac_address}: {fixed_ip}")?;
+        }
 
         table.add_row(row![
             expected_machine.chassis_serial_number,
             expected_machine.bmc_mac_address,
             machine_interface
                 .map(|x| x.address.join("\n"))
-                .unwrap_or("Undiscovered".to_string()),
+                .unwrap_or_else(|| "Undiscovered".to_string()),
             expected_machine.fallback_dpu_serial_numbers.join("\n"),
             machine_id.unwrap_or("Unlinked"),
             expected_machine

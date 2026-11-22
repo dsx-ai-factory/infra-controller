@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -260,7 +261,7 @@ func (s *SSHStrategy) executeCopy(ctx context.Context, update *FirmwareUpdate, t
 	)
 
 	// Get the port from NVOS config (uses custom port if set, otherwise default 22)
-	port := fmt.Sprintf("%d", tray.NVOS.GetPort())
+	port := strconv.Itoa(tray.NVOS.GetPort())
 
 	cmd := exec.Command("sshpass", "-e",
 		"scp",

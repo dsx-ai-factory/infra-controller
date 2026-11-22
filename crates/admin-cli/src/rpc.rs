@@ -388,11 +388,11 @@ impl ApiClient {
             }
         };
 
-        serial_details
-            .machine_id
-            .ok_or(CarbideCliError::GenericError(
+        serial_details.machine_id.ok_or_else(|| {
+            CarbideCliError::GenericError(
                 "Serial number found without associated machine ID".to_string(),
-            ))
+            )
+        })
     }
 
     /// Resolves the full instance list matching a filter, via one id-listing
@@ -693,7 +693,7 @@ impl ApiClient {
 
         Ok(result
             .histories
-            .remove(&rack_id.to_string())
+            .remove(rack_id.as_str())
             .map(|h| h.records)
             .unwrap_or_default())
     }
@@ -753,7 +753,7 @@ impl ApiClient {
 
         Ok(result
             .histories
-            .remove(&rack_id.to_string())
+            .remove(rack_id.as_str())
             .map(|h| h.records)
             .unwrap_or_default())
     }
@@ -1362,7 +1362,7 @@ impl ApiClient {
             .wrap_err("failed to get expected machine for legacy update")?;
         let mac_str = bmc_mac_address
             .map(|m| m.to_string())
-            .unwrap_or(expected_machine.bmc_mac_address.clone());
+            .unwrap_or_else(|| expected_machine.bmc_mac_address.clone());
         let parsed_interfaces = interfaces
             .map(|s| serde_json::from_str::<Vec<rpc::ExpectedInterface>>(&s))
             .transpose()?;
@@ -1668,6 +1668,7 @@ impl ApiClient {
                     labels: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
             })
             .await
@@ -1733,6 +1734,7 @@ impl ApiClient {
                     labels: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
             })
             .await?)
@@ -2161,9 +2163,11 @@ impl ApiClient {
             for network_segment_id in pf_network_segment_ids {
                 let device = interface_iter
                     .next()
-                    .ok_or(CarbideCliError::GenericError(
-                        "Insufficient interfaces for selected machine".to_string(),
-                    ))?
+                    .ok_or_else(|| {
+                        CarbideCliError::GenericError(
+                            "Insufficient interfaces for selected machine".to_string(),
+                        )
+                    })?
                     .pci_properties
                     .as_ref()
                     .map(|pci| pci.device.as_str());
@@ -2378,6 +2382,7 @@ impl ApiClient {
                 auto: allocate_instance.flat_vpc_id.is_some(),
             }),
             network_security_group_id: allocate_instance.network_security_group_id.clone(),
+            dhcp_option_set_id: None,
             infiniband: None,
             dpu_extension_services: None,
             nvlink: None,
@@ -2763,12 +2768,14 @@ impl ApiClient {
         version: String,
         metadata: Option<rpc::Metadata>,
         network_security_group_id: Option<String>,
+        dhcp_option_set_id: Option<String>,
     ) -> CarbideCliResult<rpc::Vpc> {
         let request = rpc::VpcUpdateRequest {
             id: Some(vpc_id),
             if_version_match: Some(version),
             metadata,
             network_security_group_id,
+            dhcp_option_set_id,
             default_nvlink_logical_partition_id: None,
             routing_profile_overrides: None,
             power_resource_group: None,

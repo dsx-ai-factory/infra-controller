@@ -189,6 +189,12 @@ pub struct InitDpfResourcesConfig {
 
     #[builder(setter(strip_option))]
     pub(crate) proxy: Option<DpfProxyDetails>,
+    /// Containerd registry mirrors written into the flavor, one `hosts.toml` per upstream
+    /// registry. Empty leaves the flavor unchanged.
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
+    /// DPUs.
+    pub(crate) registry_mirrors: Vec<DpfRegistryMirror>,
     /// Operator-supplied bf.cfg lines appended to the flavor's built-in `bfcfgParameters`.
     ///
     /// Passed through verbatim; the SDK applies no quoting or interpretation. Entries containing
@@ -200,6 +206,8 @@ pub struct InitDpfResourcesConfig {
     pub(crate) extra_bfcfg_parameters: Vec<String>,
     /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
     pub(crate) enable_delay_host_init: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage during provisioning.
+    pub(crate) enable_pci_switch_emulation: bool,
     /// Omit partial-multiplane maintenance initialization from Astra provisioning when true.
     pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
@@ -243,8 +251,10 @@ impl Default for InitDpfResourcesConfig {
             intercept_bridging: None,
             interfaces: Vec::new(),
             proxy: None,
+            registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
+            enable_pci_switch_emulation: false,
             partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
@@ -271,6 +281,43 @@ pub struct DpfProxyDetails {
     pub https_proxy: String,
     #[serde(default)]
     pub no_proxy: Vec<String>,
+}
+
+/// A containerd registry mirror for one upstream registry.
+///
+/// The flavor carries it as `/etc/containerd/certs.d/<upstream>/hosts.toml`. containerd on the
+/// DPU then tries `mirror` first and falls back to the upstream registry, provided its registry
+/// `config_path` includes `/etc/containerd/certs.d` (the default from containerd 2.2).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DpfRegistryMirror {
+    /// Registry host exactly as it appears in image references, with the port when the
+    /// references carry one (`nvcr.io`, `registry.example.com:5000`). Docker Hub is `docker.io`.
+    pub upstream: String,
+    /// `http://` or `https://` URL of the mirror, without userinfo, query, or fragment.
+    /// containerd offers the upstream registry's pull secret to a mirror that asks for
+    /// credentials, so the mirror is trusted with it.
+    pub mirror: String,
+    /// Treats the path of `mirror` as the registry API root instead of appending `/v2`
+    /// (containerd `override_path`). Needed when the mirror serves the upstream under a path
+    /// prefix.
+    #[serde(default)]
+    pub override_path: bool,
+    /// Fallback registry URL (containerd `server`). Unset keeps containerd's default, which is
+    /// the upstream registry itself.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// PEM certificates that sign the mirror's TLS certificate. Unset uses the DPU's system
+    /// trust store. Must hold at least one certificate that parses: containerd fails every pull
+    /// for the upstream when it cannot load the file.
+    #[serde(default)]
+    pub ca_pem: Option<String>,
+    /// Longest time containerd waits for a connection to the mirror before it moves on to the
+    /// fallback (containerd `dial_timeout`): a positive whole number of seconds or milliseconds
+    /// with at most six digits, such as `5s` or `500ms`. Unset keeps containerd's default of 30
+    /// seconds. Takes effect from containerd 2.1; earlier versions ignore the key.
+    #[serde(default)]
+    pub dial_timeout: Option<String>,
 }
 
 /// A DPU CR whose installed BFB, BlueFieldSoftware, or `spec.dpuFlavor` does
@@ -1298,6 +1345,7 @@ impl From<DpuStatusPhase> for DpuPhase {
             DpuStatusPhase::PerformArmForceRestart => {
                 Self::Provisioning("PerformArmForceRestart".into())
             }
+            DpuStatusPhase::BmcForceRestart => Self::Provisioning("BmcForceRestart".into()),
             DpuStatusPhase::UpdateFirmware => Self::Provisioning("UpdateFirmware".into()),
             DpuStatusPhase::ServiceReadiness => Self::Provisioning("ServiceReadiness".into()),
         }
@@ -1752,6 +1800,10 @@ mod tests {
 
             "PerformArmForceRestart -> Provisioning" {
                 DpuStatusPhase::PerformArmForceRestart => DpuPhase::Provisioning("PerformArmForceRestart".into()),
+            }
+
+            "BmcForceRestart -> Provisioning" {
+                DpuStatusPhase::BmcForceRestart => DpuPhase::Provisioning("BmcForceRestart".into()),
             }
 
             "NodeEffect -> NodeEffect" {

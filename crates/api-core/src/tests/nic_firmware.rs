@@ -2377,7 +2377,7 @@ async fn desired_nic_firmware_keeps_selections_and_profiles_in_one_snapshot(pool
         .api
         .get_desired_nic_firmware(Request::new(request.clone()));
     let change = async {
-        let reader_pid = db::test_support::postgres::wait_for_blocked_query(
+        let reader_pid = crate::tests::wait_for_blocked_query(
             &env.pool,
             writer_pid,
             "FROM nic_firmware_profiles WHERE id",

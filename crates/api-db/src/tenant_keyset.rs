@@ -28,10 +28,10 @@ pub async fn create(
         RETURNING organization_id, keyset_id, content, version";
 
     sqlx::query_as(query)
-        .bind(value.keyset_identifier.organization_id.to_string())
+        .bind(&value.keyset_identifier.organization_id)
         .bind(&value.keyset_identifier.keyset_id)
         .bind(sqlx::types::Json(&value.keyset_content))
-        .bind(value.version.to_string())
+        .bind(&value.version)
         .fetch_one(txn)
         .await
         .map_err(|error| match error {
@@ -77,8 +77,7 @@ pub async fn find_by_ids(
          FROM tenant_keysets WHERE (organization_id, keyset_id) IN ",
     );
     builder.push_tuples(ids.iter(), |mut b, id| {
-        b.push_bind(id.organization_id.to_string())
-            .push_bind(&id.keyset_id);
+        b.push_bind(&id.organization_id).push_bind(&id.keyset_id);
     });
     // execute
     let query = builder.build_query_as();
@@ -100,7 +99,7 @@ pub async fn find(
     organization_id: Option<String>,
     keyset_filter: ObjectFilter<'_, String>,
     include_key_data: bool,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<TenantKeyset>, DatabaseError> {
     let mut result = if let Some(organization_id) = organization_id {
         match keyset_filter {
@@ -108,8 +107,8 @@ pub async fn find(
                 "SELECT organization_id, keyset_id, content, version
                      FROM tenant_keysets WHERE organization_id = $1",
             )
-            .bind(organization_id.to_string())
-            .fetch_all(txn)
+            .bind(&organization_id)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::new("keyset All", e)),
 
@@ -117,9 +116,9 @@ pub async fn find(
                 let query = "SELECT organization_id, keyset_id, content, version
                     FROM tenant_keysets WHERE organization_id = $1 AND keyset_id = $2";
                 sqlx::query_as(query)
-                    .bind(organization_id.to_string())
+                    .bind(&organization_id)
                     .bind(keyset_id)
-                    .fetch_all(txn)
+                    .fetch_all(conn)
                     .await
                     .map_err(|e| DatabaseError::query(query, e))
             }
@@ -128,9 +127,9 @@ pub async fn find(
                 let query = "SELECT organization_id, keyset_id, content, version
                     FROM tenant_keysets WHERE organization_id = $1 AND keyset_id = ANY($2)";
                 sqlx::query_as(query)
-                    .bind(organization_id.to_string())
+                    .bind(&organization_id)
                     .bind(keyset_ids)
-                    .fetch_all(txn)
+                    .fetch_all(conn)
                     .await
                     .map_err(|e| DatabaseError::query(query, e))
             }
@@ -138,7 +137,7 @@ pub async fn find(
     } else {
         let query = "SELECT organization_id, keyset_id, content, version FROM tenant_keysets";
         sqlx::query_as::<_, TenantKeyset>(query)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))
     }?;
@@ -184,7 +183,7 @@ pub async fn update(
         Some(value.keyset_identifier.organization_id.to_string()),
         ObjectFilter::One(value.keyset_identifier.keyset_id.clone()),
         false,
-        txn,
+        &mut *txn,
     )
     .await?;
 
@@ -197,24 +196,24 @@ pub async fn update(
 
     let expected_version = value
         .if_version_match
-        .clone()
-        .unwrap_or(current_keyset[0].version.to_string());
+        .as_deref()
+        .unwrap_or(current_keyset[0].version.as_str());
 
     let query = "UPDATE tenant_keysets SET content=$1, version=$2 WHERE organization_id=$3 AND keyset_id=$4 AND version=$5
         RETURNING organization_id, keyset_id, content, version";
     match sqlx::query_as::<_, TenantKeyset>(query)
         .bind(sqlx::types::Json(&value.keyset_content))
-        .bind(value.version.to_string())
-        .bind(value.keyset_identifier.organization_id.to_string())
+        .bind(&value.version)
+        .bind(&value.keyset_identifier.organization_id)
         .bind(&value.keyset_identifier.keyset_id)
-        .bind(&expected_version)
+        .bind(expected_version)
         .fetch_one(txn)
         .await
     {
         Ok(_) => Ok(()),
         Err(sqlx::Error::RowNotFound) => Err(DatabaseError::ConcurrentModificationError(
             "keyset",
-            expected_version,
+            expected_version.to_owned(),
         )),
         Err(e) => Err(DatabaseError::query(query, e)),
     }

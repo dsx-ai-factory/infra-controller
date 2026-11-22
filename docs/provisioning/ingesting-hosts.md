@@ -16,6 +16,8 @@ Ensure you have the following prerequisites met before ingesting machines:
 1. For the remaining REST parity gaps, you have `nico-admin-cli` and direct access to the NICo site. See the next section for details.
 1. The NICo API service is running at IP address `NICo_API_EXTERNAL`. It is recommended that you add this IP address to your trusted list.
 1. DHCP requests from all managed host IPMI networks have been forwarded to the NICo service running at IP address `NICo_DHCP_EXTERNAL`.
+1. Complete the [DHCP Cutover Checklist](ip-and-network-configuration.md#dhcp-cutover-checklist). Configure reservations for each DPU BMC or DPU OS interface that uses a Fixed allocation policy. Dynamic and Retained policies allocate addresses through DHCP without a predefined reservation only on segments with `allocation_strategy = "dynamic"`. On segments with `allocation_strategy = "reserved"`, an interface cannot obtain its first DHCP address without an existing reservation.
+1. Configure the [Site-wide Credentials](../getting-started/quick-start.md#set-site-wide-credentials) before starting discovery.
 1. You have the following information for all hosts that need to be ingested:
 
    - The MAC address of the host BMC

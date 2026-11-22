@@ -37,7 +37,7 @@ use model::resource_pool::{
     OwnerType, ResourcePool, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolEntry,
     ResourcePoolEntryState, ResourcePoolError, ResourcePoolSnapshot, ResourcePoolStats, ValueType,
 };
-use sqlx::{PgConnection, Postgres, Row};
+use sqlx::{PgConnection, Row};
 
 use super::BIND_LIMIT;
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
@@ -521,7 +521,7 @@ where
 /// `find_integer_pool_overlap` compares all stored values of two integer pools.
 /// Allocation state and assignment partition do not restrict membership.
 pub async fn find_integer_pool_overlap(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     first_pool: &str,
     second_pool: &str,
 ) -> Result<Option<i64>, DatabaseError> {
@@ -532,7 +532,7 @@ pub async fn find_integer_pool_overlap(
     sqlx::query_scalar(query)
         .bind(first_pool)
         .bind(second_pool)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
@@ -542,7 +542,7 @@ pub async fn find_integer_pool_overlap(
 /// and allocation state, including inventory added by growth. The query compares
 /// compact intervals in PostgreSQL without returning the pool's inventory.
 pub async fn find_pool_overlap_with_ranges(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     pool_name: &str,
     ranges: &[(i64, i64)],
 ) -> Result<Option<i64>, DatabaseError> {
@@ -579,7 +579,7 @@ pub async fn find_pool_overlap_with_ranges(
         .bind(pool_name)
         .bind(starts)
         .bind(ends)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
@@ -635,6 +635,58 @@ where
     })
 }
 
+/// `release_by_recorded_owner` frees an exact value using its locked owner ID.
+/// The caller must first authorize release through an immutable entity/value
+/// association; a metadata name alone does not authorize this operation.
+/// Missing or free inventory returns `NotApplied`. Another owner type, or a
+/// rejected release after locking its owner, is an error. Inventory and the
+/// allocation record change through [`release`], preserving its diagnostics.
+/// Commit or roll back this operation together with the authorizing entity change.
+pub async fn release_by_recorded_owner<T>(
+    pool: &ResourcePool<T>,
+    txn: &mut Transaction<'_>,
+    value: T,
+    owner_type: OwnerType,
+) -> Result<ConditionalWrite<(), ResourcePoolAllocationNotOwned>, DatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    T::Err: std::error::Error,
+{
+    let value_text = value.to_string();
+    let query = "SELECT state FROM resource_pool
+                 WHERE name=$1 AND value=$2 FOR UPDATE";
+    let allocation: Option<sqlx::types::Json<ResourcePoolEntryState>> = sqlx::query_scalar(query)
+        .bind(pool.name())
+        .bind(&value_text)
+        .fetch_optional(txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    let owner = match allocation {
+        Some(sqlx::types::Json(ResourcePoolEntryState::Allocated {
+            owner,
+            owner_type: actual_owner_type,
+        })) => {
+            if actual_owner_type != owner_type.to_string() {
+                return Err(DatabaseError::FailedPrecondition(format!(
+                    "value `{value_text}` in pool `{}` is allocated to {actual_owner_type}, not {owner_type}",
+                    pool.name(),
+                )));
+            }
+            owner
+        }
+        None | Some(sqlx::types::Json(ResourcePoolEntryState::Free)) => {
+            return Ok(ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned));
+        }
+    };
+    match release(pool, txn, value, owner_type, &owner).await? {
+        ConditionalWrite::Applied(()) => Ok(ConditionalWrite::Applied(())),
+        ConditionalWrite::NotApplied(_) => Err(DatabaseError::FailedPrecondition(format!(
+            "value `{value_text}` in pool `{}` did not match its locked reservation for owner `{owner}`",
+            pool.name(),
+        ))),
+    }
+}
+
 async fn release_inner(
     txn: &mut PgConnection,
     pool_name: &str,
@@ -682,17 +734,14 @@ pub struct PoolValueInfo {
     /// auto-assignable cannot be explicitly requested via [`allocate`], so a
     /// deterministic reservation must target a non-auto-assign value.
     pub auto_assign: bool,
-    /// Free, or Allocated with its owner. A new or changed reservation must
-    /// target a Free value; an already-allocated value belongs to some DPU.
+    /// Free, or Allocated with its owner.
     pub state: ResourcePoolEntryState,
 }
 
 /// Look up one value in a pool without locking or claiming it.
 ///
-/// Returns `None` when the value is not a member of the pool. Callers use this
-/// to validate a requested reservation up front: it must exist, sit in the
-/// non-auto-assign partition, and be free (not already allocated to a DPU). The
-/// pool's own constraints remain the authority at allocation time.
+/// Returns `None` when the value is not a member of the pool. The caller
+/// decides whether the returned partition and ownership allow a reservation.
 pub async fn find_value_in_pool<T>(
     pool: &ResourcePool<T>,
     db: impl DbReader<'_>,
@@ -724,10 +773,10 @@ where
     }))
 }
 
-pub async fn stats<'c, E>(executor: E, name: &str) -> Result<ResourcePoolStats, DatabaseError>
-where
-    E: sqlx::Executor<'c, Database = Postgres>,
-{
+pub async fn stats(
+    conn: impl DbReader<'_>,
+    name: &str,
+) -> Result<ResourcePoolStats, DatabaseError> {
     // Will do an index scan on idx_resource_pools_name, same as without the FILTER, so doing
     // all at once is faster than two queries.
     let free_state = ResourcePoolEntryState::Free;
@@ -750,7 +799,7 @@ where
     let s: ResourcePoolStats = sqlx::query_as(query)
         .bind(sqlx::types::Json(free_state))
         .bind(name)
-        .fetch_one(executor)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(s)
@@ -817,7 +866,10 @@ pub async fn all_stored_defs(
 /// `all` returns local inventory bounds and counts, ordered by pool name.
 /// Pools do not need a saved backend binding to appear here. Address bounds
 /// omit the host prefix length; delegated IPv6 prefixes retain theirs.
-pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, DatabaseError> {
+pub async fn all<DB>(conn: &mut DB) -> Result<Vec<ResourcePoolSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut out = Vec::with_capacity(4);
 
     let query_int = "
@@ -872,7 +924,7 @@ pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, Da
 
     for query in [query_int, query_ip_address] {
         let mut rows: Vec<ResourcePoolSnapshot> = sqlx::query_as(query)
-            .fetch_all(&mut *txn)
+            .fetch_all(&mut *conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
         out.append(&mut rows);
@@ -1119,11 +1171,11 @@ pub async fn define_all_from(
 }
 /// `pool_has_rows` reports whether Integrated inventory exists for this pool,
 /// including rows already allocated. It does not query a remote backend.
-pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, DatabaseError> {
+pub async fn pool_has_rows(conn: impl DbReader<'_>, name: &str) -> Result<bool, DatabaseError> {
     let query: &str = "SELECT EXISTS(SELECT 1 FROM resource_pool WHERE name = $1)";
     let (exists,): (bool,) = sqlx::query_as(query)
         .bind(name)
-        .fetch_one(&mut *txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(exists)
@@ -1641,10 +1693,13 @@ fn expand_int_range(start_s: &str, end_s: &str) -> Result<Vec<i64>, eyre::Report
 
 /// Build shared pool handles after checking mandatory pool readiness. Integrated
 /// or unbound pools need free local values; remote pools need an accepted definition.
-pub async fn create_common_pools(
-    db: sqlx::PgPool,
+pub async fn create_common_pools<DB>(
+    conn: &mut DB,
     ib_fabric_ids: HashSet<String>,
-) -> eyre::Result<Arc<CommonPools>> {
+) -> eyre::Result<Arc<CommonPools>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut pool_names = Vec::new();
 
     let pool_loopback_ip: Arc<ResourcePool<IpAddr>> =
@@ -1682,7 +1737,7 @@ pub async fn create_common_pools(
     // Mandatory pools need local capacity when Integrated or unbound, and an
     // accepted provider definition when remote.
     for name in &pool_names {
-        match binding::load(&db, name).await? {
+        match binding::load(&mut *conn, name).await? {
             Some(ResourcePoolBinding {
                 backend_kind: ResourcePoolBackendKind::Grpc,
                 binding_id,
@@ -1690,7 +1745,7 @@ pub async fn create_common_pools(
             }) => {
                 // Local inventory cannot establish remote readiness. Provider
                 // capacity is checked when allocating.
-                if registration::latest_accepted(&db, binding_id)
+                if registration::latest_accepted(&mut *conn, binding_id)
                     .await?
                     .is_none()
                 {
@@ -1702,7 +1757,7 @@ pub async fn create_common_pools(
                 backend_kind: ResourcePoolBackendKind::Integrated,
                 ..
             }) => {
-                if stats(&db, name).await?.free == 0 {
+                if stats(&mut *conn, name).await?.free == 0 {
                     eyre::bail!(
                         "resource pool '{name}' missing or full. edit config file and restart"
                     );
@@ -1759,6 +1814,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
 
     /// Compact lookup preserves gaps and inclusive endpoints even when intervals
     /// arrive nested or unsorted, without parsing values from another pool type.
@@ -1811,10 +1867,13 @@ mod tests {
                 let pool_handle = &pool_handle;
                 async move {
                     let mut connection = pool.acquire().await.expect("membership connection");
-                    let overlap =
-                        find_pool_overlap_with_ranges(&mut connection, pool_handle.name(), &ranges)
-                            .await
-                            .expect("membership query succeeds with unrelated noninteger values");
+                    let overlap = find_pool_overlap_with_ranges(
+                        &mut *connection,
+                        pool_handle.name(),
+                        &ranges,
+                    )
+                    .await
+                    .expect("membership query succeeds with unrelated noninteger values");
                     Ok::<_, ()>(overlap)
                 }
             },
@@ -3303,7 +3362,9 @@ mod tests {
         assert_eq!(stats(&pool, VLANID).await?.free, 1);
         let with_local_vlan = resource_pool_inventory(&pool).await?;
 
-        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+        let Err(error) =
+            create_common_pools(&mut PgPoolReader::from(pool.clone()), HashSet::new()).await
+        else {
             panic!("a remote mandatory pool needs an accepted definition");
         };
         assert_eq!(
@@ -3328,7 +3389,9 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+        let Err(error) =
+            create_common_pools(&mut PgPoolReader::from(pool.clone()), HashSet::new()).await
+        else {
             panic!("a pending definition does not make a remote pool ready");
         };
         assert_eq!(
@@ -3358,7 +3421,7 @@ mod tests {
             .await?;
         txn.commit().await?;
         let without_local_vlan = resource_pool_inventory(&pool).await?;
-        create_common_pools(pool.clone(), HashSet::new()).await?;
+        create_common_pools(&mut PgPoolReader::from(pool.clone()), HashSet::new()).await?;
         assert_eq!(resource_pool_inventory(&pool).await?, without_local_vlan);
         let remote_rows: i64 =
             sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE name = $1")
@@ -3375,7 +3438,9 @@ mod tests {
         );
         txn.commit().await?;
         let bound_exhausted_inventory = resource_pool_inventory(&pool).await?;
-        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+        let Err(error) =
+            create_common_pools(&mut PgPoolReader::from(pool.clone()), HashSet::new()).await
+        else {
             panic!("an exhausted Integrated mandatory pool must fail readiness");
         };
         assert_eq!(
@@ -3413,7 +3478,9 @@ mod tests {
         txn.commit().await?;
         assert_eq!(binding::load(&pool, LOOPBACK_IP).await?, None);
         let unbound_exhausted_inventory = resource_pool_inventory(&pool).await?;
-        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+        let Err(error) =
+            create_common_pools(&mut PgPoolReader::from(pool.clone()), HashSet::new()).await
+        else {
             panic!("an exhausted unbound mandatory pool must fail readiness");
         };
         assert_eq!(

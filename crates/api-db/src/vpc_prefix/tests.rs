@@ -279,7 +279,7 @@ async fn exercise_prefix_queries(
     );
     txn.commit().await?;
 
-    let stored_child = network_prefix::find(connection, child.id).await?;
+    let stored_child = network_prefix::find(&mut *connection, child.id).await?;
     assert_eq!(
         serde_json::to_value(stored_child)?,
         serde_json::to_value(child)?

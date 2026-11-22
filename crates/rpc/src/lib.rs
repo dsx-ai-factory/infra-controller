@@ -247,10 +247,27 @@ impl<'a> serde::Deserialize<'a> for Timestamp {
     where
         D: serde::Deserializer<'a>,
     {
-        let s = String::deserialize(deserializer)?;
-        let dt =
-            DateTime::<Utc>::from_str(&s).unwrap_or_else(|_e| DateTime::<chrono::Utc>::default());
-        Ok(dt.into())
+        struct StringVisitor;
+
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = Timestamp;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Timestamp, E> {
+                Ok(DateTime::<Utc>::from_str(value).unwrap_or_default().into())
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Timestamp, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer.deserialize_string(StringVisitor)
     }
 }
 
@@ -1178,6 +1195,63 @@ mod tests {
         assert_eq!(
             "\"1970-01-01T00:00:00Z\"",
             serde_json::to_string(&proto_ts).unwrap()
+        );
+    }
+
+    #[test]
+    fn timestamp_deserialization_preserves_lenient_text_and_utf8_errors() {
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::{Case, check_cases};
+        use serde::Deserialize;
+        use serde::de::value::{BorrowedBytesDeserializer, Error, StrDeserializer};
+
+        #[derive(Debug)]
+        enum Input {
+            Text(&'static str),
+            Bytes(&'static [u8]),
+        }
+
+        let timestamp = Timestamp::from(prost_types::Timestamp {
+            seconds: 1_672_628_645,
+            nanos: 123_456_789,
+        });
+        check_cases(
+            [
+                Case {
+                    scenario: "valid text preserves seconds and nanoseconds",
+                    input: Input::Text("2023-01-02T03:04:05.123456789Z"),
+                    expect: Yields(timestamp),
+                },
+                Case {
+                    scenario: "malformed text defaults to the epoch",
+                    input: Input::Text("not a timestamp"),
+                    expect: Yields(Timestamp::from(prost_types::Timestamp {
+                        seconds: 0,
+                        nanos: 0,
+                    })),
+                },
+                Case {
+                    scenario: "UTF-8 bytes use timestamp parsing",
+                    input: Input::Bytes(b"2023-01-02T03:04:05.123456789Z"),
+                    expect: Yields(timestamp),
+                },
+                Case {
+                    scenario: "invalid UTF-8 is rejected",
+                    input: Input::Bytes(&[0xff]),
+                    expect: FailsWith("invalid value: byte array, expected a string".to_string()),
+                },
+            ],
+            |input| {
+                match input {
+                    Input::Text(text) => {
+                        Timestamp::deserialize(StrDeserializer::<Error>::new(text))
+                    }
+                    Input::Bytes(bytes) => {
+                        Timestamp::deserialize(BorrowedBytesDeserializer::<Error>::new(bytes))
+                    }
+                }
+                .map_err(|error| error.to_string())
+            },
         );
     }
 

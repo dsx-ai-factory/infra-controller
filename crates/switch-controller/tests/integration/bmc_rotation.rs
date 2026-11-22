@@ -117,8 +117,7 @@ async fn load_switch(
     pool: &sqlx::PgPool,
     switch_id: &carbide_uuid::switch::SwitchId,
 ) -> TestResult<Switch> {
-    let mut conn = pool.acquire().await?;
-    Ok(db_switch::find_by_id(&mut conn, switch_id)
+    Ok(db_switch::find_by_id(pool, switch_id)
         .await?
         .expect("switch should exist"))
 }
@@ -212,8 +211,7 @@ async fn switch_store_persist_failure_holds_in_rotating_bmc_until_reconciled(
         "the rotation suppression must be retained while the store lags"
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, bmc_mac)
+        let status = device_rotation_status(&pool, BMC, bmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -262,8 +260,7 @@ async fn switch_store_persist_failure_holds_in_rotating_bmc_until_reconciled(
         "resume must delete the rotation suppression once reconciled"
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, bmc_mac)
+        let status = device_rotation_status(&pool, BMC, bmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(

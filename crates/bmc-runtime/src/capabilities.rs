@@ -25,11 +25,11 @@ use std::sync::Arc;
 use bmc_drivers::CatalogError;
 use bmc_platform::{
     Accounts, Attestation, Bios, BiosSettings, BiosStatus, BmcControl, BootInterfaceSelector,
-    BootOrder, BootOrderStatus, Capability, ClassifyBmcError, Console, ConsoleSpec, ConsoleStatus,
-    Dpu, DpuStatus, DriverOutcome, EvidenceProgress, Firmware, FirmwareUpload, HostPrivilegeLevel,
-    Lockdown, LockdownDesiredState, LockdownScope, LockdownStatus, ManagerSettings,
-    ManagerSettingsStatus, NicMode, OperationReference, PlatformError, Power, RshimState,
-    SecureBoot, SecureBootStatus, Storage, SuperNic, TimeStatus,
+    BootOrder, BootOrderStatus, BootProgress, Capability, ClassifyBmcError, Console, ConsoleSpec,
+    ConsoleStatus, Dpu, DpuStatus, DriverOutcome, EvidenceProgress, Firmware, FirmwareUpload,
+    HostPrivilegeLevel, Lockdown, LockdownDesiredState, LockdownScope, LockdownStatus,
+    ManagerSettings, ManagerSettingsStatus, NicMode, OperationReference, PlatformError, Power,
+    RshimState, SecureBoot, SecureBootStatus, Storage, SuperNic, TimeStatus,
 };
 use nv_redfish::Bmc;
 use nv_redfish::account::ManagerAccountCreate;
@@ -54,6 +54,17 @@ pub struct BoundDriver<'a, D: ?Sized + 'a, B: Bmc + 'static> {
     bmc: &'a ConnectedBmc<B>,
 }
 
+impl<B: Bmc + 'static> BoundDriver<'_, dyn Power<B>, B>
+where
+    B::Error: ClassifyBmcError,
+{
+    /// Whether this power request can reach the prepared IPMI transport.
+    pub fn may_use_ipmi_restart(&self, action: ResetType) -> bool {
+        self.driver
+            .may_use_ipmi_restart(&self.bmc.operation_context(), action)
+    }
+}
+
 impl<B: Bmc + 'static> ConnectedBmc<B>
 where
     B::Error: ClassifyBmcError,
@@ -76,7 +87,7 @@ where
 /// `$capability.$method`.
 macro_rules! capability_operations {
     ($capability:ident: $trait:ident {
-        $(fn $method:ident(&self $(, $arg:ident: $ty:ty)* $(,)?) -> $ok:ty;)*
+        $(fn $method:ident(&self $(, $arg:ident: $ty:ty)* $(,)?) -> $ok:ty $(=> [$($secret:expr),* $(,)?])?;)*
     }) => {
         impl<B: Bmc + 'static> ConnectedBmc<B>
         where
@@ -99,15 +110,26 @@ macro_rules! capability_operations {
                     // driver's future: state handlers await many of these, and
                     // inlining them all grows each handler's stack frame.
                     Box::pin(async move {
+                        let secrets: Vec<String> = vec![$($(String::from($secret)),*)?];
                         let cx = self.bmc.operation_context();
-                        observe(
+                        let result = observe(
                             &self.bmc.instrumentation,
                             self.bmc.endpoint(),
                             Some(Capability::$trait),
                             concat!(stringify!($capability), ".", stringify!($method)),
                             self.driver.$method(&cx $(, $arg)*),
                         )
-                        .await
+                        .await;
+                        if secrets.is_empty() {
+                            result
+                        } else {
+                            let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+                            result.map_err(|error| {
+                                error.map_messages(&mut |text| {
+                                    carbide_utils::redfish::mask_all(text, refs.iter().copied())
+                                })
+                            })
+                        }
                     })
                     .await
                 }
@@ -126,11 +148,11 @@ macro_rules! capability_operations {
 
 capability_operations!(accounts: Accounts {
     fn list(&self) -> Vec<Arc<ManagerAccount>>;
-    fn create(&self, request: ManagerAccountCreate) -> DriverOutcome;
+    fn create(&self, request: ManagerAccountCreate) -> DriverOutcome => [request.password.as_str()];
     fn delete(&self, username: &str) -> DriverOutcome;
-    fn change_password(&self, account_username: &str, password: &str) -> DriverOutcome;
+    fn change_password(&self, account_username: &str, password: &str) -> DriverOutcome => [password];
     fn change_username(&self, old_username: &str, new_username: &str) -> DriverOutcome;
-    fn apply_default_policy(&self, account_username: &str, password: &str) -> DriverOutcome;
+    fn apply_default_policy(&self, account_username: &str, password: &str) -> DriverOutcome => [password];
 });
 
 capability_operations!(attestation: Attestation {
@@ -155,8 +177,8 @@ capability_operations!(bios: Bios {
     fn reset(&self) -> DriverOutcome;
     fn clear_pending(&self) -> DriverOutcome;
     fn clear_nvram(&self) -> DriverOutcome;
-    fn change_uefi_password(&self, current_password: &str, new_password: &str) -> DriverOutcome;
-    fn clear_uefi_password(&self, current_password: &str) -> DriverOutcome;
+    fn change_uefi_password(&self, current_password: &str, new_password: &str) -> DriverOutcome => [current_password, new_password];
+    fn clear_uefi_password(&self, current_password: &str) -> DriverOutcome => [current_password];
     fn clear_tpm(&self) -> DriverOutcome;
     fn infinite_boot_enabled(&self) -> Option<bool>;
 });
@@ -208,6 +230,7 @@ capability_operations!(lockdown: Lockdown {
 
 capability_operations!(power: Power {
     fn state(&self) -> Option<PowerState>;
+    fn boot_progress(&self) -> Option<BootProgress>;
     fn ac_power_cycle_supported(&self) -> bool;
     fn set(&self, reset_type: ResetType) -> DriverOutcome;
     fn chassis_reset(&self, chassis_id: &str, reset_type: ResetType) -> DriverOutcome;

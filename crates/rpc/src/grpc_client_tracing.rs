@@ -161,7 +161,7 @@ mod tests {
                     Reply::Headers(code) | Reply::Trailers(code) => code,
                     _ => unreachable!(),
                 };
-                metadata.insert("grpc-status", code.to_string().parse().unwrap());
+                metadata.insert("grpc-status", code.into());
                 let response = match reply {
                     Reply::Headers(_) => {
                         let mut response = Response::new(Body::empty());

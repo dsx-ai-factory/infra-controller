@@ -146,7 +146,7 @@ fn render_user_data(
     let bmc_fw_update = state
         .engine
         .render("bmc_fw_update", HashMap::<String, String>::new())
-        .unwrap_or("".to_string());
+        .unwrap_or_default();
     context.insert("forge_bmc_fw_update".to_string(), bmc_fw_update);
 
     let seconds_since_epoch = SystemTime::now()

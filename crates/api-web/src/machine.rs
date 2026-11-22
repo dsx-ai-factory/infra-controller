@@ -321,6 +321,10 @@ async fn show(
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_machine(
     api: &Api,
     machine_id: MachineId,
@@ -364,6 +368,10 @@ async fn fetch_machine(
 }
 
 /// Fetches Instance Type Names for the given Instance Type IDs
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_instance_type_names(
     api: &Api,
     instance_type_ids: Vec<String>,
@@ -390,7 +398,7 @@ async fn fetch_instance_type_names(
 
     let mut result = HashMap::new();
     for instance_type in instance_types {
-        if let Some(name) = instance_type.metadata.as_ref().map(|m| m.name.clone()) {
+        if let Some(name) = instance_type.metadata.map(|m| m.name) {
             result.insert(instance_type.id, name);
         }
     }
@@ -1061,7 +1069,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             lifecycle_detail: super::LifecycleDetail {
                 last_reboot: Some(
                     to_time(status.last_reboot_time, Some(&machine_id))
-                        .unwrap_or("N/A".to_string()),
+                        .unwrap_or_else(|| "N/A".to_string()),
                 ),
                 ..super::LifecycleDetail::new(m.state, m.state_version, m.state_reason, m.state_sla)
             },
@@ -1102,7 +1110,9 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             capabilities_json: status
                 .capabilities
                 .as_ref()
-                .map(|set| serde_json::to_string_pretty(set).unwrap_or("Invalid JSON".to_string()))
+                .map(|set| {
+                    serde_json::to_string_pretty(set).unwrap_or_else(|_| "Invalid JSON".to_string())
+                })
                 .unwrap_or_else(|| "{}".to_string()),
             capabilities: status
                 .capabilities

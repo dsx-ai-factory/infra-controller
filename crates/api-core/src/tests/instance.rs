@@ -25,7 +25,7 @@ use ::rpc::forge::forge_server::Forge;
 use carbide_dpf::{DpfError, DpuDeploymentType};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_redfish::libredfish::test_support::{RedfishSimAction, RedfishSimTimepoint};
 use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::DpuMachineId;
@@ -68,9 +68,9 @@ use model::instance::config::network::{
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::{
     AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine,
-    HostPlatformConfigurationState, InstanceState, MachineState, MachineValidatingState,
-    ManagedHostState, ManagedHostStateSnapshot, MeasuringState, NetworkConfigUpdateState,
-    SpdmMeasuringState, ValidationState,
+    HostPlatformConfigurationState, InstanceState, MachineLastRebootRequestedMode, MachineState,
+    MachineValidatingState, ManagedHostState, ManagedHostStateSnapshot, MeasuringState,
+    NetworkConfigUpdateState, RetryInfo, SpdmMeasuringState, ValidationState,
 };
 use model::metadata::Metadata;
 use model::network_prefix::NewNetworkPrefix;
@@ -412,6 +412,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         )),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -986,8 +987,7 @@ async fn test_release_waits_for_service_vpc_endpoint_cleanup(pool: sqlx::PgPool)
 
     // With placement already terminated, only the endpoint guard can own this wait.
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, waiting);
     assert!(
         matches!(
@@ -1013,7 +1013,6 @@ async fn test_release_waits_for_service_vpc_endpoint_cleanup(pool: sqlx::PgPool)
         Some(removal_time)
     );
     assert_eq!(persisted.config.network.service_interfaces, vec![endpoint]);
-    txn.commit().await.unwrap();
 }
 
 /// Verifies public whole-instance release marks every attachment retaining endpoints in one write
@@ -1156,14 +1155,14 @@ async fn test_release_terminates_multiple_service_vpc_owners_atomically(
     // Both generated segments and normalized addresses remain until external cleanup is observed.
     for endpoint in [first_endpoint, second_endpoint] {
         let segments = db::network_segment::find_by(
-            &mut *env.pool.acquire().await?,
+            &mut env.db_reader(),
             ObjectColumnFilter::One(IdColumn, &endpoint.network_segment_id),
             NetworkSegmentSearchConfig::default(),
         )
         .await?;
         assert_eq!(segments.len(), 1);
         let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-            &mut *env.pool.acquire().await?,
+            &env.pool,
             &instance.id,
             &endpoint.network_segment_id,
         )
@@ -1353,14 +1352,12 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
     }
 
     async fn assert_instance_state(env: &TestEnv, mh: &TestManagedHost, expected: InstanceState) {
-        let mut txn = env.db_txn().await;
         assert_eq!(
-            mh.host().db_machine(&mut txn).await.current_state(),
+            mh.host().db_machine(&env.pool).await.current_state(),
             &ManagedHostState::Assigned {
                 instance_state: expected,
             }
         );
-        txn.commit().await.unwrap();
     }
 
     async fn assert_pxe_reboot_wait_outcome(
@@ -1368,8 +1365,7 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
         mh: &TestManagedHost,
         expected_reason: &str,
     ) {
-        let mut txn = env.db_txn().await;
-        let host_machine = mh.host().db_machine(&mut txn).await;
+        let host_machine = mh.host().db_machine(&env.pool).await;
         let Some(PersistentStateHandlerOutcome::Wait {
             reason,
             source_ref: Some(source_ref),
@@ -1379,7 +1375,6 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
         };
         assert_eq!(reason, expected_reason);
         assert!(source_ref.file.ends_with("/handler.rs"));
-        txn.commit().await.unwrap();
     }
 
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
@@ -1519,8 +1514,7 @@ async fn test_instance_release_waits_for_primary_dpu_network_health_before_disco
     }
 
     async fn assert_release_is_waiting(env: &TestEnv, mh: &TestManagedHost, scenario: &str) {
-        let mut txn = env.db_txn().await;
-        let host = mh.host().db_machine(&mut txn).await;
+        let host = mh.host().db_machine(&env.pool).await;
         assert_eq!(
             host.current_state(),
             &ManagedHostState::Assigned {
@@ -1534,7 +1528,6 @@ async fn test_instance_release_waits_for_primary_dpu_network_health_before_disco
             panic!("{scenario}: release gate should persist a Wait outcome");
         };
         assert_eq!(reason, DPU_NETWORK_READY_WAIT_REASON, "{scenario}");
-        txn.commit().await.unwrap();
     }
 
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
@@ -1596,16 +1589,14 @@ async fn test_instance_release_waits_for_primary_dpu_network_health_before_disco
     network_configured_with_health(&env, &mh.dpu_ids[0], Some(agent_health(None))).await;
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.db_txn().await;
     assert_eq!(
-        mh.host().db_machine(&mut txn).await.current_state(),
+        mh.host().db_machine(&env.pool).await.current_state(),
         &ManagedHostState::Assigned {
             instance_state: InstanceState::BootingWithDiscoveryImage {
                 retry: model::machine::RetryInfo { count: 0 },
             },
         }
     );
-    txn.commit().await.unwrap();
 
     let power_actions = env
         .redfish_sim
@@ -1758,8 +1749,7 @@ async fn test_instance_cloud_init_metadata(
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.db_txn().await;
-    let machine = mh.host().db_machine(&mut txn).await;
+    let machine = mh.host().db_machine(&env.pool).await;
 
     let request = tonic::Request::new(rpc::forge::CloudInitInstructionsRequest {
         ip: machine.status.interfaces[0].addresses[0].to_string(),
@@ -1791,7 +1781,6 @@ async fn test_instance_cloud_init_metadata(
 
     assert_eq!(metadata.instance_id, tinstance.id.to_string());
 
-    txn.commit().await.unwrap();
     tinstance.delete().await;
 
     Ok(())
@@ -1864,9 +1853,7 @@ async fn test_bootingwithdiscoveryimage_delay(_: PgPoolOptions, options: PgConne
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let host = mh.host().db_machine(&env.pool).await;
 
     update_time_params(&env.pool, &host, 1, None).await;
     env.run_machine_state_controller_iteration_until_state_matches(
@@ -1900,6 +1887,179 @@ async fn test_bootingwithdiscoveryimage_delay(_: PgPoolOptions, options: PgConne
             .formatted_metric("carbide_reboot_attempts_in_booting_with_discovery_image_count")
             .unwrap(),
         "1"
+    );
+}
+
+/// What ends the DPU wait after a `BootingWithDiscoveryImage` power-cycle retry.
+#[derive(Clone, Copy, Debug)]
+enum DiscoveryPowerCycleWaitEnd {
+    DpusReport,
+    NextRetryDue,
+}
+
+#[crate::sqlx_test]
+async fn test_bootingwithdiscoveryimage_restarts_once_dpus_report_after_power_cycle(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    check_discovery_power_cycle_restarts_host_once(options, DiscoveryPowerCycleWaitEnd::DpusReport)
+        .await;
+}
+
+#[crate::sqlx_test]
+async fn test_bootingwithdiscoveryimage_power_cycle_dpu_wait_ends_at_next_retry(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    check_discovery_power_cycle_restarts_host_once(
+        options,
+        DiscoveryPowerCycleWaitEnd::NextRetryDue,
+    )
+    .await;
+}
+
+async fn check_discovery_power_cycle_restarts_host_once(
+    options: PgConnectOptions,
+    wait_end: DiscoveryPowerCycleWaitEnd,
+) {
+    const DPUS_UP_AFTER_POWER_CYCLE_WAIT_REASON: &str =
+        "Waiting for DPUs to come up after host power cycle before PXE reboot";
+
+    fn booting_with_discovery_image(count: u64) -> ManagedHostState {
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage {
+                retry: RetryInfo { count },
+            },
+        }
+    }
+
+    fn power_actions(env: &TestEnv, checkpoint: &RedfishSimTimepoint) -> Vec<RedfishSimAction> {
+        env.redfish_sim
+            .actions_since(checkpoint)
+            .all_hosts()
+            .into_iter()
+            .filter(|action| matches!(action, RedfishSimAction::Power(_)))
+            .collect()
+    }
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+
+    let tinstance = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    env.api
+        .release_instance(tonic::Request::new(InstanceReleaseRequest {
+            id: Some(tinstance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .expect("Delete instance failed.");
+
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        8,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::CheckHostConfig,
+            },
+        },
+    )
+    .await;
+    mh.network_configured(&env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        2,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForDpusToUp,
+        },
+    )
+    .await;
+    mh.network_configured(&env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        1,
+        booting_with_discovery_image(0),
+    )
+    .await;
+
+    // The host never reports back, so retries 1-3 restart it and retry 4 powers it off.
+    for count in 1..=4 {
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        txn.commit().await.unwrap();
+        update_time_params(&env.pool, &host, 1, None).await;
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &mh.host().id,
+            1,
+            booting_with_discovery_image(count),
+        )
+        .await;
+    }
+
+    let checkpoint = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration().await;
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    txn.commit().await.unwrap();
+    assert_eq!(host.current_state(), &booting_with_discovery_image(4));
+    // The backdated retries leave the state above its SLA, which wraps the wait in an error.
+    assert!(
+        matches!(
+            &host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Error { err, .. })
+                if err.contains(DPUS_UP_AFTER_POWER_CYCLE_WAIT_REASON)
+        ),
+        "powered-on host should wait for its DPUs, got {:?}",
+        host.controller_state_outcome,
+    );
+    assert_eq!(
+        power_actions(&env, &checkpoint),
+        vec![RedfishSimAction::Power(libredfish::SystemPowerControl::On)],
+        "host must not be restarted for PXE before its DPUs report after power-on",
+    );
+
+    match wait_end {
+        DiscoveryPowerCycleWaitEnd::DpusReport => mh.network_configured(&env).await,
+        DiscoveryPowerCycleWaitEnd::NextRetryDue => {
+            let mut txn = env.db_txn().await;
+            let host = mh.host().db_machine(&mut txn).await;
+            txn.commit().await.unwrap();
+            update_time_params(&env.pool, &host, 1, None).await;
+        }
+    }
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        1,
+        booting_with_discovery_image(5),
+    )
+    .await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    txn.commit().await.unwrap();
+    assert_eq!(
+        host.status
+            .last_reboot_requested
+            .map(|request| request.mode),
+        Some(MachineLastRebootRequestedMode::Reboot),
+    );
+    assert_eq!(
+        power_actions(&env, &checkpoint),
+        vec![
+            RedfishSimAction::Power(libredfish::SystemPowerControl::On),
+            RedfishSimAction::Power(libredfish::SystemPowerControl::ForceRestart),
+        ],
+        "{wait_end:?}",
     );
 }
 
@@ -1948,6 +2108,7 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -1964,9 +2125,8 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
     txn.commit().await.unwrap();
     assert!(config.network.interfaces[0].network_segment_id.is_some());
 
-    let mut txn = env.db_txn().await;
     let network_segment = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         ObjectColumnFilter::One(
             IdColumn,
             &config.network.interfaces[0].network_segment_id.unwrap(),
@@ -2053,16 +2213,13 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
         for _ in 0..10 {
             env.run_machine_state_controller_iteration_no_requeue()
                 .await;
-            let mut txn = env.db_txn().await;
-            let state = mh.snapshot(&mut txn).await.managed_state;
-            txn.commit().await.unwrap();
+            let state = mh.snapshot(&mut env.db_reader()).await.managed_state;
             if state == waiting {
                 break;
             }
         }
 
-        let mut txn = env.db_txn().await;
-        let snapshot = mh.snapshot(&mut txn).await;
+        let snapshot = mh.snapshot(&mut env.db_reader()).await;
         assert_eq!(
             snapshot.host_snapshot.network_config.use_admin_network,
             Some(true),
@@ -2084,7 +2241,6 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
             .find(|interface| interface.primary_interface)
             .and_then(|interface| interface.attached_dpu_machine_id)
             .unwrap();
-        txn.commit().await.unwrap();
         if predecessor_selected_tenant {
             // The predecessor persisted tenant mode and its restart before entering this wait.
             let mut txn = env.db_txn().await;
@@ -2138,8 +2294,7 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
         let tenant_wait = ManagedHostState::Assigned {
             instance_state: InstanceState::WaitingForNetworkConfig,
         };
-        let mut txn = env.db_txn().await;
-        let snapshot = mh.snapshot(&mut txn).await;
+        let snapshot = mh.snapshot(&mut env.db_reader()).await;
         assert_eq!(snapshot.managed_state, tenant_wait, "{scenario}");
         assert_eq!(
             snapshot.host_snapshot.network_config.use_admin_network,
@@ -2161,7 +2316,6 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
                 "{scenario}"
             );
         }
-        txn.commit().await.unwrap();
 
         for (dpu_id, admin_response) in admin_responses {
             let response = env
@@ -2202,8 +2356,7 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
                 .unwrap();
         }
         env.run_machine_state_controller_iteration().await;
-        let mut txn = env.db_txn().await;
-        let snapshot = mh.snapshot(&mut txn).await;
+        let snapshot = mh.snapshot(&mut env.db_reader()).await;
         assert_eq!(snapshot.managed_state, tenant_wait, "{scenario}");
         assert!(
             matches!(
@@ -2234,11 +2387,9 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
             Some(true),
             "{scenario}"
         );
-        txn.commit().await.unwrap();
 
         mh.network_configured(&env).await;
-        let mut txn = env.db_txn().await;
-        let snapshot = mh.snapshot(&mut txn).await;
+        let snapshot = mh.snapshot(&mut env.db_reader()).await;
         assert!(
             snapshot.managed_host_network_config_version_synced(),
             "{scenario}"
@@ -2249,12 +2400,10 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
             instance.network_config_version,
             "{scenario}"
         );
-        txn.commit().await.unwrap();
         // Keep the immediate successor visible even while another host is queued.
         env.run_machine_state_controller_iteration_no_requeue()
             .await;
-        let mut txn = env.db_txn().await;
-        let snapshot = mh.snapshot(&mut txn).await;
+        let snapshot = mh.snapshot(&mut env.db_reader()).await;
         assert_eq!(
             snapshot.managed_state,
             ManagedHostState::Assigned {
@@ -2262,7 +2411,6 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
             },
             "{scenario}"
         );
-        txn.commit().await.unwrap();
     }
 }
 
@@ -3055,8 +3203,7 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
     assert_eq!(dual_status_interface.prefixes[1], "fd42:2403:0:1::/64");
 
     let dual_stack_instance_id = dual_stack_instance.id.unwrap();
-    let mut txn = fixture.env.db_txn().await;
-    let dual_snapshot = db::instance::find_by_id(txn.as_mut(), dual_stack_instance_id)
+    let dual_snapshot = db::instance::find_by_id(&fixture.env.pool, dual_stack_instance_id)
         .await
         .unwrap()
         .expect("persisted dual-stack SLAAC instance");
@@ -3078,12 +3225,11 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
         Some(&expected_dual_ipv6_prefix),
     );
     let dual_addresses =
-        db::instance_address::find_by_segment_id(txn.as_mut(), &dual_stack_segment_id)
+        db::instance_address::find_by_segment_id(&fixture.env.pool, &dual_stack_segment_id)
             .await
             .unwrap();
     assert_eq!(dual_addresses.len(), 1);
     assert!(dual_addresses[0].address.is_ipv4());
-    txn.commit().await.unwrap();
 
     let dual_managed_config = fixture
         .env
@@ -3298,15 +3444,13 @@ async fn test_deleted_slaac_vpc_rejects_manual_segment_address_allocation(pool: 
             if message.contains("only 0 active VPCs were found")
     ));
 
-    let mut txn = fixture.env.db_txn().await;
     assert_eq!(
-        db::instance_address::count_by_segment_id(txn.as_mut(), &fixture.segment_id)
+        db::instance_address::count_by_segment_id(&fixture.env.pool, &fixture.segment_id)
             .await
             .unwrap(),
         0,
         "the losing allocation must not materialize an address",
     );
-    txn.rollback().await.unwrap();
 }
 
 /// If allocation wins serialization, final deletion must wait for its commit
@@ -3375,10 +3519,9 @@ async fn test_slaac_allocation_blocks_and_defeats_segment_final_delete(pool: PgP
             if message.contains("allocations still reference it")
     ));
 
-    let mut txn = fixture.env.db_txn().await;
     assert!(
         !db::network_segment::find_by(
-            txn.as_mut(),
+            &mut fixture.env.db_reader(),
             ObjectColumnFilter::One(IdColumn, &fixture.segment_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -3388,19 +3531,18 @@ async fn test_slaac_allocation_blocks_and_defeats_segment_final_delete(pool: PgP
         "failed final deletion must retain the segment",
     );
     assert!(
-        db::instance_address::find_by_segment_id(txn.as_mut(), &fixture.segment_id)
+        db::instance_address::find_by_segment_id(&fixture.env.pool, &fixture.segment_id)
             .await
             .unwrap()
             .is_empty(),
         "SLAAC allocation must retain only its prefix",
     );
     assert_eq!(
-        db::instance::count_network_segment_references(txn.as_mut(), &fixture.segment_id)
+        db::instance::count_network_segment_references(&fixture.env.pool, &fixture.segment_id)
             .await
             .unwrap(),
         1,
     );
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies a rare overlap from outside parent-prefix serialization retries
@@ -3464,9 +3606,8 @@ async fn test_auto_vpc_prefix_selection_retries_concurrent_network_prefix_insert
         interface.network_details,
         Some(NetworkDetails::VpcPrefixId(fixture.lower_ipv4_prefix_id)),
     );
-    let mut txn = fixture.env.db_txn().await;
     let generated_segment = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut fixture.env.db_reader(),
         ObjectColumnFilter::One(IdColumn, &interface.network_segment_id.unwrap()),
         NetworkSegmentSearchConfig::default(),
     )
@@ -3479,7 +3620,6 @@ async fn test_auto_vpc_prefix_selection_retries_concurrent_network_prefix_insert
             .lower_ipv4_prefix
             .contains(generated_segment[0].prefixes[0].prefix.network())
     );
-    txn.commit().await.unwrap();
 }
 
 /// Verifies a deleted candidate is rejected by its locking re-read so allocation
@@ -3654,9 +3794,8 @@ async fn test_cross_tenant_vpc_selectors_persist_allocations(pool: PgPool) {
         );
 
         // The generated segment must belong to the selected VPC, not the Instance tenant.
-        let mut txn = fixture.env.db_txn().await;
         let segment = db::network_segment::find_by(
-            txn.as_mut(),
+            &mut fixture.env.db_reader(),
             ObjectColumnFilter::One(IdColumn, &interface.network_segment_id.unwrap()),
             NetworkSegmentSearchConfig::default(),
         )
@@ -3670,13 +3809,12 @@ async fn test_cross_tenant_vpc_selectors_persist_allocations(pool: PgPool) {
             Some(fixture.lower_ipv4_prefix_id)
         );
         assert_eq!(
-            db::instance_address::count_by_segment_id(&mut txn, &segment.id)
+            db::instance_address::count_by_segment_id(&fixture.env.pool, &segment.id)
                 .await
                 .unwrap(),
             1,
             "{scenario}",
         );
-        txn.rollback().await.unwrap();
     }
 }
 
@@ -3744,9 +3882,8 @@ async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_del
     );
 
     // The generated segment is queued for lifecycle deletion and its instance address is freed.
-    let mut txn = fixture.env.db_txn().await;
     let generated_segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut fixture.env.db_reader(),
         ObjectColumnFilter::One(IdColumn, &generated_segment_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -3757,12 +3894,11 @@ async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_del
     };
     assert!(generated_segment.is_marked_as_deleted());
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &generated_segment_id)
+        db::instance_address::count_by_segment_id(&fixture.env.pool, &generated_segment_id)
             .await
             .unwrap(),
         0,
     );
-    txn.commit().await.unwrap();
 }
 
 /// Holds one tenant-owned FNN VPC and ordered candidates so every scenario
@@ -4023,9 +4159,8 @@ async fn assert_ipv6_only_resolution(
             .is_ipv6()
     );
 
-    let mut txn = fixture.env.db_txn().await;
     let ipv6_only_segment = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut fixture.env.db_reader(),
         ObjectColumnFilter::One(IdColumn, &ipv6_only_segment_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -4039,7 +4174,7 @@ async fn assert_ipv6_only_resolution(
     );
 
     let ipv6_only_addresses =
-        db::instance_address::find_by_segment_id(txn.as_mut(), &ipv6_only_segment_id)
+        db::instance_address::find_by_segment_id(&fixture.env.pool, &ipv6_only_segment_id)
             .await
             .unwrap();
 
@@ -4052,7 +4187,6 @@ async fn assert_ipv6_only_resolution(
     ));
     let tenant_interface_prefix = IpNetwork::new(tenant_address, 128).unwrap();
     assert_eq!(ipv6_only_addresses[0].prefix, tenant_interface_prefix);
-    txn.commit().await.unwrap();
 
     // Core publishes only the real V6 family and leaves deprecated V4 fields
     // empty rather than fabricating an unusable V4 address configuration.
@@ -4152,9 +4286,8 @@ async fn assert_dual_stack_resolution(
     );
 
     // Both selected family linknets must share one generated segment.
-    let mut txn = fixture.env.db_txn().await;
     let dual_stack_segment = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut fixture.env.db_reader(),
         ObjectColumnFilter::One(IdColumn, &dual_stack_segment_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -4179,7 +4312,7 @@ async fn assert_dual_stack_resolution(
     );
 
     let dual_stack_addresses =
-        db::instance_address::find_by_segment_id(txn.as_mut(), &dual_stack_segment_id)
+        db::instance_address::find_by_segment_id(&fixture.env.pool, &dual_stack_segment_id)
             .await
             .unwrap();
 
@@ -4203,7 +4336,6 @@ async fn assert_dual_stack_resolution(
         .expect("dual-stack segment has an IPv6 prefix")
         .prefix
         .to_string();
-    txn.commit().await.unwrap();
 
     let managed_config = fixture
         .env
@@ -4640,9 +4772,7 @@ async fn test_service_vpc_coordinator_allocates_enabled_ipv6_127_endpoint(
     let request = RequestedInstanceExtensionServicesConfig {
         service_configs: vec![selection],
     };
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -4693,7 +4823,7 @@ async fn test_service_vpc_coordinator_allocates_enabled_ipv6_127_endpoint(
     assert_eq!(endpoint.dpu_id, host.dpu_ids[0]);
     assert_eq!(endpoint.link_prefix, "fd42:230::/127".parse()?);
     let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        &mut *env.pool.acquire().await?,
+        &env.pool,
         &instance.id,
         &endpoint.network_segment_id,
     )
@@ -4701,11 +4831,10 @@ async fn test_service_vpc_coordinator_allocates_enabled_ipv6_127_endpoint(
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].address, "fd42:230::1".parse::<IpAddr>()?);
     assert_eq!(addresses[0].prefix, endpoint.link_prefix);
-    let parent =
-        db::vpc_prefix::get_for_allocation_by_ids(&mut *env.pool.acquire().await?, &[parent_id])
-            .await?
-            .pop()
-            .expect("IPv6 service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[parent_id])
+        .await?
+        .pop()
+        .expect("IPv6 service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, Some(endpoint.link_prefix));
 
     Ok(())
@@ -4777,10 +4906,9 @@ async fn test_service_vpc_coordinator_serializes_competing_allocations(
     };
 
     // Load both `ManagedHostStateSnapshot` and `InstanceSnapshot` values before either transaction takes allocator locks.
-    let mut snapshot_txn = env.db_txn().await;
-    let first_host_snapshot = first_host.snapshot(&mut snapshot_txn).await;
-    let second_host_snapshot = second_host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let mut db_reader = env.db_reader();
+    let first_host_snapshot = first_host.snapshot(&mut db_reader).await;
+    let second_host_snapshot = second_host.snapshot(&mut db_reader).await;
     let first_instance_snapshot = first_host_snapshot
         .instance
         .clone()
@@ -4932,13 +5060,12 @@ async fn test_service_vpc_coordinator_serializes_competing_allocations(
     );
     assert_eq!(first_endpoint.vpc_prefix_id, parent_id);
     assert_eq!(second_endpoint.vpc_prefix_id, parent_id);
-    let mut observer = env.pool.acquire().await?;
     for (instance_id, endpoint) in [
         (first_instance.id, first_endpoint),
         (second_instance_id, second_endpoint),
     ] {
         let segment = db::network_segment::find_by(
-            &mut *observer,
+            &mut env.db_reader(),
             ObjectColumnFilter::One(IdColumn, &endpoint.network_segment_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -4948,7 +5075,7 @@ async fn test_service_vpc_coordinator_serializes_competing_allocations(
         assert_eq!(segment.prefixes.len(), 1);
         assert_eq!(segment.prefixes[0].id, endpoint.network_prefix_id);
         let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-            &mut observer,
+            &env.pool,
             &instance_id,
             &endpoint.network_segment_id,
         )
@@ -4979,7 +5106,7 @@ async fn test_service_vpc_coordinator_serializes_competing_allocations(
         second_persisted.network_config_version.version_nr(),
         second_network_version.version_nr() + 1
     );
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(&mut observer, &[parent_id])
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[parent_id])
         .await?
         .pop()
         .expect("shared parent remains stored");
@@ -5128,9 +5255,8 @@ async fn test_service_vpc_coordinator_rolls_back_competing_same_instance_additio
             .version_nr()
             + 1
     );
-    let mut observer = env.pool.acquire().await?;
     let generated_segments = db::network_segment::find_by(
-        &mut *observer,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &service_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -5138,13 +5264,13 @@ async fn test_service_vpc_coordinator_rolls_back_competing_same_instance_additio
     assert_eq!(generated_segments.len(), 1);
     assert_eq!(generated_segments[0].id, endpoint.network_segment_id);
     let persisted_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        &mut observer,
+        &env.pool,
         &fixture.instance_id,
         &endpoint.network_segment_id,
     )
     .await?;
     assert_eq!(persisted_addresses.len(), 1);
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(&mut observer, &[fixture.parent_id])
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[fixture.parent_id])
         .await?
         .pop()
         .expect("shared parent remains stored");
@@ -5186,8 +5312,7 @@ async fn test_service_vpc_coordinator_persists_all_target_dpu_identities(
     )
     .await;
     let host = create_service_vpc_test_host_with_dpu_count(&env, 2).await?;
-    let mut locator_txn = env.db_txn().await;
-    let host_machine = host.host().db_machine(&mut locator_txn).await;
+    let host_machine = host.host().db_machine(&env.pool).await;
     let dpu_locators = host
         .dpu_ids
         .iter()
@@ -5197,7 +5322,6 @@ async fn test_service_vpc_coordinator_persists_all_target_dpu_identities(
                 .expect("fixture DPU has a device locator")
         })
         .collect_vec();
-    locator_txn.rollback().await?;
     let instance = host
         .instance_builer(&env)
         .network(interface_network_config_with_devices(
@@ -5216,9 +5340,7 @@ async fn test_service_vpc_coordinator_persists_all_target_dpu_identities(
     let request = RequestedInstanceExtensionServicesConfig {
         service_configs: vec![selection],
     };
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -5293,10 +5415,9 @@ async fn test_service_vpc_coordinator_persists_all_target_dpu_identities(
     assert_eq!(first_endpoint.vpc_prefix_id, parent_id);
     assert_eq!(second_endpoint.vpc_prefix_id, parent_id);
 
-    let mut observer = env.pool.acquire().await?;
     for endpoint in endpoints {
         let segment = db::network_segment::find_by(
-            &mut *observer,
+            &mut env.db_reader(),
             ObjectColumnFilter::One(IdColumn, &endpoint.network_segment_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -5309,7 +5430,7 @@ async fn test_service_vpc_coordinator_persists_all_target_dpu_identities(
         assert_eq!(segment.prefixes[0].vpc_prefix_id, Some(parent_id));
 
         let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-            &mut observer,
+            &env.pool,
             &instance.id,
             &endpoint.network_segment_id,
         )
@@ -5321,7 +5442,7 @@ async fn test_service_vpc_coordinator_persists_all_target_dpu_identities(
             db::instance_address::service_address_for_prefix(endpoint.link_prefix)?
         );
     }
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(&mut observer, &[parent_id])
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[parent_id])
         .await?
         .pop()
         .expect("shared parent remains stored");
@@ -5367,8 +5488,7 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
     )
     .await;
     let host = create_service_vpc_test_host_with_dpu_count(&env, 2).await?;
-    let mut locator_txn = env.db_txn().await;
-    let host_machine = host.host().db_machine(&mut locator_txn).await;
+    let host_machine = host.host().db_machine(&env.pool).await;
     let dpu_locators = host
         .dpu_ids
         .iter()
@@ -5378,7 +5498,6 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
                 .expect("fixture DPU has a device locator")
         })
         .collect_vec();
-    locator_txn.rollback().await?;
     let instance = host
         .instance_builer(&env)
         .network(interface_network_config_with_devices(
@@ -5396,9 +5515,7 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
     let request = RequestedInstanceExtensionServicesConfig {
         service_configs: vec![selection],
     };
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -5449,7 +5566,7 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
     // `VpcPrefix.status.last_used_prefix` unchanged, and incremented neither
     // `extension_services_config_version` nor `network_config_version`.
     let generated = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &service_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -5461,11 +5578,10 @@ async fn test_service_vpc_coordinator_rolls_back_earlier_intent_after_late_exhau
             .fetch_one(&env.pool)
             .await?;
     assert_eq!(address_count, 0);
-    let parent =
-        db::vpc_prefix::get_for_allocation_by_ids(&mut *env.pool.acquire().await?, &[parent_id])
-            .await?
-            .pop()
-            .expect("parent remains stored after rollback");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[parent_id])
+        .await?
+        .pop()
+        .expect("parent remains stored after rollback");
     assert_eq!(parent.status.last_used_prefix, None);
     let persisted = db::instance::find_by_id(&env.pool, instance.id)
         .await?
@@ -5550,6 +5666,7 @@ async fn test_batch_allocate_instances_rolls_back_earlier_service_vpc_allocation
                 network: Some(single_interface_network_config(host_segment)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id.clone(),
@@ -5594,27 +5711,20 @@ async fn test_batch_allocate_instances_rolls_back_earlier_service_vpc_allocation
         .await?
         .into_inner();
     assert!(persisted.instances.is_empty());
-    let mut snapshot_txn = env.db_txn().await;
-    assert!(
-        first_host
-            .snapshot(&mut snapshot_txn)
-            .await
-            .instance
-            .is_none()
-    );
+    let mut db_reader = env.db_reader();
+    assert!(first_host.snapshot(&mut db_reader).await.instance.is_none());
     assert!(
         second_host
-            .snapshot(&mut snapshot_txn)
+            .snapshot(&mut db_reader)
             .await
             .instance
             .is_none()
     );
-    snapshot_txn.rollback().await?;
 
     // Generated network segments, service and host `instance_addresses`, and
     // `VpcPrefix.status.last_used_prefix` must all roll back.
     let generated_segments = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &service_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -5628,19 +5738,14 @@ async fn test_batch_allocate_instances_rolls_back_earlier_service_vpc_allocation
     assert_eq!(service_address_count, 0);
     for segment_id in [first_host_segment, second_host_segment] {
         assert_eq!(
-            db::instance_address::count_by_segment_id(
-                &mut *env.pool.acquire().await?,
-                &segment_id,
-            )
-            .await?,
+            db::instance_address::count_by_segment_id(&env.pool, &segment_id,).await?,
             0
         );
     }
-    let parent =
-        db::vpc_prefix::get_for_allocation_by_ids(&mut *env.pool.acquire().await?, &[parent_id])
-            .await?
-            .pop()
-            .expect("batch service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[parent_id])
+        .await?
+        .pop()
+        .expect("batch service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, None);
 
     Ok(())
@@ -5677,8 +5782,7 @@ async fn test_service_vpc_coordinator_rejects_multi_dpu_addition_when_one_target
         )
         .await;
     let host = create_service_vpc_test_host_with_dpu_count(&env, 2).await?;
-    let mut locator_txn = env.db_txn().await;
-    let host_machine = host.host().db_machine(&mut locator_txn).await;
+    let host_machine = host.host().db_machine(&env.pool).await;
     let dpu_locators = host
         .dpu_ids
         .iter()
@@ -5688,7 +5792,6 @@ async fn test_service_vpc_coordinator_rejects_multi_dpu_addition_when_one_target
                 .expect("fixture DPU has a device locator")
         })
         .collect_vec();
-    locator_txn.rollback().await?;
     let instance = host
         .instance_builer(&env)
         .network(interface_network_config_with_devices(
@@ -5707,9 +5810,7 @@ async fn test_service_vpc_coordinator_rejects_multi_dpu_addition_when_one_target
     )
     .await?;
     mark_networked_dpf_service_ready(&env, retained_service.service_id.parse()?).await?;
-    let mut initial_snapshot_txn = env.db_txn().await;
-    let initial_host_snapshot = host.snapshot(&mut initial_snapshot_txn).await;
-    initial_snapshot_txn.rollback().await?;
+    let initial_host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let primary_dpu = initial_host_snapshot
         .host_snapshot
         .primary_attached_dpu_machine_id()
@@ -5732,9 +5833,7 @@ async fn test_service_vpc_coordinator_rejects_multi_dpu_addition_when_one_target
     mark_networked_dpf_service_ready(&env, requested_service.service_id.parse()?).await?;
     let (requested_attachment, requested_selection) =
         coordinator_attachment(&requested_service, service_vpc_id)?;
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -5788,7 +5887,7 @@ async fn test_service_vpc_coordinator_rejects_multi_dpu_addition_when_one_target
         instance_snapshot.network_config_version
     );
     let generated_segments = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &service_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -5804,13 +5903,11 @@ async fn test_service_vpc_coordinator_rejects_multi_dpu_addition_when_one_target
             .fetch_one(&env.pool)
             .await?;
     assert_eq!(address_count, 1);
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[retained_endpoint.vpc_prefix_id],
-    )
-    .await?
-    .pop()
-    .expect("retained parent remains stored");
+    let parent =
+        db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[retained_endpoint.vpc_prefix_id])
+            .await?
+            .pop()
+            .expect("retained parent remains stored");
     assert_eq!(
         parent.status.last_used_prefix,
         Some(retained_endpoint.link_prefix)
@@ -5926,7 +6023,7 @@ async fn test_update_instance_retains_service_vpc_slot_during_replacement(
     );
     assert!(
         db::network_segment::find_by(
-            &mut *env.pool.acquire().await?,
+            &mut env.db_reader(),
             ObjectColumnFilter::One(db::network_segment::VpcColumn, &replacement_vpc_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -5934,15 +6031,12 @@ async fn test_update_instance_retains_service_vpc_slot_during_replacement(
         .is_empty()
     );
     assert_eq!(
-        db::vpc_prefix::get_for_allocation_by_ids(
-            &mut *env.pool.acquire().await?,
-            &[replacement_parent_id],
-        )
-        .await?
-        .pop()
-        .expect("replacement parent remains stored")
-        .status
-        .last_used_prefix,
+        db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[replacement_parent_id],)
+            .await?
+            .pop()
+            .expect("replacement parent remains stored")
+            .status
+            .last_used_prefix,
         None
     );
 
@@ -5983,9 +6077,7 @@ async fn test_service_vpc_coordinator_distinguishes_missing_and_deleted_vpcs(
     assert!(deleted.deleted.is_some());
     txn.commit().await?;
     let missing_vpc_id = VpcId::new();
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -6054,7 +6146,7 @@ async fn test_service_vpc_coordinator_distinguishes_missing_and_deleted_vpcs(
                 .await?;
         assert_eq!(address_count, 0, "{scenario}");
         let segments = db::network_segment::find_by(
-            &mut *env.pool.acquire().await?,
+            &mut env.db_reader(),
             ObjectColumnFilter::One(db::network_segment::VpcColumn, &selected_vpc_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -6398,9 +6490,8 @@ async fn test_service_vpc_coordinator_serializes_with_default_force_delete(
         fixture.extension_config
     );
     assert_eq!(persisted.config.network, network);
-    let mut observer = env.db_txn().await;
     let machine = db::machine::find_one(
-        &mut *observer,
+        &env.pool,
         &host_id,
         model::machine::machine_search_config::MachineSearchConfig::default(),
     )
@@ -6412,7 +6503,6 @@ async fn test_service_vpc_coordinator_serializes_with_default_force_delete(
             instance_state: InstanceState::Ready
         }
     ));
-    observer.rollback().await?;
 
     Ok(())
 }
@@ -6434,6 +6524,9 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
         .expect_force_delete_host()
         .times(1)
         .returning(|_, _| Ok(()));
+    dpf_sdk
+        .expect_delete_host_bmc_credential_secrets()
+        .returning(|_, _| Ok(true));
     let env = create_service_vpc_coordinator_test_env_with_dpf_sdk(pool, Arc::new(dpf_sdk)).await;
     let fixture = create_service_vpc_coordinator_fixture(&env, "orphan-force-delete-race").await?;
     let mut activation = env.pool.txn_begin().await?;
@@ -6497,7 +6590,7 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
     );
     assert!(
         db::instance_address::find_all_by_instance_id_and_segment_id(
-            &mut *env.pool.acquire().await?,
+            &env.pool,
             &fixture.instance_id,
             &endpoint.network_segment_id,
         )
@@ -6641,11 +6734,10 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
         persisted.network_config_version,
         baseline.network_config_version
     );
-    let parent =
-        db::vpc_prefix::get_for_allocation_by_ids(&mut *env.pool.acquire().await?, &[parent_id])
-            .await?
-            .pop()
-            .expect("service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[parent_id])
+        .await?
+        .pop()
+        .expect("service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, None);
 
     Ok(())
@@ -6683,14 +6775,12 @@ async fn test_update_instance_rejects_service_vpc_retry_after_primary_dpu_change
     )
     .await?;
     mark_networked_dpf_service_ready(&env, service.service_id.parse()?).await?;
-    let mut snapshot_txn = env.db_txn().await;
     let original_primary_dpu = host
-        .snapshot(&mut snapshot_txn)
+        .snapshot(&mut env.db_reader())
         .await
         .host_snapshot
         .primary_attached_dpu_machine_id()
         .expect("two-DPU host has an original primary");
-    snapshot_txn.rollback().await?;
     let endpoint = seed_networked_attachment(
         &env,
         instance.id,
@@ -6701,12 +6791,10 @@ async fn test_update_instance_rejects_service_vpc_retry_after_primary_dpu_change
     .await?;
 
     // Promote the other DPU-backed interface through the operator API.
-    let mut interface_txn = env.db_txn().await;
-    let interfaces = db::machine_interface::find_by_machine_ids(interface_txn.as_mut(), &[host.id])
+    let interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[host.id])
         .await?
         .remove(&host.id)
         .expect("two-DPU host has interface rows");
-    interface_txn.rollback().await?;
     let replacement_primary_interface = interfaces
         .iter()
         .find(|interface| {
@@ -6770,7 +6858,7 @@ async fn test_update_instance_rejects_service_vpc_retry_after_primary_dpu_change
     );
     assert_eq!(
         db::instance_address::find_all_by_instance_id_and_segment_id(
-            &mut *env.pool.acquire().await?,
+            &env.pool,
             &instance.id,
             &endpoint.network_segment_id,
         )
@@ -6778,13 +6866,10 @@ async fn test_update_instance_rejects_service_vpc_retry_after_primary_dpu_change
         .len(),
         1
     );
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[endpoint.vpc_prefix_id],
-    )
-    .await?
-    .pop()
-    .expect("historical endpoint parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[endpoint.vpc_prefix_id])
+        .await?
+        .pop()
+        .expect("historical endpoint parent remains stored");
     assert_eq!(parent.status.last_used_prefix, Some(endpoint.link_prefix));
 
     Ok(())
@@ -6837,9 +6922,7 @@ async fn test_service_vpc_coordinator_preserves_existing_endpoint_after_astra_re
         "10.228.0.0/30".parse()?,
     )
     .await?;
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -6964,11 +7047,10 @@ async fn test_service_vpc_coordinator_rejects_deferred_registration(
     let fixture = create_service_vpc_coordinator_fixture(&env, "deferred-registration").await?;
     let service_id = fixture.extension_config.service_configs[0].service_id;
     let mut state_txn = env.db_txn().await;
-    let service =
-        db::extension_service::find_by_ids(state_txn.as_mut(), &[service_id], false, false)
-            .await?
-            .pop()
-            .expect("fixture service remains stored");
+    let service = db::extension_service::find_by_ids(state_txn.as_mut(), &[service_id], false)
+        .await?
+        .pop()
+        .expect("fixture service remains stored");
     let state_change = service.status.controller_state.version.incremental_change();
     assert_eq!(
         db::extension_service::try_update_controller_state(
@@ -7101,8 +7183,7 @@ async fn test_service_vpc_coordinator_rejects_mixed_target_family_support(
     bf3_target
         .set(host.dpu_ids[0])
         .expect("mixed deployment target is assigned once");
-    let mut locator_txn = env.db_txn().await;
-    let host_machine = host.host().db_machine(&mut locator_txn).await;
+    let host_machine = host.host().db_machine(&env.pool).await;
     let dpu_locators = host
         .dpu_ids
         .iter()
@@ -7112,7 +7193,6 @@ async fn test_service_vpc_coordinator_rejects_mixed_target_family_support(
                 .expect("fixture DPU has a device locator")
         })
         .collect_vec();
-    locator_txn.rollback().await?;
     let instance = host
         .instance_builer(&env)
         .network(interface_network_config_with_devices(
@@ -7132,9 +7212,7 @@ async fn test_service_vpc_coordinator_rejects_mixed_target_family_support(
     let service = create_networked_dpf_service(&env, "mixed-deployment-service").await?;
     mark_networked_dpf_service_ready(&env, service.service_id.parse()?).await?;
     let (attachment, selection) = coordinator_attachment(&service, service_vpc_id)?;
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -7251,16 +7329,13 @@ async fn test_service_vpc_coordinator_does_not_fall_back_to_another_prefix_famil
         persisted.network_config_version,
         fixture.instance_snapshot.network_config_version
     );
-    let ipv6_parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[ipv6_parent_id],
-    )
-    .await?
-    .pop()
-    .expect("IPv6-only parent remains stored");
+    let ipv6_parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[ipv6_parent_id])
+        .await?
+        .pop()
+        .expect("IPv6-only parent remains stored");
     assert_eq!(ipv6_parent.status.last_used_prefix, None);
     let segments = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &selected_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -7333,7 +7408,7 @@ async fn test_update_instance_complete_config_rejects_tenant_service_vpc_overlap
         fixture.instance_snapshot.network_config_version
     );
     let segments = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &selected_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -7341,19 +7416,16 @@ async fn test_update_instance_complete_config_rejects_tenant_service_vpc_overlap
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].id, overlapping_host_segment);
     let allocated_host_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        &mut *env.pool.acquire().await?,
+        &env.pool,
         &fixture.instance_id,
         &overlapping_host_segment,
     )
     .await?;
     assert!(allocated_host_addresses.is_empty());
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[fixture.parent_id],
-    )
-    .await?
-    .pop()
-    .expect("configured service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[fixture.parent_id])
+        .await?
+        .pop()
+        .expect("configured service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, None);
 
     Ok(())
@@ -7491,7 +7563,7 @@ async fn test_update_instance_complete_config_activates_service_vpc_and_stages_h
             + 1
     );
     let generated_segments = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &selected_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -7503,20 +7575,17 @@ async fn test_update_instance_complete_config_activates_service_vpc_and_stages_h
             .any(|segment| segment.id == endpoint.network_segment_id)
     );
     let persisted_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        &mut *env.pool.acquire().await?,
+        &env.pool,
         &fixture.instance_id,
         &endpoint.network_segment_id,
     )
     .await?;
     assert_eq!(persisted_addresses.len(), 1);
     assert_eq!(persisted_addresses[0].prefix, endpoint.link_prefix);
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[fixture.parent_id],
-    )
-    .await?
-    .pop()
-    .expect("configured service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[fixture.parent_id])
+        .await?
+        .pop()
+        .expect("configured service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, Some(endpoint.link_prefix));
 
     Ok(())
@@ -7762,7 +7831,7 @@ async fn test_update_instance_serializes_service_activation_with_conflicting_hos
     );
     assert_eq!(
         db::instance_address::find_all_by_instance_id_and_segment_id(
-            &mut *env.pool.acquire().await?,
+            &env.pool,
             &fixture.instance_id,
             &overlapping_host_segment,
         )
@@ -7770,13 +7839,10 @@ async fn test_update_instance_serializes_service_activation_with_conflicting_hos
         .len(),
         0
     );
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[fixture.parent_id],
-    )
-    .await?
-    .pop()
-    .expect("service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[fixture.parent_id])
+        .await?
+        .pop()
+        .expect("service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, Some(endpoint.link_prefix));
 
     Ok(())
@@ -8001,9 +8067,7 @@ async fn test_update_instance_complete_config_rolls_back_allocations_on_final_ca
     let service_id = service.service_id.parse()?;
     mark_networked_dpf_service_ready(&env, service_id).await?;
     let (attachment, selection) = coordinator_attachment(&service, service_vpc_id)?;
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -8059,7 +8123,8 @@ async fn test_update_instance_complete_config_rolls_back_allocations_on_final_ca
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(service_lock.as_mut())
         .await?;
-    db::extension_service::find_by_ids(service_lock.as_mut(), &[service_id], false, true).await?;
+    db::extension_service::find_by_ids_for_update(service_lock.as_mut(), &[service_id], false)
+        .await?;
     let api = env.api.clone();
     let pending_update = TestTaskHandle::new(tokio::spawn(async move {
         crate::instance::service_vpc::with_service_vpc_implementation_support_for_test(
@@ -8134,7 +8199,7 @@ async fn test_update_instance_complete_config_rolls_back_allocations_on_final_ca
     // Allocation tables and both original host-address sets must also reflect complete rollback.
     let selected_vpc_id = fixture.request.service_configs[0].service_vpc_ids[0];
     let generated_segments = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &selected_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -8148,21 +8213,14 @@ async fn test_update_instance_complete_config_rolls_back_allocations_on_final_ca
     assert_eq!(service_address_count, 0);
     for segment_id in [retained_host_segment, removed_host_segment] {
         assert_eq!(
-            db::instance_address::count_by_segment_id(
-                &mut *env.pool.acquire().await?,
-                &segment_id,
-            )
-            .await?,
+            db::instance_address::count_by_segment_id(&env.pool, &segment_id,).await?,
             1,
         );
     }
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[fixture.parent_id],
-    )
-    .await?
-    .pop()
-    .expect("configured service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[fixture.parent_id])
+        .await?
+        .pop()
+        .expect("configured service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, None);
 
     Ok(())
@@ -8326,7 +8384,7 @@ async fn test_update_instance_revalidates_host_fnn_for_active_retained_endpoint(
     );
     assert!(rejected.update_network_config_request.is_none());
     let generated_segment = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(IdColumn, &endpoint.network_segment_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -8339,7 +8397,7 @@ async fn test_update_instance_revalidates_host_fnn_for_active_retained_endpoint(
     assert_eq!(generated_prefix.id, endpoint.network_prefix_id);
     assert_eq!(generated_prefix.prefix, endpoint.link_prefix);
     let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        &mut *env.pool.acquire().await?,
+        &env.pool,
         &instance.id,
         &endpoint.network_segment_id,
     )
@@ -8352,13 +8410,10 @@ async fn test_update_instance_revalidates_host_fnn_for_active_retained_endpoint(
         retained_address.address,
         db::instance_address::service_address_for_prefix(endpoint.link_prefix)?
     );
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[endpoint.vpc_prefix_id],
-    )
-    .await?
-    .pop()
-    .expect("retained endpoint parent remains stored after rejection");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[endpoint.vpc_prefix_id])
+        .await?
+        .pop()
+        .expect("retained endpoint parent remains stored after rejection");
     assert_eq!(parent.status.last_used_prefix, Some(endpoint.link_prefix));
 
     // Retry with a distinct FNN host VPC to prove active endpoint validation permits supported paths.
@@ -8542,6 +8597,7 @@ async fn test_allocate_and_update_network_config_instance(
                     infiniband: None,
                     nvlink: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     spxconfig: None,
                     power_profile: None,
@@ -8566,9 +8622,7 @@ async fn test_allocate_and_update_network_config_instance(
     );
 
     // Reload the database row to prove live state keeps the record and pending work owns only hosts.
-    let mut txn = env.db_txn().await;
-    let instance = tinstance.db_instance(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let instance = tinstance.db_instance(&env.pool).await;
 
     assert!(instance.update_network_config_request.is_some());
     assert!(
@@ -8675,6 +8729,7 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
                     nvlink: None,
                     spxconfig: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     power_profile: None,
                 }),
@@ -9301,14 +9356,12 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
         fixture.lower_ipv4_prefix_id,
         fixture.higher_ipv4_prefix_id,
     );
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     for (interface, dpu_id) in network.interfaces.iter_mut().zip(&mh.dpu_ids) {
         let locator = host.get_device_locator_for_dpu_id(dpu_id).unwrap();
         interface.device = Some(locator.device);
         interface.device_instance = locator.device_instance as u32;
     }
-    txn.commit().await.unwrap();
     let tinstance = mh
         .instance_builer(env)
         .tenant_org(FIXTURE_TENANT_ORG_ID)
@@ -9364,13 +9417,12 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
         }
     }
     let removed_dpu_id = removed_dpu_id.expect("removed DPU must receive Admin config");
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     let pending = snapshot.instance.as_ref().unwrap();
     assert_eq!(pending.observations.network.len(), 2);
     let update_request = pending.update_network_config_request.clone().unwrap();
     let old_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &tinstance.id,
         &removed_segment_id,
     )
@@ -9380,7 +9432,6 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
     .map(|allocation| allocation.address)
     .collect_vec();
     assert_eq!(old_addresses.len(), 1);
-    txn.commit().await.unwrap();
 
     for phase in [
         NetworkConfigUpdateState::WaitingForConfigSynced,
@@ -9397,9 +9448,10 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
                 network_config_update_state: phase,
             },
         };
-        let mut txn = env.db_txn().await;
-        assert_eq!(mh.snapshot(&mut txn).await.managed_state, expected_state);
-        txn.commit().await.unwrap();
+        assert_eq!(
+            mh.snapshot(&mut env.db_reader()).await.managed_state,
+            expected_state
+        );
 
         // Inject the report emitted after a failed Admin apply: both version
         // stamps are absent, although NVUE/uplink health can still be clear.
@@ -9420,8 +9472,8 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
             .unwrap();
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = env.db_txn().await;
-        let snapshot = mh.snapshot(&mut txn).await;
+        let mut db_reader = env.db_reader();
+        let snapshot = mh.snapshot(&mut db_reader).await;
         assert_eq!(snapshot.managed_state, expected_state);
         assert!(
             matches!(
@@ -9449,7 +9501,7 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
             Some(&update_request)
         );
         let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-            txn.as_mut(),
+            &env.pool,
             &tinstance.id,
             &removed_segment_id,
         )
@@ -9460,7 +9512,7 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
         .collect_vec();
         assert_eq!(addresses, old_addresses);
         let segments = db::network_segment::find_by(
-            txn.as_mut(),
+            &mut db_reader,
             ObjectColumnFilter::One(IdColumn, &removed_segment_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -9468,7 +9520,6 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
         .unwrap();
         assert_eq!(segments.len(), 1);
         assert!(!segments[0].is_marked_as_deleted());
-        txn.commit().await.unwrap();
     }
 
     // A lifecycle-blocking alert can arrive after the healthy transition to
@@ -9488,8 +9539,7 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
         });
     network_configured_with_health(env, &removed_dpu_id, Some(blocking_health.into())).await;
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     assert!(snapshot.managed_host_network_config_version_synced());
     assert_eq!(
         snapshot.managed_state,
@@ -9517,17 +9567,16 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
             .is_some()
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &removed_segment_id)
+        db::instance_address::count_by_segment_id(&env.pool, &removed_segment_id)
             .await
             .unwrap(),
         1
     );
-    txn.commit().await.unwrap();
 
     network_configured_with_health(env, &removed_dpu_id, None).await;
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let mut db_reader = env.db_reader();
+    let snapshot = mh.snapshot(&mut db_reader).await;
     assert_eq!(
         snapshot.managed_state,
         ManagedHostState::Assigned {
@@ -9544,19 +9593,19 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
             .is_none()
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &removed_segment_id)
+        db::instance_address::count_by_segment_id(&env.pool, &removed_segment_id)
             .await
             .unwrap(),
         0
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &retained_segment_id)
+        db::instance_address::count_by_segment_id(&env.pool, &retained_segment_id)
             .await
             .unwrap(),
         1
     );
     let segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut db_reader,
         ObjectColumnFilter::One(IdColumn, &removed_segment_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -9564,7 +9613,6 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
     .unwrap();
     assert_eq!(segments.len(), 1);
     assert!(segments[0].is_marked_as_deleted());
-    txn.commit().await.unwrap();
 }
 
 /// Verifies host-network promotion releases per-VPC loopbacks only when no
@@ -9672,6 +9720,7 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -9690,13 +9739,12 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
         .await;
 
     // Verify the retained PF VPC loopback remains and the removed VF VPC loopback is gone.
-    let mut txn = env.db_txn().await;
-    let retained_loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &first_vpc)
+    let retained_loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &first_vpc)
         .await
         .unwrap()
         .expect("retained PF VPC loopback should remain");
     assert_eq!(retained_loopback.loopback_ip.to_string(), first_loopback);
-    let retained_entry = db::resource_pool::find_value(&mut *txn, &first_loopback)
+    let retained_entry = db::resource_pool::find_value(&env.pool, &first_loopback)
         .await
         .expect("find retained PF loopback allocation")
         .into_iter()
@@ -9709,7 +9757,7 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
             owner_type: OwnerType::Machine.to_string(),
         }
     );
-    let removed_entry = db::resource_pool::find_value(&mut *txn, &second_loopback)
+    let removed_entry = db::resource_pool::find_value(&env.pool, &second_loopback)
         .await
         .expect("find removed VF loopback allocation")
         .into_iter()
@@ -9717,12 +9765,11 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
         .expect("removed VF loopback must remain in its pool");
     assert_eq!(removed_entry.state.0, ResourcePoolEntryState::Free);
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &second_vpc)
+        db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &second_vpc)
             .await
             .unwrap()
             .is_none()
     );
-    txn.rollback().await.unwrap();
 
     // A second host keeps the removed host VPC through a service endpoint on
     // its exact DPU, so that DPU/VPC allocation must remain assigned.
@@ -9807,15 +9854,14 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
 
     // The service address and exact DPU/VPC loopback remain allocated, while
     // the unrelated first VPC allocation also remains intact.
-    let mut txn = env.db_txn().await;
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &service_dpu_id, &first_vpc)
+        db::vpc_dpu_loopback::find(&env.pool, &service_dpu_id, &first_vpc)
             .await
             .unwrap()
             .is_some()
     );
     assert_eq!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &service_dpu_id, &second_vpc)
+        db::vpc_dpu_loopback::find(&env.pool, &service_dpu_id, &second_vpc)
             .await
             .unwrap()
             .expect("service VPC loopback should remain")
@@ -9823,7 +9869,7 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
             .to_string(),
         service_loopback,
     );
-    let service_entry = db::resource_pool::find_value(&mut *txn, &service_loopback)
+    let service_entry = db::resource_pool::find_value(&env.pool, &service_loopback)
         .await
         .expect("find retained service loopback allocation")
         .into_iter()
@@ -9840,7 +9886,7 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
         db::instance_address::service_address_for_prefix(service_endpoint.link_prefix)
             .expect("seeded link prefix has a service address");
     let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &service_instance.id,
         &service_endpoint.network_segment_id,
     )
@@ -9944,19 +9990,17 @@ async fn test_fnn_vrf_loopback_pool_release_failure_rolls_back_and_retries(pool:
         .pool_vpc_dpu_loopback_ip
         .name()
         .to_string();
-    let mut txn = env.db_txn().await;
     let pending_request = tinstance
-        .db_instance(&mut txn)
+        .db_instance(&env.pool)
         .await
         .update_network_config_request
         .expect("network update should remain pending before cleanup");
-    let loopback_ip = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &second_vpc)
+    let loopback_ip = db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &second_vpc)
         .await
         .unwrap()
         .expect("removed VPC should have a loopback before cleanup")
         .loopback_ip;
     let loopback_value = loopback_ip.to_string();
-    txn.rollback().await.unwrap();
 
     // Reject only the target loopback's transition to an unallocated pool row.
     // The loopback-row deletion has already run when this constraint fires.
@@ -9971,8 +10015,7 @@ async fn test_fnn_vrf_loopback_pool_release_failure_rolls_back_and_retries(pool:
 
     // The failed iteration must retain its state and roll back every earlier
     // write, preserving the pending request, address, and loopback row.
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, release_state);
     assert!(
         matches!(
@@ -9983,26 +10026,26 @@ async fn test_fnn_vrf_loopback_pool_release_failure_rolls_back_and_retries(pool:
         "expected the injected pool-release error, got {:?}",
         snapshot.host_snapshot.controller_state_outcome,
     );
-    let persisted = tinstance.db_instance(&mut txn).await;
+    let persisted = tinstance.db_instance(&env.pool).await;
     assert_eq!(
         persisted.update_network_config_request.as_ref(),
         Some(&pending_request),
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &second_segment_id)
+        db::instance_address::count_by_segment_id(&env.pool, &second_segment_id)
             .await
             .unwrap(),
         1,
     );
     assert_eq!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &second_vpc)
+        db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &second_vpc)
             .await
             .unwrap()
             .expect("failed release should retain the loopback row")
             .loopback_ip,
         loopback_ip,
     );
-    let retained_entry = db::resource_pool::find_value(&mut *txn, &loopback_value)
+    let retained_entry = db::resource_pool::find_value(&env.pool, &loopback_value)
         .await
         .unwrap()
         .into_iter()
@@ -10015,7 +10058,6 @@ async fn test_fnn_vrf_loopback_pool_release_failure_rolls_back_and_retries(pool:
             owner_type: OwnerType::Machine.to_string(),
         }
     );
-    txn.rollback().await.unwrap();
 
     // Remove the transient failure and let a later controller iteration retry
     // the same persisted cleanup state.
@@ -10034,36 +10076,34 @@ async fn test_fnn_vrf_loopback_pool_release_failure_rolls_back_and_retries(pool:
     .await;
 
     // The retry must successfully complete each previously rolled-back mutation.
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, ready_state);
     assert!(
         tinstance
-            .db_instance(&mut txn)
+            .db_instance(&env.pool)
             .await
             .update_network_config_request
             .is_none()
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &second_segment_id)
+        db::instance_address::count_by_segment_id(&env.pool, &second_segment_id)
             .await
             .unwrap(),
         0,
     );
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &second_vpc)
+        db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &second_vpc)
             .await
             .unwrap()
             .is_none()
     );
-    let released_entry = db::resource_pool::find_value(&mut *txn, &loopback_value)
+    let released_entry = db::resource_pool::find_value(&env.pool, &loopback_value)
         .await
         .unwrap()
         .into_iter()
         .find(|entry| entry.pool_name == loopback_pool_name)
         .expect("released loopback should remain represented in its pool");
     assert_eq!(released_entry.state.0, ResourcePoolEntryState::Free);
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies network updates independently retain and release exact DPU/VPC loopbacks, including
@@ -10251,16 +10291,14 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
         (managed_host.dpu_ids[1], second_vpc),
     ];
     let mut initial_loopbacks = HashMap::new();
-    let mut txn = env.db_txn().await;
     for (dpu_id, vpc_id) in initial_memberships {
-        let loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &vpc_id)
+        let loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &vpc_id)
             .await
             .unwrap()
             .expect("initial host membership has a loopback");
         initial_loopbacks.insert((dpu_id, vpc_id), loopback.loopback_ip.to_string());
     }
     assert_eq!(initial_loopbacks.values().collect::<HashSet<_>>().len(), 4);
-    txn.rollback().await.unwrap();
 
     // Persist a DPF service registration and a service interface on DPU 0/VPC 2.
     create_fixture_tenant(&env, "best_org").await.unwrap();
@@ -10375,16 +10413,18 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
 
     // Reload after reconciliation to prove stale cleanup completed, retained the ambiguous VPC
     // on both current DPUs, and independently released DPU 1/VPC 2.
-    let mut txn = env.db_txn().await;
     assert_eq!(
-        managed_host.snapshot(&mut txn).await.managed_state,
+        managed_host
+            .snapshot(&mut env.db_reader())
+            .await
+            .managed_state,
         ManagedHostState::Assigned {
             instance_state: InstanceState::Ready,
         }
     );
     assert!(
         instance
-            .db_instance(&mut txn)
+            .db_instance(&env.pool)
             .await
             .update_network_config_request
             .is_none()
@@ -10397,7 +10437,7 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
     for dpu_id in managed_host.dpu_ids.iter().copied() {
         let expected_loopback = &initial_loopbacks[&(dpu_id, first_vpc)];
         assert_eq!(
-            db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &first_vpc)
+            db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &first_vpc)
                 .await
                 .unwrap()
                 .expect("ambiguous VPC ownership retains every current DPU loopback")
@@ -10405,7 +10445,7 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
                 .to_string(),
             *expected_loopback,
         );
-        let entry = db::resource_pool::find_value(&mut *txn, expected_loopback)
+        let entry = db::resource_pool::find_value(&env.pool, expected_loopback)
             .await
             .unwrap()
             .into_iter()
@@ -10423,19 +10463,18 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
     }
     let released_loopback = &initial_loopbacks[&(managed_host.dpu_ids[1], second_vpc)];
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu_ids[1], &second_vpc)
+        db::vpc_dpu_loopback::find(&env.pool, &managed_host.dpu_ids[1], &second_vpc)
             .await
             .unwrap()
             .is_none()
     );
-    let released_entry = db::resource_pool::find_value(&mut *txn, released_loopback)
+    let released_entry = db::resource_pool::find_value(&env.pool, released_loopback)
         .await
         .unwrap()
         .into_iter()
         .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vpc_dpu_loopback_ip.name())
         .expect("exactly released loopback remains represented in its pool");
     assert_eq!(released_entry.state.0, ResourcePoolEntryState::Free);
-    txn.rollback().await.unwrap();
 
     // Restore the valid DPU 1/VPC 1 locator through the public API so the original exact-release
     // contract remains covered after stale cleanup.
@@ -10458,11 +10497,10 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
         // Service membership on DPU 0 retains VPC 2.
         (managed_host.dpu_ids[0], second_vpc),
     ];
-    let mut txn = env.db_txn().await;
     for (dpu_id, vpc_id) in retained_memberships {
         let expected_loopback = &initial_loopbacks[&(dpu_id, vpc_id)];
         assert_eq!(
-            db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &vpc_id)
                 .await
                 .unwrap()
                 .expect("retained membership keeps its loopback")
@@ -10470,7 +10508,7 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
                 .to_string(),
             *expected_loopback,
         );
-        let entry = db::resource_pool::find_value(&mut *txn, expected_loopback)
+        let entry = db::resource_pool::find_value(&env.pool, expected_loopback)
             .await
             .unwrap()
             .into_iter()
@@ -10497,12 +10535,12 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
     for (dpu_id, vpc_id) in released_memberships {
         let released_loopback = &initial_loopbacks[&(dpu_id, vpc_id)];
         assert!(
-            db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &dpu_id, &vpc_id)
                 .await
                 .unwrap()
                 .is_none()
         );
-        let entry = db::resource_pool::find_value(&mut *txn, released_loopback)
+        let entry = db::resource_pool::find_value(&env.pool, released_loopback)
             .await
             .unwrap()
             .into_iter()
@@ -10512,7 +10550,6 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
             .expect("released loopback remains represented in its pool");
         assert_eq!(entry.state.0, ResourcePoolEntryState::Free);
     }
-    txn.rollback().await.unwrap();
 }
 
 // Test that if due to race condition instance creation and reprovision is started together,
@@ -10881,9 +10918,7 @@ async fn create_service_vpc_coordinator_fixture(
     mark_networked_dpf_service_ready(env, service.service_id.parse()?).await?;
     let (attachment, selection) = coordinator_attachment(&service, service_vpc_id)?;
     // Capture the host and Instance values so each test changes only the field the coordinator must revalidate.
-    let mut snapshot_txn = env.db_txn().await;
-    let host_snapshot = host.snapshot(&mut snapshot_txn).await;
-    snapshot_txn.rollback().await?;
+    let host_snapshot = host.snapshot(&mut env.db_reader()).await;
     let instance_snapshot = host_snapshot
         .instance
         .clone()
@@ -10935,19 +10970,16 @@ async fn assert_service_vpc_fixture_unmodified(
         persisted.update_network_config_request,
         fixture.instance_snapshot.update_network_config_request
     );
-    let parent = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[fixture.parent_id],
-    )
-    .await?
-    .pop()
-    .expect("service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[fixture.parent_id])
+        .await?
+        .pop()
+        .expect("service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, None);
 
     // The selected service VPC must contain no generated endpoint segment or normalized address.
     let selected_vpc_id = fixture.request.service_configs[0].service_vpc_ids[0];
     let segments = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::VpcColumn, &selected_vpc_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -11064,7 +11096,7 @@ async fn mark_networked_dpf_service_ready(
     service_id: ExtensionServiceId,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = env.db_txn().await;
-    let service = db::extension_service::find_by_ids(txn.as_mut(), &[service_id], false, false)
+    let service = db::extension_service::find_by_ids(txn.as_mut(), &[service_id], false)
         .await?
         .pop()
         .expect("created DPF registration exists");
@@ -11435,7 +11467,7 @@ async fn test_allocate_instance_activates_service_vpc_and_preserves_host_network
     );
     assert_eq!(
         db::instance_address::find_all_by_instance_id_and_segment_id(
-            &mut *env.pool.acquire().await?,
+            &env.pool,
             &requested_instance_id,
             &host_segment_id,
         )
@@ -11444,7 +11476,7 @@ async fn test_allocate_instance_activates_service_vpc_and_preserves_host_network
         1
     );
     let service_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        &mut *env.pool.acquire().await?,
+        &env.pool,
         &requested_instance_id,
         &endpoint.network_segment_id,
     )
@@ -11452,7 +11484,7 @@ async fn test_allocate_instance_activates_service_vpc_and_preserves_host_network
     assert_eq!(service_addresses.len(), 1);
     assert_eq!(service_addresses[0].prefix, endpoint.link_prefix);
     let generated_segment = db::network_segment::find_by(
-        &mut *env.pool.acquire().await?,
+        &mut env.db_reader(),
         ObjectColumnFilter::One(IdColumn, &endpoint.network_segment_id),
         NetworkSegmentSearchConfig::default(),
     )
@@ -11460,11 +11492,10 @@ async fn test_allocate_instance_activates_service_vpc_and_preserves_host_network
     .pop()
     .expect("generated service segment remains stored");
     assert_eq!(generated_segment.prefixes[0].id, endpoint.network_prefix_id);
-    let parent =
-        db::vpc_prefix::get_for_allocation_by_ids(&mut *env.pool.acquire().await?, &[parent_id])
-            .await?
-            .pop()
-            .expect("service parent remains stored");
+    let parent = db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[parent_id])
+        .await?
+        .pop()
+        .expect("service parent remains stored");
     assert_eq!(parent.status.last_used_prefix, Some(endpoint.link_prefix));
 
     Ok(())
@@ -11781,11 +11812,9 @@ async fn test_update_instance_rejects_new_networked_attachment_while_lifecycle_i
 
         // Neither address family may update `VpcPrefix.status.last_used_prefix` or create a
         // network-segment or Instance-address record.
-        let parents = db::vpc_prefix::get_for_allocation_by_ids(
-            &mut *env.pool.acquire().await?,
-            &[ipv4_parent_id, ipv6_parent_id],
-        )
-        .await?;
+        let parents =
+            db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[ipv4_parent_id, ipv6_parent_id])
+                .await?;
         assert_eq!(parents.len(), 2, "{scenario}");
         assert!(
             parents
@@ -11794,7 +11823,7 @@ async fn test_update_instance_rejects_new_networked_attachment_while_lifecycle_i
             "{scenario}"
         );
         let generated_segments = db::network_segment::find_by(
-            &mut *env.pool.acquire().await?,
+            &mut env.db_reader(),
             ObjectColumnFilter::One(db::network_segment::VpcColumn, &selected_vpc),
             NetworkSegmentSearchConfig::default(),
         )
@@ -12077,7 +12106,7 @@ async fn test_update_existing_networked_attachment_preserves_service_interfaces(
     );
     assert_eq!(persisted.network_config_version, baseline_network_version);
     let persisted_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        &mut *env.pool.acquire().await?,
+        &env.pool,
         &instance.id,
         &seeded_endpoint.network_segment_id,
     )
@@ -12247,11 +12276,8 @@ async fn test_detach_networked_service_with_soft_deleted_parent_prefix(
         persisted.config.network.service_interfaces,
         vec![endpoint.clone()]
     );
-    let parents = db::vpc_prefix::get_for_allocation_by_ids(
-        &mut *env.pool.acquire().await?,
-        &[endpoint.vpc_prefix_id],
-    )
-    .await?;
+    let parents =
+        db::vpc_prefix::get_for_allocation_by_ids(&env.pool, &[endpoint.vpc_prefix_id]).await?;
     assert_eq!(parents.len(), 1);
     assert!(parents[0].is_marked_as_deleted());
 
@@ -12878,9 +12904,8 @@ async fn test_extension_cleanup_rejects_an_instance_update_from_before_cleanup(
         .config
         .as_ref()
         .and_then(|config| config.network.clone());
-    let mut txn = env.db_txn().await;
     let baseline_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &tinstance.id,
         &segment_id,
     )
@@ -12889,7 +12914,6 @@ async fn test_extension_cleanup_rejects_an_instance_update_from_before_cleanup(
     .map(|address| (address.address, address.prefix, address.vpc_id))
     .collect_vec();
     assert!(!baseline_addresses.is_empty());
-    txn.commit().await?;
 
     // The API locks service definitions after reading and merging attachments.
     // Blocking on the new service lets the controller clean up the old one.
@@ -12897,11 +12921,10 @@ async fn test_extension_cleanup_rejects_an_instance_update_from_before_cleanup(
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(service_lock.as_mut())
         .await?;
-    db::extension_service::find_by_ids(
+    db::extension_service::find_by_ids_for_update(
         service_lock.as_mut(),
         &[new_service.service_id.parse()?],
         false,
-        true,
     )
     .await?;
     detached_config.dpu_extension_services = Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -12982,9 +13005,8 @@ async fn test_extension_cleanup_rejects_an_instance_update_from_before_cleanup(
     );
 
     // The failed replacement must preserve the original `instance_addresses` and create no allocation.
-    let mut txn = env.db_txn().await;
     let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &tinstance.id,
         &segment_id,
     )
@@ -12995,14 +13017,13 @@ async fn test_extension_cleanup_rejects_an_instance_update_from_before_cleanup(
     assert_eq!(retained_addresses, baseline_addresses);
     assert!(
         db::instance_address::find_all_by_instance_id_and_segment_id(
-            txn.as_mut(),
+            &env.pool,
             &tinstance.id,
             &replacement_segment_id,
         )
         .await?
         .is_empty(),
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -13041,8 +13062,7 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
     let segment_ids = env.create_vpc_and_tenant_segments(1).await;
     let mh = create_managed_host_multi_dpu(&env, 1).await;
 
-    let mut txn = env.db_txn().await;
-    let host_machine = mh.host().db_machine(&mut txn).await;
+    let host_machine = mh.host().db_machine(&env.pool).await;
     let device_locators: Vec<DeviceLocator> = mh
         .dpu_ids
         .iter()
@@ -13057,7 +13077,6 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
         .bmc_info
         .mac
         .expect("fixture host should have a BMC MAC");
-    txn.commit().await.unwrap();
 
     // Allocate and drive the instance to Assigned/Ready.
     let tinstance = mh
@@ -13147,10 +13166,8 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
             acknowledged = true;
         }
 
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let machine = mh.host().db_machine(&mut txn).await;
+        let machine = mh.host().db_machine(&env.pool).await;
         let state = machine.current_state().clone();
-        txn.commit().await.unwrap();
 
         // WaitForBmc holds a fixed 30s wall-clock settle window before its first
         // readiness probe. Backdate the state version timestamp (preserving the
@@ -13175,7 +13192,7 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
             let mut txn = env.pool.txn_begin().await.unwrap();
             sqlx::query("UPDATE machines SET controller_state_version=$1 WHERE id=$2")
                 .bind(aged_version)
-                .bind(machine.id.to_string())
+                .bind(machine.id)
                 .execute(txn.as_mut())
                 .await
                 .unwrap();

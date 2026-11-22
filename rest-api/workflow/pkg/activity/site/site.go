@@ -793,7 +793,7 @@ func (mst ManageSite) GetAllSiteIDs(ctx context.Context) ([]uuid.UUID, error) {
 // updateSiteStatusInDB is helper function to write Site status updates to DB
 func (mst ManageSite) updateSiteStatusInDB(ctx context.Context, tx *cdb.Tx, siteID uuid.UUID, status *string, statusMessage *string) error {
 	logger := log.With().Str("activity", "updateSiteStatusInDB").Logger()
-	logger.Info().Msg(fmt.Sprintf("status value: %v, siteID: %v", status, siteID))
+	logger.Info().Msgf("status value: %v, siteID: %v", status, siteID)
 	if status != nil {
 		siteDAO := cdbm.NewSiteDAO(mst.dbSession)
 

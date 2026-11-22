@@ -29,13 +29,18 @@ bmc-platform = { path = "../bmc-platform" }
 bmc-runtime = { path = "../bmc-runtime" }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-redfish = { path = "../redfish" }
+carbide-secrets = { path = "../secrets", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
 libredfish = { workspace = true }
-nv-redfish = { workspace = true }
+nv-redfish = { features = ["accounts", "computer-systems", "secure-boot"], workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 http = { workspace = true }
+mac_address = { workspace = true }
+tokio = { features = ["macros", "rt"], workspace = true }
 
 [lints]
 workspace = true

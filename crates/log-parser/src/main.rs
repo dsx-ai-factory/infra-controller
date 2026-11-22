@@ -199,8 +199,8 @@ fn queue_event(timestamp: i64, event_type: &EventType, log: &mut LogFile, buffer
         machine_id: log
             .file_name_fields
             .get("machine_id")
-            .unwrap_or(&"".to_string())
-            .to_string(),
+            .cloned()
+            .unwrap_or_default(),
         ids: log.file_name_fields.clone(),
     };
     if log.events.len() >= MAX_EVENTS {
@@ -409,7 +409,7 @@ async fn one_log_file(
                     // remove the invalid entry so it gets correctly populated
                     eprintln!(
                         "invalid {i} for match {file_name} in logs vec for {}",
-                        cfg.filename.as_ref().unwrap_or(&"invalid".to_string())
+                        cfg.filename.as_deref().unwrap_or("invalid")
                     );
                     cfg.logs_hash.remove(file_path.as_os_str().as_bytes());
                     add_log_file(cfg, file_path, matched)?
@@ -423,7 +423,7 @@ async fn one_log_file(
     } else {
         eprintln!(
             "file name {file_name} did not match the regex pattern for events pipeline {}",
-            cfg.filename.as_ref().unwrap_or(&"invalid".to_string())
+            cfg.filename.as_deref().unwrap_or("invalid")
         );
         Ok(())
     }
@@ -451,7 +451,7 @@ async fn scan_files(cfg: &mut Configuration, set_offset: bool) -> Result<(), any
     } else {
         eprintln!(
             "Events pipeline {} path specified {} is not a directory or a file",
-            cfg.filename.as_ref().unwrap_or(&"".to_string()),
+            cfg.filename.as_deref().unwrap_or(""),
             cfg.logs_path
         )
     }
@@ -468,7 +468,7 @@ async fn read_event_definition(path: &Path) -> Result<Configuration, anyhow::Err
         path.file_name()
             .unwrap_or_default()
             .to_string_lossy()
-            .to_string(),
+            .into_owned(),
     );
     let filename_format = config.filename_format.replace("\\\\", "\\");
     if filename_format.is_empty() {
@@ -636,7 +636,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 Ok(_) => {
                     println!(
                         "successfully processed event pipeline defined in {}",
-                        config.filename.as_ref().unwrap_or(&"invalid".to_string())
+                        config.filename.as_deref().unwrap_or("invalid")
                     );
                 }
                 Err(e) => {
@@ -653,7 +653,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         event.timestamp,
                         event.severity,
                         event.name,
-                        event.description.clone().unwrap_or_default()
+                        event.description.as_deref().unwrap_or_default()
                     );
                     println!("from: {}", event.log_entry);
                 }

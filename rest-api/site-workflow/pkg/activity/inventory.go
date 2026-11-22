@@ -269,7 +269,7 @@ func (impl *manageInventoryImpl[K, R, P]) newCollector(grpcClient *cClient.CoreG
 		impl:          impl,
 		grpcClient:    grpcClient,
 		workflowName:  fmt.Sprintf("Update%sInventory", impl.itemType),
-		workflowID:    fmt.Sprintf("update-%s-inventory-%s", strings.ToLower(impl.itemType), impl.config.SiteID.String()),
+		workflowID:    fmt.Sprintf("update-%s-inventory-%s", strings.ToLower(impl.itemType), impl.config.SiteID),
 		dataConverter: util.NewTemporalDataConverter(),
 		// Both loops advance by the page size, so a caller that left either unset would spin
 		// forever on empty pages instead of failing.

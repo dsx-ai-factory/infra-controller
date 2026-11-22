@@ -55,22 +55,22 @@ pub(super) async fn positions(args: Args, api_client: &ApiClient) -> CarbideCliR
             x.machine_id.unwrap_or_default(),
             x.physical_slot_number
                 .map(|x| x.to_string())
-                .unwrap_or("---".to_string()),
+                .unwrap_or_else(|| "---".to_string()),
             x.compute_tray_index
                 .map(|x| x.to_string())
-                .unwrap_or("---".to_string()),
+                .unwrap_or_else(|| "---".to_string()),
             x.topology_id
                 .map(|x| x.to_string())
-                .unwrap_or("---".to_string()),
+                .unwrap_or_else(|| "---".to_string()),
             x.revision_id
                 .map(|x| x.to_string())
-                .unwrap_or("---".to_string()),
+                .unwrap_or_else(|| "---".to_string()),
             x.switch_id
                 .map(|id| id.to_string())
-                .unwrap_or("---".to_string()),
+                .unwrap_or_else(|| "---".to_string()),
             x.power_shelf_id
                 .map(|id| id.to_string())
-                .unwrap_or("---".to_string()),
+                .unwrap_or_else(|| "---".to_string()),
         ]);
     }
     table.printstd();

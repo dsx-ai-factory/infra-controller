@@ -33,6 +33,8 @@ use crate::db_read::DbReader;
 use crate::dns::zone::DbDnsZone;
 use crate::{DatabaseError, DatabaseResult};
 
+pub mod creation;
+
 #[cfg(test)]
 mod test_explicit_columns;
 
@@ -78,8 +80,8 @@ pub async fn persist(
         "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
-                slaac_enabled)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                slaac_enabled, dhcp_option_set_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING {}",
         Vpc::db_table_columns(),
     );
@@ -98,6 +100,7 @@ pub async fn persist(
         .bind(sqlx::types::Json(&status))
         .bind(value.power_resource_group)
         .bind(value.slaac_enabled)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
@@ -284,7 +287,7 @@ pub async fn find_private_dns_zones_by_vpc_ids(
     Ok(zones)
 }
 
-pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
+pub async fn find_by_vni(conn: impl DbReader<'_>, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
     let query = format!(
         "SELECT {} from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL",
         Vpc::db_table_columns(),
@@ -292,7 +295,7 @@ pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, D
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vni)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -444,7 +447,8 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
         )));
     }
 
-    let instance_config_reference_count = crate::instance::count_vpc_references(txn, &id).await?;
+    let instance_config_reference_count =
+        crate::instance::count_vpc_references(&mut *txn, &id).await?;
     if instance_config_reference_count > 0 {
         return Err(DatabaseError::FailedPrecondition(format!(
             "VPC {id} cannot be deleted while {instance_config_reference_count} instance network configurations still reference it"
@@ -496,6 +500,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 labels=$5::json,
                 routing_profile_overrides=COALESCE($6::jsonb, routing_profile_overrides),
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
+                dhcp_option_set_id=$11,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
             RETURNING {}",
@@ -525,6 +530,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
         .bind(power_resource_group)
         .bind(value.id)
         .bind(current_version)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await;
 

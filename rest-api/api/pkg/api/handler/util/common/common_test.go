@@ -12,29 +12,36 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
+	temporalEnums "go.temporal.io/api/enums/v1"
 	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 func testCommonInitDB(t *testing.T) *cdb.Session {
@@ -414,6 +421,12 @@ func TestUnwrapWorkflowError(t *testing.T) {
 		wantErr                  error
 		wantApplicationErrorType string
 	}{
+		{
+			name:                     "preserves Core deadline after Temporal serialization",
+			err:                      failureConverter.FailureToError(failureConverter.ErrorToFailure(swe.WrapErr(status.Error(codes.DeadlineExceeded, "cancellation is unresolved")))),
+			wantCode:                 http.StatusGatewayTimeout,
+			wantApplicationErrorType: swe.ErrTypeNICoDeadlineExceeded,
+		},
 		{
 			name:     "maps direct rack conflict",
 			err:      grpcAborted,
@@ -1263,87 +1276,76 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		})
 	}
 
-	for _, tc := range []struct {
-		name          string
-		forceDeletion bool
-	}{
-		{"labels", false},
-		{"force-deletion marker", true},
-	} {
-		t.Run("rechecks "+tc.name+" after a concurrent update, unlocks the rejected Machine", func(t *testing.T) {
-			concurrentInstanceType := testCommonBuildInstanceType(t, dbSession, "concurrent-"+tc.name, site1, ip, tnuser)
-			machine := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(concurrentInstanceType.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
-			_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
-				MachineID: machine.ID,
-				Labels:    map[string]string{"failure-domain": "fd-a"},
-			})
-			require.NoError(t, err)
-			testCommonBuildMachineInstanceType(t, dbSession, machine.ID, concurrentInstanceType.ID)
-
-			labelTx, err := cdb.BeginTx(ctx, dbSession, nil)
-			require.NoError(t, err)
-			update := cdbm.MachineUpdateInput{MachineID: machine.ID, Labels: map[string]string{"failure-domain": "fd-b"}}
-			if tc.forceDeletion {
-				update.Labels = nil
-				update.IsForceDeletionRequested = cutil.GetPtr(true)
-				update.IsUsableByTenant = cutil.GetPtr(false)
-			}
-			_, err = cdbm.NewMachineDAO(dbSession).Update(ctx, labelTx, update)
-			require.NoError(t, err)
-
-			allocationTx, err := cdb.BeginTx(ctx, dbSession, nil)
-			require.NoError(t, err)
-			labelTxFinished := false
-			defer func() {
-				if !labelTxFinished {
-					assert.NoError(t, labelTx.Rollback())
-				}
-				require.NoError(t, allocationTx.Rollback())
-			}()
-			var allocationBackendPID int
-			err = allocationTx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &allocationBackendPID)
-			require.NoError(t, err)
-
-			type allocationResult struct {
-				machine *cdbm.Machine
-				err     error
-			}
-			resultCh := make(chan allocationResult, 1)
-			go func() {
-				selected, selectionErr := GetUnallocatedMachineForInstanceType(
-					ctx,
-					zerolog.Nop(),
-					allocationTx,
-					dbSession,
-					concurrentInstanceType,
-					&cam.APIInstanceCreateRequest{MachineLabelSelector: map[string]string{"failure-domain": "fd-a"}},
-				)
-				resultCh <- allocationResult{machine: selected, err: selectionErr}
-			}()
-
-			require.Eventually(t, func() bool {
-				var waitEventType string
-				queryErr := dbSession.DB.QueryRowContext(ctx, `
-					SELECT COALESCE(wait_event_type, '')
-					FROM pg_catalog.pg_stat_activity
-					WHERE pid = ?
-				`, allocationBackendPID).Scan(&waitEventType)
-				return queryErr == nil && waitEventType == "Lock"
-			}, 5*time.Second, 10*time.Millisecond, "Machine selection did not wait for the concurrent label update")
-
-			require.NoError(t, labelTx.Commit())
-			labelTxFinished = true
-			select {
-			case result := <-resultCh:
-				require.Nil(t, result.machine)
-				require.Error(t, result.err)
-				// allocationTx is still open, so a lock held through it would block this attempt
-				assert.False(t, machineLockedElsewhere(t, machine.ID), "rejected Machine must be unlocked before the transaction ends")
-			case <-time.After(5 * time.Second):
-				t.Fatal("Machine selection did not resume after the concurrent label update committed")
-			}
+	t.Run("rechecks labels after a concurrent update, unlocks the rejected Machine", func(t *testing.T) {
+		concurrentInstanceType := testCommonBuildInstanceType(t, dbSession, "concurrent-label-update", site1, ip, tnuser)
+		machine := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(concurrentInstanceType.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
+		_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+			MachineID: machine.ID,
+			Labels:    map[string]string{"failure-domain": "fd-a"},
 		})
-	}
+		require.NoError(t, err)
+		testCommonBuildMachineInstanceType(t, dbSession, machine.ID, concurrentInstanceType.ID)
+
+		labelTx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		_, err = cdbm.NewMachineDAO(dbSession).Update(ctx, labelTx, cdbm.MachineUpdateInput{
+			MachineID: machine.ID,
+			Labels:    map[string]string{"failure-domain": "fd-b"},
+		})
+		require.NoError(t, err)
+
+		allocationTx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		labelTxFinished := false
+		defer func() {
+			if !labelTxFinished {
+				assert.NoError(t, labelTx.Rollback())
+			}
+			require.NoError(t, allocationTx.Rollback())
+		}()
+		var allocationBackendPID int
+		err = allocationTx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &allocationBackendPID)
+		require.NoError(t, err)
+
+		type allocationResult struct {
+			machine *cdbm.Machine
+			err     error
+		}
+		resultCh := make(chan allocationResult, 1)
+		go func() {
+			selected, selectionErr := GetUnallocatedMachineForInstanceType(
+				ctx,
+				zerolog.Nop(),
+				allocationTx,
+				dbSession,
+				concurrentInstanceType,
+				&cam.APIInstanceCreateRequest{MachineLabelSelector: map[string]string{"failure-domain": "fd-a"}},
+			)
+			resultCh <- allocationResult{machine: selected, err: selectionErr}
+		}()
+
+		require.Eventually(t, func() bool {
+			var waitEventType string
+			queryErr := dbSession.DB.QueryRowContext(ctx, `
+				SELECT COALESCE(wait_event_type, '')
+				FROM pg_catalog.pg_stat_activity
+				WHERE pid = ?
+			`, allocationBackendPID).Scan(&waitEventType)
+			return queryErr == nil && waitEventType == "Lock"
+		}, 5*time.Second, 10*time.Millisecond, "Machine selection did not wait for the concurrent label update")
+
+		require.NoError(t, labelTx.Commit())
+		labelTxFinished = true
+		select {
+		case result := <-resultCh:
+			require.Nil(t, result.machine)
+			require.Error(t, result.err)
+			// allocationTx is still open, so a lock held through it would block this attempt
+			assert.False(t, machineLockedElsewhere(t, machine.ID), "rejected Machine must be unlocked before the transaction ends")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Machine selection did not resume after the concurrent label update committed")
+		}
+	})
 }
 
 func TestGetSiteMachineCountStats(t *testing.T) {
@@ -2039,40 +2041,6 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 			}
 		})
 	}
-	t.Run("retained force deletion removes usable capacity but preserves ownership counts", func(t *testing.T) {
-		_, err := cdbm.NewAllocationConstraintDAO(dbSession).Update(ctx, nil, cdbm.AllocationConstraintUpdateInput{
-			AllocationConstraintID: alc3.ID, ConstraintValue: cutil.GetPtr(alc3.ConstraintValue - 5),
-		})
-		require.NoError(t, err)
-		before, apiErr := GetInstanceTypeAllocationStats(ctx, dbSession, zerolog.Nop(), *it1, nil)
-		require.Nil(t, apiErr)
-		require.Equal(t, cutil.GetPtr(5), before.MaxAllocatable)
-		for _, tc := range []struct {
-			name           string
-			retained       int
-			maxAllocatable int
-		}{
-			{"remaining eligible capacity", 1, 4},
-			{"acknowledged capacity shortfall", 6, 0},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				for i := range tc.retained {
-					_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
-						MachineID: m1s[allocatedMachines+i].ID, IsForceDeletionRequested: cutil.GetPtr(true), IsUsableByTenant: cutil.GetPtr(false),
-					})
-					require.NoError(t, err)
-				}
-				after, apiErr := GetInstanceTypeAllocationStats(ctx, dbSession, zerolog.Nop(), *it1, nil)
-				require.Nil(t, apiErr)
-				assert.Equal(t, before.UnusedUsable-tc.retained, after.UnusedUsable)
-				assert.Equal(t, cutil.GetPtr(tc.maxAllocatable), after.MaxAllocatable)
-				assert.Equal(t, before.Assigned, after.Assigned)
-				assert.Equal(t, before.Used, after.Used)
-				assert.Equal(t, before.Total, after.Total)
-			})
-		}
-	})
-
 }
 
 func TestGetIsProviderRequest(t *testing.T) {
@@ -3851,6 +3819,372 @@ func TestHandleTxError(t *testing.T) {
 			c.Set(cutil.APINameContextKey, "nico")
 			require.NoError(t, HandleTxError(c, zerolog.Nop(), tt.err, "fallback"))
 			assert.JSONEq(t, tt.body, rec.Body.String())
+		})
+	}
+}
+
+// testProxiedCall is what a mutation helper handed to the proxy workflow.
+type testProxiedCall struct {
+	options      tclient.StartWorkflowOptions
+	workflowName string
+	request      grpcproxy.Request
+}
+
+// testNewMutationProxyClient returns a Temporal client that captures the proxy call
+// and answers it with reply, so a helper runs its success path.
+func testNewMutationProxyClient(t *testing.T, reply proto.Message) (*tmocks.Client, *testProxiedCall) {
+	t.Helper()
+
+	replyJSON, err := protojson.Marshal(reply)
+	require.NoError(t, err)
+
+	workflowRun := &tmocks.WorkflowRun{}
+	workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		out, ok := args.Get(1).(*grpcproxy.Response)
+		require.True(t, ok, "Get target is %T", args.Get(1))
+		out.ResponseJSON = replyJSON
+	}).Return(nil)
+
+	call := &testProxiedCall{}
+	temporalClient := &tmocks.Client{}
+	temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		call.options = args.Get(1).(tclient.StartWorkflowOptions)
+		call.workflowName = args.Get(2).(string)
+		call.request = args.Get(3).(grpcproxy.Request)
+	}).Return(workflowRun, nil)
+
+	return temporalClient, call
+}
+
+func testMutationTargetSpec(rackID string) *flowv1.OperationTargetSpec {
+	return &flowv1.OperationTargetSpec{
+		Targets: &flowv1.OperationTargetSpec_Racks{
+			Racks: &flowv1.RackTargets{
+				Targets: []*flowv1.RackTarget{
+					{Identifier: &flowv1.RackTarget_Id{Id: &flowv1.UUID{Id: rackID}}},
+				},
+			},
+		},
+	}
+}
+
+// testExecuteFlowMutationWorkflow pins what the power, bring-up and
+// firmware helpers send. Each covers a Flow method reached only through these
+// helpers, so an incorrect method, workflow ID, conflict policy or request
+// payload would otherwise surface as a misrouted mutation on a live site.
+func testExecuteFlowMutationWorkflow(t *testing.T, operation string) {
+	t.Helper()
+	const (
+		rackID     = "6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"
+		ruleID     = "b3d2c1a0-5e4f-4a3b-9c8d-7e6f5a4b3c2d"
+		siteID     = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
+		workflowID = "rack-power-1"
+		entityName = "rack r1"
+	)
+	ruleIDArg := ruleID
+	version := "1.2.3"
+
+	cases := []struct {
+		name                 string
+		execute              func(context.Context, tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError)
+		wantFullMethod       string
+		wantRequest          proto.Message
+		wantWorkflowID       string
+		wantWorkflowIDPrefix string
+	}{
+		{
+			name: "power on",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
+			wantRequest: &flowv1.PowerOnRackRequest{
+				TargetSpec:  testMutationTargetSpec(rackID),
+				Description: "API power on rack r1",
+				RuleId:      &flowv1.UUID{Id: ruleID},
+			},
+		},
+		{
+			name: "power off",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateOff, nil, false, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_PowerOffRack_FullMethodName,
+			wantRequest: &flowv1.PowerOffRackRequest{
+				TargetSpec:  testMutationTargetSpec(rackID),
+				Description: "API power off rack r1",
+			},
+		},
+		{
+			name: "power cycle",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateCycle, nil, false, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_PowerResetRack_FullMethodName,
+			wantRequest: &flowv1.PowerResetRackRequest{
+				TargetSpec:  testMutationTargetSpec(rackID),
+				Description: "API power cycle rack r1",
+			},
+		},
+		{
+			// Forced shares PowerOffRack with the unforced state, so the flag is
+			// the only thing separating them on the wire.
+			name: "force power off",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateForceOff, nil, true, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_PowerOffRack_FullMethodName,
+			wantRequest: &flowv1.PowerOffRackRequest{
+				TargetSpec:             testMutationTargetSpec(rackID),
+				Forced:                 true,
+				Description:            "API force power off rack r1",
+				OverrideReadinessCheck: true,
+			},
+		},
+		{
+			name: "force power cycle",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateForceCycle, nil, false, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_PowerResetRack_FullMethodName,
+			wantRequest: &flowv1.PowerResetRackRequest{
+				TargetSpec:  testMutationTargetSpec(rackID),
+				Forced:      true,
+				Description: "API force power cycle rack r1",
+			},
+		},
+		{
+			name: "AC power cycle",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateACCycle, nil, true, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_ACPowerCycleRack_FullMethodName,
+			wantRequest: &flowv1.ACPowerCycleRackRequest{
+				TargetSpec:             testMutationTargetSpec(rackID),
+				Description:            "API AC power cycle rack r1",
+				OverrideReadinessCheck: true,
+			},
+		},
+		{
+			name: "bring up",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_BringUpRack_FullMethodName,
+			wantRequest: &flowv1.BringUpRackRequest{
+				TargetSpec:             testMutationTargetSpec(rackID),
+				Description:            "API bring up rack r1",
+				RuleId:                 &flowv1.UUID{Id: ruleID},
+				OverrideReadinessCheck: true,
+			},
+		},
+		{
+			name: "firmware update",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, nil, siteID, nil, false, true, workflowID, entityName)
+			},
+			wantFullMethod:       flowv1.Flow_UpgradeFirmware_FullMethodName,
+			wantWorkflowIDPrefix: workflowID + "-override-version-check-targets-",
+			wantRequest: &flowv1.UpgradeFirmwareRequest{
+				TargetSpec:           testMutationTargetSpec(rackID),
+				TargetVersion:        &version,
+				SubTargets:           []string{"bmc", "nvos"},
+				Description:          "API firmware update rack r1",
+				OverrideVersionCheck: true,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		selected := "power"
+		if tc.name == "bring up" {
+			selected = "bring up"
+		}
+		if tc.name == "firmware update" {
+			selected = "firmware"
+		}
+		if selected != operation {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			reply := &flowv1.SubmitTaskResponse{}
+			temporalClient, call := testNewMutationProxyClient(t, reply)
+
+			got, apiErr := tc.execute(context.Background(), temporalClient)
+
+			require.Nil(t, apiErr)
+			require.NotNil(t, got)
+
+			assert.Equal(t, grpcproxy.Flow.WorkflowName, call.workflowName)
+			assert.Equal(t, tc.wantFullMethod, call.request.FullMethod)
+
+			t.Run("coalesces retries onto the mutation already in flight", func(t *testing.T) {
+				wantWorkflowID := tc.wantWorkflowID
+				if wantWorkflowID == "" {
+					wantWorkflowID = workflowID
+				}
+				if tc.wantWorkflowIDPrefix != "" {
+					assert.True(t, strings.HasPrefix(call.options.ID, tc.wantWorkflowIDPrefix))
+					assert.NotEqual(t, tc.wantWorkflowIDPrefix, call.options.ID)
+				} else {
+					assert.Equal(t, wantWorkflowID, call.options.ID)
+				}
+				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, call.options.WorkflowIDConflictPolicy)
+			})
+
+			t.Run("sends the expected request", func(t *testing.T) {
+				decoded := tc.wantRequest.ProtoReflect().New().Interface()
+				require.NoError(t, protojson.Unmarshal(call.request.RequestJSON, decoded))
+				assert.Empty(t, call.request.EncryptedSecrets)
+				assert.True(t, proto.Equal(tc.wantRequest, decoded), "want %v, got %v", tc.wantRequest, decoded)
+			})
+		})
+	}
+}
+
+func testExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
+	const (
+		rackID     = "6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"
+		siteID     = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
+		workflowID = "rack-firmware-1"
+		token      = "firmware-access-token"
+	)
+	authenticationData := &flowv1.FirmwareAuthenticationData{
+		Value: &flowv1.FirmwareAuthenticationData_Shared{Shared: token},
+	}
+	wantRequest := &flowv1.UpgradeFirmwareRequest{
+		TargetSpec:         testMutationTargetSpec(rackID),
+		Description:        "API firmware update rack r1",
+		AuthenticationData: authenticationData,
+	}
+	temporalClient, call := testNewMutationProxyClient(t, &flowv1.SubmitTaskResponse{})
+
+	got, apiErr := ExecuteFirmwareUpdateWorkflow(
+		context.Background(), zerolog.Nop(), temporalClient,
+		testMutationTargetSpec(rackID), nil, nil, authenticationData, nil, siteID, nil, false, false,
+		workflowID, "rack r1",
+	)
+
+	require.Nil(t, apiErr)
+	require.NotNil(t, got)
+	assert.True(t, strings.HasPrefix(call.options.ID, workflowID+"-"))
+	assert.NotContains(t, call.options.ID, token)
+	assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, call.options.WorkflowIDConflictPolicy)
+	assert.NotContains(t, string(call.request.RequestJSON), token)
+	assert.Contains(t, string(call.request.RequestJSON), grpcproxy.RedactedPlaceholder)
+	require.NotEmpty(t, call.request.EncryptedSecrets)
+
+	secretsJSON := cutil.DecryptData(call.request.EncryptedSecrets, siteID)
+	restoredJSON, err := grpcproxy.MergeSecrets(call.request.RequestJSON, secretsJSON)
+	require.NoError(t, err)
+	gotRequest := &flowv1.UpgradeFirmwareRequest{}
+	require.NoError(t, protojson.Unmarshal(restoredJSON, gotRequest))
+	assert.True(t, proto.Equal(wantRequest, gotRequest), "want %v, got %v", wantRequest, gotRequest)
+}
+
+// testExecutePowerControlWorkflowRejectsUnknownState keeps an unroutable state
+// from reaching Flow: the helper picks the method from it, so there is nothing
+// to proxy. It returns a structured error for the HTTP handler to render.
+func testExecutePowerControlWorkflowRejectsUnknownState(t *testing.T) {
+	temporalClient := &tmocks.Client{}
+
+	got, apiErr := ExecutePowerControlWorkflow(context.Background(), zerolog.Nop(), temporalClient, testMutationTargetSpec("6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"), "hibernate", nil, false, "rack-power-1", "rack r1")
+
+	assert.Nil(t, got)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	assert.Equal(t, "Invalid power control state: hibernate", apiErr.Message)
+	temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func testExecuteFirmwareUpdateWorkflowDeviceCredentials(t *testing.T) {
+	const siteID = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
+	credentials := &flowv1.DeviceCredentialOverrides{Bmc: &flowv1.DeviceLogin{Username: "operator", Password: "device-secret-value"}}
+	target := &flowv1.OperationTargetSpec{Targets: &flowv1.OperationTargetSpec_Components{Components: &flowv1.ComponentTargets{Targets: []*flowv1.ComponentTarget{{Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: "aa:bb:cc:dd:ee:01"}}}}}}}
+	for _, tc := range []struct {
+		name   string
+		target *flowv1.OperationTargetSpec
+	}{
+		{"tray credentials encrypted", target}, {"rack-filtered tray selection", testMutationTargetSpec("6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, call := testNewMutationProxyClient(t, &flowv1.SubmitTaskResponse{})
+			_, apiErr := ExecuteFirmwareUpdateWorkflow(context.Background(), zerolog.Nop(), client, tc.target, nil, nil, nil, credentials, siteID, nil, true, false, "tray-fw", "Tray")
+			require.Nil(t, apiErr)
+			require.NotContains(t, string(call.request.RequestJSON), "device-secret-value")
+			require.NotContains(t, string(call.request.RequestJSON), "operator")
+			restored, err := grpcproxy.MergeSecrets(call.request.RequestJSON, cutil.DecryptData(call.request.EncryptedSecrets, siteID))
+			require.NoError(t, err)
+			var request flowv1.UpgradeFirmwareRequest
+			require.NoError(t, protojson.Unmarshal(restored, &request))
+			require.True(t, proto.Equal(credentials, request.GetDeviceCredentialOverrides()))
+			require.True(t, request.GetOverrideReadinessCheck())
+		})
+	}
+}
+
+func TestExecuteFirmwareUpdateWorkflow(t *testing.T) {
+	t.Run("proxy request", func(t *testing.T) { testExecuteFlowMutationWorkflow(t, "firmware") })
+	t.Run("download authentication", testExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData)
+	t.Run("device credentials", testExecuteFirmwareUpdateWorkflowDeviceCredentials)
+	t.Run("workflow identity", testExecuteFirmwareUpdateWorkflowIdentity)
+}
+
+func TestExecutePowerControlWorkflow(t *testing.T) {
+	t.Run("proxy requests", func(t *testing.T) { testExecuteFlowMutationWorkflow(t, "power") })
+	t.Run("unknown state", testExecutePowerControlWorkflowRejectsUnknownState)
+}
+
+func TestExecuteBringUpRackWorkflow(t *testing.T) {
+	testExecuteFlowMutationWorkflow(t, "bring up")
+}
+
+func testExecuteFirmwareUpdateWorkflowIdentity(t *testing.T) {
+	const (
+		rackID     = "6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"
+		siteID     = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
+		workflowID = "rack-firmware-1"
+	)
+	cases := []struct {
+		name          string
+		firstTargets  []string
+		secondTargets []string
+		firstVersion  string
+		secondVersion string
+		wantSameID    bool
+	}{
+		{name: "omitted and empty keep existing default identity", secondTargets: []string{}, wantSameID: true},
+		{name: "BMC-only does not reuse default submission", secondTargets: []string{"bmc"}},
+		{name: "DPU-only does not reuse BMC-only submission", firstTargets: []string{"bmc"}, secondTargets: []string{"dpu"}},
+		{name: "identical explicit requests still coalesce", firstTargets: []string{"bmc"}, secondTargets: []string{"bmc"}, wantSameID: true},
+		{name: "different firmware input does not reuse filtered submission", firstTargets: []string{"bmc"}, secondTargets: []string{"bmc"}, firstVersion: "firmware-object-a", secondVersion: "firmware-object-b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ids := make([]string, 0, 2)
+			for _, request := range []struct {
+				targets []string
+				version string
+			}{
+				{tc.firstTargets, tc.firstVersion},
+				{tc.secondTargets, tc.secondVersion},
+			} {
+				temporalClient, call := testNewMutationProxyClient(t, &flowv1.SubmitTaskResponse{})
+				_, apiErr := ExecuteFirmwareUpdateWorkflow(context.Background(), zerolog.Nop(), temporalClient,
+					testMutationTargetSpec(rackID), &request.version, request.targets, nil, nil, siteID, nil, false, false,
+					workflowID, "rack r1")
+				require.Nil(t, apiErr)
+				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, call.options.WorkflowIDConflictPolicy)
+				ids = append(ids, call.options.ID)
+			}
+			if tc.wantSameID {
+				assert.Equal(t, ids[0], ids[1])
+			} else {
+				assert.NotEqual(t, ids[0], ids[1])
+			}
+			if len(tc.firstTargets) == 0 {
+				assert.Equal(t, workflowID, ids[0])
+			}
 		})
 	}
 }

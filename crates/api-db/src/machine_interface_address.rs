@@ -94,13 +94,13 @@ pub struct MachineInterfaceAddressWithType {
 }
 
 pub async fn find_ipv4_for_interface(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
 ) -> Result<MachineInterfaceAddress, DatabaseError> {
     let query = "SELECT address FROM machine_interface_addresses WHERE interface_id = $1 AND family(address) = 4";
     sqlx::query_as(query)
         .bind(interface_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -216,14 +216,14 @@ async fn lock_interface_for_deletion(
 
 /// Find all addresses for an interface, including their allocation type.
 pub async fn find_for_interface(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
 ) -> Result<Vec<MachineInterfaceAddressWithType>, DatabaseError> {
     let query =
         "SELECT address, allocation_type FROM machine_interface_addresses WHERE interface_id = $1";
     sqlx::query_as(query)
         .bind(interface_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -231,7 +231,7 @@ pub async fn find_for_interface(
 /// Find the allocation type of the existing address for a given
 /// interface and address family, if one exists.
 pub async fn find_allocation_type_for_family(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
 ) -> Result<Option<AllocationType>, DatabaseError> {
@@ -239,7 +239,7 @@ pub async fn find_allocation_type_for_family(
     let result: Option<(AllocationType,)> = sqlx::query_as(query)
         .bind(interface_id)
         .bind(family.pg_family())
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(result.map(|(t,)| t))
@@ -533,7 +533,7 @@ pub async fn restore_reserved(
 /// addresses never appear. Ordered by MAC then family then address for a
 /// deterministic operator listing.
 pub async fn find_reserved(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: Option<MacAddress>,
     address: Option<IpAddr>,
 ) -> Result<Vec<ReservedAddress>, DatabaseError> {
@@ -546,7 +546,7 @@ pub async fn find_reserved(
     sqlx::query_as(query)
         .bind(mac_address)
         .bind(address)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -558,7 +558,7 @@ pub async fn find_reserved(
 /// (`interface_id IS NULL`) are returned, ordered by MAC then family then
 /// address so the paged listing is deterministic.
 pub async fn find_reserved_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: Option<MacAddress>,
     address: Option<IpAddr>,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
@@ -571,7 +571,7 @@ pub async fn find_reserved_ids(
     sqlx::query_scalar(query)
         .bind(mac_address)
         .bind(address)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -582,7 +582,7 @@ pub async fn find_reserved_ids(
 /// since been re-owned or released is silently dropped. Ordered by MAC then
 /// family then address to match [`find_reserved_ids`].
 pub async fn find_reserved_by_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     addresses: &[IpAddr],
 ) -> Result<Vec<ReservedAddress>, DatabaseError> {
     let query = "SELECT address, reserved_by_mac, allocation_type
@@ -592,7 +592,7 @@ pub async fn find_reserved_by_ids(
         ORDER BY reserved_by_mac, family(address), address";
     sqlx::query_as(query)
         .bind(addresses)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -730,7 +730,7 @@ async fn delete_address_allocation(
 /// has an address for the family (static or DHCP), no re-allocation
 // is needed.
 pub async fn has_address_for_family(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
 ) -> Result<bool, DatabaseError> {
@@ -738,7 +738,7 @@ pub async fn has_address_for_family(
     sqlx::query_scalar(query)
         .bind(interface_id)
         .bind(family.pg_family())
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -1002,7 +1002,7 @@ mod tests {
         assert_eq!(assignment?, AssignStaticResult::ReplacedDhcp);
 
         let mut connection = pool.acquire().await?;
-        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        let addresses = find_for_interface(&mut *connection, interface_id).await?;
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, static_address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Static);
@@ -1092,11 +1092,11 @@ mod tests {
 
         let mut connection = pool.acquire().await?;
         assert!(
-            find_for_interface(&mut connection, source_interface_id)
+            find_for_interface(&mut *connection, source_interface_id)
                 .await?
                 .is_empty()
         );
-        let addresses = find_for_interface(&mut connection, destination_interface_id).await?;
+        let addresses = find_for_interface(&mut *connection, destination_interface_id).await?;
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
@@ -1170,7 +1170,7 @@ mod tests {
         assert!(!removal?);
 
         let mut connection = pool.acquire().await?;
-        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        let addresses = find_for_interface(&mut *connection, interface_id).await?;
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, replacement_address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Static);
@@ -1825,7 +1825,11 @@ mod tests {
         assert!(!mark_result?);
 
         let mut connection = pool.acquire().await?;
-        assert!(find_reserved(&mut connection, None, None).await?.is_empty());
+        assert!(
+            find_reserved(&mut *connection, None, None)
+                .await?
+                .is_empty()
+        );
         assert!(find_by_address(&mut *connection, address).await?.is_none());
         Ok(())
     }

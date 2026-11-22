@@ -260,7 +260,9 @@ impl fmt::Display for MlxVariableSpec {
             MlxVariableSpec::Bytes => write!(f, "Bytes"),
             MlxVariableSpec::Array => write!(f, "Array"),
             MlxVariableSpec::Enum { options } => {
-                write!(f, "Enum [{}]", options.join(", "))
+                f.write_str("Enum [")?;
+                crate::write_joined(f, options, ", ")?;
+                f.write_str("]")
             }
             MlxVariableSpec::Preset { max_preset } => {
                 write!(f, "Preset (max: {max_preset})")
@@ -272,7 +274,9 @@ impl fmt::Display for MlxVariableSpec {
                 write!(f, "IntegerArray[{size}]")
             }
             MlxVariableSpec::EnumArray { options, size } => {
-                write!(f, "EnumArray[{size}] [{}]", options.join(", "))
+                write!(f, "EnumArray[{size}] [")?;
+                crate::write_joined(f, options, ", ")?;
+                f.write_str("]")
             }
             MlxVariableSpec::BinaryArray { size } => {
                 write!(f, "BinaryArray[{size}]")

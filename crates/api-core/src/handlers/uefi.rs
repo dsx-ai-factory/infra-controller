@@ -19,6 +19,7 @@ use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_uuid::machine::MachineId;
 use db::WithTransaction;
+use db::db_read::DbReader;
 use futures_util::FutureExt;
 use model::machine::LoadSnapshotOptions;
 use tonic::{Request, Response, Status};
@@ -65,11 +66,11 @@ async fn host_uefi_target_version(conn: &mut sqlx::PgConnection) -> Result<u32, 
 /// therefore a broken invariant and returns an error. An existing row with an
 /// unknown version still uses the fallback above, which may fail authentication.
 async fn host_uefi_device_version(
-    conn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     bmc_mac: mac_address::MacAddress,
 ) -> Result<u32, db::DatabaseError> {
     let status = db::credential_rotation::device_rotation_status(
-        &mut *conn,
+        db,
         db::credential_rotation::CredentialRotationType::HostUefi,
         bmc_mac,
     )
@@ -91,9 +92,7 @@ async fn host_uefi_device_version(
 /// secret to a `CarbideError`. Used to resolve the password the low-level
 /// `redfish` UEFI calls apply (they no longer read the store themselves).
 ///
-/// Takes no database connection: the reader can be Vault-backed, so callers
-/// resolve the version-to-`key` half against the DB first, commit, then call
-/// this -- the remote read must not run while a connection is held.
+/// Callers resolve the key before issuing a potentially remote secret read.
 pub(super) async fn read_uefi_credentials(
     reader: &dyn CredentialReader,
     key: &CredentialKey,
@@ -116,15 +115,13 @@ pub(super) async fn read_uefi_credentials(
 /// authenticate a *clear* against its existing password (the device's converged
 /// version; see [`host_uefi_device_version`]).
 ///
-/// This is only the database half: it reads
-/// the device version and returns the key. The caller reads the secret with
-/// `read_uefi_credentials` after committing, so no connection is held across the
-/// remote reader (Vault) request.
+/// Read the device version from the database before fetching the secret with
+/// [`read_uefi_credentials`].
 pub(super) async fn host_uefi_clear_credential_key(
-    conn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     bmc_mac: mac_address::MacAddress,
 ) -> Result<CredentialKey, CarbideError> {
-    let version = host_uefi_device_version(conn, bmc_mac).await.map_err(|e| {
+    let version = host_uefi_device_version(db, bmc_mac).await.map_err(|e| {
         CarbideError::internal(format!("failed to read host UEFI device version: {e}"))
     })?;
     Ok(CredentialKey::host_uefi_site_default(version))
@@ -158,15 +155,13 @@ pub(crate) async fn clear_host_uefi_password(
 ) -> Result<Response<rpc::ClearHostUefiPasswordResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
     let request = request.into_inner();
 
     // https://github.com/NVIDIA/carbide-core/issues/116
     // Resolve machine_id from machine_query first (preferred),
     // otherwise fall back to the host_id (now deprecated).
     let machine_id = if let Some(query) = request.machine_query {
-        match db::machine::find_by_query(&mut txn, &query).await? {
+        match db::machine::find_by_query(api.pg_pool(), &query).await? {
             Some(machine) => {
                 log_machine_id(&machine.id);
                 machine.id
@@ -194,7 +189,7 @@ pub(crate) async fn clear_host_uefi_password(
     }
 
     let snapshot = db::managed_host::load_snapshot(
-        &mut txn,
+        &mut api.db_reader(),
         &machine_id,
         LoadSnapshotOptions {
             include_history: false,
@@ -215,7 +210,6 @@ pub(crate) async fn clear_host_uefi_password(
     // with a warning and a successful no-op response instead of surfacing an
     // internal error to the operator.
     if snapshot.host_snapshot.bios_password_set_time.is_none() {
-        txn.commit().await?;
         tracing::warn!(
             %machine_id,
             "No UEFI password is recorded as set on this host; nothing to clear"
@@ -240,18 +234,12 @@ pub(crate) async fn clear_host_uefi_password(
     })?;
 
     let bmc_access_info =
-        db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
+        db::machine_interface::lookup_bmc_access_info(api.pg_pool(), addr.ip(), Some(addr.port()))
             .await?;
 
-    // Resolve which credential the clear must authenticate with -- the password
-    // the device currently holds, keyed by its converged version (table-driven;
-    // see `host_uefi_clear_credential_key`). This is the DB half; do it while the
-    // txn is open.
-    let clear_key = host_uefi_clear_credential_key(&mut txn, bmc_mac).await?;
+    // The BMC still holds the password for its converged credential version.
+    let clear_key = host_uefi_clear_credential_key(api.pg_pool(), bmc_mac).await?;
 
-    // Commit before the remote reader (Vault) request so the connection is not
-    // held across it, then read the actual secret.
-    txn.commit().await?;
     let clear_credentials =
         read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &clear_key).await?;
 

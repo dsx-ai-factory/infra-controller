@@ -93,6 +93,7 @@ fn main() {
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod build_support {
+    use std::fmt::Write;
     use std::path::{Path, PathBuf};
 
     pub(crate) fn find_kea_dhcp_library(
@@ -110,15 +111,17 @@ mod build_support {
             }
         }
 
-        Err(format!(
-            "No linkable libkea-dhcp++ or libkea-dhcp found in [{}]. \
-         Install the Kea development package or set KEA_LIB_PATH to its library directory.",
-            lib_paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
+        let mut message = String::from("No linkable libkea-dhcp++ or libkea-dhcp found in [");
+        for (index, path) in lib_paths.iter().enumerate() {
+            if index != 0 {
+                message.push_str(", ");
+            }
+            write!(message, "{}", path.display()).expect("writing to a String cannot fail");
+        }
+        message.push_str(
+            "]. Install the Kea development package or set KEA_LIB_PATH to its library directory.",
+        );
+        Err(message)
     }
 }
 

@@ -111,11 +111,10 @@ current_version_reported_as = "^2$"
     .await?;
     txn.commit().await?;
 
-    let mut txn = pool.txn_begin().await?;
     let query =
         r#"SELECT versions->>'Versions' AS versions FROM desired_firmware WHERE vendor = 'Dell';"#;
 
-    let versions_all: Vec<AsStrings> = sqlx::query_as(query).fetch_all(txn.as_mut()).await?;
+    let versions_all: Vec<AsStrings> = sqlx::query_as(query).fetch_all(&pool).await?;
     let versions = versions_all.first().unwrap().versions.clone();
 
     let expected =
@@ -124,13 +123,12 @@ current_version_reported_as = "^2$"
     assert_eq!(expected, versions);
 
     let query = r#"SELECT COUNT(1) FROM desired_firmware;"#;
-    let count: (i64,) = sqlx::query_as(query).fetch_one(txn.as_mut()).await?;
+    let count: (i64,) = sqlx::query_as(query).fetch_one(&pool).await?;
     assert_eq!(count, (1,));
 
     let query = r#"SELECT explicit_update_start_needed FROM desired_firmware;"#;
-    let explicit_update_needed: (bool,) = sqlx::query_as(query).fetch_one(txn.as_mut()).await?;
+    let explicit_update_needed: (bool,) = sqlx::query_as(query).fetch_one(&pool).await?;
     assert_eq!(explicit_update_needed, (true,));
-    txn.commit().await?;
 
     Ok(())
 }

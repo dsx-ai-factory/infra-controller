@@ -301,6 +301,7 @@ pub async fn run_metrics_endpoint_with_cancellation(
 ) -> Result<(), std::io::Error> {
     let listener = bind_tcp_listener(config.address).await?;
 
+    // Preserve native string quoting for callers using tracing_subscriber::fmt.
     tracing::info!(
         metrics_address = config.address.to_string(),
         "Starting metrics listener"

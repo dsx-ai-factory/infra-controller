@@ -21,22 +21,22 @@
 
 use std::collections::BTreeMap;
 
-use bmc_backend::platform_error;
+use bmc_backend::{idrac_outcome, libredfish_operation_status, platform_error};
 use bmc_platform::{
     BiosSettings, DriverOutcome, ManagerSettings, OperationReference, OperationStatus,
-    PlatformError, PlatformIdentity, VendorJobId,
+    PlatformError, PlatformIdentity,
 };
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
 use carbide_redfish::nv_redfish::RedfishBmc;
 use carbide_uuid::machine::MachineIdSubtypeTrait;
-use libredfish::{BiosProfileVendor, JobState, Redfish, RedfishError};
+use libredfish::{BiosProfileVendor, Redfish, RedfishError};
 use model::machine::{Machine, ManagedHostStateSnapshot};
 use serde_json::Value;
 use state_controller::state_handler::StateHandlerError;
 
-use super::{DpuSettings, idrac_job};
+use super::DpuSettings;
 use crate::config::MachineStateHandlerSiteConfig;
 use crate::context::MachineStateHandlerServices;
 
@@ -91,24 +91,17 @@ impl<'a> PlatformBmc<'a> {
         })
     }
 
-    /// See [`ConnectedBmc::operation_status`]. libredfish reads only the
-    /// iDRAC jobs its `machine_setup` starts.
+    /// See [`ConnectedBmc::operation_status`] and
+    /// [`libredfish_operation_status`].
     pub(crate) async fn operation_status(
         &self,
         reference: &OperationReference,
     ) -> Result<OperationStatus, PlatformError> {
-        match (self, reference) {
+        match self {
             // Boxed so the state handler's future stays within the stack limit.
-            (Self::Drivers(bmc), reference) => Box::pin(bmc.operation_status(reference)).await,
-            (Self::Libredfish { client, .. }, OperationReference::VendorJob { job_id, .. }) => {
-                client
-                    .get_job_state(job_id.as_str())
-                    .await
-                    .map(job_status)
-                    .map_err(platform_error)
-            }
-            (Self::Libredfish { .. }, OperationReference::RedfishTask { .. }) => {
-                Err(PlatformError::Unsupported)
+            Self::Drivers(bmc) => Box::pin(bmc.operation_status(reference)).await,
+            Self::Libredfish { client, .. } => {
+                libredfish_operation_status(*client, reference).await
             }
         }
     }
@@ -226,15 +219,6 @@ fn handle_no_dpu_error(
     }
 }
 
-/// The iDRAC job a libredfish write started, by the id it returned.
-fn idrac_outcome(job_id: Option<String>) -> DriverOutcome {
-    job_id
-        .and_then(|job_id| VendorJobId::new(job_id).ok())
-        .map_or_else(DriverOutcome::complete, |job_id| {
-            DriverOutcome::accepted(idrac_job(job_id))
-        })
-}
-
 /// See [`super::in_effect`].
 pub(super) async fn in_effect(
     client: &dyn Redfish,
@@ -301,21 +285,6 @@ pub(super) fn profiles(
     )
 }
 
-/// An iDRAC job state libredfish does not recognize is still running.
-fn job_status(state: JobState) -> OperationStatus {
-    match state {
-        JobState::Scheduled => OperationStatus::AwaitingReset,
-        JobState::Running | JobState::Unknown => OperationStatus::Running,
-        JobState::Completed => OperationStatus::Completed,
-        JobState::ScheduledWithErrors | JobState::CompletedWithErrors | JobState::Failed => {
-            OperationStatus::Failed {
-                state: format!("{state:?}"),
-                message: None,
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -324,7 +293,6 @@ mod tests {
     use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::credentials::{CredentialKey, CredentialType};
-    use carbide_test_support::value_scenarios;
     use libredfish::BiosProfileType;
     use libredfish::model::service_root::RedfishVendor;
     use serde_json::json;
@@ -381,31 +349,6 @@ mod tests {
             assert_eq!(bios.attributes, expected, "{scenario}");
             assert_eq!(manager.attributes, expected, "{scenario}");
         }
-    }
-
-    #[test]
-    fn idrac_job_states_map_to_operation_statuses() {
-        let failed = |state: &str| OperationStatus::Failed {
-            state: state.to_string(),
-            message: None,
-        };
-        value_scenarios!(job_status:
-            "awaiting the host restart" {
-                JobState::Scheduled => OperationStatus::AwaitingReset,
-            }
-            "running, including states libredfish does not recognize" {
-                JobState::Running => OperationStatus::Running,
-                JobState::Unknown => OperationStatus::Running,
-            }
-            "completed" {
-                JobState::Completed => OperationStatus::Completed,
-            }
-            "ended without completing" {
-                JobState::ScheduledWithErrors => failed("ScheduledWithErrors"),
-                JobState::CompletedWithErrors => failed("CompletedWithErrors"),
-                JobState::Failed => failed("Failed"),
-            }
-        );
     }
 
     #[test]

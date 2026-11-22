@@ -39,5 +39,6 @@ pub use artifact_resolution::{
 pub use config::{FirmwareConfig, FirmwareConfigSnapshot};
 pub use digest_cache::{
     ArtifactDigest, CacheError, CacheLookup, CachedArtifact, FirmwareArtifactCache,
+    PreparedCacheOpen,
 };
 pub use downloader::{ArtifactStatus, FirmwareDownloader};

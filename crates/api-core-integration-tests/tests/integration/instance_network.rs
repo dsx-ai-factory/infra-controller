@@ -58,20 +58,24 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
     };
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
 
-    let mut txn = env.harness.db_txn().await;
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &segment_id_1)
-            .await
-            .unwrap(),
+        db::instance_address::count_by_segment_id(
+            &env.harness.api().database_connection,
+            &segment_id_1
+        )
+        .await
+        .unwrap(),
         0
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &segment_id_2)
-            .await
-            .unwrap(),
+        db::instance_address::count_by_segment_id(
+            &env.harness.api().database_connection,
+            &segment_id_2
+        )
+        .await
+        .unwrap(),
         0
     );
-    txn.commit().await.unwrap();
 
     let network = rpc::InstanceNetworkConfig {
         interfaces: vec![
@@ -110,17 +114,22 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
         .await;
     env.advance_instance_to_ready(&mh, &tinstance).await;
 
-    let mut txn = env.harness.db_txn().await;
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &segment_id_1)
-            .await
-            .unwrap(),
+        db::instance_address::count_by_segment_id(
+            &env.harness.api().database_connection,
+            &segment_id_1
+        )
+        .await
+        .unwrap(),
         1
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &segment_id_2)
-            .await
-            .unwrap(),
+        db::instance_address::count_by_segment_id(
+            &env.harness.api().database_connection,
+            &segment_id_2
+        )
+        .await
+        .unwrap(),
         1
     );
 
@@ -131,9 +140,12 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
         segment_id: segment_id_1,
         busy_ips: vec![],
     };
-    let used_ips = allocated_ip_resolver.used_ips(txn.as_mut()).await.unwrap();
+    let used_ips = allocated_ip_resolver
+        .used_ips(&env.harness.api().database_connection)
+        .await
+        .unwrap();
     let used_prefixes = allocated_ip_resolver
-        .used_prefixes(txn.as_mut())
+        .used_prefixes(&env.harness.api().database_connection)
         .await
         .unwrap();
     assert_eq!(1, used_ips.len());
@@ -146,17 +158,18 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
         segment_id: segment_id_2,
         busy_ips: vec![],
     };
-    let used_ips = allocated_ip_resolver.used_ips(txn.as_mut()).await.unwrap();
+    let used_ips = allocated_ip_resolver
+        .used_ips(&env.harness.api().database_connection)
+        .await
+        .unwrap();
     let used_prefixes = allocated_ip_resolver
-        .used_prefixes(txn.as_mut())
+        .used_prefixes(&env.harness.api().database_connection)
         .await
         .unwrap();
     assert_eq!(1, used_ips.len());
     assert_eq!(1, used_prefixes.len());
     assert_eq!("192.1.4.3", used_ips[0].to_string());
     assert_eq!("192.1.4.3/32", used_prefixes[0].to_string());
-
-    txn.commit().await.unwrap();
 
     // The addresses should show up in the internal config - which is sent to the DPU
     let network_config = env
@@ -223,14 +236,6 @@ async fn test_allocate_instance_with_old_network_segemnt(
         .id;
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
 
-    let txn = env
-        .harness
-        .api()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    txn.commit().await.unwrap();
-
     let instance_metadata = rpc::forge::Metadata {
         name: "test_instance_with_labels".to_string(),
         description: "this instance does not have labels.".to_string(),
@@ -268,8 +273,7 @@ async fn test_allocate_instance_with_old_network_segemnt(
         Some(instance_metadata.clone())
     );
 
-    let mut txn = env.harness.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.harness.api().db_reader()).await;
 
     let fetched_instance = snapshot.instance.unwrap();
     assert_eq!(fetched_instance.machine_id, host_id(&mh).into());
@@ -290,7 +294,6 @@ async fn test_allocate_instance_with_old_network_segemnt(
         network_config_no_addresses,
         InstanceNetworkConfig::for_segment_ids(&[segment_id], &[device_locator], &[vpc_id])
     );
-    txn.rollback().await.unwrap();
 }
 
 #[sqlx_test]
@@ -433,9 +436,9 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     assert_eq!(segment_ids.iter().copied().collect::<HashSet<_>>().len(), 2);
 
     // Verify the allocated segments are attached to both requested FNN VPCs.
-    let mut txn = env.harness.db_txn().await;
+    let mut reader = env.harness.api().db_reader();
     let segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut reader,
         ObjectColumnFilter::List(IdColumn, &segment_ids),
         NetworkSegmentSearchConfig::default(),
     )
@@ -448,7 +451,6 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
             .collect::<HashSet<_>>(),
         HashSet::from([first_vpc, second_vpc])
     );
-    txn.rollback().await.unwrap();
 }
 
 fn dual_physical_network_config_with_vpc_prefixes(

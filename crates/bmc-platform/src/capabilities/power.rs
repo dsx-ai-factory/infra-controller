@@ -18,8 +18,17 @@
 use async_trait::async_trait;
 use nv_redfish::core::Bmc;
 use nv_redfish::resource::{PowerState, ResetType};
+/// The Redfish boot stages a [`BootProgress`] reports.
+pub use nv_redfish::schema::computer_system::BootProgressTypes;
 
 use crate::{DriverOutcome, OpCx, PlatformError};
+
+/// What a system reports of its last boot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootProgress {
+    pub last_state: Option<BootProgressTypes>,
+    pub oem_last_state: Option<String>,
+}
 
 /// Host and chassis power observations and mutations.
 ///
@@ -40,9 +49,21 @@ pub trait Power<B: Bmc>: Send + Sync {
         self.standard().state(cx).await
     }
 
+    /// What the system reports of its last boot; `None` when it reports none.
+    /// A platform that reports a running OS through an OEM state reports
+    /// [`BootProgressTypes::OsRunning`].
+    async fn boot_progress(&self, cx: &OpCx<'_, B>) -> Result<Option<BootProgress>, PlatformError> {
+        self.standard().boot_progress(cx).await
+    }
+
     /// Whether `set` can perform [`ResetType::FullPowerCycle`] on this platform.
     async fn ac_power_cycle_supported(&self, cx: &OpCx<'_, B>) -> Result<bool, PlatformError> {
         self.standard().ac_power_cycle_supported(cx).await
+    }
+
+    /// Whether `set` can issue an IPMI restart, including a restart selected from live power state.
+    fn may_use_ipmi_restart(&self, cx: &OpCx<'_, B>, reset_type: ResetType) -> bool {
+        self.standard().may_use_ipmi_restart(cx, reset_type)
     }
 
     /// Requests `reset_type`.

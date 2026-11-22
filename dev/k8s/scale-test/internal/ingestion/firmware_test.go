@@ -64,6 +64,7 @@ type firmwareSite struct {
 	requestOutageUntil                    time.Time
 	onCensusFailure                       func()
 	censusFailures                        int
+	deadlineReads                         int
 	outageUntil                           time.Time
 	configOutage                          bool
 	*instanceSite
@@ -100,6 +101,14 @@ func firmwareFixture(n int) *firmwareSite {
 	}}}
 	return f
 }
+func orderingTypes(refs []*corev1.HostFirmwareComponentRef) []corev1.HostFirmwareComponentType {
+	types := make([]corev1.HostFirmwareComponentType, 0, len(refs))
+	for _, ref := range refs {
+		types = append(types, ref.GetType())
+	}
+	return types
+}
+
 func (f *firmwareSite) meta(family probeapi.Family) probeapi.SweepInfo {
 	m := f.instanceSite.meta(family)
 	if f.snapshotEpoch != 0 {
@@ -165,7 +174,7 @@ func (f *firmwareSite) Config(ctx context.Context, _ probe.ConfigFilter) (probea
 	}
 	return c, nil
 }
-func (f *firmwareSite) Units(_ context.Context, filter probeapi.Filter, _ *string, page probe.Page) (probeapi.UnitsResponse, error) {
+func (f *firmwareSite) Units(ctx context.Context, filter probeapi.Filter, _ *string, page probe.Page) (probeapi.UnitsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.catalogSent.IsZero() && f.catalogUnitsError != nil && (f.catalogErrorFor == 0 || time.Since(f.catalogSent) < f.catalogErrorFor) {
@@ -180,6 +189,11 @@ func (f *firmwareSite) Units(_ context.Context, filter probeapi.Filter, _ *strin
 		if spec.kind == filter.Type {
 			family = spec.family
 		}
+	}
+	if f.mode == "host read deadline" && family == probeapi.FamilyHost || f.mode == "census read deadline" && family == probeapi.FamilyHostFirmwareRequests {
+		f.deadlineReads++
+		<-ctx.Done()
+		return probeapi.UnitsResponse{}, &probe.Error{Kind: probe.Cancelled}
 	}
 	if family == probeapi.FamilyHostFirmwareRequests && time.Now().Before(f.requestOutageUntil) {
 		f.censusFailures++
@@ -263,8 +277,8 @@ func (f *firmwareSite) UpsertHostFirmwareConfig(_ context.Context, r *corev1.Ups
 		components[c.Type] = true
 	}
 	ordering := f.runtimeOrdering
-	if len(r.Ordering) > 0 {
-		ordering = r.Ordering
+	if len(r.ComponentOrdering) > 0 {
+		ordering = orderingTypes(r.ComponentOrdering)
 	}
 	seen := map[corev1.HostFirmwareComponentType]bool{}
 	for _, c := range ordering {
@@ -1065,8 +1079,16 @@ func TestFirmwareVerification(t *testing.T) {
 	}
 }
 
+// Keep parent deadline delivery pending while its child probe deadline fires.
+type firmwarePendingDeadline struct {
+	context.Context
+	until time.Time
+}
+
+func (c firmwarePendingDeadline) Deadline() (time.Time, bool) { return c.until, true }
+
 func TestFirmwareCleanup(t *testing.T) {
-	for _, mode := range []string{"valid", "foreign bounds", "lost Lease", "soft stop", "hard cancel", "active request", "unknown active work", "already closed", "pool unhealthy", "API replaced", "probe restarted", "probe restarted closed", "foreign instance", "foreign window elsewhere", "foreign request", "changed target", "stale evidence", "changed identity", "journal failure", "deadline", "census unavailable", "early evidence", "stop mid sweep", "probe starting", "probe offline", "config reader unavailable", "late owned request", "cancel after clean", "epoch during read", "epoch during family", "census recovers", "lost Lease during outage", "lost Lease during census"} {
+	for _, mode := range []string{"valid", "foreign bounds", "lost Lease", "soft stop", "hard cancel", "active request", "unknown active work", "already closed", "pool unhealthy", "API replaced", "probe restarted", "probe restarted closed", "foreign instance", "foreign window elsewhere", "foreign request", "changed target", "stale evidence", "changed identity", "journal failure", "deadline", "census unavailable", "early evidence", "stop mid sweep", "probe starting", "probe offline", "config reader unavailable", "late owned request", "cancel after clean", "epoch during read", "epoch during family", "census recovers", "lost Lease during outage", "lost Lease during census", "host read deadline", "census read deadline", "cancel cleanup read"} {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				site := firmwareFixture(1)
@@ -1177,6 +1199,10 @@ func TestFirmwareCleanup(t *testing.T) {
 					site.state[probeapi.FamilyHost]["h0"] = u
 				case "journal failure":
 					r.j.Inject(func(_ *os.File, _ []byte) error { return errors.New("fsync failure") })
+				case "host read deadline", "census read deadline":
+					site.mode = mode
+				case "cancel cleanup read":
+					site.mode = "host read deadline"
 				case "census unavailable":
 					site.mode = mode
 				case "deadline":
@@ -1200,7 +1226,15 @@ func TestFirmwareCleanup(t *testing.T) {
 					budget = 10 * time.Second
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), budget)
+				if strings.HasSuffix(mode, "read deadline") || mode == "cancel cleanup read" {
+					cancel()
+					ctx, cancel = context.WithCancel(context.Background())
+					ctx = firmwarePendingDeadline{ctx, time.Now().Add(budget)}
+				}
 				defer cancel()
+				if mode == "cancel cleanup read" {
+					site.onConfig = func() { time.Sleep(budget); cancel() }
+				}
 				if mode == "cancel after clean" {
 					test.dial = func(string) (firmwareWriter, error) { return firmwareHook{firmwareWriter: site, closed: cancel}, nil }
 				}
@@ -1221,13 +1255,23 @@ func TestFirmwareCleanup(t *testing.T) {
 				if mode == "census unavailable" && site.writes != 2 {
 					t.Fatal("unknown census blocked closure")
 				}
-				if (mode == "deadline" || mode == "census unavailable") && !errors.Is(err, context.DeadlineExceeded) {
+				if (mode == "deadline" || mode == "census unavailable" || strings.HasSuffix(mode, "read deadline")) && !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("deadline cause lost: %v", err)
+				}
+				if (strings.HasSuffix(mode, "read deadline") || mode == "cancel cleanup read") && site.deadlineReads != 1 {
+					t.Fatal("deadline did not land in a probe read", site.deadlineReads)
+				}
+				var probeCause *probe.Error
+				if strings.HasSuffix(mode, "read deadline") && !errors.As(err, &probeCause) {
+					t.Fatal("original probe cause lost", err)
+				}
+				if mode == "cancel cleanup read" && (!errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+					t.Fatal("real cancellation misclassified", err)
 				}
 				if (err == nil) != clean || r.j.Unsettled() == clean {
 					t.Fatalf("cleanup=%v pending=%v", err, r.j.Unsettled())
 				}
-				noClose := slices.Contains([]string{"lost Lease", "foreign bounds", "already closed", "probe restarted closed", "stale evidence", "changed identity", "journal failure", "early evidence", "lost Lease during outage"}, mode)
+				noClose := slices.Contains([]string{"lost Lease", "foreign bounds", "already closed", "probe restarted closed", "stale evidence", "changed identity", "journal failure", "early evidence", "lost Lease during outage", "host read deadline", "cancel cleanup read"}, mode)
 				if (noClose && site.writes != 1) || (clean && !noClose && site.writes != 2) {
 					t.Fatalf("unexpected close writes=%d", site.writes)
 				}
@@ -1775,7 +1819,7 @@ func TestFirmwareCatalogOrderingFallback(t *testing.T) {
 					t.Fatal("manual refusal lost", out.Reasons)
 				}
 				if calls == 2 {
-					if !slices.Equal(site.catalogRequests[1].Ordering, []corev1.HostFirmwareComponentType{1}) {
+					if !slices.Equal(orderingTypes(site.catalogRequests[1].ComponentOrdering), []corev1.HostFirmwareComponentType{1}) {
 						t.Fatal("fallback scope", site.catalogRequests)
 					}
 					b, e := os.ReadFile(r.j.Path())
@@ -1818,7 +1862,7 @@ func TestFirmwareCatalogRequest(t *testing.T) {
 			if err != nil || needed != (component == probeapi.ComponentUefi) {
 				t.Fatal(needed, err)
 			}
-			if body.Vendor != "NVIDIA" || body.Model != "GB200 NVL" || body.ExplicitStartNeeded == nil || !*body.ExplicitStartNeeded || len(body.Components) != 1 || !slices.Equal(body.Ordering, []corev1.HostFirmwareComponentType{1, 3}) {
+			if body.Vendor != "NVIDIA" || body.Model != "GB200 NVL" || body.ExplicitStartNeeded == nil || !*body.ExplicitStartNeeded || len(body.Components) != 1 || !slices.Equal(orderingTypes(body.ComponentOrdering), []corev1.HostFirmwareComponentType{1, 3}) {
 				t.Fatal(body)
 			}
 			selected := body.Components[0]
@@ -1984,7 +2028,7 @@ func TestFirmwareCatalogComponentNames(t *testing.T) {
 			site.config.NicoAPI.FirmwareTargets[1].ComponentName = new(name)
 			site.config.NicoAPI.FirmwareTargets[1].Component = probeapi.ComponentOther
 			body, _, err := firmwareCatalogRequest(site.config, "NVIDIA", "GB200 NVL", test.s)
-			if err != nil || !slices.Equal(body.Ordering, []corev1.HostFirmwareComponentType{1, want}) {
+			if err != nil || !slices.Equal(orderingTypes(body.ComponentOrdering), []corev1.HostFirmwareComponentType{1, want}) {
 				t.Fatal("valid component rejected", name, err, body)
 			}
 		})

@@ -348,14 +348,12 @@ async fn save_failure_evidence(
 
     let (interfaces, endpoints) = tokio::join!(
         async {
-            let mut connection = env.db_pool.acquire().await?;
-            let mut interfaces = db::machine_interface::find_all(&mut connection).await?;
+            let mut interfaces = db::machine_interface::find_all(&env.db_pool).await?;
             interfaces.sort_by_key(|interface| interface.mac_address);
             Ok::<_, eyre::Report>(serde_json::to_value(interfaces)?)
         },
         async {
-            let mut connection = env.db_pool.acquire().await?;
-            let mut endpoints = db::explored_endpoints::find_all(&mut *connection).await?;
+            let mut endpoints = db::explored_endpoints::find_all(&env.db_pool).await?;
             endpoints.sort_by_key(|endpoint| endpoint.address);
             let mut states = Vec::new();
             for endpoint in endpoints {
@@ -921,9 +919,8 @@ async fn core_identity(
                 .collect::<Vec<_>>()
         })
         .collect();
-    let mut connection = env.db_pool.acquire().await?;
     let mut interfaces = BTreeMap::new();
-    for row in db::machine_interface::find_all(&mut connection).await? {
+    for row in db::machine_interface::find_all(&env.db_pool).await? {
         let mac = row.mac_address.to_string();
         if expected.contains(&mac) {
             let previous = interfaces.insert(mac.clone(), json!({
@@ -1317,7 +1314,7 @@ async fn cycles(
         let host_history_cutoff: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(id), 0) FROM machine_state_history WHERE object_id = $1",
         )
-        .bind(host_id.to_string())
+        .bind(host_id)
         .fetch_one(&env.db_pool)
         .await?;
         let old_ip = host.bmc_ip().context("host has no BMC IP")?;
@@ -1342,7 +1339,7 @@ async fn cycles(
         let switch_history_cutoff: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(id), 0) FROM switch_state_history WHERE object_id = $1",
         )
-        .bind(switch_id.to_string())
+        .bind(switch_id)
         .fetch_one(&env.db_pool)
         .await?;
         let admission = View::read(env, client, host)
@@ -1372,7 +1369,7 @@ async fn cycles(
             async {
                 rpc(client.clone().decommission_managed_host(
                     forge::DecommissionManagedHostRequest {
-                        machine_id: Some(host_id.to_string().parse()?),
+                        machine_id: Some(host_id.try_into()?),
                     },
                 ))
                 .await?;
@@ -1419,7 +1416,7 @@ async fn cycles(
             "SELECT jsonb_build_object('state', state, 'version', state_version)
              FROM machine_state_history WHERE object_id = $1 AND id > $2 ORDER BY id",
         )
-        .bind(host_id.to_string())
+        .bind(host_id)
         .bind(host_history_cutoff)
         .fetch_all(&env.db_pool)
         .await?;
@@ -1622,7 +1619,7 @@ async fn cycles(
              WHERE object_id = $1 AND id > $2
                AND state #> '{decommissioning_state,dpu_states}' IS NOT NULL ORDER BY id",
         )
-        .bind(host_id.to_string())
+        .bind(host_id)
         .bind(host_history_cutoff)
         .fetch_all(&env.db_pool)
         .await?;
@@ -1685,7 +1682,7 @@ async fn cycles(
                AND state #>> '{decommissioning_state,job_id}' IS NOT NULL
              ORDER BY id",
         )
-        .bind(switch_id.to_string())
+        .bind(switch_id)
         .bind(switch_history_cutoff)
         .fetch_all(&env.db_pool)
         .await?

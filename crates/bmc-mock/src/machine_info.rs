@@ -213,13 +213,14 @@ impl DpuMachineInfo {
         let bmc_mac_address = next_mac();
         let host_mac_address = next_mac();
         let oob_mac_address = next_mac();
+        let [a, b, c, d, e, f] = oob_mac_address.bytes();
         Self {
             hw_type,
             bmc_mac_address,
             host_mac_address,
             oob_mac_address,
             settings,
-            serial: format!("MT{}", oob_mac_address.to_string().replace(':', "")),
+            serial: format!("MT{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}"),
         }
     }
 
@@ -414,14 +415,16 @@ impl HostMachineInfo {
         } else {
             vec![]
         };
-        let switch_serial_number = nvos_mac_addresses
-            .first()
-            .map(|mac| format!("MT{}", mac.to_string().replace(':', "")));
+        let switch_serial_number = nvos_mac_addresses.first().map(|mac| {
+            let [a, b, c, d, e, f] = mac.bytes();
+            format!("MT{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}")
+        });
+        let [a, b, c, d, e, f] = bmc_mac_address.bytes();
         Self {
             hw_type,
             rack_placement: None,
             bmc_mac_address,
-            serial: bmc_mac_address.to_string().replace(':', ""),
+            serial: format!("{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}"),
             non_dpu_mac_address: if dpus.is_empty()
                 && !matches!(
                     hw_type,
@@ -1046,7 +1049,8 @@ impl HostMachineInfo {
         let mut pool = MacAddressPool::new_pool(self.hw_mac_addr_pool);
         let mut next_mac = || pool.allocate().expect("MAC address must be allocated");
         let storage_nic0_p0_mac = next_mac();
-        let storage_nic0_serial = format!("MT{}", storage_nic0_p0_mac.to_string().replace(":", ""));
+        let [a, b, c, d, e, f] = storage_nic0_p0_mac.bytes();
+        let storage_nic0_serial = format!("MT{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}");
         hw::nvidia_dgx_h100::NvidiaDgxH100 {
             dgx_system_serial_number: Cow::Borrowed(&self.serial),
             dgx_chassis_serial_number: Cow::Borrowed("1663223000002"),
@@ -1345,6 +1349,73 @@ mod tests {
             .expect("valid hardware MAC pool");
         let dpu = DpuMachineInfo::new(hw_type, pool, DpuSettings::default());
         HostMachineInfo::new(hw_type, vec![dpu], pool, hw_mac_addr_pool)
+    }
+
+    #[test]
+    fn mac_derived_serials_preserve_padded_uppercase_and_prefixes() {
+        let pool_config =
+            PoolConfig::new(MacAddress::new([2, 1, 10, 16, 0, 0]), 16).expect("valid MAC pool");
+        let mut pool = MacAddressPool::new_pool(pool_config);
+        let dpu = dpu(
+            HardwareType::DellPowerEdgeR750,
+            &mut pool,
+            DpuFirmwareVersions::default(),
+        );
+        assert_eq!(dpu.serial, "MT02010A100003");
+
+        let hw_pool = PoolConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 16)
+            .expect("valid hardware MAC pool");
+        let host = HostMachineInfo::new(
+            HardwareType::NvidiaSwitchN5700Ld,
+            vec![],
+            &mut pool,
+            hw_pool,
+        );
+        assert_eq!(host.serial, "02010A100004");
+        assert_eq!(host.switch_serial_number.as_deref(), Some("MT02010A100005"));
+        assert_eq!(
+            hw::nic::Nic::rooftop(MacAddress::new([0, 1, 10, 16, 160, 255]))
+                .serial_number
+                .as_deref(),
+            Some("RT00010A10A0FF"),
+        );
+    }
+
+    #[test]
+    fn bluefield3_mac_paths_preserve_padding_case_and_image_layout() {
+        let pool_config =
+            PoolConfig::new(MacAddress::new([2, 1, 10, 16, 0, 0]), 16).expect("valid MAC pool");
+        let mut pool = MacAddressPool::new_pool(pool_config);
+        let dpu = dpu(
+            HardwareType::DellPowerEdgeR750,
+            &mut pool,
+            DpuFirmwareVersions::default(),
+        );
+        let system_config =
+            dpu.system_config(Arc::new(crate::test_support::TestCallbacks::default()));
+        let options = system_config.systems.as_ref().expect("DPU Systems")[0]
+            .boot_options
+            .as_ref()
+            .expect("DPU boot inventory");
+        let network_boot = options
+            .iter()
+            .find(|option| option.kind == crate::BootOptionKind::Network)
+            .expect("DPU network boot option")
+            .to_json();
+        assert_eq!(
+            network_boot["UefiDevicePath"].as_str(),
+            Some("MAC(02010A100003,0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"),
+        );
+        let update_config = dpu.update_service_config();
+        let image = update_config
+            .firmware_inventory
+            .iter()
+            .find(|inventory| inventory.id == "DPU_SYS_IMAGE")
+            .expect("DPU system image inventory");
+        assert_eq!(
+            image.to_json()["Version"].as_str(),
+            Some("0201:0A00:0010:0002")
+        );
     }
 
     #[test]

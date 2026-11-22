@@ -353,8 +353,7 @@ pub(crate) async fn update(
                 kind: "ComputeAllocation",
                 id: format!(
                     "{} for tenant org `{}`",
-                    metadata.name.clone(),
-                    req.tenant_organization_id.clone(),
+                    metadata.name, req.tenant_organization_id,
                 ),
             }
             .into());
@@ -551,8 +550,7 @@ pub(crate) async fn delete(
         if allocation.tenant_organization_id != tenant_organization_id {
             return Err(CarbideError::InvalidArgument(format!(
                 "ComputeAllocation `{}` is not owned by tenant `{}`",
-                allocation.id.clone(),
-                tenant_organization_id.clone()
+                allocation.id, tenant_organization_id
             ))
             .into());
         }

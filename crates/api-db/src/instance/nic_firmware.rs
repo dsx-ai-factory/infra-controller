@@ -13,6 +13,7 @@ use model::tenant::{TenantNicFirmwareConfig, TenantOrganizationId};
 use sqlx::PgConnection;
 use sqlx::types::Json;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[derive(sqlx::FromRow)]
@@ -41,7 +42,7 @@ struct CaptureRow {
 /// before [`persist`]. Results are ordered by instance ID; repeated IDs produce
 /// one result, and a missing requested instance returns `NotFoundError`.
 pub async fn capture(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     instance_ids: &[InstanceId],
 ) -> DatabaseResult<Vec<(InstanceId, InstanceNicFirmwareSnapshot)>> {
     if instance_ids.is_empty() {
@@ -93,7 +94,7 @@ pub async fn capture(
     "#;
     let rows: Vec<CaptureRow> = sqlx::query_as(query)
         .bind(instance_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     let captured_ids: HashSet<_> = rows.iter().map(|row| row.id).collect();
@@ -165,6 +166,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
     use crate::test_support::postgres::wait_for_blocked_query;
 
     /// Creates a minimal persisted allocation so tests exercise the production
@@ -635,7 +637,12 @@ mod tests {
         let change = async {
             // pg_stat_activity can truncate SQL text before the profile join.
             // Match the capture's prefix while still requiring this writer's lock.
-            wait_for_blocked_query(&pool, writer_pid, "SELECT i.id, i.tenant_org").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                writer_pid,
+                "SELECT i.id, i.tenant_org",
+            )
+            .await;
             // A split reader has already read the old tenant selection before
             // its profile query blocks. Replacing that selection and editing the
             // old profile together would give that reader a pair that never existed.

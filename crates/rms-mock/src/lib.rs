@@ -41,6 +41,8 @@ mod resolve;
 mod router;
 mod service_v1;
 mod service_v2;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use config::{FaultConfig, RmsMockConfig};
 pub use fabric::SwitchFabricSnapshot;

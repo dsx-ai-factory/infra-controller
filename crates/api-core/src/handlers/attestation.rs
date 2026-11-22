@@ -18,12 +18,13 @@ use ::rpc::forge::{self as rpc};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_machine_controller::handler::attestation::{
-    SchedulingOutcome, select_machine_attesters, trigger_attestation,
+    select_machine_attesters, trigger_attestation,
 };
 use carbide_uuid::machine::{MachineId, MachineType};
-use db::{ObjectFilter, TransactionVending as _};
+use db::ObjectFilter;
 use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
+use model::attestation_scheduling::SchedulingOutcome;
 use model::bmc_info::BmcInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use regex::Regex;
@@ -56,13 +57,14 @@ pub(crate) async fn trigger_machine_attestation(
     }
 
     let request_payload = request.get_ref();
-    let machine_id = request_payload
-        .machine_id
-        .ok_or(Status::from(CarbideError::Internal {
+    let machine_id = request_payload.machine_id.ok_or_else(|| {
+        Status::from(CarbideError::Internal {
             message: "No machine id supplied".to_string(),
-        }))?;
+        })
+    })?;
     // Validate before any BMC access; callers other than the CLI can supply this field too.
-    let attester_id_regex = request_payload
+    // The request carries at most one pattern; the override itself takes a list.
+    let attester_id_regexes: Vec<Regex> = request_payload
         .attester_id_regex
         .as_deref()
         .map(|pattern| {
@@ -75,7 +77,9 @@ pub(crate) async fn trigger_machine_attestation(
                 CarbideError::InvalidArgument(format!("invalid attester ID regex: {error}"))
             })
         })
-        .transpose()?;
+        .transpose()?
+        .into_iter()
+        .collect();
     let redfish_timeout_duration =
         std::time::Duration::from_secs(request_payload.redfish_timeout_secs as u64);
 
@@ -132,7 +136,7 @@ pub(crate) async fn trigger_machine_attestation(
         bmc_info,
         &machine_id,
         redfish_timeout_duration,
-        attester_id_regex.as_ref(),
+        &attester_id_regexes,
     )
     .await
     .map_err(|error| match error {
@@ -150,10 +154,10 @@ pub(crate) async fn trigger_machine_attestation(
     Ok(Response::new(rpc::SpdmMachineAttestationTriggerResponse {
         machine_id: Some(machine_id),
         devices_under_attestation: result.devices_scheduled as i32,
-        resolved_hardware_class: result.hardware_class,
-        outcome: reported_outcome(result.outcome).into(),
-        used_any_fallback: result.used_any_fallback,
-        profile_version: result.profile_version,
+        resolved_hardware_class: result.decision.hardware_class.unwrap_or_default(),
+        outcome: reported_outcome(result.decision.outcome).into(),
+        used_any_fallback: result.decision.used_any_fallback,
+        profile_version: result.decision.profile_version,
         started_at: result.started_at.map(Into::into),
         job_id: result.job_id.map(|job_id| ::rpc::common::Uuid {
             value: job_id.to_string(),
@@ -175,11 +179,11 @@ fn reported_outcome(outcome: SchedulingOutcome) -> rpc::SpdmSchedulingOutcome {
         SchedulingOutcome::PolicyMatchedNothing => rpc::SpdmSchedulingOutcome::PolicyMatchedNothing,
         SchedulingOutcome::ClassNotRecorded => rpc::SpdmSchedulingOutcome::ClassNotRecorded,
         SchedulingOutcome::NoProfile => rpc::SpdmSchedulingOutcome::NoProfile,
-        SchedulingOutcome::IndividualAttesterTriggerMatchedNothing => {
-            rpc::SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing
+        SchedulingOutcome::AttesterOverrideMatchedNothing => {
+            rpc::SpdmSchedulingOutcome::AttesterOverrideMatchedNothing
         }
-        SchedulingOutcome::IndividualAttesterTriggerScheduled => {
-            rpc::SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled
+        SchedulingOutcome::AttesterOverrideScheduled => {
+            rpc::SpdmSchedulingOutcome::AttesterOverrideScheduled
         }
     }
 }
@@ -195,15 +199,34 @@ pub(crate) async fn waive_attestation(
 
     let mut txn = api.txn_begin().await?;
     // Record waiver intent while the SPDM controller cleans up evidence collection.
-    db::attestation::spdm::request_attestation_cancellation(
+    let machine_ids = db::attestation::spdm::request_attestation_cancellation(
         &mut txn,
         &job_id,
         model_spdm::SpdmCancellationTarget::Waive,
     )
     .await?;
+    republish_attestation_alerts(&mut txn, &machine_ids).await?;
     txn.commit().await?;
 
     Ok(Response::new(()))
+}
+
+/// Rebuilds each machine's attestation alerts from its stored results.
+///
+/// An override on a device that already finished leaves the SPDM controller
+/// nothing to transition, so it never republishes. Without this the alerts
+/// would keep reporting the result the operator just overrode until some
+/// later attestation of that machine rebuilt them. A DPU is attested only
+/// when an operator asks, so for one there may be no later attestation.
+async fn republish_attestation_alerts(
+    txn: &mut sqlx::PgConnection,
+    machine_ids: &[MachineId],
+) -> Result<(), db::DatabaseError> {
+    for machine_id in machine_ids {
+        let report = db::attestation::health::build_health_report(&mut *txn, machine_id).await?;
+        db::machine::update_attestation_health_report(&mut *txn, machine_id, &report).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn fail_attestation(
@@ -216,12 +239,13 @@ pub(crate) async fn fail_attestation(
 
     // Terminal status reads apply this target directly; unfinished devices still need cleanup.
     let mut txn = api.txn_begin().await?;
-    db::attestation::spdm::request_attestation_cancellation(
+    let machine_ids = db::attestation::spdm::request_attestation_cancellation(
         &mut txn,
         &job_id,
         model_spdm::SpdmCancellationTarget::Fail,
     )
     .await?;
+    republish_attestation_alerts(&mut txn, &machine_ids).await?;
     txn.commit().await?;
     Ok(Response::new(()))
 }
@@ -293,15 +317,13 @@ pub(crate) async fn list_attestation(
     };
 
     // Read one extra matching job in the same query to determine continuation.
-    let mut txn = api.txn_begin().await?;
     let mut statuses = db::attestation::spdm::list_all_attestation_statuses(
-        &mut txn,
+        api.pg_pool(),
         list_selector,
         after_job_id,
         page_size,
     )
     .await?;
-    txn.commit().await?;
 
     let has_more = statuses.len() > page_size as usize;
     statuses.truncate(page_size as usize);
@@ -433,32 +455,25 @@ async fn assess_machine_attestation(
     let attestation_status = if device_ids.is_empty() {
         None
     } else {
-        let mut txn = db_pool
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         let status = db::attestation::spdm::list_single_machine_attestation_status(
-            &mut txn,
+            db_pool,
             machine_id,
             Some(&device_ids),
         )
         .await?;
-        txn.commit()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         Some(status)
     };
     // Selection success reports what was selected, without implying a job was scheduled.
-    let attester_selection_status = match selection.outcome {
+    let attester_selection_status = match selection.decision.outcome {
         // Assessment uses profile selection; keep its statuses independent of trigger origin.
-        SchedulingOutcome::Scheduled | SchedulingOutcome::IndividualAttesterTriggerScheduled => {
+        SchedulingOutcome::Scheduled | SchedulingOutcome::AttesterOverrideScheduled => {
             AttesterSelectionStatus::Selected
         }
         SchedulingOutcome::PartiallySatisfied => AttesterSelectionStatus::PartiallySatisfied,
         SchedulingOutcome::AttestationDisabled => AttesterSelectionStatus::Disabled,
         SchedulingOutcome::NoAttestersFound => AttesterSelectionStatus::NoAttestersFound,
         SchedulingOutcome::PolicyMatchedNothing
-        | SchedulingOutcome::IndividualAttesterTriggerMatchedNothing => {
+        | SchedulingOutcome::AttesterOverrideMatchedNothing => {
             AttesterSelectionStatus::PolicyMatchedNothing
         }
         SchedulingOutcome::ClassNotRecorded => AttesterSelectionStatus::ClassNotRecorded,
@@ -636,16 +651,14 @@ async fn list_machine_predictions(
         Some(token.after_machine_id)
     };
     // One statement computes matching statuses and reads one extra row for lookahead.
-    let mut txn = api.txn_begin().await?;
     let mut summaries = db::attestation::spdm::find_machine_attestation_statuses(
-        &mut txn,
+        api.pg_pool(),
         after_machine_id,
         status,
         machine_type,
         page_size,
     )
     .await?;
-    txn.commit().await?;
     let has_more = summaries.len() > page_size as usize;
     summaries.truncate(page_size as usize);
     let next_page_token = if let Some(last) = summaries.last().filter(|_| has_more) {
@@ -687,10 +700,8 @@ pub(crate) async fn get_attestation(
     let job_id: Uuid = Uuid::try_from(request.into_inner())
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
     let attestations_details =
-        db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
-    txn.commit().await?;
+        db::attestation::spdm::get_attestations_for_job_id(api.pg_pool(), &job_id).await?;
 
     Ok(Response::new(rpc::SpdmGetAttestationResponse {
         attestations_details: attestations_details
@@ -871,8 +882,8 @@ mod tests {
             SchedulingOutcome::PolicyMatchedNothing,
             SchedulingOutcome::ClassNotRecorded,
             SchedulingOutcome::NoProfile,
-            SchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
-            SchedulingOutcome::IndividualAttesterTriggerScheduled,
+            SchedulingOutcome::AttesterOverrideMatchedNothing,
+            SchedulingOutcome::AttesterOverrideScheduled,
         ]
         .map(|outcome| {
             let wire = reported_outcome(outcome);
@@ -889,11 +900,12 @@ mod tests {
 
         // An outcome added to the schema but never listed above would
         // otherwise go unchecked, since nothing here iterates the enum.
-        for value in 1.. {
-            let Ok(wire) = rpc::SpdmSchedulingOutcome::try_from(value) else {
-                break;
-            };
-            assert!(covered.contains(&wire), "{wire:?} is not covered above");
+        // Reserved values leave gaps, so scan a fixed range instead of
+        // stopping at the first value that does not decode.
+        for value in 1..64 {
+            if let Ok(wire) = rpc::SpdmSchedulingOutcome::try_from(value) {
+                assert!(covered.contains(&wire), "{wire:?} is not covered above");
+            }
         }
     }
 }

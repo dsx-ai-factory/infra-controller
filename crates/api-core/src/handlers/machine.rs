@@ -22,11 +22,11 @@ use std::time::Duration;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
-use bmc_platform::{PlatformError, ResetType};
-use carbide_redfish::libredfish::RedfishAuth;
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use bmc_platform::{LockdownDesiredState, LockdownScope, LockdownState, ResetType};
+use carbide_secrets::credentials::Credentials;
 use carbide_site_explorer::dpu_asn::DPU_ASN_SLOT;
-use carbide_site_explorer::dpu_loopback::DPU_IPV4_LOOPBACK_SLOT;
+use carbide_site_explorer::dpu_loopback::{DPU_IPV4_LOOPBACK_SLOT, DPU_IPV6_LOOPBACK_SLOT};
+use carbide_site_explorer::lockdown_report;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
 };
@@ -54,25 +54,14 @@ use crate::handlers::utils::convert_and_log_machine_id;
 /// force-deleting a machine, keyed by the password the device currently holds
 /// (see `host_uefi_clear_credential_key`). Best effort: any failure returns
 /// `None`, so the force-delete skips the clear rather than aborting.
-///
-/// Resolve the key while the txn is open, commit, then read the secret -- the
-/// remote reader (Vault) request must not run while we hold the connection.
 async fn resolve_host_uefi_clear_credentials(
     api: &Api,
     bmc_mac_address: mac_address::MacAddress,
 ) -> Option<Credentials> {
-    let mut txn = api.txn_begin().await.ok()?;
-    let key =
-        crate::handlers::uefi::host_uefi_clear_credential_key(&mut txn, bmc_mac_address).await;
-    if let Err(err) = txn.commit().await {
-        tracing::warn!(
-            %bmc_mac_address,
-            error = %err,
-            "Failed to commit while resolving host UEFI clear credentials; skipping clear"
-        );
-        return None;
-    }
-    let clear_key = key.ok()?;
+    let clear_key =
+        crate::handlers::uefi::host_uefi_clear_credential_key(api.pg_pool(), bmc_mac_address)
+            .await
+            .ok()?;
     crate::handlers::uefi::read_uefi_credentials(
         api.bmc_credential_ops.credential_reader(),
         &clear_key,
@@ -178,8 +167,6 @@ pub(crate) async fn find_machines_by_ids(
     log_request_data(&request);
     let request = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
     let machine_ids = request.machine_ids;
 
     let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
@@ -195,7 +182,7 @@ pub(crate) async fn find_machines_by_ids(
     }
 
     let snapshots = db::managed_host::load_by_machine_ids(
-        &mut txn,
+        &mut api.db_reader(),
         &machine_ids,
         LoadSnapshotOptions {
             include_history: request.include_history,
@@ -218,7 +205,7 @@ pub(crate) async fn find_machines_by_ids(
         Vec::new()
     } else {
         db::machine::find(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectFilter::List(&standalone_dpu_ids),
             MachineSearchConfig {
                 include_history: request.include_history,
@@ -239,13 +226,14 @@ pub(crate) async fn find_machines_by_ids(
         })
         .collect::<Vec<_>>();
     let spectrum_x_capabilities_by_machine =
-        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
-            .await?;
+        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(
+            api.pg_pool(),
+            &host_machine_ids,
+        )
+        .await?;
 
     let mut lldp_neighbors_by_machine =
-        db::machine_lldp_neighbor::find_by_machine_ids(&mut txn, &machine_ids).await?;
-
-    txn.commit().await?;
+        db::machine_lldp_neighbor::find_by_machine_ids(api.pg_pool(), &machine_ids).await?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
         api.runtime_config
@@ -332,10 +320,8 @@ pub(crate) async fn find_machine_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::Machine,
         &machine_ids,
     )
@@ -350,8 +336,6 @@ pub(crate) async fn find_machine_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(Response::new(response))
 }
@@ -772,29 +756,21 @@ async fn force_delete_cleanup_txn(
                 .await?;
         }
 
-        // The machine snapshot predates `ForceDeletion`, so a concurrent
-        // backfill can make its IPv6 field stale. The pool owner remains the
-        // authoritative reservation source during deletion.
-        if let Some(loopback_ip_v6) = db::resource_pool::find_owned_allocation(
-            &api.common_pools.ethernet.pool_loopback_ip_v6,
-            &mut txn,
-            model::resource_pool::OwnerType::Machine,
-            &owner_id,
-        )
-        .await
-        .map_err(CarbideError::from)?
-        {
-            // The lookup locks this DPU's reservation, so a rejected release
-            // is an invariant failure.
-            match db::resource_pool::release(
+        // Ownership remains authoritative when a concurrent backfill made
+        // the machine snapshot's IPv6 field stale.
+        if let Some(owned) = api
+            .resource_pool_registry
+            .find_owned(
                 &api.common_pools.ethernet.pool_loopback_ip_v6,
                 &mut txn,
-                loopback_ip_v6,
                 model::resource_pool::OwnerType::Machine,
                 &owner_id,
+                DPU_IPV6_LOOPBACK_SLOT,
             )
             .await?
-            {
+        {
+            let loopback_ip_v6 = *owned.value();
+            match owned.release(&mut txn).await? {
                 ConditionalWrite::Applied(()) => {}
                 ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
                     return Err(CarbideError::FailedPrecondition(format!(
@@ -803,6 +779,15 @@ async fn force_delete_cleanup_txn(
                     )));
                 }
             }
+        } else {
+            api.resource_pool_registry
+                .request_cancellation(
+                    &mut txn,
+                    model::resource_pool::OwnerType::Machine,
+                    &owner_id,
+                    DPU_IPV6_LOOPBACK_SLOT,
+                )
+                .await?;
         }
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;
@@ -1136,7 +1121,7 @@ pub(crate) async fn admin_force_delete_machine(
                 },
             )
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: host_machine.id.to_string(),
             })?;
@@ -1177,7 +1162,7 @@ pub(crate) async fn admin_force_delete_machine(
                 LoadSnapshotOptions::default(),
             )
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: host_machine.id.to_string(),
             })?;
@@ -1289,6 +1274,46 @@ pub(crate) async fn admin_force_delete_machine(
     }
 
     if let Some(machine) = &host_machine {
+        if let Some(ref ops) = api.dpf_sdk
+            && !dpu_machines.is_empty()
+        {
+            let cleanup_result: Result<bool, CarbideError> = async {
+                let host_dpf_id = machine.dpf_id().ok_or_else(|| {
+                    CarbideError::internal("BMC MAC not set for host".to_string())
+                })?;
+                let dpu_device_names: Vec<String> = dpu_machines
+                    .iter()
+                    .map(|dpu| {
+                        dpu.dpf_id().ok_or_else(|| {
+                            CarbideError::internal("BMC MAC not set for DPU".to_string())
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                ops.force_delete_host(&host_dpf_id, &dpu_device_names)
+                    .await
+                    .map_err(CarbideError::DpfError)?;
+                ops.delete_host_bmc_credential_secrets(&host_dpf_id, &dpu_device_names)
+                    .await
+                    .map_err(CarbideError::DpfError)
+            }
+            .await;
+
+            if matches!(cleanup_result, Ok(false)) && !request.allow_delete_with_orphaned_dpf_crds {
+                response.all_done = false;
+                return Ok(Response::new(response));
+            }
+            if let Err(error) = cleanup_result {
+                if !request.allow_delete_with_orphaned_dpf_crds {
+                    return Err(error.into());
+                }
+                tracing::warn!(
+                    machine_id = %machine.id,
+                    error = %error,
+                    "Continuing force deletion with explicitly orphaned DPF resources",
+                );
+            }
+        }
+
         if let Some(ip) = machine.status.bmc_info.ip {
             if let Some(bmc_mac_address) = machine.status.bmc_info.mac {
                 let ip_address = ip.to_string();
@@ -1298,41 +1323,46 @@ pub(crate) async fn admin_force_delete_machine(
                     "BMC IP and MAC address for machine was found. Trying to perform Bios unlock",
                 );
 
-                match api
-                    .redfish_pool
-                    .create_client(
-                        &ip_address,
-                        machine.status.bmc_info.port,
-                        RedfishAuth::Key(CredentialKey::BmcCredentials {
-                            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-                        }),
-                        None,
-                    )
-                    .await
-                {
-                    Ok(client) => {
+                let access = carbide_utils::redfish::BmcAccessInfo {
+                    host: ip_address.clone(),
+                    port: machine.status.bmc_info.port,
+                    mac_address: bmc_mac_address,
+                };
+                match api.connect_bmc(&access).await {
+                    Ok(bmc) => {
                         let machine_id = machine.id;
                         let mut host_restart_needed = false;
-                        match client.lockdown_status().await {
-                            Ok(status) if status.is_fully_disabled() => {
+                        match bmc.lockdown_status().await {
+                            Ok(Some(status)) if status.aggregate == LockdownState::Disabled => {
                                 tracing::info!(%machine_id, "Bios is not locked down");
-                                response.initial_lockdown_state = status.to_string();
+                                response.initial_lockdown_state =
+                                    format!("{:?}", lockdown_report(&status));
                                 response.machine_unlocked = false;
                             }
-                            Ok(status) => {
+                            Ok(Some(status)) => {
                                 tracing::info!(%machine_id, ?status, "Unlocking BIOS");
-                                if let Err(e) =
-                                    client.lockdown(libredfish::EnabledDisabled::Disabled).await
+                                response.initial_lockdown_state =
+                                    format!("{:?}", lockdown_report(&status));
+                                response.machine_unlocked = match bmc
+                                    .set_lockdown(
+                                        LockdownScope::All,
+                                        LockdownDesiredState::Disabled,
+                                    )
+                                    .await
                                 {
-                                    tracing::warn!(%machine_id, error = %e, "Failed to unlock");
-                                    response.initial_lockdown_state = status.to_string();
-                                    response.machine_unlocked = false;
-                                } else {
-                                    response.initial_lockdown_state = status.to_string();
-                                    response.machine_unlocked = true;
-                                }
+                                    Ok(supported) => supported,
+                                    Err(e) => {
+                                        tracing::warn!(%machine_id, error = %e, "Failed to unlock");
+                                        false
+                                    }
+                                };
                                 // Dell, at least, needs a reboot after disabling lockdown.  Safest to just do this for everything.
                                 host_restart_needed = true;
+                            }
+                            Ok(None) => {
+                                tracing::info!(%machine_id, "BMC has no lockdown to unlock");
+                                response.initial_lockdown_state = "".to_string();
+                                response.machine_unlocked = false;
                             }
                             Err(e) => {
                                 tracing::warn!(%machine_id, error = %e, "Failed to fetch lockdown status");
@@ -1349,11 +1379,6 @@ pub(crate) async fn admin_force_delete_machine(
                             let clear_credentials =
                                 resolve_host_uefi_clear_credentials(api, bmc_mac_address).await;
                             if let Some(clear_credentials) = clear_credentials {
-                                let access = carbide_utils::redfish::BmcAccessInfo {
-                                    host: ip_address.clone(),
-                                    port: machine.status.bmc_info.port,
-                                    mac_address: bmc_mac_address,
-                                };
                                 match api
                                     .bmc_credential_ops
                                     .clear_host_uefi_password(&access, clear_credentials)
@@ -1388,20 +1413,8 @@ pub(crate) async fn admin_force_delete_machine(
                         }
 
                         if host_restart_needed {
-                            let access = carbide_utils::redfish::BmcAccessInfo {
-                                host: ip_address.clone(),
-                                port: machine.status.bmc_info.port,
-                                mac_address: bmc_mac_address,
-                            };
-                            let restart = match api.connect_bmc(&access).await {
-                                Ok(bmc) => {
-                                    async { bmc.power()?.set(ResetType::ForceRestart).await }
-                                        .await
-                                        .map(drop)
-                                        .map_err(|error: PlatformError| error.to_string())
-                                }
-                                Err(error) => Err(error.to_string()),
-                            };
+                            let restart =
+                                async { bmc.power()?.set(ResetType::ForceRestart).await }.await;
                             if let Err(e) = restart {
                                 tracing::warn!(%machine_id, error = %e, "Failed to reboot host while force deleting machine");
                             }
@@ -1411,7 +1424,7 @@ pub(crate) async fn admin_force_delete_machine(
                         tracing::warn!(
                             machine_id = %machine.id,
                             error = %e,
-                            "Failed to create Redfish client. Skipping bios unlock",
+                            "Failed to connect to the host BMC. Skipping bios unlock",
                         );
                     }
                 }
@@ -1426,39 +1439,6 @@ pub(crate) async fn admin_force_delete_machine(
                 machine_id = %machine.id,
                 "Failed to unlock host because the BMC IP address is missing",
             );
-        }
-
-        if let Some(ref ops) = api.dpf_sdk
-            && !dpu_machines.is_empty()
-        {
-            let cleanup_result: Result<(), CarbideError> = async {
-                let host_dpf_id = machine.dpf_id().ok_or_else(|| {
-                    CarbideError::internal("BMC MAC not set for host".to_string())
-                })?;
-                let dpu_device_names: Vec<String> = dpu_machines
-                    .iter()
-                    .map(|dpu| {
-                        dpu.dpf_id().ok_or_else(|| {
-                            CarbideError::internal("BMC MAC not set for DPU".to_string())
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-                ops.force_delete_host(&host_dpf_id, &dpu_device_names)
-                    .await
-                    .map_err(CarbideError::DpfError)
-            }
-            .await;
-
-            if let Err(error) = cleanup_result {
-                if !request.allow_delete_with_orphaned_dpf_crds {
-                    return Err(error.into());
-                }
-                tracing::warn!(
-                    machine_id = %machine.id,
-                    error = %error,
-                    "Continuing force deletion with explicitly orphaned DPF resources",
-                );
-            }
         }
     }
 
@@ -1524,11 +1504,7 @@ pub(crate) async fn get_dpu_info_list(
 ) -> Result<Response<rpc::GetDpuInfoListResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
-    let dpu_list = db::machine::find_dpu_infos(&mut txn).await?;
-
-    txn.commit().await?;
+    let dpu_list = db::machine::find_dpu_infos(api.pg_pool()).await?;
 
     let response = rpc::GetDpuInfoListResponse {
         dpu_list: dpu_list.into_iter().map(rpc::DpuInfo::from).collect(),
@@ -1641,18 +1617,19 @@ pub(crate) async fn get_machine_position_info(
         )
         .into());
     }
-    let mut txn = api.txn_begin().await?;
 
     // Translate the machine IDs to BMC IPs. Machines without a usable selected
     // BMC interface are omitted, consistent with how find_machines_by_ids
     // handles missing machines.
-    let pairs =
-        db::machine_topology::find_machine_bmc_pairs_by_machine_id(&mut txn, request.machine_ids)
-            .await?;
+    let pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
+        api.pg_pool(),
+        request.machine_ids,
+    )
+    .await?;
 
     // Find the explored endpoints for those BMC IPs
     let explored_endpoints = db::explored_endpoints::find_by_ips(
-        &mut txn,
+        api.pg_pool(),
         pairs
             .iter()
             .filter_map(|(machine_id, ip_opt)| match ip_opt {
@@ -1675,7 +1652,6 @@ pub(crate) async fn get_machine_position_info(
             .collect(),
     )
     .await?;
-    txn.commit().await?;
 
     // Redo the explored endpoints into a hashmap based on the IP address
     let as_hashmap = explored_endpoints

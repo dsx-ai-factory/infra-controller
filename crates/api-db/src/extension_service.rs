@@ -193,7 +193,7 @@ pub enum InsertExtensionServiceInterfaceMacError {
 
 /// Reads a service's stable interface MAC assignments in ordinal order.
 pub async fn find_interface_macs(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
 ) -> DatabaseResult<Vec<ExtensionServiceInterfaceMac>> {
     let query = "SELECT service_id, interface_ordinal, mac_address
@@ -202,7 +202,7 @@ pub async fn find_interface_macs(
                  ORDER BY interface_ordinal";
     let rows = sqlx::query_as::<_, (ExtensionServiceId, i32, mac_address::MacAddress)>(query)
         .bind(service_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
@@ -376,7 +376,7 @@ pub async fn create(
         .bind(deployment_type)
         .bind(service_name)
         .bind(description.unwrap_or(""))
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(initial_version_ctr)
         .bind(sqlx::types::Json(initial_controller_state))
         .bind(initial_controller_state_version)
@@ -417,7 +417,7 @@ pub async fn create(
         version_query.as_str(),
     ))
     .bind(service_id)
-    .bind(version.to_string())
+    .bind(version)
     .bind(data)
     .bind(dpf_service_id)
     .bind(observability.map(sqlx::types::Json))
@@ -510,7 +510,7 @@ pub async fn update(
     {
         Ok(service) => service,
         Err(sqlx::Error::RowNotFound) => {
-            if !find_by_ids(txn, &[service_id], false, true)
+            if !find_by_ids_for_update(txn, &[service_id], false)
                 .await?
                 .is_empty()
             {
@@ -862,23 +862,20 @@ pub async fn update_controller_state_outcome(
 /// Finds the IDs of extension services, optionally filtered by type, name, and tenant organization ID.
 ///
 /// # Parameters
-/// * `txn`          - A reference to an active DB transaction
 /// * `service_type` - Optional filter on the type of the extension service
 /// * `service_name` - Optional filter by case-insensitive exact match on service name
 /// * `tenant_organization_id` - Optional filter by tenant organization ID
 /// * `include_deleted` - Whether terminal soft-deleted services should also be included.
 ///   In-progress deletion remains visible regardless of this flag.
-/// * `for_update`   - A boolean flag to acquire DB locks for synchronization
 ///
 /// # Returns
 /// A vector of matching `ExtensionServiceId`s (may be empty).
 pub async fn find_ids(
-    txn: &mut PgConnection,
+    db: impl DbReader<'_>,
     service_type: Option<ExtensionServiceType>,
     service_name: Option<&str>,
     tenant_organization_id: Option<&TenantOrganizationId>,
     include_deleted: bool,
-    for_update: bool,
 ) -> Result<Vec<ExtensionServiceId>, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new("SELECT id FROM extension_services WHERE true");
 
@@ -904,31 +901,38 @@ pub async fn find_ids(
 
     if let Some(tenant_organization_id) = tenant_organization_id {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.to_string());
+        builder.push_bind(tenant_organization_id);
     }
 
     builder.push(" ORDER BY created DESC");
 
-    if for_update {
-        builder.push(" FOR UPDATE");
-    }
-
     builder
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(db)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
 
-/// Finds extension services by their IDs.
-///
-/// # Parameters
-/// * `txn`        - A reference to an active DB transaction
-/// * `ids`        - A list of extension service IDs to query
-/// * `include_deleted` - Whether soft-deleted services should be included
-/// * `for_update` - Whether to lock the extension services for update
+/// Finds extension services by their IDs, optionally including soft-deleted services.
 pub async fn find_by_ids(
+    db: impl DbReader<'_>,
+    ids: &[ExtensionServiceId],
+    include_deleted: bool,
+) -> DatabaseResult<Vec<ExtensionService>> {
+    find_by_ids_inner(db, ids, include_deleted, false).await
+}
+
+/// Locks extension services in ID order for the duration of the caller's transaction.
+pub async fn find_by_ids_for_update(
     txn: &mut PgConnection,
+    ids: &[ExtensionServiceId],
+    include_deleted: bool,
+) -> DatabaseResult<Vec<ExtensionService>> {
+    find_by_ids_inner(txn, ids, include_deleted, true).await
+}
+
+async fn find_by_ids_inner(
+    db: impl DbReader<'_>,
     ids: &[ExtensionServiceId],
     include_deleted: bool,
     for_update: bool,
@@ -956,13 +960,13 @@ pub async fn find_by_ids(
 
     builder
         .build_query_as::<ExtensionService>()
-        .fetch_all(txn)
+        .fetch_all(db)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
 
 pub async fn find_snapshots_by_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ids: &[ExtensionServiceId],
 ) -> DatabaseResult<Vec<ExtensionServiceSnapshot>> {
     // We order the active versions using the version number in descending order
@@ -1014,7 +1018,7 @@ pub async fn find_snapshots_by_ids(
 
     sqlx::query_as::<_, ExtensionServiceSnapshot>(query)
         .bind(ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -1026,17 +1030,20 @@ pub async fn find_snapshots_by_ids(
 /// * `txn`        - A reference to an active DB transaction
 /// * `service_id` - The ID of the extension service
 /// * `version`    - Optional specific version number to retrieve. If None, returns the latest version
-pub async fn find_version_info(
-    txn: &mut PgConnection,
+pub async fn find_version_info<DB>(
+    conn: &mut DB,
     service_id: ExtensionServiceId,
     version: Option<ConfigVersion>,
-) -> DatabaseResult<ExtensionServiceVersionInfo> {
+) -> DatabaseResult<ExtensionServiceVersionInfo>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     // We check if the extension service exists first to return a precise service not found error
     let service_query = "SELECT id FROM extension_services WHERE id = $1 AND deleted IS NULL";
 
     match sqlx::query_scalar::<_, uuid::Uuid>(service_query)
         .bind(service_id)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| DatabaseError::query(service_query, e))?
     {
@@ -1049,7 +1056,7 @@ pub async fn find_version_info(
         }
     }
 
-    find_version_info_of_known_service(txn, service_id, version).await
+    find_version_info_of_known_service(conn, service_id, version).await
 }
 
 /// Finds a specific version of an extension service, or the latest version if not specified,
@@ -1065,7 +1072,7 @@ pub async fn find_version_info(
 /// * `service_id` - The ID of the extension service
 /// * `version`    - Optional specific version number to retrieve. If None, returns the latest version
 pub async fn find_version_info_of_known_service(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
     version: Option<ConfigVersion>,
 ) -> DatabaseResult<ExtensionServiceVersionInfo> {
@@ -1088,7 +1095,7 @@ pub async fn find_version_info_of_known_service(
     }
 
     let query = builder.build_query_as::<ExtensionServiceVersionInfo>();
-    match query.fetch_one(txn).await {
+    match query.fetch_one(conn).await {
         Ok(ver) => Ok(ver),
         Err(sqlx::Error::RowNotFound) => {
             let id_text = if let Some(v) = version {
@@ -1112,7 +1119,7 @@ pub async fn find_version_info_of_known_service(
 /// * `service_id` - The ID of the extension service
 /// * `versions`   - Optional slice of version numbers to filter by. If None, returns all version infos.
 pub async fn find_versions_info(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: &ExtensionServiceId,
     versions: Option<&[ConfigVersion]>,
 ) -> DatabaseResult<Vec<ExtensionServiceVersionInfo>> {
@@ -1138,7 +1145,7 @@ pub async fn find_versions_info(
     builder.push(" ORDER BY (split_part(split_part(version, '-', 1), 'V', 2))::integer DESC");
 
     let query = builder.build_query_as::<ExtensionServiceVersionInfo>();
-    match query.fetch_all(txn).await {
+    match query.fetch_all(conn).await {
         Ok(versions) => Ok(versions),
         Err(e) => Err(DatabaseError::query(builder.sql(), e)),
     }
@@ -1317,7 +1324,7 @@ pub async fn soft_delete_versions(
 ///   whose persisted configuration still refers to the service as in use. Such
 ///   rows are retained while instance cleanup is still in progress.
 pub async fn is_service_in_use(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
     versions: &[ConfigVersion],
     include_deleted_instances: bool,
@@ -1355,7 +1362,7 @@ pub async fn is_service_in_use(
 
     let exists = builder
         .build_query_scalar::<i32>()
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))?
         .is_some();
@@ -1370,7 +1377,7 @@ pub async fn is_service_in_use(
 /// * `service_id` - The ID of the extension service
 /// * `versions`   - Optional slice of version numbers to check if the service has credentials
 pub async fn find_versions_with_credentials(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
     versions: &[ConfigVersion],
 ) -> DatabaseResult<Vec<ConfigVersion>> {
@@ -1396,7 +1403,7 @@ pub async fn find_versions_with_credentials(
 
     builder
         .build_query_scalar::<ConfigVersion>()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
@@ -1523,7 +1530,7 @@ mod test_batched_lookups {
         .expect("apply shipped deployment-type migration");
 
         // Decode migrated rows through the production reader, including soft-deleted services.
-        let services = find_by_ids(txn.as_mut(), &[pod_id, helm_id], true, false)
+        let services = find_by_ids(txn.as_mut(), &[pod_id, helm_id], true)
             .await
             .expect("read migrated registrations");
         assert_eq!(services.len(), 2);
@@ -2314,7 +2321,7 @@ mod test_batched_lookups {
         } in cases
         {
             let mut txn = pool.txn_begin().await.expect("begin stale update");
-            let before = find_by_ids(&mut txn, &[service_id], true, false)
+            let before = find_by_ids(&mut txn, &[service_id], true)
                 .await
                 .expect("load parent before rejected update");
             let versions_before = find_versions_info(&mut txn, &service_id, None)
@@ -2347,11 +2354,10 @@ mod test_batched_lookups {
             // Commit to prove rejection didn't leave any database changes.
             txn.commit().await.expect("commit rejected update");
 
-            let mut txn = pool.txn_begin().await.expect("begin persistence check");
-            let after = find_by_ids(&mut txn, &[service_id], true, false)
+            let after = find_by_ids(&pool, &[service_id], true)
                 .await
                 .expect("reload parent after rejected update");
-            let versions_after = find_versions_info(&mut txn, &service_id, None)
+            let versions_after = find_versions_info(&pool, &service_id, None)
                 .await
                 .expect("reload versions after rejected update");
             assert_eq!(after.len(), before.len(), "{scenario}: parent count");
@@ -2397,7 +2403,6 @@ mod test_batched_lookups {
                     .collect::<Vec<_>>(),
                 "{scenario}: version rows must not change"
             );
-            txn.commit().await.expect("commit persistence check");
         }
     }
 
@@ -2438,7 +2443,7 @@ mod test_batched_lookups {
         .await
         .expect("create DPF Helm chart service");
 
-        let creating = find_by_ids(&mut txn, &[service_id], false, false)
+        let creating = find_by_ids(&mut txn, &[service_id], false)
             .await
             .map(|mut services| services.pop())
             .expect("load controller record")
@@ -2508,13 +2513,13 @@ mod test_batched_lookups {
             .expect("soft delete service");
 
         assert!(
-            find_by_ids(&mut txn, &[service_id], false, false)
+            find_by_ids(&mut txn, &[service_id], false)
                 .await
                 .expect("exclude soft-deleted controller record")
                 .is_empty(),
             "find_by_ids excludes soft-deleted services unless requested"
         );
-        let deleted_record = find_by_ids(&mut txn, &[service_id], true, false)
+        let deleted_record = find_by_ids(&mut txn, &[service_id], true)
             .await
             .map(|mut services| services.pop())
             .expect("load soft-deleted controller record")
@@ -2549,7 +2554,6 @@ mod test_batched_lookups {
             None,
             None,
             true,
-            false,
         )
         .await
         .expect("list DPF controller ids");
@@ -2562,19 +2566,16 @@ mod test_batched_lookups {
         let seeded = seed_services(&pool, N).await;
         let ids = seeded.iter().map(|(id, _)| *id).collect::<Vec<_>>();
 
-        // The reads run on plain pool connections -- no transaction -- so no
-        // begin/commit statements land in the counts. Each counted region
-        // acquires its connection inside the instrumented future.
+        // Use the pool directly so the counts only include the queries under test.
 
         // BEFORE: find_by_ids called with a 1-element slice per service (the pattern in dpu.rs).
         let (looped, before_count) = {
             let pool = &pool;
             let ids = &ids;
             count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
                 let mut names = std::collections::HashMap::new();
                 for id in ids {
-                    let service = find_by_ids(&mut conn, &[*id], false, false)
+                    let service = find_by_ids(pool, &[*id], false)
                         .await
                         .expect("find_by_ids")
                         .into_iter()
@@ -2591,13 +2592,8 @@ mod test_batched_lookups {
         let (batched, after_count) = {
             let pool = &pool;
             let ids = &ids;
-            count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
-                find_by_ids(&mut conn, ids, false, false)
-                    .await
-                    .expect("find_by_ids")
-            })
-            .await
+            count_queries(async move { find_by_ids(pool, ids, false).await.expect("find_by_ids") })
+                .await
         };
 
         // Data equality: same set of (id -> name) pairs.
@@ -2635,18 +2631,19 @@ mod test_batched_lookups {
         let seeded = seed_services(&pool, 1).await;
         let (service_id, version) = seeded[0];
 
-        // The reads run on plain pool connections -- no transaction -- so no
-        // begin/commit statements land in the counts. Each counted region
-        // acquires its connection inside the instrumented future.
+        // Use the pool directly so the counts only include the queries under test.
 
         // find_version_info: existence probe + version lookup.
         let (probed_info, probed_count) = {
             let pool = &pool;
             count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
-                find_version_info(&mut conn, service_id, Some(version))
-                    .await
-                    .expect("find_version_info")
+                find_version_info(
+                    &mut crate::db_read::PgPoolReader::from(pool.clone()),
+                    service_id,
+                    Some(version),
+                )
+                .await
+                .expect("find_version_info")
             })
             .await
         };
@@ -2655,8 +2652,7 @@ mod test_batched_lookups {
         let (unprobed_info, unprobed_count) = {
             let pool = &pool;
             count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
-                find_version_info_of_known_service(&mut conn, service_id, Some(version))
+                find_version_info_of_known_service(pool, service_id, Some(version))
                     .await
                     .expect("find_version_info_of_known_service")
             })
@@ -2717,7 +2713,7 @@ mod test_batched_lookups {
         .execute(&mut *txn)
         .await
         .expect("prepare DPF registration");
-        let controller_version = find_by_ids(&mut txn, &[deleting_id], false, false)
+        let controller_version = find_by_ids(&mut txn, &[deleting_id], false)
             .await
             .expect("load DPF registration")
             .pop()
@@ -2744,7 +2740,7 @@ mod test_batched_lookups {
 
         for finalized in [false, true] {
             if finalized {
-                let deleting_version = find_by_ids(&mut txn, &[deleting_id], true, false)
+                let deleting_version = find_by_ids(&mut txn, &[deleting_id], true)
                     .await
                     .expect("load deleting registration")
                     .pop()
@@ -2765,7 +2761,7 @@ mod test_batched_lookups {
                     ConditionalWrite::Applied(())
                 );
             }
-            let ids = find_ids(&mut txn, None, None, None, false, false)
+            let ids = find_ids(&mut txn, None, None, None, false)
                 .await
                 .expect("enumerate inventory");
             assert_eq!(
@@ -2776,7 +2772,7 @@ mod test_batched_lookups {
                     vec![deleting_id, active_id]
                 }
             );
-            let controller_ids = find_ids(&mut txn, None, None, None, true, false)
+            let controller_ids = find_ids(&mut txn, None, None, None, true)
                 .await
                 .expect("enumerate controller records including terminal deletion");
             assert_eq!(controller_ids, vec![deleting_id, active_id]);
@@ -2797,7 +2793,6 @@ mod test_batched_lookups {
                 Some(ExtensionServiceType::DpfHelmChart),
                 Some("SVC-1"),
                 Some(&tenant),
-                false,
                 false,
             )
             .await

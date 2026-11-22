@@ -406,7 +406,7 @@ async fn search(
                         prefix
                             .gateway
                             .map(|gateway| gateway.to_string())
-                            .unwrap_or("(no gateway)".to_string()),
+                            .unwrap_or_else(|| "(no gateway)".to_string()),
                     ),
                 })
                 .collect());

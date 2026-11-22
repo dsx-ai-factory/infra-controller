@@ -184,10 +184,31 @@ pub enum MatchPattern {
 fn deserialize_mac_address<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<MacAddress, D::Error> {
-    let value = String::deserialize(deserializer)?;
-    value
-        .parse()
-        .map_err(|error| serde::de::Error::custom(format!("invalid MAC address {value}: {error}")))
+    struct MacAddressVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for MacAddressVisitor {
+        type Value = Result<MacAddress, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(value
+                .parse()
+                .map_err(|error| format!("invalid MAC address {value}: {error}")))
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            let value = std::str::from_utf8(value)
+                .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+            self.visit_str(value)
+        }
+    }
+
+    deserializer
+        .deserialize_string(MacAddressVisitor)?
+        .map_err(serde::de::Error::custom)
 }
 
 impl MatchPattern {
@@ -506,3 +527,50 @@ const fn field_precedence(field: &IdentityField) -> Option<Precedence> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod serde_input_tests {
+    use super::*;
+
+    #[test]
+    fn mac_address_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "c4:5a:b1:c8:38:0d";
+        let cases = [
+            (
+                "borrowed string",
+                deserialize_mac_address(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                deserialize_mac_address(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                deserialize_mac_address(StringDeserializer::<Error>::new(input.to_string())),
+            ),
+            (
+                "bytes",
+                deserialize_mac_address(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert_eq!(
+                value,
+                input.parse::<MacAddress>().expect("fixture MAC"),
+                "{scenario}"
+            );
+        }
+
+        let error = deserialize_mac_address(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
+}

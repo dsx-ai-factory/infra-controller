@@ -173,12 +173,11 @@ async fn resolve_rotate_lockdown_key(api: &Api, machine_id: HostMachineId) -> Ca
     if api.runtime_config.nic_lockdown_ikm_rotation_enabled {
         return Ok(true);
     }
-    let mut conn = api.database_connection.acquire().await.map_err(|e| {
-        CarbideError::GenericErrorFromReport(eyre!(
-            "failed to acquire connection to read nic lockdown force flag: {e}"
-        ))
-    })?;
-    Ok(db::machine::get_lockdown_ikm_credential_rotation_requested(&mut conn, machine_id).await?)
+    Ok(db::machine::get_lockdown_ikm_credential_rotation_requested(
+        &api.database_connection,
+        machine_id,
+    )
+    .await?)
 }
 
 /// Resolve the lockdown IKM version to *lock* a card under.
@@ -223,15 +222,10 @@ async fn resolve_lock_ikm_version(
     mac: MacAddress,
     migrate_to_target: bool,
 ) -> CarbideResult<i32> {
-    let mut conn = api.database_connection.acquire().await.map_err(|e| {
-        CarbideError::GenericErrorFromReport(eyre!(
-            "failed to acquire connection to resolve lockdown lock IKM version: {e}"
-        ))
-    })?;
     // An in-flight lock wins over both branches: re-derive the staged version so
     // a later reconciliation cannot overwrite it (see the doc comment).
     let device_state = db::credential_rotation::device_rotation_operation_state(
-        &mut *conn,
+        &api.database_connection,
         db::credential_rotation::CredentialRotationType::LockdownIkm,
         mac,
     )
@@ -245,7 +239,7 @@ async fn resolve_lock_ikm_version(
     // boundary (`ikm_version_u32` -> `build_supernic_lockdown_key`).
     let version = if migrate_to_target {
         db::credential_rotation::current_target_version(
-            &mut conn,
+            &api.database_connection,
             db::credential_rotation::CredentialRotationType::LockdownIkm,
         )
         .await?
@@ -272,15 +266,10 @@ async fn resolve_lock_ikm_version(
 /// before re-locking it, a locked card's version is always exactly this resolved
 /// value, so a single key suffices.
 async fn resolve_unlock_ikm_version(api: &Api, mac: MacAddress) -> CarbideResult<i32> {
-    let mut conn = api.database_connection.acquire().await.map_err(|e| {
-        CarbideError::GenericErrorFromReport(eyre!(
-            "failed to acquire connection to resolve lockdown unlock IKM version: {e}"
-        ))
-    })?;
     // DB-native `i32`; converted to `u32` once via `ikm_version_u32` at the
     // derivation call. No row / no tracked version falls back to the seed.
     let version = db::credential_rotation::device_rotation_operation_state(
-        &mut *conn,
+        &api.database_connection,
         db::credential_rotation::CredentialRotationType::LockdownIkm,
         mac,
     )
@@ -1030,8 +1019,13 @@ fn get_dpa_by_mac<'a>(
     devinfo: &MlxDeviceInfo,
     dpas: &'a mut [DpaInterface],
 ) -> CarbideResult<&'a mut DpaInterface> {
+    let reported_mac = devinfo
+        .base_mac
+        .parse::<MacAddress>()
+        .ok()
+        .filter(|mac| mac.to_string() == devinfo.base_mac);
     dpas.iter_mut()
-        .find(|dpa| dpa.mac_address.to_string() == devinfo.base_mac)
+        .find(|dpa| Some(dpa.mac_address) == reported_mac)
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "mac_addr",
             id: devinfo.base_mac.to_string(),

@@ -29,7 +29,7 @@ use measured_boot::machine::CandidateMachine;
 use measured_boot::records::{MeasurementBundleState, MeasurementMachineState};
 use model::machine::topology::TopologyData;
 use serde::Serialize;
-use sqlx::{FromRow, PgConnection};
+use sqlx::FromRow;
 
 use crate::db_read::DbReader;
 use crate::measured_boot::interface::bundle::get_measurement_bundle_by_id;
@@ -64,11 +64,11 @@ pub struct CandidateMachineRecord {
     pub updated: chrono::DateTime<Utc>,
 }
 
-pub async fn from_id(
-    txn: &mut PgConnection,
-    machine_id: MachineId,
-) -> DatabaseResult<CandidateMachine> {
-    match get_candidate_machine_record_by_id(txn, machine_id).await? {
+pub async fn from_id<DB>(conn: &mut DB, machine_id: MachineId) -> DatabaseResult<CandidateMachine>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match get_candidate_machine_record_by_id(&mut *conn, machine_id).await? {
         Some(record) => {
             let attrs = match &record.topology.discovery_data.info.dmi_data {
                 Some(dmi_data) => Ok(HashMap::from([
@@ -81,7 +81,7 @@ pub async fn from_id(
                 ))),
             }?;
 
-            let journal = get_latest_journal_for_id(txn, machine_id).await?;
+            let journal = get_latest_journal_for_id(conn, machine_id).await?;
             let state = machine_state_from_journal(&journal);
 
             Ok(CandidateMachine {

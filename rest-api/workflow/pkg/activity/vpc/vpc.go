@@ -16,6 +16,9 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"go.temporal.io/sdk/client"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -34,6 +37,10 @@ import (
 // systemTenantOrganizationID is the organization Core assigns to its own admin VPC
 // (crates/api-core/src/db_init.rs). That VPC is system-owned and never a REST tenant VPC.
 const systemTenantOrganizationID = "carbide_internal"
+
+// pendingRefreshTimeout leaves most of the inventory activity's minute for
+// ordinary updates and deletion reconciliation when Core is slow.
+const pendingRefreshTimeout = 5 * time.Second
 
 // ManageVpc is an activity wrapper for managing VPC lifecycle that allows
 // injecting DB access
@@ -117,6 +124,24 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		}
 	}
 
+	// Inventory may predate the saved POST or a Core edit. Re-read only Pending
+	// candidates in this page before allowing inventory to complete a creation.
+	pendingIDs := []*corev1.VpcId{}
+	for _, reported := range vpcInventory.Vpcs {
+		id := reported.GetId().GetValue()
+		vpc := existingVpcCtrlIDMap[id]
+		if vpc == nil {
+			vpc = existingVpcIDMap[id]
+		}
+		if vpc != nil && vpc.Status == cdbm.VpcStatusPending && vpc.CreationRejectedAt == nil {
+			pendingIDs = append(pendingIDs, &corev1.VpcId{Value: id})
+		}
+	}
+	currentPending, err := findPendingVpcsInCore(ctx, tc, pendingIDs)
+	if err != nil {
+		logger.Error().Err(err).Msg("could not refresh Pending VPCs from Core; retaining their creation requests")
+	}
+
 	// Prepare a map of ID -> propagation status
 	// so we can quickly attach it to the object
 	// when need to perform the update query.
@@ -165,6 +190,23 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		}
 
 		reportedVpcIDMap[vpc.ID] = true
+		if vpc.CreationRejectedAt != nil {
+			slogger.Warn().Msg("Core VPC shares a rejected request's ID; preserving the rejected request")
+			continue
+		}
+		if vpc.Status == cdbm.VpcStatusPending {
+			current := currentPending[controllerVpcIDStr]
+			if current == nil {
+				continue
+			}
+			completed, completeErr := vpcDAO.CompleteCreation(ctx, vpc.ID, current)
+			if completeErr != nil {
+				slogger.Error().Err(completeErr).Msg("failed to complete original Pending VPC from inventory")
+			} else {
+				*vpc = *completed
+			}
+			continue
+		}
 
 		// Reset missing flag if necessary
 		var isMissingOnSite *bool
@@ -402,9 +444,17 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		}
 	}
 
-	// Loop through VPCs for deletion
+	// Missing inventory cannot settle an unfinished request or erase a saved
+	// cancellation decision. Those records remain available to their DELETE path.
 	for _, vpc := range vpcsToDelete {
 		slogger := logger.With().Str("VPC ID", vpc.ID.String()).Logger()
+		if vpc.CreationRejectedAt != nil {
+			continue
+		}
+
+		if vpc.Status == cdbm.VpcStatusPending {
+			continue
+		}
 
 		// If the VPC was already being deleted, we can proceed with removing it from the DB
 		if vpc.Status == cdbm.VpcStatusDeleting {
@@ -474,7 +524,7 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 	vpcID, err := uuid.Parse(controllerVpc.GetId().GetValue())
 	if err != nil {
-		logger.Warn().Msg(fmt.Sprintf("unable to create VPC found on Site: failed to parse VPC Controller ID, not a valid UUID %s", controllerVpc.GetId().GetValue()))
+		logger.Warn().Msgf("unable to create VPC found on Site: failed to parse VPC Controller ID, not a valid UUID %s", controllerVpc.GetId().GetValue())
 		return nil
 	}
 
@@ -505,11 +555,15 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 		if len(matches) > 0 {
 			existingVpc := &matches[0]
+			if existingVpc.CreationRejectedAt != nil {
+				logger.Warn().Str("VPC ID", existingVpc.ID.String()).Msg("Core VPC shares a rejected request's ID; not restoring the request")
+				return nil, nil
+			}
 			if existingVpc.Deleted == nil {
 				return existingVpc, nil
 			}
 			if existingVpc.Org != reportedVpc.Org {
-				logger.Warn().Msg(fmt.Sprintf("unable to create VPC found on Site: tenant organization differs in REST cache and Site record %s", reportedVpc.Org))
+				logger.Warn().Msgf("unable to create VPC found on Site: tenant organization differs in REST cache and Site record %s", reportedVpc.Org)
 				return nil, nil
 			}
 			// Deleted records when the delete happened, so a delete newer than the interval can
@@ -660,6 +714,10 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 		logger.Error().Err(err).Msg("failed to retrieve VPC from DB by ID")
 		return err
 	}
+	if vpc.CreationRejectedAt != nil {
+		logger.Warn().Msg("not updating Core metadata for a rejected VPC creation")
+		return nil
+	}
 
 	logger.Info().Msg("retrieved VPC from DB")
 
@@ -705,6 +763,46 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 	logger.Info().Msg("completed activity")
 
 	return nil
+}
+
+// findPendingVpcsInCore refreshes one inventory page's Pending candidates through
+// the existing Site proxy. The bounded read runs before any completion transaction.
+// Missing or unreadable results leave the saved requests for a later inventory pass.
+func findPendingVpcsInCore(ctx context.Context, tc client.Client, ids []*corev1.VpcId) (map[string]*corev1.Vpc, error) {
+	current := make(map[string]*corev1.Vpc)
+	if len(ids) == 0 {
+		return current, nil
+	}
+	request, err := protojson.Marshal(&corev1.VpcsByIdsRequest{VpcIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, pendingRefreshTimeout)
+	defer cancel()
+	run, err := tc.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       "core-grpc-FindVpcsByIds-" + uuid.NewString(),
+		TaskQueue:                queue.SiteTaskQueue,
+		WorkflowExecutionTimeout: pendingRefreshTimeout,
+	}, grpcproxy.Core.WorkflowName, grpcproxy.Request{
+		FullMethod: corev1.Forge_FindVpcsByIds_FullMethodName, RequestJSON: request,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var response grpcproxy.Response
+	err = run.Get(ctx, &response)
+	if err != nil {
+		return nil, err
+	}
+	var vpcs corev1.VpcList
+	err = (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(response.ResponseJSON, &vpcs)
+	if err != nil {
+		return nil, err
+	}
+	for _, vpc := range vpcs.GetVpcs() {
+		current[vpc.GetId().GetValue()] = vpc
+	}
+	return current, nil
 }
 
 // NewManageVpc returns a new ManageVpc activity

@@ -64,17 +64,19 @@ async fn test_expire_releases_allocation(pool: PgPool) -> Result<(), Box<dyn std
     assert_eq!(resp.status(), ExpireDhcpLeaseStatus::FeatureDisabled);
 
     // Address and interface must both still exist (expiry is blocked).
-    let mut txn = env.db_txn().await;
-    let addr =
-        db::machine_interface_address::find_ipv4_for_interface(&mut txn, interface.id).await?;
+    let addr = db::machine_interface_address::find_ipv4_for_interface(
+        &env.api().database_connection,
+        interface.id,
+    )
+    .await?;
     assert_eq!(
         addr.address, ip,
         "address should still exist while expiry is blocked"
     );
 
-    let iface = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+    let iface =
+        db::machine_interface::find_one(&env.api().database_connection, interface.id).await?;
     assert_eq!(iface.id, interface.id, "interface should still exist");
-    txn.commit().await?;
 
     Ok(())
 }
@@ -225,9 +227,8 @@ async fn test_discover_reallocates_after_expiration(
         response1.machine_interface_id, response2.machine_interface_id,
         "should reuse the same interface"
     );
-    let mut txn = env.db_txn().await;
     let addresses = db::machine_interface_address::find_for_interface(
-        &mut txn,
+        &env.api().database_connection,
         response2
             .machine_interface_id
             .expect("DHCP should identify the interface"),
@@ -235,7 +236,6 @@ async fn test_discover_reallocates_after_expiration(
     .await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -283,10 +283,11 @@ async fn test_expire_does_not_delete_static_allocation(
     );
 
     // Verify the address still exists.
-    let mut txn = env.db_txn().await;
-    let addr =
-        db::machine_interface_address::find_ipv4_for_interface(&mut txn, interface.id).await?;
-    txn.commit().await?;
+    let addr = db::machine_interface_address::find_ipv4_for_interface(
+        &env.api().database_connection,
+        interface.id,
+    )
+    .await?;
     assert_eq!(addr.address, static_ip, "static address should still exist");
 
     Ok(())
@@ -327,10 +328,11 @@ async fn test_expire_does_not_delete_slaac_allocation(
     assert_eq!(response.status(), ExpireDhcpLeaseStatus::NotFound);
 
     // Verify through a fresh DB read that the SLAAC row remained.
-    let mut txn = env.db_txn().await;
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
-    txn.commit().await?;
+    let addresses = db::machine_interface_address::find_for_interface(
+        &env.api().database_connection,
+        interface.id,
+    )
+    .await?;
     assert!(
         addresses.iter().any(|address| address.address == slaac_ip
             && address.allocation_type == AllocationType::Slaac)
@@ -462,14 +464,13 @@ async fn test_expire_resets_hostname_and_discover_restores_it(
 
     // The hostname must match the IP (dots replaced with dashes for IPv4).
     let interface_id = response1.machine_interface_id.unwrap();
-    let mut txn = env.db_txn().await;
-    let iface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let iface =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     let expected_hostname = original_ip.replace('.', "-");
     assert_eq!(
         iface.hostname, expected_hostname,
         "hostname should be derived from the allocated IP"
     );
-    txn.commit().await?;
 
     // Expire the lease: address is removed and hostname resets to dormant format.
     let expire_response = env
@@ -483,8 +484,8 @@ async fn test_expire_resets_hostname_and_discover_restores_it(
     assert_eq!(expire_response.status(), ExpireDhcpLeaseStatus::Released);
 
     // Hostname should have reset to the dormant n-<mac> placeholder.
-    let mut txn = env.db_txn().await;
-    let iface_after_expiry = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let iface_after_expiry =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     assert!(
         iface_after_expiry
             .hostname
@@ -493,7 +494,6 @@ async fn test_expire_resets_hostname_and_discover_restores_it(
         "hostname should reset to dormant format after expiry, got: {}",
         iface_after_expiry.hostname,
     );
-    txn.commit().await?;
 
     // Re-discover: a new IP is allocated and the hostname must be updated.
     let response2 = env
@@ -506,15 +506,14 @@ async fn test_expire_resets_hostname_and_discover_restores_it(
     let new_ip = response2.address.clone();
     assert!(!new_ip.is_empty(), "should get an IP after re-allocation");
 
-    let mut txn = env.db_txn().await;
-    let iface_after_rediscover = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let iface_after_rediscover =
+        db::machine_interface::find_one(&env.api().database_connection, interface_id).await?;
     let expected_new_hostname = new_ip.replace('.', "-");
     assert_eq!(
         iface_after_rediscover.hostname.to_lowercase(),
         expected_new_hostname.to_lowercase(),
         "hostname should match the newly allocated IP after rediscover"
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -559,11 +558,12 @@ async fn test_expire_with_mismatched_mac_is_no_op(
     );
 
     // Verify MacAddressB's record is still in tact.
-    let mut txn = env.db_txn().await;
-    let addr =
-        db::machine_interface_address::find_ipv4_for_interface(&mut txn, interface.id).await?;
+    let addr = db::machine_interface_address::find_ipv4_for_interface(
+        &env.api().database_connection,
+        interface.id,
+    )
+    .await?;
     assert_eq!(addr.address, ip, "MacAddressB address should still exist");
-    txn.commit().await?;
 
     Ok(())
 }
@@ -599,11 +599,10 @@ async fn test_mac_scoped_expiry_resyncs_only_the_owner(
         .into_inner();
     let other_id = other.machine_interface_id.unwrap();
 
-    let mut txn = env.db_txn().await;
-    let other_hostname_before = db::machine_interface::find_one(&mut *txn, other_id)
-        .await?
-        .hostname;
-    txn.commit().await?;
+    let other_hostname_before =
+        db::machine_interface::find_one(&env.api().database_connection, other_id)
+            .await?
+            .hostname;
 
     // Expire the owner's lease scoped by (ip, mac).
     let expire_response = env
@@ -618,10 +617,10 @@ async fn test_mac_scoped_expiry_resyncs_only_the_owner(
 
     // The owner is resynced to the dormant placeholder; the other interface is
     // left exactly as it was.
-    let mut txn = env.db_txn().await;
-    let owner_after = db::machine_interface::find_one(&mut *txn, owner_id).await?;
-    let other_after = db::machine_interface::find_one(&mut *txn, other_id).await?;
-    txn.commit().await?;
+    let owner_after =
+        db::machine_interface::find_one(&env.api().database_connection, owner_id).await?;
+    let other_after =
+        db::machine_interface::find_one(&env.api().database_connection, other_id).await?;
     assert!(
         owner_after.hostname.to_lowercase().starts_with("noip"),
         "the (ip, mac) owner should be resynced to dormant, got: {}",

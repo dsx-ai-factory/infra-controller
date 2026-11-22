@@ -39,6 +39,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
+use itertools::Itertools;
 use regex::Regex;
 
 /// Everything the Configuration page template needs.
@@ -499,7 +500,7 @@ impl<'a> CatalogBuilder<'a> {
             .take_while(|(k, _)| k.starts_with(&prefix))
             .map(|(_, source)| *source)
             .collect();
-        (!sources.is_empty()).then(|| sources.into_iter().collect::<Vec<_>>().join(", "))
+        (!sources.is_empty()).then(|| sources.into_iter().join(", "))
     }
 }
 
@@ -508,16 +509,19 @@ impl<'a> CatalogBuilder<'a> {
 /// `mlx-config-profiles`, and `MlxConfigProfiles` all compare equal while
 /// path structure is preserved.
 fn canonical(path: &str) -> String {
-    path.split('.')
-        .map(|segment| {
+    let mut canonical = String::with_capacity(path.len());
+    for (index, segment) in path.split('.').enumerate() {
+        if index > 0 {
+            canonical.push('.');
+        }
+        canonical.extend(
             segment
                 .chars()
                 .filter(char::is_ascii_alphanumeric)
-                .map(|c| c.to_ascii_lowercase())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join(".")
+                .map(|c| c.to_ascii_lowercase()),
+        );
+    }
+    canonical
 }
 
 /// Renders a JSON value as a display cell.
@@ -531,7 +535,7 @@ fn format_value(value: &serde_json::Value) -> CellValue {
         Value::String(s) => CellValue::Code(s.clone()),
         Value::Array(items) if items.is_empty() => CellValue::Empty,
         Value::Array(items) if items.iter().all(is_scalar) => {
-            let joined = items.iter().map(scalar_text).collect::<Vec<_>>().join(", ");
+            let joined = items.iter().map(scalar_text).join(", ");
             if joined.len() <= 120 {
                 CellValue::Code(joined)
             } else {
@@ -598,39 +602,47 @@ fn clean_type(ty: &str) -> String {
 /// "dpa_config" -> "DPA", "machine_validation_config" -> "Machine Validation".
 /// The `_config` suffix is dropped: every section is config, so it's noise.
 fn humanize(field: &str) -> String {
-    field
+    let mut humanized = String::new();
+    for (index, word) in field
         .strip_suffix("_config")
         .unwrap_or(field)
         .split('_')
-        .map(|word| match word {
-            "dpu" => "DPU".to_string(),
-            "dpa" => "DPA".to_string(),
-            "dpf" => "DPF".to_string(),
-            "ib" => "IB".to_string(),
-            "nvlink" => "NVLink".to_string(),
-            "rms" => "RMS".to_string(),
-            "spdm" => "SPDM".to_string(),
-            "tls" => "TLS".to_string(),
-            "kms" => "KMS".to_string(),
-            "fnn" => "FNN".to_string(),
-            "vpc" => "VPC".to_string(),
-            "mqtt" => "MQTT".to_string(),
-            "oauth2" => "OAuth2".to_string(),
-            "dsx" => "DSX".to_string(),
-            "vmaas" => "VMaaS".to_string(),
-            "bom" => "BOM".to_string(),
-            "nsg" => "NSG".to_string(),
-            "oem" => "OEM".to_string(),
+        .enumerate()
+    {
+        if index > 0 {
+            humanized.push(' ');
+        }
+        let word = match word {
+            "dpu" => "DPU",
+            "dpa" => "DPA",
+            "dpf" => "DPF",
+            "ib" => "IB",
+            "nvlink" => "NVLink",
+            "rms" => "RMS",
+            "spdm" => "SPDM",
+            "tls" => "TLS",
+            "kms" => "KMS",
+            "fnn" => "FNN",
+            "vpc" => "VPC",
+            "mqtt" => "MQTT",
+            "oauth2" => "OAuth2",
+            "dsx" => "DSX",
+            "vmaas" => "VMaaS",
+            "bom" => "BOM",
+            "nsg" => "NSG",
+            "oem" => "OEM",
             other => {
                 let mut chars = other.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => String::new(),
+                if let Some(first) = chars.next() {
+                    humanized.extend(first.to_uppercase());
+                    humanized.push_str(chars.as_str());
                 }
+                continue;
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        };
+        humanized.push_str(word);
+    }
+    humanized
 }
 
 /// Parses the reference markdown into `(section_name, fields)` pairs in

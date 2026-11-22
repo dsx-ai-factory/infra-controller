@@ -72,8 +72,13 @@ impl PcrSet {
 
 impl fmt::Display for PcrSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let vals: Vec<String> = self.iter().map(|&val| val.to_string()).collect();
-        write!(f, "{}", vals.join(","))
+        for (index, value) in self.iter().enumerate() {
+            if index != 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{value}")?;
+        }
+        Ok(())
     }
 }
 

@@ -234,6 +234,8 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
     let mh = env.create_ready_managed_host(1).await.0;
     let host_machine_id = mh.host.id;
     let dpu_machine_id = mh.dpu(0).id;
+    let host_machine_id_text = host_machine_id.to_string();
+    let dpu_machine_id_text = dpu_machine_id.to_string();
 
     let merge_payload = r#"{
         "mode": "Merge",
@@ -252,20 +254,14 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
             }]
         }
     }"#;
-    post_machine_health_report(
-        &app,
-        &dpu_machine_id.to_string(),
-        "add-report",
-        merge_payload,
-    )
-    .await;
+    post_machine_health_report(&app, &dpu_machine_id_text, "add-report", merge_payload).await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(dpu_aggregate_health.contains("dpu merge web health"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(host_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(host_aggregate_health.contains("dpu merge web health"));
@@ -287,22 +283,16 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
             }]
         }
     }"#;
-    post_machine_health_report(
-        &app,
-        &dpu_machine_id.to_string(),
-        "add-report",
-        replace_payload,
-    )
-    .await;
+    post_machine_health_report(&app, &dpu_machine_id_text, "add-report", replace_payload).await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(dpu_aggregate_health.contains("DpuReplaceWebHealth"));
     assert!(dpu_aggregate_health.contains("dpu replace web health"));
     assert!(!dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!dpu_aggregate_health.contains("dpu merge web health"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(host_aggregate_health.contains("DpuReplaceWebHealth"));
     assert!(host_aggregate_health.contains("dpu replace web health"));
@@ -311,38 +301,38 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
 
     post_machine_health_report(
         &app,
-        &dpu_machine_id.to_string(),
+        &dpu_machine_id_text,
         "remove-report",
         r#"{"source":"web-dpu-replace-health-test"}"#,
     )
     .await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!dpu_aggregate_health.contains("DpuReplaceWebHealth"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(host_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!host_aggregate_health.contains("DpuReplaceWebHealth"));
 
     post_machine_health_report(
         &app,
-        &dpu_machine_id.to_string(),
+        &dpu_machine_id_text,
         "remove-report",
         r#"{"source":"web-dpu-merge-health-test"}"#,
     )
     .await;
 
-    let dpu_health = get_machine_health_page(&app, &dpu_machine_id.to_string()).await;
+    let dpu_health = get_machine_health_page(&app, &dpu_machine_id_text).await;
     let dpu_aggregate_health = aggregate_health_section(&dpu_health);
     assert!(!dpu_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!dpu_aggregate_health.contains("DpuReplaceWebHealth"));
     assert!(!dpu_health.contains("web-dpu-merge-health-test"));
     assert!(!dpu_health.contains("web-dpu-replace-health-test"));
 
-    let host_health = get_machine_health_page(&app, &host_machine_id.to_string()).await;
+    let host_health = get_machine_health_page(&app, &host_machine_id_text).await;
     let host_aggregate_health = aggregate_health_section(&host_health);
     assert!(!host_aggregate_health.contains("DpuMergeWebHealth"));
     assert!(!host_aggregate_health.contains("DpuReplaceWebHealth"));

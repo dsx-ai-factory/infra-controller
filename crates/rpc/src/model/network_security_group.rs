@@ -554,7 +554,16 @@ impl From<NetworkSecurityGroupPropagationObjectStatus>
 {
     fn from(status: NetworkSecurityGroupPropagationObjectStatus) -> Self {
         let (status_type, details) = {
-            if status.interfaces_applied == status.interfaces_expected {
+            // An overcount can hide missing applied evidence when interface counts are summed.
+            // Keep matching totals UNKNOWN while an instance remains unpropagated.
+            if status.interfaces_applied == status.interfaces_expected
+                && !status.unpropagated_instance_ids.is_empty()
+            {
+                (
+                    rpc::NetworkSecurityGroupPropagationStatus::NsgPropStatusUnknown,
+                    Some("matching interface totals include unpropagated instances".to_string()),
+                )
+            } else if status.interfaces_applied == status.interfaces_expected {
                 (
                     rpc::NetworkSecurityGroupPropagationStatus::NsgPropStatusFull,
                     None,
@@ -634,8 +643,10 @@ mod tests {
     use super::*;
     use crate::forge as rpc;
 
-    // `From<NetworkSecurityGroupPropagationObjectStatus>` derives the propagation
-    // status (and any details) from the applied-vs-expected interface counts.
+    /// Verifies that `From<NetworkSecurityGroupPropagationObjectStatus>` derives propagation
+    /// status and details from applied-vs-expected interface counts and unpropagated instance IDs.
+    /// Matching totals with unpropagated instances must report UNKNOWN because an overcount
+    /// can hide missing applied evidence.
     #[test]
     fn test_model_nsg_prop_obj_status_to_rpc_conversion() {
         value_scenarios!(
@@ -677,6 +688,34 @@ mod tests {
                         "fb02b51c-3f18-46b8-b2f1-bc4a6e9b2f3d".to_string(),
                     ],
                     unpropagated_instance_ids: vec![],
+                },
+            }
+
+            // Reject matching totals when an unpropagated instance contradicts full propagation.
+            "unknown, matching totals retain unpropagated instances" {
+                NetworkSecurityGroupPropagationObjectStatus {
+                    id: "any_id".to_string(),
+                    interfaces_expected: 2, // Pair equal totals with an unpropagated instance.
+                    interfaces_applied: 2, // Match the expected total to exercise the ID check.
+                    related_instance_ids: vec![
+                        "200f1043-1653-426d-bd0e-97f5b06bdb3f".parse().expect("valid instance ID"),
+                    ],
+                    unpropagated_instance_ids: vec![ // Keep matching totals from proving FULL.
+                        "200f1043-1653-426d-bd0e-97f5b06bdb3f".parse().expect("valid instance ID"),
+                    ],
+                } => rpc::NetworkSecurityGroupPropagationObjectStatus {
+                    id: "any_id".to_string(),
+                    status: rpc::NetworkSecurityGroupPropagationStatus::NsgPropStatusUnknown
+                        .into(),
+                    details: Some(
+                        "matching interface totals include unpropagated instances".to_string(),
+                    ),
+                    related_instance_ids: vec![
+                        "200f1043-1653-426d-bd0e-97f5b06bdb3f".to_string(),
+                    ],
+                    unpropagated_instance_ids: vec![
+                        "200f1043-1653-426d-bd0e-97f5b06bdb3f".to_string(),
+                    ],
                 },
             }
 
@@ -829,9 +868,7 @@ mod tests {
                 action: NetworkSecurityGroupRuleAction::Deny,
                 priority: 9001,
                 src_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
-                dst_net: NetworkSecurityGroupRuleNet::Prefix(
-                    "0.0.0.0/0".to_string().parse().unwrap(),
-                ),
+                dst_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
             }],
         };
 

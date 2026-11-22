@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/google/uuid"
 
@@ -125,7 +124,7 @@ func (t executionTargets) sortBySeedScore(seed string) executionTargets {
 		if cmp := bytes.Compare(scoreA[:], scoreB[:]); cmp != 0 {
 			return cmp
 		}
-		return strings.Compare(a.RackID.String(), b.RackID.String())
+		return bytes.Compare(a.RackID[:], b.RackID[:])
 	})
 
 	return ordered

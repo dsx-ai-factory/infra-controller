@@ -116,7 +116,7 @@ async fn register_with_psm(
         .collect();
 
     if failures.len() == endpoints.len() && !endpoints.is_empty() {
-        let errors: Vec<String> = failures.iter().map(|f| f.error.clone()).collect();
+        let errors: Vec<&str> = failures.iter().map(|f| f.error.as_str()).collect();
         return Err(ComponentManagerError::Internal(format!(
             "PSM registration failed for all power shelves: {}",
             errors.join("; ")
@@ -306,7 +306,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
                     .components
                     .iter()
                     .filter(|c| !c.error.is_empty())
-                    .map(|c| c.error.clone())
+                    .map(|c| c.error.as_str())
                     .collect::<Vec<_>>()
                     .join("; ");
                 Ok(PowerShelfComponentResult {
@@ -439,14 +439,12 @@ impl PowerShelfManager for PsmPowerShelfBackend {
 
         let mut results = Vec::with_capacity(endpoints.len());
         for ep in endpoints {
+            let pmc_mac = ep.pmc_mac.to_string();
+            // Match canonical zero-padded, colon-delimited MAC text, ignoring ASCII case.
             let Some(shelf) = response.powershelves.iter().find(|s| {
-                s.pmc.as_ref().is_some_and(|pmc| {
-                    // PSM emits canonical colon-delimited MACs; the parser also accepts
-                    // malformed octet widths.
-                    parse_mac(&pmc.mac_address).is_ok_and(|mac| {
-                        mac == ep.pmc_mac && pmc.mac_address.eq_ignore_ascii_case(&mac.to_string())
-                    })
-                })
+                s.pmc
+                    .as_ref()
+                    .is_some_and(|pmc| pmc.mac_address.eq_ignore_ascii_case(&pmc_mac))
             }) else {
                 results.push(ComponentPowerStateResult {
                     mac_address: ep.pmc_mac,

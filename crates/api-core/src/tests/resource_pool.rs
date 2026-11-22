@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::{TestEnv, create_test_env};
@@ -61,9 +62,8 @@ ranges = [{ start = "172.0.1.0", end = "172.0.1.255" }]
     let pool: ResourcePool<Ipv4Addr> =
         ResourcePool::new("test_define_range".to_string(), ValueType::Ipv4);
 
-    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool.name()).await?,
+        db::resource_pool::stats(&db_pool, pool.name()).await?,
         St {
             used: 0,
             free: 255,
@@ -97,9 +97,8 @@ prefix = "172.0.1.0/24"
     let pool: ResourcePool<Ipv4Addr> =
         ResourcePool::new("test_define_range".to_string(), ValueType::Ipv4);
 
-    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool.name()).await?,
+        db::resource_pool::stats(&db_pool, pool.name()).await?,
         St {
             used: 0,
             free: 255,
@@ -153,9 +152,8 @@ prefix = "2001:db8:2389::/126"
 
     let mut assigned = HashSet::new();
     let mut versions = Vec::new();
-    let mut txn = db_pool.txn_begin().await?;
     for machine_id in &dpu_machine_ids {
-        let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
+        let config = db::machine::get_network_config(&db_pool, machine_id).await?;
         assigned.insert(
             config
                 .value
@@ -164,7 +162,6 @@ prefix = "2001:db8:2389::/126"
         );
         versions.push(config.version);
     }
-    txn.commit().await?;
     assert_eq!(assigned.len(), dpu_machine_ids.len());
 
     let stats_after_backfill = db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?;
@@ -175,13 +172,11 @@ prefix = "2001:db8:2389::/126"
     env.api
         .admin_grow_resource_pool(tonic::Request::new(grow()))
         .await?;
-    let mut txn = db_pool.txn_begin().await?;
     for (machine_id, version) in dpu_machine_ids.iter().zip(versions) {
-        let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
+        let config = db::machine::get_network_config(&db_pool, machine_id).await?;
         assert!(assigned.contains(&config.value.loopback_ip_v6.unwrap()));
         assert_eq!(config.version, version);
     }
-    txn.commit().await?;
     assert_eq!(
         db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?,
         stats_after_backfill
@@ -255,7 +250,7 @@ prefix = "2001:db8:2390::/126"
             "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1 AND owner_id = $2",
         )
         .bind(LOOPBACK_IP_V6)
-        .bind(dpu_id.to_string())
+        .bind(dpu_id)
         .fetch_one(&db_pool)
         .await?;
         let bindings = db::resource_pool::binding::all(&db_pool).await?;
@@ -400,6 +395,14 @@ prefix = "2001:db8:2390::/126"
         .expect_err("the injected non-lock database failure must propagate");
     assert_eq!(error.code(), tonic::Code::Internal);
     assert_eq!(error.message(), "internal database error");
+    assert!(
+        error
+            .metadata()
+            .get("nico-error-mitigation")
+            .unwrap()
+            .to_str()?
+            .starts_with("Pool growth has committed or been acknowledged.")
+    );
     let wrapped = error
         .source()
         .unwrap()
@@ -427,6 +430,41 @@ prefix = "2001:db8:2390::/126"
     )
     .execute(&db_pool)
     .await?;
+    // A native allocator failure is wrapped one level deeper than a machine
+    // write failure. It must still expose 55P03 as retryable contention.
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_native_ipv6_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'test native lock timeout' USING ERRCODE = '55P03'; END; $$;
+         CREATE TRIGGER reject_native_ipv6_allocation BEFORE INSERT ON resource_pool_allocations
+         FOR EACH ROW WHEN (NEW.pool_name = 'lo-ip-v6')
+         EXECUTE FUNCTION reject_native_ipv6_allocation();",
+    )
+    .execute(&db_pool)
+    .await?;
+    let error = env
+        .api
+        .admin_grow_resource_pool(tonic::Request::new(more_capacity()))
+        .await
+        .expect_err("native lock timeout must leave backfill incomplete");
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-503"
+    );
+    assert_eq!(
+        db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6)
+            .await?
+            .used,
+        1
+    );
+    assert!(
+        db::machine::get_network_config(&db_pool, &second_dpu)
+            .await?
+            .loopback_ip_v6
+            .is_none()
+    );
+    sqlx::raw_sql("DROP TRIGGER reject_native_ipv6_allocation ON resource_pool_allocations; DROP FUNCTION reject_native_ipv6_allocation();")
+        .execute(&db_pool).await?;
     env.api
         .admin_grow_resource_pool(tonic::Request::new(more_capacity()))
         .await?;
@@ -1151,6 +1189,213 @@ async fn authoritative_restart_grows_pkeys_and_preserves_allocations_and_seeded_
     Ok(())
 }
 
+/// Configured fabric growth uses the production startup helper, preserving
+/// existing assignments and seed snapshots while accepting new eligibility.
+#[crate::sqlx_test]
+async fn remote_pkey_startup_grows_configured_ranges_without_reseeding(
+    database: sqlx::PgPool,
+) -> eyre::Result<()> {
+    use carbide_resource_pool::{PoolDefinitionSource, registration};
+    use carbide_uuid::infiniband::IBPartitionId;
+    use model::ib::DEFAULT_IB_FABRIC_NAME;
+    use model::ib_partition::PKEY_ALLOCATION_SLOT;
+    use model::resource_pool::allocation::{AllocationSource, AllocationState};
+    use model::resource_pool::remote::AllocationResult;
+    use model::resource_pool::{Range, ResourcePoolDef, ResourcePoolType};
+
+    use crate::tests::common::resource_pool::{RemotePool, RemotePoolFixture};
+
+    const PKEY_POOL: &str = "ib_fabrics.default.pkey";
+    let mut fixture = RemotePoolFixture::start_with_values(
+        database,
+        &[RemotePool {
+            name: PKEY_POOL,
+            start: 2000,
+            auto_assign: true,
+        }],
+        &[2000, 2001, 2002, 2003],
+        None,
+    )
+    .await?;
+    let mut fabrics = fixture.env.config.ib_fabrics.clone();
+    fabrics
+        .get_mut(DEFAULT_IB_FABRIC_NAME)
+        .expect("default fabric")
+        .pkeys = vec![Range {
+        start: "2001".into(),
+        end: "2004".into(),
+        auto_assign: false,
+    }];
+    let fabric_definitions = crate::resource_pool::ib_fabric_pool_definitions(&fabrics);
+    // The ordinary seed takes precedence over different fabric ranges when
+    // registering for the first time. Growth adds the fabric ranges afterward.
+    fixture
+        .initialize_with_registration_definitions(
+            PoolDefinitionSource::SeedConfiguration,
+            &fabric_definitions,
+        )
+        .await?;
+    let owner_id = IBPartitionId::new().to_string();
+    let pool = &fixture.env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    let registry = &fixture.env.api.resource_pool_registry;
+    let selected = registry
+        .select(&mut fixture.env.api.db_reader(), pool)
+        .await?
+        .expect("configured PKey pool");
+    let allocation = selected
+        .prepare_allocation(
+            &fixture.env.pool,
+            OwnerType::IBPartition,
+            &owner_id,
+            PKEY_ALLOCATION_SLOT,
+            None,
+            &fixture.cancel,
+        )
+        .await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    allocation.allocate(&mut txn).await?;
+    txn.commit().await?;
+    let original = db::resource_pool::remote::latest_for_owner_slot(
+        &fixture.env.pool,
+        OwnerType::IBPartition,
+        &owner_id,
+        PKEY_ALLOCATION_SLOT,
+    )
+    .await?
+    .expect("original PKey assignment");
+    assert_eq!(original.state, AllocationState::Attached);
+    let AllocationSource::Remote {
+        result: Some(AllocationResult::Allocated(assignment)),
+        ..
+    } = &original.source
+    else {
+        panic!("original PKey must retain its provider assignment");
+    };
+    assert!(
+        fixture
+            .provider
+            .local
+            .is_provisioned(&assignment.allocation_id)
+    );
+    let binding = registry
+        .get(PKEY_POOL)
+        .expect("PKey binding")
+        .binding
+        .clone();
+    let initial = registration::latest_accepted(&fixture.env.pool, &binding)
+        .await?
+        .expect("initial PKey registration");
+    assert_eq!(
+        initial.eligibility,
+        carbide_resource_pool::value::ResourcePoolEligibility::try_from(
+            fixture.definitions[PKEY_POOL].clone(),
+        )?
+        .entries
+    );
+    let snapshot = pool_database_snapshot(&fixture.env.pool).await?;
+
+    // An ordinary same-name seed stays unchanged. Fabric ranges grow additively,
+    // including overlap with already acknowledged ranges.
+    fixture.definitions.insert(
+        PKEY_POOL.into(),
+        ResourcePoolDef {
+            pool_type: ResourcePoolType::Integer,
+            ranges: vec![Range {
+                start: "3000".into(),
+                end: "3002".into(),
+                auto_assign: true,
+            }],
+            prefix: None,
+            delegate_prefix_len: None,
+        },
+    );
+    let logs = fixture
+        .initialize_with_registration_definitions(
+            PoolDefinitionSource::SeedConfiguration,
+            &fabric_definitions,
+        )
+        .await?;
+    assert!(logs.iter().any(|log| {
+        log.metadata_name == "config_definition_drifted"
+            && log.field("name") == Some(PKEY_POOL)
+            && log.field("drift_kind") == Some("changed")
+    }));
+    assert_eq!(pool_database_snapshot(&fixture.env.pool).await?, snapshot);
+    assert_eq!(
+        registration::latest_accepted(&fixture.env.pool, &binding).await?,
+        Some(initial.clone())
+    );
+    assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 1);
+
+    // Startup already resolved its bindings. Fabric growth must not discover
+    // and bind an unrelated pool added afterward.
+    let unrelated = ResourcePool::<i64>::new("unrelated-growth".to_owned(), ValueType::Integer);
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    db::resource_pool::populate(&unrelated, &mut txn, vec![1], true).await?;
+    txn.commit().await?;
+    let snapshot = pool_database_snapshot(&fixture.env.pool).await?;
+    let monitor = &fixture.env.api.resource_pool_monitor;
+    for _ in 0..2 {
+        monitor
+            .initialize_ib_pkey_pools(
+                &fixture.env.api.resource_pool_registry,
+                &fabrics,
+                &fixture.cancel,
+            )
+            .await?;
+    }
+    let grown = registration::latest_accepted(&fixture.env.pool, &binding)
+        .await?
+        .expect("acknowledged configured PKey growth");
+    assert_eq!(grown.eligibility_revision, "2");
+    assert_eq!(grown.previous_revision, Some(initial.eligibility_revision));
+    let delta = carbide_resource_pool::value::ResourcePoolEligibility::try_from(
+        fabric_definitions[PKEY_POOL].clone(),
+    )?;
+    let mut expected = initial.eligibility;
+    expected.extend(delta.entries);
+    assert_eq!(grown.eligibility, expected);
+    assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        db::resource_pool::binding::load(&fixture.env.pool, unrelated.name()).await?,
+        None
+    );
+    assert_eq!(pool_database_snapshot(&fixture.env.pool).await?, snapshot);
+    assert!(
+        fixture
+            .provider
+            .local
+            .is_provisioned(&assignment.allocation_id)
+    );
+    assert_eq!(
+        db::resource_pool::remote::load(&fixture.env.pool, original.allocation_id).await?,
+        Some(original)
+    );
+
+    let pool = &fixture.env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(&mut fixture.env.api.db_reader(), pool)
+        .await?
+        .expect("configured PKey pool");
+    let allocation = selected
+        .prepare_allocation(
+            &fixture.env.pool,
+            OwnerType::IBPartition,
+            &IBPartitionId::new().to_string(),
+            PKEY_ALLOCATION_SLOT,
+            Some(2003),
+            &fixture.cancel,
+        )
+        .await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    assert_eq!(allocation.allocate(&mut txn).await?, 2003);
+    txn.commit().await?;
+    fixture.stop().await
+}
+
 #[crate::sqlx_test]
 async fn authoritative_startup_rejects_persisted_ip_address_pkey_pool_without_changes(
     db_pool: sqlx::PgPool,
@@ -1354,6 +1599,19 @@ ranges = [{ start = "5", end = "7" }]
 "#,
             tonic::Code::InvalidArgument,
             "resource pool name must not be empty",
+        ),
+        (
+            "IPv6 loopback rejects an IPv4 delta before any batch writes",
+            r#"
+[valid-growth]
+type = "integer"
+ranges = [{ start = "1", end = "3" }]
+[lo-ip-v6]
+type = "ipv4"
+ranges = [{ start = "192.0.2.10", end = "192.0.2.11" }]
+"#,
+            tonic::Code::InvalidArgument,
+            "lo-ip-v6 requires an IPv6 address pool",
         ),
         (
             "growth cannot change an existing pool's value domain",

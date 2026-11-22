@@ -82,9 +82,7 @@ async fn test_machine_validation_complete_with_error(
 
     let mh = create_host_with_machine_validation(&env, None, Some("Test Error".to_owned())).await;
 
-    let mut txn = env.pool.txn_begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
     match machine.current_state() {
         ManagedHostState::Failed {
             details,
@@ -152,9 +150,7 @@ async fn test_machine_validation_with_error(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Failed {
@@ -291,10 +287,7 @@ async fn test_machine_validation(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Ready => {}
@@ -496,9 +489,12 @@ async fn test_create_update_external_config(
         .unwrap()
         .into_inner();
 
-    assert_eq!(res_next.config.clone().unwrap().name, name);
-    assert_eq!(res_next.config.clone().unwrap().description.unwrap(), desc);
-    assert_eq!(&res_next.config.clone().unwrap().version, "2");
+    assert_eq!(res_next.config.as_ref().unwrap().name, name);
+    assert_eq!(
+        res_next.config.as_ref().unwrap().description.as_deref(),
+        Some(desc)
+    );
+    assert_eq!(&res_next.config.as_ref().unwrap().version, "2");
     assert_eq!(res_next.config.unwrap().config, input.as_bytes().to_vec());
     let res_list = env
         .api
@@ -699,9 +695,7 @@ async fn test_machine_validation_test_on_demand_filter(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let machine = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Ready => {}
@@ -974,14 +968,12 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
     .await;
 
     let reboot_request_before_wait = {
-        let mut txn = env.pool.txn_begin().await?;
-        let machine = mh.host().db_machine(&mut txn).await;
-        let reboot = machine
+        let machine = mh.host().db_machine(&env.pool).await;
+
+        machine
             .status
             .last_reboot_requested
-            .map(|last_reboot| (last_reboot.time, last_reboot.mode));
-        txn.commit().await?;
-        reboot
+            .map(|last_reboot| (last_reboot.time, last_reboot.mode))
     };
 
     let mut machine_validation_config = env.config.machine_validation_config.clone();
@@ -1022,14 +1014,12 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
     .await;
 
     let reboot_request_after_wait = {
-        let mut txn = env.pool.txn_begin().await?;
-        let machine = mh.host().db_machine(&mut txn).await;
-        let reboot = machine
+        let machine = mh.host().db_machine(&env.pool).await;
+
+        machine
             .status
             .last_reboot_requested
-            .map(|last_reboot| (last_reboot.time, last_reboot.mode));
-        txn.commit().await?;
-        reboot
+            .map(|last_reboot| (last_reboot.time, last_reboot.mode))
     };
     assert_eq!(reboot_request_after_wait, reboot_request_before_wait);
 
@@ -1581,8 +1571,7 @@ async fn test_on_demant_un_verified_machine_validation(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
     match machine.current_state() {
         ManagedHostState::Ready => {}
         s => {

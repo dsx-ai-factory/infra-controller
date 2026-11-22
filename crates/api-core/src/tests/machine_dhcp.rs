@@ -246,13 +246,10 @@ pub(super) async fn interface_addresses_for_mac(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     let interface_id = interfaces[0].id;
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
-    txn.rollback().await?;
+    let addresses = db::machine_interface_address::find_for_interface(pool, interface_id).await?;
     Ok((interface_id, addresses))
 }
 
@@ -367,14 +364,12 @@ async fn test_machine_dhcp_with_api(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let env = common::api_fixtures::create_test_env(pool.clone()).await;
 
     // Inititially 0 addresses are allocated on the segment
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, env.admin_segment_ref())
+        db::machine_interface::count_by_segment_id(&env.pool, env.admin_segment_ref())
             .await
             .unwrap(),
         0
     );
-    txn.commit().await.unwrap();
 
     let mac_address = "FF:FF:FF:FF:FF:FF";
     let response = env
@@ -395,14 +390,12 @@ async fn test_machine_dhcp_with_api(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     assert_eq!(response.gateway.unwrap(), "192.0.2.1".to_owned());
 
     // After DHCP, 1 address is allocated on the segment
-    let mut txn = pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, env.admin_segment_ref())
+        db::machine_interface::count_by_segment_id(&pool, env.admin_segment_ref())
             .await
             .unwrap(),
         1
     );
-    txn.commit().await.unwrap();
     Ok(())
 }
 
@@ -414,8 +407,7 @@ async fn test_non_primary_admin_interface_dhcp_is_rejected(
 
     // Create a multi-DPU host and find its dormant DPU-backed admin interface.
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = pool.txn_begin().await?;
-    let mut interface_map = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id]).await?;
+    let mut interface_map = db::machine_interface::find_by_machine_ids(&pool, &[mh.id]).await?;
     let dormant_interface = interface_map
         .remove(&mh.id)
         .unwrap()
@@ -427,7 +419,6 @@ async fn test_non_primary_admin_interface_dhcp_is_rejected(
         })
         .unwrap();
     assert!(dormant_interface.addresses.is_empty());
-    txn.commit().await?;
 
     // DHCP on the dormant admin link must be rejected before a new lease
     // is allocated or any stale record can be returned.
@@ -447,11 +438,8 @@ async fn test_non_primary_admin_interface_dhcp_is_rejected(
     );
 
     // Verify the rejected request did not allocate a replacement address.
-    let mut txn = pool.txn_begin().await?;
-    let persisted_interface =
-        db::machine_interface::find_one(&mut *txn, dormant_interface.id).await?;
+    let persisted_interface = db::machine_interface::find_one(&pool, dormant_interface.id).await?;
     assert!(persisted_interface.addresses.is_empty());
-    txn.commit().await?;
 
     Ok(())
 }
@@ -513,14 +501,12 @@ async fn test_multiple_machines_dhcp_with_api(
     let env = common::api_fixtures::create_test_env(pool.clone()).await;
 
     // Inititially 0 addresses are allocated on the segment
-    let mut txn = pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, env.admin_segment_ref())
+        db::machine_interface::count_by_segment_id(&pool, env.admin_segment_ref())
             .await
             .unwrap(),
         0
     );
-    txn.commit().await.unwrap();
 
     let mac_address = "FF:FF:FF:FF:FF:0".to_string();
     const NUM_MACHINES: usize = 6;
@@ -543,14 +529,12 @@ async fn test_multiple_machines_dhcp_with_api(
         assert_eq!(response.gateway.unwrap(), "192.0.2.1".to_owned());
     }
 
-    let mut txn = pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, env.admin_segment_ref())
+        db::machine_interface::count_by_segment_id(&pool, env.admin_segment_ref())
             .await
             .unwrap(),
         NUM_MACHINES
     );
-    txn.commit().await.unwrap();
     Ok(())
 }
 
@@ -615,8 +599,7 @@ async fn test_machine_dhcp_declared_admin_nic_allocates_from_relay_admin_segment
     let interface_id = response
         .machine_interface_id
         .expect("DHCP response should include machine_interface_id");
-    let mut txn = env.pool.txn_begin().await?;
-    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
+    let persisted_interface = db::machine_interface::find_one(&env.pool, interface_id).await?;
     assert_eq!(persisted_interface.segment_id, second_admin_segment);
     assert_eq!(persisted_interface.mac_address, admin_nic_mac);
     assert_eq!(persisted_interface.domain_id, Some(env.domain.into()));
@@ -681,8 +664,7 @@ async fn test_machine_dhcp_declared_segment_type_allocates_from_relay_admin_segm
     let interface_id = response
         .machine_interface_id
         .expect("DHCP response should include machine_interface_id");
-    let mut txn = env.pool.txn_begin().await?;
-    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
+    let persisted_interface = db::machine_interface::find_one(&env.pool, interface_id).await?;
     assert_eq!(persisted_interface.segment_id, second_admin_segment);
     assert_eq!(persisted_interface.mac_address, admin_nic_mac);
 
@@ -808,11 +790,8 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
             .machine_interface_id
             .expect("DHCP response should identify the interface");
 
-        let mut txn = pool.txn_begin().await?;
-        let interface = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
-        let before =
-            db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
-        txn.rollback().await?;
+        let interface = db::machine_interface::find_one(&pool, interface_id).await?;
+        let before = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
         assert_eq!(interface.segment_id, underlay_segment, "case: {name}");
         assert_eq!(interface.interface_type, interface_type, "case: {name}");
         assert_eq!(interface.primary_interface, primary, "case: {name}");
@@ -841,10 +820,7 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         )
         .await;
 
-        let mut txn = pool.txn_begin().await?;
-        let after =
-            db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
-        txn.rollback().await?;
+        let after = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
         assert_eq!(after.len(), 1, "case: {name}");
         assert_eq!(
             after[0].allocation_type, expected_allocation,
@@ -911,11 +887,9 @@ async fn test_host_bmc_identity_wins_expected_interface_mac_lookup(
         }))
         .await?;
 
-    let mut txn = pool.txn_begin().await?;
-    let stored = db::expected_machine::find_by_bmc_mac_address(&mut *txn, bmc_mac)
+    let stored = db::expected_machine::find_by_bmc_mac_address(&pool, bmc_mac)
         .await?
         .expect("expected machine should exist");
-    txn.rollback().await?;
     assert!(
         stored.data.interfaces.iter().any(|interface| {
             interface.mac_address == Some(bmc_mac) && interface.role == ExpectedInterfaceRole::Host
@@ -935,8 +909,7 @@ async fn test_host_bmc_identity_wins_expected_interface_mac_lookup(
         .machine_interface_id
         .expect("DHCP response should identify the Host BMC interface");
 
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.interface_type, InterfaceType::Bmc);
     assert!(!interface.primary_interface);
 
@@ -1041,9 +1014,8 @@ async fn machine_interface_discovery_persists_vendor_strings(
         interface_id: &MachineInterfaceId,
         expected: &[&str],
     ) {
-        let mut txn = pool.clone().txn_begin().await.unwrap();
         let entry = db::dhcp_entry::find_by(
-            &mut txn,
+            &pool.clone(),
             ObjectColumnFilter::One(dhcp_entry::MachineInterfaceIdColumn, interface_id),
         )
         .await
@@ -1057,12 +1029,10 @@ async fn machine_interface_discovery_persists_vendor_strings(
         );
 
         // Also check via the MachineInterface API
-        let iface = db::machine_interface::find_one(txn.as_mut(), *interface_id)
+        let iface = db::machine_interface::find_one(&pool.clone(), *interface_id)
             .await
             .unwrap();
         assert_eq!(iface.vendors, expected);
-
-        txn.rollback().await.unwrap();
     }
 
     async fn dhcp_with_vendor(
@@ -1293,9 +1263,8 @@ async fn test_dhcp_record_address_family(
     txn.commit().await?;
 
     // Now test find_by_mac_address with IPv4 — should return only the IPv4 record.
-    let mut txn = pool.txn_begin().await?;
     let ipv4_record = db::dhcp_record::find_by_mac_address(
-        &mut txn,
+        &pool,
         &parsed_mac,
         &segment_id,
         IpAddressFamily::Ipv4,
@@ -1308,12 +1277,10 @@ async fn test_dhcp_record_address_family(
         ipv4_record.address
     );
     assert_eq!(ipv4_record.address.to_string(), ipv4_address);
-    txn.rollback().await?;
 
     // And with IPv6 — should return only the IPv6 record.
-    let mut txn = pool.txn_begin().await?;
     let ipv6_record = db::dhcp_record::find_by_mac_address(
-        &mut txn,
+        &pool,
         &parsed_mac,
         &segment_id,
         IpAddressFamily::Ipv6,
@@ -1326,7 +1293,6 @@ async fn test_dhcp_record_address_family(
         ipv6_record.address
     );
     assert_eq!(ipv6_record.address, ipv6_addr);
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -1442,9 +1408,8 @@ async fn test_dhcp_v6_info_request_default_off_keeps_ipv4_only(
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
     assert!(addresses[0].address.is_ipv4());
 
-    let mut txn = pool.txn_begin().await?;
     let records =
-        db::dns::resource_record::find_record(&mut *txn, &format!("{}.", v4_response.fqdn)).await?;
+        db::dns::resource_record::find_record(&pool, &format!("{}.", v4_response.fqdn)).await?;
     assert!(
         records
             .iter()
@@ -1452,11 +1417,10 @@ async fn test_dhcp_v6_info_request_default_off_keeps_ipv4_only(
     );
     assert!(records.iter().all(|record| record.q_type != "AAAA"));
     assert!(
-        db::dns::resource_record::find_ptr_record(&mut *txn, computed_address)
+        db::dns::resource_record::find_ptr_record(&pool, computed_address)
             .await?
             .is_empty()
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -1517,11 +1481,9 @@ async fn test_dhcp_v6_info_request_rejects_slaac_address_owned_by_other_interfac
         )
     );
 
-    let mut txn = pool.txn_begin().await?;
     let requester_interfaces =
-        db::machine_interface::find_by_mac_address(&mut *txn, requester_mac).await?;
+        db::machine_interface::find_by_mac_address(&pool, requester_mac).await?;
     assert!(requester_interfaces.is_empty());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -1554,11 +1516,9 @@ async fn test_dhcp_v6_info_request_restores_domain_after_v4_expiration(
             mac_address: Some(mac.to_string()),
         }))
         .await?;
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert!(interface.addresses.is_empty());
     assert!(interface.domain_id.is_none());
-    txn.rollback().await?;
 
     // Infer the SLAAC EUI-64 address on the same row; the options-only response
     // should keep its metadata.
@@ -1579,18 +1539,15 @@ async fn test_dhcp_v6_info_request_restores_domain_after_v4_expiration(
     assert!(response.last_invalidation_time.is_some());
 
     // Verify persistence after a fresh DB read, not just the response.
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.domain_id, Some(env.domain.into()));
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
     assert_eq!(
         addresses[0].address,
         expected_slaac_address("2001:db8:e::".parse()?, mac)
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -1623,11 +1580,9 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_keeps_fqdn_after_expiratio
             mac_address: Some(mac.to_string()),
         }))
         .await?;
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert!(interface.addresses.is_empty());
     assert!(interface.domain_id.is_none());
-    txn.rollback().await?;
 
     // Request v6 options; no SLAAC address is eligible, but FQDN should survive.
     let response = env
@@ -1647,14 +1602,11 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_keeps_fqdn_after_expiratio
     assert!(response.last_invalidation_time.is_some());
 
     // Verify no address was persisted and FQDN came from the segment domain.
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.domain_id, None);
     assert_eq!(response.fqdn, format!("{}.dwrt1.com", interface.hostname));
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert!(addresses.is_empty());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -1689,10 +1641,8 @@ async fn test_dhcp_v6_link_address_matches_segment_outside_prefix(
     assert!(response.address.parse::<IpAddr>()?.is_ipv6());
 
     // Verify a nearby address with no equality match resolves to no segment.
-    let mut txn = pool.txn_begin().await?;
-    let missing = db::network_segment::for_relay(&mut txn, "2001:db8:ffff::2".parse()?).await?;
+    let missing = db::network_segment::for_relay(&pool, "2001:db8:ffff::2".parse()?).await?;
     assert!(missing.is_none());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -1788,9 +1738,7 @@ async fn test_dhcp_v6_solicit_exact_link_precedes_reserved_prefix_candidate(
 
     // Verify the dynamic allocation was persisted only on the exact segment.
     let (interface_id, addresses) = interface_addresses_for_mac(&pool, mac).await?;
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
-    txn.rollback().await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.segment_id, exact_segment);
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
@@ -1859,9 +1807,7 @@ async fn test_dhcp_v6_solicit_exact_link_preserves_legacy_typed_segment_behavior
 
     // Verify persistence came from the exact segment, not the declared-type fallback.
     let (interface_id, addresses) = interface_addresses_for_mac(&pool, host_mac).await?;
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
-    txn.rollback().await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.segment_id, exact_segment);
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
@@ -1930,9 +1876,7 @@ async fn test_dhcp_v6_info_request_exact_link_preserves_legacy_typed_segment_beh
 
     // Verify SLAAC EUI-64 inference used the exact segment prefix.
     let (interface_id, addresses) = interface_addresses_for_mac(&pool, host_mac).await?;
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
-    txn.rollback().await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.segment_id, exact_segment);
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
@@ -2057,9 +2001,7 @@ async fn test_dhcp_v6_exact_link_honors_expected_segment_type_guard(
         );
 
         // A rejected discover must not create an observed interface.
-        let mut txn = pool.txn_begin().await?;
-        let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, host_mac).await?;
-        txn.rollback().await?;
+        let interfaces = db::machine_interface::find_by_mac_address(&pool, host_mac).await?;
         assert!(interfaces.is_empty(), "case: {}", case.name);
     }
 
@@ -2121,12 +2063,10 @@ async fn test_dhcp_rejects_explicit_protocol_family_mismatched_with_relay_contex
     );
 
     // Both rejects happen before interface/address persistence.
-    let mut txn = pool.txn_begin().await?;
     for mac in [v6_request_mac, v4_request_mac] {
-        let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+        let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
         assert!(interfaces.is_empty());
     }
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -2141,11 +2081,9 @@ async fn test_dhcp_v6_find_existing_machine_uses_link_address(
     let host = create_managed_host(&env).await;
     let (host_mac, gateway) = host_interface_and_gateway(&env, host.host().id).await?;
     let host_segment = {
-        let mut txn = pool.txn_begin().await?;
-        let segment = db::network_segment::for_relay(&mut txn, gateway)
+        let segment = db::network_segment::for_relay(&pool, gateway)
             .await?
             .expect("host segment should resolve by its IPv4 gateway");
-        txn.rollback().await?;
         segment.id
     };
 
@@ -2159,10 +2097,8 @@ async fn test_dhcp_v6_find_existing_machine_uses_link_address(
         Some("2001:db8:ffff:16::1"),
     )
     .await?;
-    let mut txn = pool.txn_begin().await?;
-    let machine_id = db::machine::find_existing_machine(&mut txn, host_mac, link_address).await?;
+    let machine_id = db::machine::find_existing_machine(&pool, host_mac, link_address).await?;
     assert_eq!(machine_id, Some(host.host().id.into()));
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -2181,11 +2117,9 @@ async fn test_dhcp_v6_exact_link_rejects_known_machine_on_prefix_fallback(
 
     // Put the known host on a segment whose prefix contains the relay.
     let host_segment = {
-        let mut txn = pool.txn_begin().await?;
-        let segment = db::network_segment::for_relay(&mut txn, gateway)
+        let segment = db::network_segment::for_relay(&pool, gateway)
             .await?
             .expect("host segment should resolve by gateway");
-        txn.rollback().await?;
         segment.id
     };
     add_ipv6_prefix(&pool, host_segment, "2001:db8:80::/64", None).await?;
@@ -2202,10 +2136,8 @@ async fn test_dhcp_v6_exact_link_rejects_known_machine_on_prefix_fallback(
     add_ipv6_prefix(&pool, exact_segment, "2001:db8:81::/64", Some(relay)).await?;
 
     // Known-machine lookup must not accept the prefix fallback when exact exists.
-    let mut txn = pool.txn_begin().await?;
-    let machine_id = db::machine::find_existing_machine(&mut txn, host_mac, relay.parse()?).await?;
+    let machine_id = db::machine::find_existing_machine(&pool, host_mac, relay.parse()?).await?;
     assert!(machine_id.is_none());
-    txn.rollback().await?;
 
     // The DHCP path should hit the existing-MAC segment guard and reject.
     let status = env
@@ -2400,15 +2332,12 @@ async fn test_dhcp_v6_fixed_reservation_restores_domain_after_v4_expiration(
     assert_eq!(response.address, fixed_ip.to_string());
 
     // Verify the address assignment restored domain membership in storage.
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.domain_id, Some(env.domain.into()));
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     assert_eq!(addresses[0].address, fixed_ip);
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -2471,9 +2400,7 @@ async fn test_dhcp_v6_info_request_materializes_fixed_reservation_on_reserved_no
     // reservation, and response metadata came from that interface without
     // writing a SLAAC row.
     let (interface_id, addresses) = interface_addresses_for_mac(&pool, mac).await?;
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
-    txn.rollback().await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(response.machine_interface_id, Some(interface_id));
     assert_eq!(response.machine_id, interface.machine_id);
     assert_eq!(response.fqdn, format!("{}.dwrt1.com", interface.hostname));
@@ -2547,15 +2474,13 @@ async fn test_dhcp_v6_info_request_on_reserved_segment_returns_options_only_with
     }
 
     // Verify the options request did not persist an observed interface.
-    let mut txn = pool.txn_begin().await?;
     for (case, mac) in [
         ("anonymous interface", anonymous_mac),
         ("legacy expected interface", expected_mac),
     ] {
-        let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+        let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
         assert!(interfaces.is_empty(), "case: {case}");
     }
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -2603,14 +2528,11 @@ async fn test_dhcp_v6_info_request_on_reserved_known_interface_updates_last_dhcp
     assert_eq!(response.machine_interface_id, Some(interface_id));
 
     // Verify last_dhcp advanced and no IPv6 address was persisted.
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert!(interface.last_dhcp.expect("last_dhcp should be set") > old_last_dhcp);
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert!(addresses[0].address.is_ipv4());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -2624,8 +2546,7 @@ async fn test_dhcp_v6_info_request_on_reserved_dormant_admin_interface_rejects(
 
     // Create a multi-DPU host and find a dormant DPU-backed admin interface.
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = pool.txn_begin().await?;
-    let mut interface_map = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id]).await?;
+    let mut interface_map = db::machine_interface::find_by_machine_ids(&pool, &[mh.id]).await?;
     let dormant_interface = interface_map
         .remove(&mh.id)
         .expect("multi-DPU host has machine interfaces")
@@ -2636,7 +2557,6 @@ async fn test_dhcp_v6_info_request_on_reserved_dormant_admin_interface_rejects(
                 && !interface.primary_interface
         })
         .expect("multi-DPU host has a dormant admin interface");
-    txn.rollback().await?;
 
     // Make the dormant interface's segment IPv6-enabled and reserved-only.
     add_ipv6_prefix(
@@ -2723,15 +2643,12 @@ async fn test_dhcp_v6_info_request_on_reserved_segment_rejects_known_interface_o
     );
 
     // Verify the known interface stayed on its original segment without an address.
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.segment_id, other_segment);
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert!(addresses.is_empty());
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -3031,9 +2948,7 @@ async fn test_dhcp_v6_solicit_exact_link_exhaustion_does_not_fallback_to_prefix_
     assert_eq!(status.code(), tonic::Code::ResourceExhausted);
 
     // Verify the rejected request did not persist a fallback-segment interface.
-    let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, second_mac).await?;
-    txn.rollback().await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, second_mac).await?;
     assert!(interfaces.is_empty());
 
     Ok(())
@@ -3120,10 +3035,8 @@ async fn test_dhcp_v6_request_without_v6_prefix_is_rejected(
     assert!(status.message().contains("without an IPv6 prefix"));
 
     // The failed requests must not persist an observed interface row.
-    let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert!(interfaces.is_empty());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -3217,23 +3130,19 @@ async fn test_dhcp_v6_info_request_promotes_predicted_interface(
     // Capture the predicted identity and target host-inband segment before
     // DHCPv6 first contact consumes the prediction.
     let (machine_id, host_inband_segment_id) = {
-        let mut txn = pool.txn_begin().await?;
-        let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac)
+        let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac)
             .await?
             .expect("zero-DPU ingest should have minted a predicted interface");
-        let host_inband_segment = db::network_segment::for_relay(
-            &mut txn,
-            FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
-        )
-        .await?
-        .expect("host-inband segment should resolve from fixture gateway");
+        let host_inband_segment =
+            db::network_segment::for_relay(&pool, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip())
+                .await?
+                .expect("host-inband segment should resolve from fixture gateway");
         assert!(
-            db::machine_interface::find_by_mac_address(&mut *txn, mac)
+            db::machine_interface::find_by_mac_address(&pool, mac)
                 .await?
                 .is_empty(),
             "the in-band NIC should not have a machine_interfaces row yet",
         );
-        txn.rollback().await?;
         (predicted.machine_id, host_inband_segment.id)
     };
 
@@ -3257,16 +3166,14 @@ async fn test_dhcp_v6_info_request_promotes_predicted_interface(
 
     // The prediction becomes a real interface, but there is no address for DNS
     // or zero-DPU instance allocation to consume.
-    let mut txn = pool.txn_begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac).await?;
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac).await?;
     assert!(predicted.is_none());
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].machine_id, Some(machine_id));
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&pool, interfaces[0].id).await?;
     assert!(addresses.is_empty());
-    txn.rollback().await?;
 
     // Options-only association does not freeze configuration. Start with a
     // Fixed address outside the configured prefix, then correct it after DHCP
@@ -3302,21 +3209,19 @@ async fn test_dhcp_v6_info_request_promotes_predicted_interface(
             .message()
             .contains("not within a configured network segment")
     );
-    let mut txn = pool.txn_begin().await?;
     assert!(
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id)
+        db::machine_interface_address::find_for_interface(&pool, interfaces[0].id)
             .await?
             .is_empty()
     );
     assert!(
         db::machine_interface::can_apply_expected_allocation(
-            &mut txn,
+            &pool,
             interfaces[0].id,
             IpAddressFamily::Ipv6,
         )
         .await?
     );
-    txn.rollback().await?;
 
     expected.host_nics[0].fixed_ip = Some("2001:db8:b::55".into());
     env.api
@@ -3390,17 +3295,13 @@ async fn test_dhcp_v6_info_request_on_reserved_segment_promotes_predicted_interf
 
     // Capture the predicted machine and target segment before DHCP promotion.
     let (machine_id, host_inband_segment_id) = {
-        let mut txn = pool.txn_begin().await?;
-        let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac)
+        let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac)
             .await?
             .expect("zero-DPU ingest should have minted a predicted interface");
-        let host_inband_segment = db::network_segment::for_relay(
-            &mut txn,
-            FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
-        )
-        .await?
-        .expect("host-inband segment should resolve from fixture gateway");
-        txn.rollback().await?;
+        let host_inband_segment =
+            db::network_segment::for_relay(&pool, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip())
+                .await?
+                .expect("host-inband segment should resolve from fixture gateway");
         (predicted.machine_id, host_inband_segment.id)
     };
 
@@ -3424,19 +3325,17 @@ async fn test_dhcp_v6_info_request_on_reserved_segment_promotes_predicted_interf
     assert_eq!(response.segment_id, Some(host_inband_segment_id));
 
     // Verify prediction cleanup, interface promotion, and no SLAAC persistence.
-    let mut txn = pool.txn_begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac).await?;
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac).await?;
     assert!(predicted.is_none());
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].machine_id, Some(machine_id));
     assert_eq!(interfaces[0].segment_id, host_inband_segment_id);
     assert!(interfaces[0].last_dhcp.is_some());
     assert_eq!(response.machine_interface_id, Some(interfaces[0].id));
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&pool, interfaces[0].id).await?;
     assert!(addresses.is_empty());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -3461,17 +3360,13 @@ async fn test_dhcp_v6_info_request_exact_link_precedes_reserved_prefix_candidate
 
     // Capture the predicted machine and exact target segment before DHCP promotion.
     let (machine_id, exact_segment) = {
-        let mut txn = pool.txn_begin().await?;
-        let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac)
+        let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac)
             .await?
             .expect("zero-DPU ingest should have minted a predicted interface");
-        let host_inband_segment = db::network_segment::for_relay(
-            &mut txn,
-            FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
-        )
-        .await?
-        .expect("host-inband segment should resolve from fixture gateway");
-        txn.rollback().await?;
+        let host_inband_segment =
+            db::network_segment::for_relay(&pool, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip())
+                .await?
+                .expect("host-inband segment should resolve from fixture gateway");
         (predicted.machine_id, host_inband_segment.id)
     };
 
@@ -3504,10 +3399,9 @@ async fn test_dhcp_v6_info_request_exact_link_precedes_reserved_prefix_candidate
     assert_eq!(response.segment_id, Some(exact_segment));
 
     // Verify the request promoted the prediction and updated the exact segment row.
-    let mut txn = pool.txn_begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac).await?;
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac).await?;
     assert!(predicted.is_none());
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].machine_id, Some(machine_id));
     assert_eq!(interfaces[0].segment_id, exact_segment);
@@ -3517,14 +3411,13 @@ async fn test_dhcp_v6_info_request_exact_link_precedes_reserved_prefix_candidate
     // Verify SLAAC EUI-64 inference used the exact segment prefix, not the
     // reserved prefix.
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&pool, interfaces[0].id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
     assert_eq!(
         addresses[0].address,
         expected_slaac_address("2001:db8:74::".parse()?, mac)
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -3548,23 +3441,19 @@ async fn test_dhcp_v6_solicit_promotes_predicted_interface_by_link_address(
 
     // Capture the predicted machine and target segment before DHCP promotion.
     let (machine_id, host_inband_segment_id) = {
-        let mut txn = pool.txn_begin().await?;
-        let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac)
+        let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac)
             .await?
             .expect("zero-DPU ingest should have minted a predicted interface");
-        let host_inband_segment = db::network_segment::for_relay(
-            &mut txn,
-            FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
-        )
-        .await?
-        .expect("host-inband segment should resolve from fixture gateway");
+        let host_inband_segment =
+            db::network_segment::for_relay(&pool, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip())
+                .await?
+                .expect("host-inband segment should resolve from fixture gateway");
         assert!(
-            db::machine_interface::find_by_mac_address(&mut *txn, mac)
+            db::machine_interface::find_by_mac_address(&pool, mac)
                 .await?
                 .is_empty(),
             "the in-band NIC should not have a machine_interfaces row yet",
         );
-        txn.rollback().await?;
         (predicted.machine_id, host_inband_segment.id)
     };
 
@@ -3599,19 +3488,17 @@ async fn test_dhcp_v6_solicit_promotes_predicted_interface_by_link_address(
     assert!(response_address.is_ipv6());
 
     // Verify prediction cleanup and the single persisted DHCPv6 allocation.
-    let mut txn = pool.txn_begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, mac).await?;
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&pool, mac).await?;
     assert!(predicted.is_none());
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].machine_id, Some(machine_id));
     assert_eq!(response.machine_interface_id, Some(interfaces[0].id));
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&pool, interfaces[0].id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     assert_eq!(addresses[0].address, response_address);
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -3636,19 +3523,14 @@ async fn test_dhcp_v6_reserved_prediction_promotion_serializes_primary_request(
     });
     let _mock = site_explorer::ingest_zero_dpu_host_awaiting_first_lease(&env, mock_host).await?;
     let (prediction, segment_id) = {
-        let mut txn = pool.txn_begin().await?;
-        let prediction =
-            db::predicted_machine_interface::find_by_mac_address(&mut txn, predicted_mac)
-                .await?
-                .expect("zero-DPU ingest should create a predicted interface");
+        let prediction = db::predicted_machine_interface::find_by_mac_address(&pool, predicted_mac)
+            .await?
+            .expect("zero-DPU ingest should create a predicted interface");
         assert!(prediction.primary_interface);
-        let segment = db::network_segment::for_relay(
-            &mut txn,
-            FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
-        )
-        .await?
-        .expect("the fixture gateway should resolve the host-inband segment");
-        txn.rollback().await?;
+        let segment =
+            db::network_segment::for_relay(&pool, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip())
+                .await?
+                .expect("the fixture gateway should resolve the host-inband segment");
         (prediction, segment.id)
     };
 
@@ -3759,9 +3641,8 @@ async fn test_dhcp_v6_reserved_prediction_promotion_serializes_primary_request(
     assert_eq!(addresses[0].address, ipv4_address);
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
 
-    let mut txn = pool.txn_begin().await?;
     let retained_prediction =
-        db::predicted_machine_interface::find_by_mac_address(&mut txn, predicted_mac)
+        db::predicted_machine_interface::find_by_mac_address(&pool, predicted_mac)
             .await?
             .expect("failed promotion should leave the prediction available for retry");
     assert_eq!(retained_prediction.id, prediction.id);
@@ -3769,11 +3650,10 @@ async fn test_dhcp_v6_reserved_prediction_promotion_serializes_primary_request(
     assert_eq!(retained_prediction.mac_address, predicted_mac);
     assert!(retained_prediction.primary_interface);
     assert!(
-        db::machine_interface::find_by_mac_address(&mut *txn, predicted_mac)
+        db::machine_interface::find_by_mac_address(&pool, predicted_mac)
             .await?
             .is_empty()
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -3806,9 +3686,8 @@ async fn test_dhcp_record_missing_address_family_is_none(
 
     // An IPv6 lookup for the same interface finds no row in the view: the
     // query succeeds and the miss surfaces as None.
-    let mut txn = pool.txn_begin().await?;
     let ipv6_record = db::dhcp_record::find_by_mac_address(
-        &mut txn,
+        &pool,
         &parsed_mac,
         &segment_id,
         IpAddressFamily::Ipv6,
@@ -3818,7 +3697,6 @@ async fn test_dhcp_record_missing_address_family_is_none(
         ipv6_record.is_none(),
         "IPv6 lookup on an IPv4-only interface should find no record, got: {ipv6_record:?}"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -3888,15 +3766,14 @@ where
     ID: MachineIdSubtypeTrait,
     db::DatabaseError: From<<ID as TryFrom<carbide_uuid::machine::MachineId>>::Error>,
 {
-    let mut txn = env.pool.txn_begin().await?;
     let interfaces_by_machine =
-        db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_machine_id]).await?;
+        db::machine_interface::find_by_machine_ids(&env.pool, &[host_machine_id]).await?;
     let interface = interfaces_by_machine
         .get(&host_machine_id)
         .and_then(|ifaces| ifaces.first())
         .ok_or("host has no machine_interfaces")?;
     let prefix = db::network_prefix::find_by(
-        txn.as_mut(),
+        &env.pool,
         ObjectColumnFilter::One(db::network_prefix::SegmentIdColumn, &interface.segment_id),
     )
     .await?
@@ -3905,7 +3782,6 @@ where
     .ok_or("no network_prefix for segment")?;
     let gateway = prefix.gateway.ok_or("segment prefix has no gateway")?;
     let mac = interface.mac_address;
-    txn.rollback().await?;
     Ok((mac, gateway))
 }
 
@@ -3970,8 +3846,7 @@ async fn test_dhcp_allows_host_bmc_with_instance_on_dpu_host(
     let mh = create_managed_host(&env).await;
 
     // Find the already-linked host BMC interface.
-    let mut txn = env.pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_all(txn.as_mut()).await?;
+    let interfaces = db::machine_interface::find_all(&env.pool).await?;
     let bmc_interface = interfaces
         .iter()
         .find(|interface| {
@@ -3984,7 +3859,7 @@ async fn test_dhcp_allows_host_bmc_with_instance_on_dpu_host(
 
     // Resolve the BMC segment gateway for the follow-up DHCP request.
     let prefix = db::network_prefix::find_by(
-        txn.as_mut(),
+        &env.pool,
         ObjectColumnFilter::One(db::network_prefix::SegmentIdColumn, &bmc_segment_id),
     )
     .await?
@@ -3992,7 +3867,6 @@ async fn test_dhcp_allows_host_bmc_with_instance_on_dpu_host(
     .next()
     .ok_or("no network_prefix for BMC segment")?;
     let gateway = prefix.gateway.ok_or("BMC segment prefix has no gateway")?;
-    txn.rollback().await?;
 
     // Allocate an instance after the BMC interface is linked.
     attach_bare_instance(&env, mh.host().id).await?;

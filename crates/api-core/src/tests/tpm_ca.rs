@@ -90,7 +90,7 @@ pub(in crate::tests) mod tests {
         // hardware_info is never inserted via db::machine_topology::create_or_update thus triggering an error
         let hardware_info = HardwareInfo::from(&host_config);
         let machine_id = from_hardware_info(&hardware_info).unwrap();
-        let _machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface, None)
+        let _machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface)
             .await
             .unwrap();
 
@@ -139,7 +139,7 @@ pub(in crate::tests) mod tests {
         .unwrap();
         let mut hardware_info = HardwareInfo::from(&host_config);
         let machine_id = from_hardware_info(&hardware_info).unwrap();
-        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface, None)
+        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface)
             .await
             .unwrap();
 
@@ -260,9 +260,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
-
-        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(txn.as_mut(), host_id)
+        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(&env.pool, host_id)
             .await
             .expect("Failed: could not make a look up for EkCertVerificationStatus in DB")
             .expect("Failed: could not find EkCertVerificationStatus for given machine in DB");
@@ -294,9 +292,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
-
-        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(txn.as_mut(), host_id)
+        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(&env.pool, host_id)
             .await
             .expect("Failed: could not make a look up for EkCertVerificationStatus in DB")
             .expect("Failed: could not find EkCertVerificationStatus for given machine in DB");
@@ -1206,7 +1202,7 @@ pub(in crate::tests) mod tests {
         .unwrap();
         let hardware_info = HardwareInfo::from(&host_config);
         let machine_id = from_hardware_info(&hardware_info).unwrap();
-        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface, None)
+        let machine = db::machine::get_or_create(&mut txn, None, &machine_id, &iface)
             .await
             .unwrap();
 

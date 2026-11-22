@@ -67,19 +67,11 @@ impl SvpcInterfaceHandler {
         monitor: &mut DpaMonitor,
         partition_id: SpxPartitionId,
     ) -> DpaManagerResult<u32> {
-        let db_pool = monitor.db_services.db_pool.clone();
-        let mut txn = db_pool
-            .txn_begin()
-            .await
-            .map_err(DpaManagerError::from_transaction)?;
         let partition = db::spx_partition::find_by(
-            txn.as_mut(),
+            &monitor.db_services.db_pool,
             ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
         )
         .await?;
-        txn.commit()
-            .await
-            .map_err(DpaManagerError::from_transaction)?;
         Ok(partition
             .into_iter()
             .next()
@@ -97,6 +89,7 @@ impl SvpcInterfaceHandler {
         metrics: &mut DpaMonitorMetrics,
     ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let this_mac = dpa_interface.mac_address;
+        let this_mac_string = this_mac.to_string();
 
         let instance_version = instance.spx_config_version;
         let nic_version = dpa_interface.network_config.version.to_string();
@@ -109,7 +102,7 @@ impl SvpcInterfaceHandler {
                 .spxconfig
                 .spx_attachments
                 .iter()
-                .filter(|a| a.mac_address.as_deref() == Some(this_mac.to_string().as_str())),
+                .filter(|a| a.mac_address.as_deref() == Some(this_mac_string.as_str())),
             "reconcile_assigned_state configured attachments",
         )?;
 
@@ -528,21 +521,10 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         };
 
         if cs.lockmode == Some(Locked) {
-            // The card is now locked on the device. Complete its lockdown_ikm
-            // convergence, keyed by the card (NIC) MAC, so the rotation engine
-            // tracks this card from the moment it is actually locked. The record
-            // is committed atomically with the state transition below (the
-            // monitor reuses this txn to persist the new controller state).
-            //
-            // api-core staged the *exact* IKM version the lock key was derived
-            // from as the in-flight `rotating_to_version` when it issued the lock
-            // command; we promote that value to `current_version` here. We must
-            // not re-read the site-wide target instead: it can advance between
-            // issuing the lock and observing it, which would record the card as
-            // converged to a newer version than the IKM it is actually locked
-            // under. A card with nothing staged (locked before this flow shipped,
-            // already covered by the backfill at v0) falls back to the site-wide
-            // target; that path is idempotent and warns.
+            // `record_lock_convergence` promotes the staged IKM version, or
+            // preserves the existing record and warns if nothing is staged.
+            // When a version is staged, the monitor commits its promotion and
+            // the `Assigned` transition atomically in this transaction.
             let mut txn = monitor
                 .db_services
                 .db_pool
@@ -626,8 +608,8 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
     /// Tenant-free rekey, phase one: wait for the card to report `Unlocked`,
     /// record the unlock (NULLing `current_version` so the truth column reflects
     /// an unlocked card), then advance to `RotateKeyLocking` to relock at the
-    /// staged site-wide target. The record commits atomically with the state
-    /// transition via the returned txn, mirroring `handle_locking`.
+    /// staged site-wide target. Any unlock bookkeeping update commits atomically
+    /// with the state transition via the returned txn, mirroring `handle_locking`.
     async fn handle_rotate_key_unlocking(
         &self,
         monitor: &mut DpaMonitor,
@@ -686,11 +668,10 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         })
     }
 
-    /// Tenant-free rekey, phase two: wait for the card to report `Locked` at the
-    /// staged target, promote `rotating_to_version -> current_version`
-    /// (`record_lock_convergence`), then return the card to `Ready`. This is the
-    /// assignment `handle_locking` promote path with a `Ready` terminal instead
-    /// of `Assigned`.
+    /// Tenant-free rekey, phase two: wait for the card to report `Locked`, then
+    /// call `record_lock_convergence` and return the card to `Ready`. The helper
+    /// promotes the staged version, or preserves the record and warns if none
+    /// is staged. The reported lock mode does not identify the IKM version.
     async fn handle_rotate_key_locking(
         &self,
         monitor: &mut DpaMonitor,
@@ -776,8 +757,8 @@ fn apply_profile(state: &DpaInterface) -> DpaManagerResult<HandlerResult> {
 }
 
 /// Completes `lockdown_ikm` convergence for a card observed locked, on the
-/// caller's `conn` (`handle_locking` passes its open transaction so the record
-/// commits atomically with the state transition).
+/// caller's `conn`. Both `handle_locking` and `handle_rotate_key_locking` pass
+/// their open transaction so any promotion commits with the state transition.
 ///
 /// api-core staged the exact IKM version the lock key was derived from as the
 /// in-flight `rotating_to_version` when it issued the lock command, so:
@@ -786,8 +767,9 @@ fn apply_profile(state: &DpaInterface) -> DpaManagerResult<HandlerResult> {
 ///     must NOT re-read the site-wide target: it can advance between issuing the
 ///     lock and observing it, which would record the card as converged to a
 ///     newer version than the IKM it is actually locked under.
-///   * if nothing is staged, preserve the existing record and warn. Observing
-///     Locked does not identify the IKM version used to lock the card.
+///   * if nothing is staged, leave the existing record unchanged (or absent)
+///     and warn. Observing `Locked` does not identify the IKM version used to
+///     lock the card.
 async fn record_lock_convergence(
     conn: &mut PgConnection,
     dpa_interface_id: DpaInterfaceId,

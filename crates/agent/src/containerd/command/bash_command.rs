@@ -61,7 +61,7 @@ impl Command for BashCommand {
             .await
             .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
 
-        let fout = String::from_utf8_lossy(&output.stdout).to_string();
+        let fout = String::from_utf8_lossy(&output.stdout).into_owned();
         Ok(fout)
     }
 }

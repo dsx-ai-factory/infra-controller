@@ -45,6 +45,7 @@ use super::{
 };
 use crate::ConditionalWrite::{Applied, NotApplied};
 use crate::TransactionVending as _;
+use crate::db_read::PgPoolReader;
 use crate::resource_pool::binding::bind_or_verify;
 use crate::resource_pool::{allocate, allocation, populate};
 use crate::test_support::postgres::wait_for_blocked_query;
@@ -1096,7 +1097,12 @@ async fn competing_first_results_preserve_the_committed_result(pool: PgPool) -> 
     };
     let commit_first = async {
         // The other writer starts while the committed row still has no result.
-        wait_for_blocked_query(&pool, first_pid, "resource_pool_allocations").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            first_pid,
+            "resource_pool_allocations",
+        )
+        .await;
         first.commit().await?;
         Ok::<_, eyre::Report>(())
     };
@@ -1159,7 +1165,12 @@ async fn attachment_and_cancellation_commit_only_one_result(pool: PgPool) -> eyr
             Ok::<_, eyre::Report>(result)
         };
         let commit_first = async {
-            wait_for_blocked_query(&pool, first_pid, "resource_pool_allocations").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                first_pid,
+                "resource_pool_allocations",
+            )
+            .await;
             first.commit().await?;
             Ok::<_, eyre::Report>(())
         };
@@ -1342,7 +1353,12 @@ async fn foreground_writes_recheck_deadline_after_waiting_for_the_row(
             Ok::<_, eyre::Report>(result)
         };
         let expire_before_unlock = async {
-            wait_for_blocked_query(&pool, blocker_pid, "resource_pool_allocations").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker_pid,
+                "resource_pool_allocations",
+            )
+            .await;
             let still_valid: bool = sqlx::query_scalar("SELECT clock_timestamp() < $1")
                 .bind(deadline)
                 .fetch_one(&pool)
@@ -1986,7 +2002,12 @@ async fn cleanup_waits_for_result_and_retains_its_terminal_allocation(
     let finish_result = async {
         // Keep cleanup blocked until the provider result commits. Its state
         // update must preserve the result written by the other transaction.
-        wait_for_blocked_query(&pool, result_pid, "resource_pool_allocations").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            result_pid,
+            "resource_pool_allocations",
+        )
+        .await;
         provider_result.commit().await?;
         Ok::<_, eyre::Report>(())
     };
@@ -2285,7 +2306,12 @@ async fn provider_string_indexes_preserve_allocations_with_a_live_writer(
         Ok::<_, eyre::Report>(())
     };
     let commit_writer = async {
-        wait_for_blocked_query(&pool, writer_pid, "resource_pool_allocations_handle").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            writer_pid,
+            "resource_pool_allocations_handle",
+        )
+        .await;
         txn.commit().await?;
         Ok::<_, eyre::Report>(())
     };
@@ -2464,7 +2490,12 @@ async fn owner_slot_lookup_keeps_terminal_generations_across_pools(
         Ok::<_, eyre::Report>(result)
     };
     let finish_inspection = async {
-        wait_for_blocked_query(&pool, inspecting_pid, "resource_pool_allocations").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            inspecting_pid,
+            "resource_pool_allocations",
+        )
+        .await;
         inspecting.commit().await?;
         Ok::<_, eyre::Report>(())
     };
@@ -2513,7 +2544,12 @@ async fn owner_slot_lookup_keeps_terminal_generations_across_pools(
         Ok::<_, eyre::Report>(applied)
     };
     let unlock = async {
-        wait_for_blocked_query(&pool, locking_pid, "resource_pool_allocations").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            locking_pid,
+            "resource_pool_allocations",
+        )
+        .await;
         txn.commit().await?;
         Ok::<_, eyre::Report>(())
     };

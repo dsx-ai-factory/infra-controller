@@ -108,14 +108,12 @@ async fn test_resolve_machine_interface_via_direct_admin_ip(pool: sqlx::PgPool) 
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
+    let interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.host().id])
         .await
         .unwrap();
     let host_iface = &interfaces[&mh.host().id][0];
     let admin_ip = host_iface.addresses[0];
     let expected_interface_id = host_iface.id;
-    txn.rollback().await.unwrap();
 
     let mut txn = env.pool.txn_begin().await.unwrap();
     let resolved = resolve_machine_interface_for_test(txn.as_mut(), admin_ip)
@@ -135,8 +133,7 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
     let mh =
         create_managed_host_with_config(&env, env.managed_host_config().with_dpu_count(2)).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     let expected_interface_id = host
         .status
         .interfaces
@@ -154,7 +151,6 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
         .and_then(|interface| interface.attached_dpu_machine_id)
         .expect("two-DPU host must have a secondary interface");
     let secondary_locator = host.get_device_locator_for_dpu_id(&secondary_dpu).unwrap();
-    txn.rollback().await.unwrap();
 
     let tinstance = mh
         .instance_builer(&env)
@@ -162,9 +158,8 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
         .build()
         .await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let instance_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &tinstance.id,
         &segment_id,
     )
@@ -174,9 +169,8 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
         panic!("instance should have one tenant address on the segment")
     };
     let tenant_ip = inst_addr.address;
-    let network = tinstance.db_instance(&mut txn).await.config.network;
+    let network = tinstance.db_instance(&env.pool).await.config.network;
     assert!(network.interfaces[0].device_locator.is_none());
-    txn.rollback().await.unwrap();
 
     let mut secondary_pf = network.clone();
     secondary_pf.interfaces[0].device_locator = Some(secondary_locator);
@@ -588,12 +582,10 @@ async fn test_zero_dpu_cloud_init_prefers_instance_when_ip_matches_host_interfac
         "zero-DPU fixture should produce no DPU machines"
     );
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
+    let host_interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.host().id])
         .await
         .unwrap();
     let host_ip = host_interfaces[&mh.host().id][0].addresses[0];
-    txn.rollback().await.unwrap();
 
     let tenant_user_data = "#cloud-config\ntenant-user-data";
     let instance = env
@@ -621,6 +613,7 @@ async fn test_zero_dpu_cloud_init_prefers_instance_when_ip_matches_host_interfac
                 }),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -798,12 +791,10 @@ async fn test_cloud_init_local_hostname_set_from_instance_name(pool: sqlx::PgPoo
 
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
+    let host_interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.host().id])
         .await
         .unwrap();
     let host_ip = host_interfaces[&mh.host().id][0].addresses[0];
-    txn.rollback().await.unwrap();
 
     let instance_name = "worker-0";
     let instance = env
@@ -828,6 +819,7 @@ async fn test_cloud_init_local_hostname_set_from_instance_name(pool: sqlx::PgPoo
                 }),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -909,12 +901,10 @@ async fn test_cloud_init_local_hostname_omitted_when_instance_name_is_not_a_vali
 
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
+    let host_interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.host().id])
         .await
         .unwrap();
     let host_ip = host_interfaces[&mh.host().id][0].addresses[0];
-    txn.rollback().await.unwrap();
 
     // Instance metadata names are free-form (unlike TenantConfig::hostname),
     // so a name like this is accepted at allocation time but is not a legal
@@ -942,6 +932,7 @@ async fn test_cloud_init_local_hostname_omitted_when_instance_name_is_not_a_vali
                 }),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -1039,8 +1030,7 @@ async fn dpu_nvconfig_profile_resolution_uses_report_or_rack_and_dpu_identity(po
         .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[dpu.id])
+    let dpu_interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[dpu.id])
         .await
         .unwrap();
     let dpu_interface = dpu_interfaces
@@ -1052,7 +1042,6 @@ async fn dpu_nvconfig_profile_resolution_uses_report_or_rack_and_dpu_identity(po
         .first()
         .expect("fixture DPU interface should have an address")
         .to_string();
-    txn.rollback().await.unwrap();
 
     assert_eq!(
         resolved_dpu_nvconfig_profile(&env, &dpu_interface_ip).await,

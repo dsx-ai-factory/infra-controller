@@ -77,15 +77,38 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// Initialize ExpectedSwitch DAO (used for reconciliation of expected instances)
 	esDAO := cdbm.NewExpectedSwitchDAO(mei.dbSession)
 
-	// Fetch ALL existing expected switches for site
-	filterInput := cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}}
-	existingExpectedSwitches, _, err := esDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get ExpectedSwitches for Site from DB")
-		return err
+	// The deletion sweep only considers Expected Switches that existed before this page is applied,
+	// and only deletes one that has not changed since.
+	var siteExpectedSwitchIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
+	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
+		siteExpectedSwitchIDsAndUpdated, err = esDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitch IDs and Updated timestamps for Site from DB")
+			return err
+		}
 	}
 
-	// Build a map of all existing Expected Switches by UUID (unique identifier)
+	// Look up only the Expected Switches this page reports. Pages run concurrently, so loading
+	// the whole Site here would make each page's memory grow with the Site's Expected Switch count.
+	pageExpectedSwitchIDs := []uuid.UUID{}
+	for _, res := range expectedSwitchInventory.GetExpectedSwitches() {
+		id, serr := uuid.Parse(res.GetExpectedSwitchId().GetValue())
+		if serr == nil {
+			pageExpectedSwitchIDs = append(pageExpectedSwitchIDs, id)
+		}
+	}
+
+	existingExpectedSwitches := []cdbm.ExpectedSwitch{}
+	if len(pageExpectedSwitchIDs) > 0 {
+		filterInput := cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedSwitchIDs: pageExpectedSwitchIDs}
+		existingExpectedSwitches, _, err = esDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitches for Site from DB")
+			return err
+		}
+	}
+
+	// Build a map of the page's existing Expected Switches by UUID (unique identifier)
 	existingByID := map[uuid.UUID]*cdbm.ExpectedSwitch{}
 	for _, es := range existingExpectedSwitches {
 		existingByID[es.ID] = &es
@@ -240,7 +263,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
-		for _, es := range existingExpectedSwitches {
+		for _, es := range siteExpectedSwitchIDsAndUpdated {
 			if _, keep := reportedIDs[es.ID]; keep {
 				continue
 			}

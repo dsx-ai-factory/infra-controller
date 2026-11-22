@@ -65,7 +65,7 @@ pub async fn list_requests(
 
 pub async fn fetch_request(
     request: model::redfish::RedfishActionId,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<ActionRequest, DatabaseError> {
     let query = format!(
         "SELECT {} FROM redfish_bmc_actions WHERE request_id = $1",
@@ -73,7 +73,7 @@ pub async fn fetch_request(
     );
     let action_request: Option<ActionRequest> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(request.request_id)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::new(&query, e))?;
     let Some(action_request) = action_request else {
@@ -88,11 +88,14 @@ pub async fn fetch_request(
 /// `find_serials` maps each distinct BMC address to its chassis serial using
 /// the database's address text. Equivalent inputs identify one BMC; any missing
 /// or invalid input returns `NotFoundError` with the requested address text.
-pub async fn find_serials(
+pub async fn find_serials<DB>(
     ips: &[String],
-    txn: &mut PgConnection,
-) -> Result<HashMap<String, String>, DatabaseError> {
-    let pairs = crate::machine_topology::find_machine_bmc_pairs(&mut *txn, ips).await?;
+    conn: &mut DB,
+) -> Result<HashMap<String, String>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let pairs = crate::machine_topology::find_machine_bmc_pairs(&mut *conn, ips).await?;
     let found_ips = pairs
         .iter()
         .map(|(_, ip)| ip.parse())
@@ -113,7 +116,7 @@ pub async fn find_serials(
         });
     }
     let topologies = crate::machine_topology::find_by_machine_ids(
-        txn,
+        conn,
         pairs.iter().map(|p| p.0).collect::<Vec<_>>().as_slice(),
     )
     .await?;
@@ -160,8 +163,8 @@ pub async fn insert_request(
     "#;
     let machine_count = machine_ips.len();
     let request_id: i64 = sqlx::query_scalar(query)
-        .bind(authored_by.clone())
-        .bind(vec![authored_by])
+        .bind(&authored_by)
+        .bind(vec![authored_by.as_str()])
         .bind(machine_ips)
         .bind(serials)
         .bind(request.target)

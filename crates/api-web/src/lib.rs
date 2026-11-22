@@ -460,7 +460,9 @@ fn routes_with_auth_mode(
                 .set_token_uri(TokenUrl::new(token_endpoint)?)
                 .set_redirect_uri(RedirectUrl::new(format!(
                     "https://{}/admin/{}",
-                    env::var(CARBIDE_WEB_HOSTNAME_ENV).unwrap_or("localhost:1079".to_string()),
+                    env::var(CARBIDE_WEB_HOSTNAME_ENV)
+                        .as_deref()
+                        .unwrap_or("localhost:1079"),
                     AUTH_CALLBACK_ROOT,
                 ))?);
 
@@ -997,8 +999,8 @@ async fn web_auth_middleware_fn(
     }
 
     // If it exists, do we still want to accept it?
-    if let Some(c) = cookiejar.get("sid").map(|cookie| cookie.value().to_owned())
-        && let Ok(expiraton_timestamp) = c.parse::<u64>()
+    if let Some(cookie) = cookiejar.get("sid")
+        && let Ok(expiraton_timestamp) = cookie.value().parse::<u64>()
     {
         let now_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)

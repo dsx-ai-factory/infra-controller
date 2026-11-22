@@ -17,11 +17,12 @@
 
 //! The line under the results naming the checks running now.
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use colored::Colorize;
+use colored::{ColoredString, Colorize};
 use tokio::task::JoinHandle;
 
 use super::terminal::{width, wrap};
@@ -132,21 +133,27 @@ impl ActivityState {
         let mut lines = self.step_lines(width()).into_iter();
         let mut frame = format!(
             "  {} {:<CHECK_WIDTH$} {:>7}  {}",
-            FRAMES[self.frame].to_string().cyan(),
+            ColoredString::from(FRAMES[self.frame].to_string()).cyan(),
             first.id,
-            seconds(first.started.elapsed()).dimmed(),
-            lines.next().unwrap_or_default().dimmed()
+            ColoredString::from(seconds(first.started.elapsed())).dimmed(),
+            ColoredString::from(lines.next().unwrap_or_default()).dimmed()
         );
         let mut rows = 1;
         for line in lines {
-            frame.push_str(&format!("\n{:DETAIL_COLUMN$}{}", "", line.dimmed()));
+            write!(
+                frame,
+                "\n{:DETAIL_COLUMN$}{}",
+                "",
+                ColoredString::from(line).dimmed()
+            )
+            .expect("writing to a String cannot fail");
             rows += 1;
         }
         self.clear();
         // Autowrap is off while drawing: a row the terminal wrapped itself
         // would not be counted, and would survive the next clear.
         print!("\x1b[?7l{frame}\x1b[?7h");
-        let _ = std::io::stdout().flush();
+        std::io::stdout().flush().ok();
         self.rows = rows;
     }
 
@@ -179,7 +186,7 @@ impl ActivityState {
             return;
         }
         print!("\r\x1b[2K{}", "\x1b[1A\x1b[2K".repeat(self.rows - 1));
-        let _ = std::io::stdout().flush();
+        std::io::stdout().flush().ok();
         self.rows = 0;
     }
 }

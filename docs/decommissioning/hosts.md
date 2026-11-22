@@ -37,26 +37,56 @@ nico-admin-cli -a <api-url> managed-host show <host-machine-id>
 **Expected result**: Successful decommissioning ends in `Decommissioning/Decommissioned`.
 If progress stops or errors persist, refer to [Troubleshooting](index.md#troubleshooting).
 
+### Missing BFB Installation Task
+
+If the host remains in `Decommissioning/DeconfiguringDpus`, check the
+per-DPU `WaitForInstallComplete` state and the recorded Redfish task ID.
+Repeated HTTP 404 responses for that task match
+[issue #8340](https://github.com/dsx-ai-factory/infra-controller/issues/8340).
+A missing task is not proof that the BFB installation succeeded. NICo cannot
+advance that step without confirming completion.
+
+Preserve the task ID, DPU BMC logs, reset history, and NICo state. Have the
+lifecycle owner verify the installed image and agree a recovery or reinstall
+before changing state. Do not force-delete the host or manually mark it
+decommissioned to bypass an unverified DPU reset.
+
+### Unsupported Power Cycle
+
+On older builds without the [Supermicro power-action check](https://github.com/dsx-ai-factory/infra-controller/pull/8501)
+or [unsupported-action fallback](https://github.com/dsx-ai-factory/infra-controller/pull/8336),
+decommissioning can remain in `PowerCyclingHost` when the BMC lacks an
+AC power-cycle action. Builds containing both fixes check advertised support
+and continue with `ForceOff` followed by `On` when AC power cycle is unsupported.
+[Issue #7928](https://github.com/dsx-ai-factory/infra-controller/issues/7928)
+tracks the remaining real-hardware confirmation; the
+[simulated verification passed](https://github.com/dsx-ai-factory/infra-controller/issues/7928#issuecomment-6612952286).
+
+If the symptom persists on a build containing both fixes, record the model,
+BMC firmware, NICo revision, advertised actions, and failed request for the
+hardware and lifecycle owners. A successful manual power action alone does
+not establish that the remaining decommission steps have completed.
+
 ## What the workflow changes
 
 NICo performs these operations in order:
 
 1. Suppresses Site Explorer for the host BMC and every DPU BMC. Site Explorer will skip these endpoints during periodic exploration to avoid instability and authentication lockout.
-2. Disables host BMC lockdown. NICo restarts Supermicro hosts after disabling
+1. Disables host BMC lockdown. NICo restarts Supermicro hosts after disabling
    lockdown; other supported vendors continue without that restart.
-3. Unlocks managed SuperNICs and waits for them to report an unlocked state.
-4. Resets the host BIOS/UEFI settings to factory defaults.
-5. Clears the host UEFI administrator password. If the platform schedules a
+1. Unlocks managed SuperNICs and waits for them to report an unlocked state.
+1. Resets the host BIOS/UEFI settings to factory defaults.
+1. Clears the host UEFI administrator password. If the platform schedules a
    Redfish job, NICo restarts the host and waits for the job to complete.
-6. Deletes DPF resources when DPF provisioned the host.
-7. Installs the vanilla `preingestion.bfb` on every DPU through Redfish and
+1. Deletes DPF resources when DPF provisioned the host.
+1. Installs the vanilla `preingestion.bfb` on every DPU through Redfish and
    waits for each DPU to boot.
-8. Suppresses DHCP for host and DPU OOB
+1. Suppresses DHCP for host and DPU OOB
    interfaces, then power cycles the machine. DHCP Request packets coming from these interface MACs are dropped.
-9. Suppresses DHCP for the host and DPU BMC interfaces.
-10. Factory-resets the host BMC and every DPU BMC.
-11. Deletes the managed host's per-device secrets and convergence records.
-12. Stops in `Decommissioning/Decommissioned`.
+1. Suppresses DHCP for the host and DPU BMC interfaces.
+1. Factory-resets the host BMC and every DPU BMC.
+1. Deletes the managed host's per-device secrets and convergence records.
+1. Stops in `Decommissioning/Decommissioned`.
 
 ## Resulting state
 

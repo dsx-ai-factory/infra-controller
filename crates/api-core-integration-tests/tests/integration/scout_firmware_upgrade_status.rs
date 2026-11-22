@@ -357,13 +357,13 @@ async fn concurrent_completion_preserves_result_against_stale_poll(pool: PgPool)
     .await;
     let before = mh.host.machine().await;
     if let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = &mut waiting {
-        *result = Some(model::machine::ScoutUpgradeResult {
+        *result = Some(Box::new(model::machine::ScoutUpgradeResult {
             success: true,
             exit_code: 0,
             stdout: "completed".into(),
             stderr: String::new(),
             error: String::new(),
-        });
+        }));
     }
     let completed = ManagedHostState::HostReprovision {
         retry_count: 0,

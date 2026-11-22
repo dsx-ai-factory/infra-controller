@@ -8,6 +8,7 @@ use std::time::Duration;
 use carbide_resource_pool_api::testing::LocalProvider;
 use carbide_resource_pool_api::v1;
 use chrono::{DateTime, Utc};
+use db::db_read::PgPoolReader;
 use db::resource_pool::{binding, remote};
 use db::work_lock_manager::{self, KeepaliveConfig, WorkLockManagerHandle};
 use db::{ConditionalWrite, TransactionVending as _};
@@ -136,6 +137,7 @@ impl Harness {
             .unwrap();
         let remote = RemoteResourcePool::new(
             database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             work_locks.clone(),
             binding.authority_id,
             client.clone(),
@@ -162,6 +164,7 @@ impl Harness {
     fn restarted(&self) -> RemoteResourcePool {
         RemoteResourcePool::new(
             self.database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             self.work_locks.clone(),
             self.request.pool.authority_id.clone(),
             self.client.clone(),
@@ -819,10 +822,11 @@ async fn worker_takeover_prevents_saving_an_intent_with_the_previous_guard(
         &harness.request,
         &harness.authority,
     ));
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("intent write did not wait for takeover: {result:?}"),
         _ = bounded(db::test_support::postgres::wait_for_blocked_query(
-            &harness.database, blocker_pid, "FROM work_locks",
+            &mut reader, blocker_pid, "FROM work_locks",
         )) => {}
     }
     takeover.commit().await?;
@@ -1318,6 +1322,7 @@ async fn recovery_continues_after_a_record_uses_its_entire_budget(database: PgPo
         .with_timeouts(Duration::from_secs(60), Duration::from_secs(60));
     let remote = RemoteResourcePool::new(
         harness.database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         harness.request.pool.authority_id.clone(),
         slow_client,
@@ -1921,10 +1926,11 @@ async fn foreground_expiry_cleans_up_after_abandonment_cannot_be_saved(
     .fetch_one(&mut *blocker)
     .await?;
     harness.cancel.cancel();
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("abandonment did not wait for the allocation row: {result:?}"),
         _ = bounded(db::test_support::postgres::wait_for_blocked_query(
-            &harness.database, blocker_pid, "UPDATE resource_pool_allocations",
+            &mut reader, blocker_pid, "UPDATE resource_pool_allocations",
         )) => {}
     }
     tokio::time::pause();
@@ -2078,6 +2084,7 @@ async fn expired_foreground_replay_requests_cleanup_without_dispatch(
     let before = harness.saved().await;
     let foreign = RemoteResourcePool::new(
         harness.database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         "another-authority".into(),
         harness.client.clone(),
@@ -2192,6 +2199,7 @@ async fn foreground_budget_stops_waiting_and_records_cleanup(database: PgPool) -
         .with_timeouts(Duration::from_secs(60), Duration::from_secs(60));
     let remote = RemoteResourcePool::new(
         harness.database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         harness.request.pool.authority_id.clone(),
         slow_client,
@@ -2242,9 +2250,10 @@ async fn shutdown_stops_a_database_wait_without_dispatching(database: PgPool) ->
             .remote
             .reconcile(harness.request.request_id, &harness.cancel),
     );
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("recovery did not wait for the allocation row: {result:?}"),
-        _ = bounded(db::test_support::postgres::wait_for_blocked_query(&harness.database, blocker_pid, "SELECT allocation_id FROM resource_pool_allocations")) => {}
+        _ = bounded(db::test_support::postgres::wait_for_blocked_query(&mut reader, blocker_pid, "SELECT allocation_id FROM resource_pool_allocations")) => {}
     }
     harness.cancel.cancel();
     assert!(matches!(
@@ -2290,6 +2299,7 @@ async fn cancelled_read_returns_its_only_connection_while_the_table_stays_locked
         .await?;
     let remote = RemoteResourcePool::new(
         single_connection.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         harness.request.pool.authority_id.clone(),
         harness.client.clone(),
@@ -2302,10 +2312,11 @@ async fn cancelled_read_returns_its_only_connection_while_the_table_stays_locked
         .execute(&mut *blocker)
         .await?;
     let mut pending = Box::pin(remote.reconcile(harness.request.request_id, &harness.cancel));
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("initial read did not wait for the table: {result:?}"),
         _ = bounded(db::test_support::postgres::wait_for_blocked_query(
-            &harness.database, blocker_pid, "FROM resource_pool_allocations",
+            &mut reader, blocker_pid, "FROM resource_pool_allocations",
         )) => {}
     }
     harness.cancel.cancel();

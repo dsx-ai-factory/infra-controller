@@ -18,7 +18,6 @@
 //! Handler for SwitchControllerState::ReProvisioning.
 
 use carbide_uuid::switch::SwitchId;
-use db::db_read::PgPoolReader;
 use db::{ObjectColumnFilter, TransactionVending as _, rack as db_rack, switch as db_switch};
 use model::rack::{MaintenanceActivity, RackState};
 use model::switch::{ReProvisioningState, Switch, SwitchControllerState, SwitchReprovisionRequest};
@@ -122,9 +121,8 @@ async fn rack_failed_abort_outcome(
         return Ok(None);
     };
 
-    let mut reader: PgPoolReader = ctx.services.db_pool.clone().into();
     let racks = db_rack::find_by(
-        reader.as_mut(),
+        &ctx.services.db_pool,
         ObjectColumnFilter::One(db_rack::IdColumn, rack_id),
     )
     .await?;

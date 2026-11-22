@@ -304,8 +304,8 @@ pub(super) async fn detail(
                 .into_response();
         }
     };
-    let partitions = match fetch_logical_partitions(state.clone(), true, Some(partitionid)).await {
-        Ok(n) => n,
+    let partitions = match fetch_logical_partitions(state, true, Some(partitionid)).await {
+        Ok(partitions) => partitions,
         Err(err) => {
             tracing::error!(error = %err, "fetch_logical_partitions");
             return (
@@ -316,11 +316,23 @@ pub(super) async fn detail(
         }
     };
 
+    let [partition] = match <[_; 1]>::try_from(partitions) {
+        Ok(single) => single,
+        Err(rows) if rows.is_empty() => return super::not_found_response(partition_id),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Expected one logical partition",
+            )
+                .into_response();
+        }
+    };
+
     if show_json {
-        return (StatusCode::OK, Json(partitions[0].clone())).into_response();
+        return (StatusCode::OK, Json(partition)).into_response();
     }
 
-    let tmpl: LogicalPartitionDetail = partitions[0].clone().into();
+    let tmpl: LogicalPartitionDetail = partition.into();
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
@@ -387,6 +399,9 @@ async fn fetch_logical_partitions(
             .find_nv_link_logical_partitions_by_ids(request_partitions)
             .await
             .map(|response| response.into_inner())?;
+        if next_partitions.partitions.is_empty() {
+            return Ok(show_partitions);
+        }
         partitions.extend(next_partitions.partitions);
     } else {
         let mut offset = 0;
@@ -417,11 +432,7 @@ async fn fetch_logical_partitions(
     let mut map: HashMap<_, Vec<forgerpc::NvLinkPartition>> = HashMap::new();
     let mut member_map: HashMap<NvLinkPartitionId, Vec<ShowPartitionMember>> = HashMap::new();
 
-    let ids = api
-        .find_nv_link_partition_ids(request)
-        .await
-        .map(|response| response.into_inner())
-        .unwrap();
+    let ids = api.find_nv_link_partition_ids(request).await?.into_inner();
 
     if !ids.partition_ids.is_empty() {
         let request = tonic::Request::new(forgerpc::NvLinkPartitionsByIdsRequest {
@@ -431,9 +442,8 @@ async fn fetch_logical_partitions(
 
         let physical_partitions = api
             .find_nv_link_partitions_by_ids(request)
-            .await
-            .map(|response| response.into_inner())
-            .unwrap();
+            .await?
+            .into_inner();
 
         if detail {
             let request = tonic::Request::new(forgerpc::MachineSearchConfig {

@@ -304,7 +304,10 @@ fn narrower_identity_outranks_broader_rules() {
         Case {
             scenario: "BlueField-2",
             identity: bluefield2(),
-            expect: vec![(Dpu, driver(NvidiaBlueField2Dpu))],
+            expect: vec![
+                (Dpu, driver(NvidiaBlueField2Dpu)),
+                (Power, driver(NvidiaBlueFieldPower)),
+            ],
         },
         Case {
             scenario: "BlueField-4",
@@ -538,4 +541,108 @@ fn firmware_and_model_resolve_to_their_quirks() {
             case.scenario
         );
     }
+}
+
+/// Before an exploration report exists, account operations select drivers from
+/// the `ServiceRoot` alone (with the chassis manufacturer for power shelves,
+/// which omit `ServiceRoot.Vendor` and `ServiceRoot.Product`). Prove that this
+/// matches the full report's `Accounts` driver for every accounts rule whose
+/// identity lives in `ServiceRoot` (or power-shelf chassis), and document the
+/// two model-refined policy rules (`nvidia-switch` and `nvidia-viking`) whose
+/// full-report driver refines the `ServiceRoot` driver while sharing the same
+/// `change_password` behavior.
+#[test]
+fn service_root_accounts_selection_matches_full_report_for_every_accounts_rule() {
+    let service_root_only = |full: &PlatformIdentity| PlatformIdentity {
+        service_root: full.service_root.clone(),
+        ..PlatformIdentity::default()
+    };
+    let service_root_plus_chassis_manufacturer = |full: &PlatformIdentity| PlatformIdentity {
+        service_root: full.service_root.clone(),
+        chassis: full
+            .chassis
+            .iter()
+            .map(|c| ChassisIdentity {
+                manufacturer: c.manufacturer.clone(),
+                ..ChassisIdentity::default()
+            })
+            .collect(),
+        ..PlatformIdentity::default()
+    };
+
+    let lenovo_ami = || {
+        let mut id = identity("Lenovo", None);
+        id.service_root.oem_keys = vec!["Ami".to_string()];
+        id
+    };
+    let nvswitch = || {
+        with_chassis(
+            identity("NVIDIA", Some("P3809")),
+            ChassisIdentity {
+                id: "MGX_NVSwitch_0".to_string(),
+                ..ChassisIdentity::default()
+            },
+        )
+    };
+
+    // Every rule whose Accounts selection is determined by ServiceRoot alone.
+    for (scenario, full) in [
+        (
+            "dell",
+            identity("Dell", Some("Integrated Dell Remote Access Controller")),
+        ),
+        ("hpe", identity("HPE", None)),
+        ("lenovo-xcc", identity("Lenovo", None)),
+        ("supermicro", identity("Supermicro", Some("Super Server"))),
+        ("ami-megarac", identity("AMI", None)),
+        ("lenovo-ami", lenovo_ami()),
+        ("nvidia-gbx00-wiwynn", identity("Wiwynn", None)),
+        ("nvidia-gbx00", identity("NVIDIA", Some("GB200 NVL"))),
+        ("nvidia-vera", identity("NVIDIA", Some("VR NVL72"))),
+        ("nvidia-gh", identity("NVIDIA", Some("P3809"))),
+        ("bluefield3", identity("Nvidia", Some("BlueField-3 DPU"))),
+        ("bluefield4", identity("Nvidia", Some("BlueField-4"))),
+    ] {
+        assert_eq!(
+            resolve(&service_root_only(&full)).drivers.get(Accounts),
+            resolve(&full).drivers.get(Accounts),
+            "{scenario}"
+        );
+    }
+
+    // Power shelves omit ServiceRoot vendor/product and require Chassis manufacturer.
+    for (scenario, full) in [
+        ("delta-power-shelf", delta()),
+        ("liteon-power-shelf", liteon()),
+    ] {
+        assert_eq!(
+            resolve(&service_root_plus_chassis_manufacturer(&full))
+                .drivers
+                .get(Accounts),
+            resolve(&full).drivers.get(Accounts),
+            "{scenario}"
+        );
+    }
+
+    // Model-refined rules: ServiceRoot selects the parent vendor/product driver
+    // (same `change_password`), while the full report selects the model-specific
+    // policy driver.
+    assert_eq!(
+        resolve(&service_root_only(&nvswitch()))
+            .drivers
+            .get(Accounts),
+        &CapabilitySelection::Driver(NvidiaGh200Accounts)
+    );
+    assert_eq!(
+        resolve(&nvswitch()).drivers.get(Accounts),
+        &CapabilitySelection::Driver(NvidiaSwitchAccounts)
+    );
+    assert_eq!(
+        resolve(&service_root_only(&viking())).drivers.get(Accounts),
+        &CapabilitySelection::Driver(AmiMegaRacAccounts)
+    );
+    assert_eq!(
+        resolve(&viking()).drivers.get(Accounts),
+        &CapabilitySelection::Driver(NvidiaVikingAccounts)
+    );
 }

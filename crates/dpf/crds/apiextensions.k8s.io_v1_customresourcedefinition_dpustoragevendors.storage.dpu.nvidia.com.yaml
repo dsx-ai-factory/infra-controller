@@ -128,8 +128,9 @@ spec:
                   type: object
                 type: array
               dpuClusters:
-                description: DPUClusters is the list of clusters on which the DPUStorageVendor
-                  is deployed.
+                description: |-
+                  DPUClusters is the list of clusters on which the
+                  DPUStorageVendor is deployed.
                 items:
                   description: ObjectReference represents a reference to a Kubernetes
                     object.
@@ -149,8 +150,9 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
             type: object

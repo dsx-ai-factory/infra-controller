@@ -138,7 +138,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 
 	// Verify if vpc is ready
 	if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
-		logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request data must be in Ready state in order to create VPC prefix", apiRequest.VpcID))
+		logger.Warn().Msgf("VPC: %v specified in request data must be in Ready state in order to create VPC prefix", apiRequest.VpcID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "VPC specified in request data must be in Ready state in order to create VPC prefix", nil)
 	}
 
@@ -154,7 +154,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("The Site: %v where the VPC prefix is being created must be in Registered state in order to proceed", vpc.SiteID.String()))
+		logger.Warn().Msgf("The Site: %v where the VPC prefix is being created must be in Registered state in order to proceed", vpc.SiteID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the VPC prefix is being created must be in Registered state in order to proceed", nil)
 	}
 
@@ -193,7 +193,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 	err = cdb.WithTx(ctx, csh.dbSession, func(tx *cdb.Tx) error {
 		// acquire an advisory lock on the parent IP block ID on which there could be contention
 		// this lock is released when the transaction commits or rollsback
-		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID.String(), ipBlockID.String())), nil)
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID, ipBlockID)), nil)
 		if derr != nil {
 			// TODO add a retry here
 			logger.Error().Err(derr).Msg("Failed to acquire advisory lock on ipblock")
@@ -893,7 +893,7 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 		}
 		if tot > 0 {
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Another VPC prefix with specified name already exists for Tenant", validation.Errors{
-				"id": fmt.Errorf("%v", vps[0].ID.String()),
+				"id": fmt.Errorf("%v", vps[0].ID),
 			})
 		}
 	}

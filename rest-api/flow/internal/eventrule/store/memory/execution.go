@@ -4,7 +4,7 @@
 package memory
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -218,7 +218,7 @@ func (s *Store) claimExecutions(
 			return order
 		}
 
-		return cmp.Compare(a.ID.String(), b.ID.String())
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 	batch := eventrule.ExecutionClaimBatch{
 		Claims:           make([]eventrule.ClaimedExecution, 0, request.Limit),
@@ -353,7 +353,7 @@ func (s *Store) Executions() ([]eventrule.Execution, error) {
 	}
 
 	slices.SortFunc(executions, func(a, b eventrule.Execution) int {
-		return cmp.Compare(a.ID.String(), b.ID.String())
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 
 	return executions, nil

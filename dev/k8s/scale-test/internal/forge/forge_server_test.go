@@ -58,11 +58,8 @@ func (f *fakeForge) reply(ctx context.Context, name string) (*emptypb.Empty, err
 		_ = grpc.SetTrailer(ctx, metadata.Pairs("grpc-retry-pushback-ms", f.pushback))
 	}
 	if f.block != nil {
-		select {
-		case <-f.block:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+		// A stalled server sends no status: returning on its own deadline can race a CANCELLED status ahead of the client's deadline error.
+		<-f.block
 	}
 	return &emptypb.Empty{}, f.err
 }

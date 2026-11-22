@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
-use std::fmt;
+use std::fmt::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -23,8 +23,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use carbide_machine_controller::dpf::{DpfOperations, validate_reprovision_compatibility};
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
+use db::dpu_machine_update;
 use db::work_lock_manager::WorkLock;
-use db::{TransactionVending as _, dpu_machine_update};
 use model::dpu_machine_update::{DpuMachineUpdate, OutdatedDpfDpu};
 use model::machine::{ManagedHostStateSnapshot, dpf_based_dpu_provisioning_possible};
 use sqlx::PgConnection;
@@ -158,9 +158,15 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 }
             }
 
-            let dpu_update_string = machine_updates.iter().fold("".to_string(), |output, dpu| {
-                output + format!("{} ({}) ", dpu.dpu_machine_id, dpu.firmware_version).as_str()
-            });
+            let mut dpu_update_string = String::new();
+            for dpu in &machine_updates {
+                write!(
+                    dpu_update_string,
+                    "{} ({}) ",
+                    dpu.dpu_machine_id, dpu.firmware_version
+                )
+                .expect("writing to a String cannot fail");
+            }
 
             let mut txn = super::update_transaction(pool, work_lock).await?;
             match dpu_machine_update::trigger_reprovisioning_for_managed_host(
@@ -294,15 +300,13 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 .store(outdated_dpus.len() as u64, Ordering::Relaxed);
         }
 
-        let mut txn = pool.txn_begin().await?;
-        match dpu_machine_update::get_fw_updates_running_count(&mut txn).await {
+        match dpu_machine_update::get_fw_updates_running_count(pool).await {
             Ok(count) => {
                 if let Some(metrics) = &self.metrics {
                     metrics
                         .running_dpu_updates
                         .store(count as u64, Ordering::Relaxed);
                 }
-                txn.commit().await?;
             }
             Err(e) => tracing::warn!(
                 error = %e,

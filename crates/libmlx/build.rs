@@ -288,6 +288,18 @@ fn generate_filters_code(filter_set: &FilterSet) -> String {
     code
 }
 
+fn string_values_code(values: &[String]) -> impl std::fmt::Display + '_ {
+    std::fmt::from_fn(move |formatter| {
+        for (index, value) in values.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str(", ")?;
+            }
+            write!(formatter, "{value:?}.to_string()")?;
+        }
+        Ok(())
+    })
+}
+
 // generate_single_filter_code generates code for a single device filter.
 fn generate_single_filter_code(filter: &Filter) -> String {
     let field_code = match filter.field {
@@ -300,15 +312,7 @@ fn generate_single_filter_code(filter: &Filter) -> String {
         Field::Status => "crate::device::filters::DeviceField::Status",
     };
 
-    let values_code = format!(
-        "vec![{}]",
-        filter
-            .values
-            .iter()
-            .map(|v| format!("{v:?}.to_string()"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    let values_code = string_values_code(&filter.values);
 
     let match_mode_code = match filter.match_mode {
         MatchModeLocal::Regex => "crate::device::filters::MatchMode::Regex",
@@ -317,7 +321,7 @@ fn generate_single_filter_code(filter: &Filter) -> String {
     };
 
     format!(
-        "crate::device::filters::DeviceFilter {{ field: {field_code}, values: {values_code}, match_mode: {match_mode_code} }}",
+        "crate::device::filters::DeviceFilter {{ field: {field_code}, values: vec![{values_code}], match_mode: {match_mode_code} }}",
     )
 }
 
@@ -415,11 +419,7 @@ fn generate_spec_code(spec: &Spec) -> String {
         Spec::Enum { options } => {
             format!(
                 "crate::variables::spec::MlxVariableSpec::builder().enum_type().with_options(vec![{}]).build()",
-                options
-                    .iter()
-                    .map(|opt| format!("{opt:?}.to_string()"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                string_values_code(options)
             )
         }
         Spec::Preset { max_preset } => {
@@ -440,11 +440,7 @@ fn generate_spec_code(spec: &Spec) -> String {
         Spec::EnumArray { options, size } => {
             format!(
                 "crate::variables::spec::MlxVariableSpec::builder().enum_array().with_options(vec![{}]).with_size({size}).build()",
-                options
-                    .iter()
-                    .map(|opt| format!("{opt:?}.to_string()"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                string_values_code(options)
             )
         }
         Spec::BinaryArray { size } => {

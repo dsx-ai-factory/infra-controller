@@ -74,13 +74,11 @@ async fn preingestion_state(
     pool: &PgPool,
     ip_addr: IpAddr,
 ) -> Result<PreingestionState, Box<dyn std::error::Error>> {
-    let mut txn = pool.txn_begin().await?;
-    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, pool)
         .await?
         .pop()
         .expect("endpoint should exist")
         .preingestion_state;
-    txn.commit().await?;
     Ok(state)
 }
 
@@ -149,8 +147,7 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
         "Expected SetNtpServers with the site NTP servers in configured order, IPv6 unbracketed"
     );
 
-    let mut txn = pool.txn_begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &pool).await?;
     let endpoint = endpoints.first().expect("Endpoint should exist");
     assert!(
         matches!(
@@ -163,7 +160,6 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
         "Expected SetNtpServers wait after applying NTP, got: {:?}",
         endpoint.preingestion_state
     );
-    txn.commit().await?;
 
     // The next iteration should still wait for BMC NTP convergence.
     mgr.run_single_iteration().await?;
@@ -181,15 +177,13 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
     // Once the convergence wait has elapsed, time sync and firmware checks complete.
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.txn_begin().await.unwrap();
     // Should go directly to complete since time is in sync and firmware is up to date
     assert!(
-        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+        db::explored_endpoints::find_all_preingestion_complete(&pool)
             .await?
             .len()
             == 1
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -255,14 +249,12 @@ async fn test_preingestion_set_ntp_servers_empty(
     );
 
     // Expect to go to complete since no need to set NTP server config.
-    let mut txn = pool.txn_begin().await.unwrap();
     assert_eq!(
-        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+        db::explored_endpoints::find_all_preingestion_complete(&pool)
             .await?
             .len(),
         1
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -326,14 +318,12 @@ async fn test_preingestion_set_ntp_servers_max_attempts(
     );
 
     // The next iteration should go to complete since NTP setup is given up.
-    let mut txn = pool.txn_begin().await.unwrap();
     assert_eq!(
-        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+        db::explored_endpoints::find_all_preingestion_complete(&pool)
             .await?
             .len(),
         1
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -404,9 +394,7 @@ async fn test_preingestion_time_sync_reset_flow(
         "Expected SetUtcTimezone action to be called during TimeSyncReset Start phase"
     );
 
-    let mut txn = pool.txn_begin().await.unwrap();
-    let endpoints =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
     assert_eq!(endpoints.len(), 1);
     let endpoint = endpoints.first().unwrap();
     match &endpoint.preingestion_state {
@@ -420,7 +408,6 @@ async fn test_preingestion_time_sync_reset_flow(
             );
         }
     }
-    txn.commit().await?;
 
     // Run iteration - should power on host and move to WaitHostBoot
     mgr.run_single_iteration().await?;
@@ -449,10 +436,9 @@ async fn test_preingestion_time_sync_reset_flow(
     // proceed to check firmware versions which should complete since firmware is up-to-date
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.txn_begin().await.unwrap();
     // After time sync reset completes and firmware check runs, endpoint should be in Complete state
     // since the firmware versions are already up-to-date
-    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &pool).await?;
     let endpoint = endpoints.first().expect("Endpoint should exist");
     assert_eq!(
         endpoint.preingestion_state,
@@ -460,7 +446,6 @@ async fn test_preingestion_time_sync_reset_flow(
         "Expected Complete after successful time sync and firmware check, got: {:?}",
         endpoint.preingestion_state
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -944,14 +929,12 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
 
     // Precondition: the host's BMC IP resolves to an ingested machine. If this
     // ever stops holding, the test below would silently stop exercising the gate.
-    let mut txn = pool.txn_begin().await.unwrap();
     assert!(
-        db::machine::find_id_by_bmc_ip(txn.as_mut(), &host_bmc_ip)
+        db::machine::find_id_by_bmc_ip(&pool, &host_bmc_ip)
             .await?
             .is_some(),
         "managed host BMC IP should map to an ingested machine"
     );
-    txn.commit().await?;
 
     let mut config = default_config::get();
     // Empty NTP config so the SetNtpServers state advances straight into
@@ -1007,8 +990,7 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
 
     // Despite the skew, the gate must keep the endpoint out of the TimeSyncReset
     // state machine entirely; it continues with the firmware check instead.
-    let mut txn = pool.txn_begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all_by_ip(host_bmc_ip, &mut txn).await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(host_bmc_ip, &pool).await?;
     let endpoint = endpoints.first().expect("Endpoint should exist");
     assert!(
         !matches!(
@@ -1018,7 +1000,6 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
         "ingested host should never enter TimeSyncReset, got: {:?}",
         endpoint.preingestion_state
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1073,8 +1054,7 @@ async fn test_preingestion_time_sync_check_error_fails(
 
     // The test passes if it doesn't panic - the mock BMC should return valid time
     // and the endpoint should proceed to completion or firmware check
-    let mut txn = pool.txn_begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_all(&pool).await?;
     assert_eq!(endpoints.len(), 1);
     // Just verify we didn't fail - we should be in Complete or some valid state
     let endpoint = &endpoints[0];
@@ -1086,7 +1066,6 @@ async fn test_preingestion_time_sync_check_error_fails(
             // Expected - time check passed or we're in a valid processing state
         }
     }
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1150,9 +1129,8 @@ async fn test_preingestion_time_sync_retry_logic(
     // and proceed to check firmware which should complete since firmware is up-to-date
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.txn_begin().await.unwrap();
     // After time sync reset completes and firmware check runs, endpoint should be in Complete state
-    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &pool).await?;
     let endpoint = endpoints.first().expect("Endpoint should exist");
 
     // With a working mock BMC, time sync should succeed and firmware check should complete
@@ -1175,7 +1153,6 @@ async fn test_preingestion_time_sync_retry_logic(
             // Could be other states if firmware upgrade is needed
         }
     }
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1237,8 +1214,7 @@ async fn test_time_sync_retry_reenters_reset_before_failing(
 
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.txn_begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &pool).await?;
     match &endpoints
         .first()
         .expect("endpoint should exist")
@@ -1254,7 +1230,6 @@ async fn test_time_sync_retry_reenters_reset_before_failing(
         }
         other => panic!("expected a retried TimeSyncReset, got: {other:?}"),
     }
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1314,8 +1289,7 @@ async fn test_time_sync_fails_after_max_attempts(
 
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.txn_begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &pool).await?;
     match &endpoints
         .first()
         .expect("endpoint should exist")
@@ -1329,7 +1303,6 @@ async fn test_time_sync_fails_after_max_attempts(
         }
         other => panic!("expected Failed after exhausting retries, got: {other:?}"),
     }
-    txn.commit().await?;
 
     Ok(())
 }

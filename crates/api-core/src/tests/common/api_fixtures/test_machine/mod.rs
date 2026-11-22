@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
-use db::TransactionVending as _;
+use db::db_read::DbReader;
 use model::machine::{Machine, ManagedHostState};
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
@@ -65,36 +65,36 @@ where
 
     pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Box<Machine<ID>> {
         env.run_machine_state_controller_iteration().await;
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let dpu = self.db_machine(&mut txn).await;
-        txn.commit().await.unwrap();
-        dpu
+        self.db_machine(&env.pool).await
     }
 
     // A machine contains its inventory, status and configuration inline. Boxing
     // here keeps each lookup result out of the calling test's async frame.
-    pub(in crate::tests) async fn db_machine(&self, txn: &mut Txn<'_>) -> Box<Machine<ID>> {
+    pub(in crate::tests) async fn db_machine(&self, db: impl DbReader<'_>) -> Box<Machine<ID>> {
         Box::new(
-            db::machine::find_one(txn.as_mut(), &self.id, Default::default())
+            db::machine::find_one(db, &self.id, Default::default())
                 .await
                 .unwrap()
                 .unwrap(),
         )
     }
 
-    pub(in crate::tests) async fn bmc_access(&self, txn: &mut Txn<'_>) -> BmcAccessInfo {
-        let addr = self.db_machine(txn).await.bmc_addr().unwrap();
-        db::machine_interface::lookup_bmc_access_info(txn.as_mut(), addr.ip(), Some(addr.port()))
+    pub(in crate::tests) async fn bmc_access<DB>(&self, db: &mut DB) -> BmcAccessInfo
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        let addr = self.db_machine(&mut *db).await.bmc_addr().unwrap();
+        db::machine_interface::lookup_bmc_access_info(db, addr.ip(), Some(addr.port()))
             .await
             .unwrap()
     }
 
     pub(in crate::tests) async fn first_interface(
         &self,
-        txn: &mut Txn<'_>,
+        db: impl DbReader<'_>,
     ) -> TestMachineInterface {
         TestMachineInterface::new(
-            db::machine_interface::find_by_machine_ids(txn, &[self.id])
+            db::machine_interface::find_by_machine_ids(db, &[self.id])
                 .await
                 .unwrap()
                 .get(&self.id)
@@ -165,15 +165,15 @@ where
             .unwrap();
     }
 
-    pub(in crate::tests) async fn bmc_ip(&self, txn: &mut Txn<'_>) -> Option<IpAddr> {
-        let machine = self.db_machine(txn).await;
+    pub(in crate::tests) async fn bmc_ip(&self, db: impl DbReader<'_>) -> Option<IpAddr> {
+        let machine = self.db_machine(db).await;
         machine.bmc_addr().map(|addr| addr.ip())
     }
 
     /// Replaces the model in this machine's persisted Site Explorer report.
     pub(in crate::tests) async fn set_exploration_model(&self, txn: &mut Txn<'_>, model: &str) {
         let bmc_ip = self
-            .bmc_ip(txn)
+            .bmc_ip(txn.as_mut())
             .await
             .expect("fixture machine should have a BMC IP");
         let endpoint = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![bmc_ip])

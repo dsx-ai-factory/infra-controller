@@ -1013,7 +1013,7 @@ pub(super) async fn update_nvue(
             let path = FPath(startup_path);
             path.cleanup();
             let file_changed = write(next_contents, &path, "NVUE", MAX_EXPECTED_SIZE, force)
-                .wrap_err(format!("NVUE config at {path}"))?;
+                .wrap_err_with(|| format!("NVUE config at {path}"))?;
 
             if !skip_post {
                 // The agent can restart after saving the file but before
@@ -2346,13 +2346,13 @@ async fn tenant_vf_mac(vlan_fdb: &[Fdb]) -> eyre::Result<&str> {
     let ovs_side = format!("{}_r", vlan_fdb[0].ifname);
     let mut cmd = TokioCommand::new("ip");
     cmd.kill_on_drop(true);
-    let cmd = cmd.args(["-j", "address", "show", &ovs_side.to_string()]);
+    let cmd = cmd.args(["-j", "address", "show", ovs_side.as_str()]);
     let cmd_str = super::pretty_cmd(cmd.as_std());
 
     let cmd_res = timeout(Duration::from_secs(5), cmd.output())
         .await
         .wrap_err_with(|| format!("timeout calling {cmd_str}"))?;
-    let ip_out = cmd_res.wrap_err(cmd_str.to_string())?;
+    let ip_out = cmd_res.wrap_err_with(|| cmd_str)?;
 
     if !ip_out.status.success() {
         tracing::debug!(
@@ -2367,7 +2367,7 @@ async fn tenant_vf_mac(vlan_fdb: &[Fdb]) -> eyre::Result<&str> {
         ));
     }
 
-    let ip_json = String::from_utf8_lossy(&ip_out.stdout).to_string();
+    let ip_json = String::from_utf8_lossy(&ip_out.stdout);
     let ip_show: Vec<IpShow> = serde_json::from_str(&ip_json)?;
     if ip_show.len() != 1 {
         eyre::bail!("getting local side MAC should return 1 entry, got {ip_show:?}");
@@ -2420,8 +2420,12 @@ fn hostname() -> eyre::Result<Hostname> {
         .split('.')
         .next()
         .map(|s| s.to_owned())
-        .ok_or(eyre::eyre!("empty hostname?"))?;
-    let search_domain = fqdn.split('.').skip(1).collect::<Vec<&str>>().join(".");
+        .ok_or_else(|| eyre::eyre!("empty hostname?"))?;
+    let search_domain = fqdn
+        .split_once('.')
+        .map(|(_, domain)| domain)
+        .unwrap_or_default()
+        .to_owned();
     Ok(Hostname {
         hostname,
         search_domain,
@@ -5183,7 +5187,7 @@ esac
             .expect("service port has addresses");
         for address in ["10.217.5.168/31", "10.217.5.170/31", "2001:db8:100::10/127"] {
             assert!(
-                addresses.contains_key(serde_yaml::Value::String(address.to_string())),
+                addresses.contains_key(address),
                 "missing grouped service address {address}"
             );
         }
@@ -5205,17 +5209,9 @@ esac
             .expect("two YAML documents")[1]["set"]["interface"]["iface_svc_0"]["ip"]["address"]
             .as_mapping()
             .expect("surviving service port has addresses");
-        assert!(
-            !survivor_addresses
-                .contains_key(serde_yaml::Value::String("10.217.5.168/31".to_string()))
-        );
-        assert!(
-            survivor_addresses
-                .contains_key(serde_yaml::Value::String("10.217.5.170/31".to_string()))
-        );
-        assert!(survivor_addresses.contains_key(serde_yaml::Value::String(
-            "2001:db8:100::10/127".to_string()
-        )));
+        assert!(!survivor_addresses.contains_key("10.217.5.168/31"));
+        assert!(survivor_addresses.contains_key("10.217.5.170/31"));
+        assert!(survivor_addresses.contains_key("2001:db8:100::10/127"));
 
         // Remove the final endpoints and prove the host keeps its port, VRF, and routing neighbor.
         config.service_interfaces.clear();
@@ -5801,7 +5797,7 @@ esac
             !service_vrf
                 .as_mapping()
                 .expect("service VPC VRF")
-                .contains_key(serde_yaml::Value::String("loopback".to_string()))
+                .contains_key("loopback")
         );
 
         // Inspect only this service VRF's default imports and route targets.
@@ -7101,7 +7097,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7161,7 +7157,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7230,7 +7226,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7286,7 +7282,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7845,7 +7841,7 @@ esac
         // check dhcp server
         let dhcp_path = hbn_root.join("etc/supervisor/conf.d/default-forge-dhcp-server.conf");
         let dhcp_contents = super::read_limited(&dhcp_path, MAX_DHCP_ACL_SIZE)
-            .wrap_err(format!("failed reading {dhcp_path:?}"))?;
+            .wrap_err_with(|| format!("failed reading {dhcp_path:?}"))?;
         assert_eq!(dhcp_contents, crate::dhcp::TMPL_EMPTY);
         Ok(())
     }
@@ -8998,7 +8994,7 @@ esac
                 service_interfaces: vec![],
                 service_vpc_slot_inventory: None,
                 use_admin_network,
-                admin_interface: use_admin_network.then_some(iface.clone()),
+                admin_interface: use_admin_network.then(|| iface.clone()),
                 tenant_interfaces: (!use_admin_network)
                     .then_some(vec![iface])
                     .unwrap_or_default(),

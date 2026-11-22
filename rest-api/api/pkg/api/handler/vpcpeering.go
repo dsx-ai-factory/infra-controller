@@ -122,25 +122,25 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 	vpc1, err := vpcDAO.GetByID(ctx, nil, vpc1ID, nil)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpc1ID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpc1ID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving VPC 1 from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 1 with ID: %s, DB error", vpc1ID.String()), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 1 with ID: %s, DB error", vpc1ID), nil)
 	}
 	vpc2, err := vpcDAO.GetByID(ctx, nil, vpc2ID, nil)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpc2ID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpc2ID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving VPC 2 from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 2 with ID: %s, DB error", vpc2ID.String()), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 2 with ID: %s, DB error", vpc2ID), nil)
 	}
 
 	// Validate VPCs are both on the provided site
 	if vpc1.SiteID != site.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC 1: %s does not belong to Site: %s", vpc1ID.String(), site.ID.String()), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC 1: %s does not belong to Site: %s", vpc1ID, site.ID), nil)
 	} else if vpc2.SiteID != site.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC 2: %s does not belong to Site: %s", vpc2ID.String(), site.ID.String()), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC 2: %s does not belong to Site: %s", vpc2ID, site.ID), nil)
 	}
 
 	// Validate VPCs are in Ready state
@@ -459,7 +459,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gavph.dbSession)
 		if err != nil {
 			if errors.Is(err, common.ErrInvalidID) {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in siteId query: %v", siteIDStr))
+				logger.Warn().Msgf("invalid value in siteId query: %v", siteIDStr)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Site ID %v in query", siteIDStr), nil)
 			}
 			if errors.Is(err, cdb.ErrDoesNotExist) {
@@ -513,7 +513,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses))
 		for _, status := range qStatuses {
 			if !cdbm.VpcPeeringStatusMap[status] {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Status value %v in query", status), nil)
 			}
 			filterInput.Statuses = append(filterInput.Statuses, status)
@@ -528,7 +528,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		for _, vpcIDStr := range vpcIDStrs {
 			vpcID, err := uuid.Parse(vpcIDStr)
 			if err != nil {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in vpcId query: %v", vpcIDStr))
+				logger.Warn().Msgf("invalid value in vpcId query: %v", vpcIDStr)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid VPC ID %v in query", vpcIDStr), nil)
 			}
 			vpcIDs = append(vpcIDs, vpcID)
@@ -551,7 +551,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		}
 		for _, vpcID := range vpcIDs {
 			if _, ok := vpcIDsMap[vpcID]; !ok {
-				logger.Warn().Msg(fmt.Sprintf("could not find VPC with ID %v specified in query", vpcID))
+				logger.Warn().Msgf("could not find VPC with ID %v specified in query", vpcID)
 				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID %v specified in query", vpcID), nil)
 			}
 		}
@@ -566,7 +566,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		for _, peerTenantIDStr := range peerTenantIDStrs {
 			peerTenantID, err := uuid.Parse(peerTenantIDStr)
 			if err != nil {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in peerTenantId query: %v", peerTenantIDStr))
+				logger.Warn().Msgf("invalid value in peerTenantId query: %v", peerTenantIDStr)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid peer tenant ID %v in query", peerTenantIDStr), nil)
 			}
 			peerTenantIDs = append(peerTenantIDs, peerTenantID)
@@ -589,7 +589,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		}
 		for _, peerTenantID := range peerTenantIDs {
 			if _, ok := peerTenantIDsMap[peerTenantID]; !ok {
-				logger.Warn().Msg(fmt.Sprintf("could not find tenant with ID %v specified in query", peerTenantID))
+				logger.Warn().Msgf("could not find tenant with ID %v specified in query", peerTenantID)
 				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find tenant with ID %v specified in query", peerTenantID), nil)
 			}
 		}
@@ -760,7 +760,7 @@ func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
 	vpcPeering, err := vpcPeeringDAO.GetByID(ctx, nil, peeringUUID, qIncludeRelations)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC Peering with ID: %s", peeringUUID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC Peering with ID: %s", peeringUUID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving VPC Peering from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve VPC Peering", nil)
@@ -775,19 +775,19 @@ func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
 		vpc1, err := vpcDAO.GetByID(ctx, nil, vpcPeering.Vpc1ID, []string{cdbm.TenantRelationName})
 		if err != nil {
 			if err == cdb.ErrDoesNotExist {
-				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc1ID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc1ID), nil)
 			}
 			logger.Error().Err(err).Msg("error retrieving VPC 1 of VPC Peering from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 1 with ID: %s, DB error", vpcPeering.Vpc1ID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 1 with ID: %s, DB error", vpcPeering.Vpc1ID), nil)
 		}
 
 		vpc2, err := vpcDAO.GetByID(ctx, nil, vpcPeering.Vpc2ID, []string{cdbm.TenantRelationName})
 		if err != nil {
 			if err == cdb.ErrDoesNotExist {
-				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc2ID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc2ID), nil)
 			}
 			logger.Error().Err(err).Msg("error retrieving VPC 2 of VPC Peering from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 2 with ID: %s, DB error", vpcPeering.Vpc2ID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 2 with ID: %s, DB error", vpcPeering.Vpc2ID), nil)
 		}
 
 		// Validate that Tenant owns one of the VPCs of the VPC Peering
@@ -903,7 +903,7 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 	vpcPeering, err := vpcPeeringDAO.GetByID(ctx, nil, vpcPeeringID, nil)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC Peering with ID: %s", vpcPeeringID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC Peering with ID: %s", vpcPeeringID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving VPC Peering from DB by ID")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve VPC Peering with specified ID", nil)
@@ -914,18 +914,18 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 	vpc1, err := vpcDAO.GetByID(ctx, nil, vpcPeering.Vpc1ID, nil)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc1ID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc1ID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving VPC 1 of VPC Peering from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 1 with ID: %s, DB error", vpcPeering.Vpc1ID.String()), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 1 with ID: %s, DB error", vpcPeering.Vpc1ID), nil)
 	}
 	vpc2, err := vpcDAO.GetByID(ctx, nil, vpcPeering.Vpc2ID, nil)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc2ID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find VPC with ID: %s", vpcPeering.Vpc2ID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving VPC 2 of VPC Peering from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 2 with ID: %s, DB error", vpcPeering.Vpc2ID.String()), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve VPC 2 with ID: %s, DB error", vpcPeering.Vpc2ID), nil)
 	}
 
 	isMultiTenant := vpc1.TenantID != vpc2.TenantID
@@ -970,6 +970,9 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 	if !providerAuthorized && !tenantAuthorized {
 		logger.Warn().Msg("User does not have access to delete the VPC Peering")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have access to delete the VPC Peering", nil)
+	}
+	if vpc1.IsCreationPendingOrRejected() || vpc2.IsCreationPendingOrRejected() {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation does not establish ownership of the Site VPC Peering; deletion is blocked", nil)
 	}
 
 	// timeoutResp lets the closure signal a post-rollback handler — the

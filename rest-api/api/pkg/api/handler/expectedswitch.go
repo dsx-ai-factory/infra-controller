@@ -467,7 +467,7 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)
@@ -587,7 +587,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)
@@ -793,7 +793,7 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)

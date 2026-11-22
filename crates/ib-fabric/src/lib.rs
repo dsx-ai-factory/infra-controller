@@ -31,6 +31,7 @@ use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
+use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{self, DatabaseError};
 use health_report::HealthReportApplyMode;
@@ -48,7 +49,7 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
 };
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -243,12 +244,7 @@ impl IbFabricMonitor {
             return Ok(0);
         }
 
-        let mut conn = self
-            .db_pool
-            .acquire()
-            .await
-            .map_err(|e| IbError::from(DatabaseError::new("acquire connection", e)))?;
-        let snapshots = match self.get_all_snapshots(&mut conn).await {
+        let snapshots = match self.get_all_snapshots().await {
             Ok(snapshots) => snapshots,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to load ManagedHost snapshots in IbFabricMonitor");
@@ -262,21 +258,20 @@ impl IbFabricMonitor {
             }
         };
 
-        let tenant_partitions = match get_tenant_partitions(&mut conn, &self.instrumentation).await
-        {
-            Ok(snapshots) => snapshots,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to load Partition data in IbFabricMonitor");
-                // Record the same error for all fabrics, so that the problem is at least visible on dashboards
-                for fabric in self.fabrics.keys() {
-                    metrics.num_fabrics += 1;
-                    let fabric_metrics = metrics.fabrics.entry(fabric.to_string()).or_default();
-                    fabric_metrics.fabric_error = "ManagedHostSnapshotLoadingError".to_string();
+        let tenant_partitions =
+            match get_tenant_partitions(&self.db_pool, &self.instrumentation).await {
+                Ok(snapshots) => snapshots,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to load Partition data in IbFabricMonitor");
+                    // Record the same error for all fabrics, so that the problem is at least visible on dashboards
+                    for fabric in self.fabrics.keys() {
+                        metrics.num_fabrics += 1;
+                        let fabric_metrics = metrics.fabrics.entry(fabric.to_string()).or_default();
+                        fabric_metrics.fabric_error = "ManagedHostSnapshotLoadingError".to_string();
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
-        drop(conn); // Don't reuse the postgres connection later on. It might be stale
+            };
 
         // Create a reverse mapping from pkeys to partition IDs
         // That makes the lookup of which partition ID is associated with GUIDs
@@ -653,10 +648,9 @@ impl IbFabricMonitor {
 
     async fn get_all_snapshots(
         &self,
-        txn: &mut PgConnection,
     ) -> IbResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
         let machine_ids = db::machine::find_machine_ids::<HostMachineId>(
-            &mut *txn,
+            &self.db_pool,
             MachineSearchConfig {
                 include_predicted_host: true,
                 ..Default::default()
@@ -665,7 +659,7 @@ impl IbFabricMonitor {
         .await?;
 
         db::managed_host::load_by_machine_ids(
-            txn,
+            &mut PgPoolReader::from(self.db_pool.clone()),
             &machine_ids,
             LoadSnapshotOptions {
                 include_history: false,
@@ -1156,11 +1150,11 @@ async fn apply_guid_pkey_changes(
 
 /// Find all active partitions in order to determine pkeys
 async fn get_tenant_partitions(
-    txn: &mut PgConnection,
+    pool: &PgPool,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<HashMap<IBPartitionId, IBPartition>, IbError> {
     let partition_ids = db::ib_partition::find_ids(
-        &mut *txn,
+        pool,
         IbPartitionSearchFilter {
             tenant_org_id: None,
             name: None,
@@ -1175,7 +1169,7 @@ async fn get_tenant_partitions(
         let page_size = PAGE_SIZE.min(partition_ids.len() - offset);
         let next_ids = &partition_ids[offset..offset + page_size];
         let partition_data = db::ib_partition::find_by(
-            &mut *txn,
+            pool,
             db::ObjectColumnFilter::List(db::ib_partition::IdColumn, next_ids),
             instrumentation,
         )
@@ -1734,12 +1728,7 @@ async fn preload_sku_inactive_devices(
         return Ok(HashMap::new());
     }
 
-    let mut conn = db_pool
-        .acquire()
-        .await
-        .map_err(|e| DatabaseError::new("acquire connection", e))?;
-
-    let skus = db::sku::find(&mut conn, &sku_ids)
+    let skus = db::sku::find(db_pool, &sku_ids)
         .await
         .map_err(|e| IbError::internal(format!("Failed to load SKUs: {e}")))?;
 
