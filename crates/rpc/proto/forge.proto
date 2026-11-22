@@ -5237,6 +5237,10 @@ message MachineStatus {
   repeated InterfaceLldp lldp_neighbors = 25;
   // Observed BMC versions, populated even when individual versions are unknown.
   BmcStatus bmc_status = 26;
+  // Last hardware command reserved on this host, including a command targeting an attached DPU.
+  // Read the host's status for that reservation. Without a saved record this protobuf field
+  // is unset and the Rust machine JSON renders it as null.
+  optional NicFirmwareDispatchStatus nic_firmware_dispatch = 27;
 }
 
 message Machine {
@@ -14839,5 +14843,59 @@ message CancelVpcCreationResponse {
     Vpc created_vpc = 1;
     // This ID cannot be created later and unfinished allocation cleanup is complete.
     google.protobuf.Empty cancelled = 2;
+  }
+}
+
+// Read-only evidence of the hardware reservation used to exclude conflicting NIC firmware work.
+// Core retains the last command after settlement until a new command replaces it.
+message NicFirmwareDispatchStatus {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Always populated. Request identity assigned before dispatch.
+  common.UUID token = 1;
+  // Always populated. When Core recorded ownership, before transport delivery.
+  google.protobuf.Timestamp started_at = 2;
+  // When Core released the reservation. Absent while unresolved. For example, Core may
+  // settle when the BMC accepts a reboot, before any observed OS restart, or when it
+  // establishes that a command was never sent. The record does not distinguish the outcomes.
+  optional google.protobuf.Timestamp settled_at = 3;
+
+  // Core sets exactly one origin with the saved target. A reader that does not recognize
+  // the origin cannot use that absence to infer that the command is safe to replay.
+  oneof origin {
+    MlxAdmin mlx_admin = 4;
+    InstanceReboot instance_reboot = 5;
+  }
+
+  message MlxAdmin {
+    // Always populated. The host or attached DPU whose Scout was selected for this request.
+    common.MachineId machine_id = 1;
+    // The mutating MLX admin command saved before delivery. An unknown value conveys no
+    // evidence that the operation can be replayed.
+    Command command = 2;
+
+    enum Command {
+      COMMAND_UNSPECIFIED = 0; // Never emitted by Core.
+      COMMAND_PROFILE_SYNC = 1; // Apply a named configuration profile.
+      COMMAND_CONFIG_SET = 2; // Apply individual configuration settings.
+      COMMAND_CONFIG_SYNC = 3; // Synchronize the supplied configuration assignments.
+      COMMAND_LOCK = 4; // Enable device lockdown.
+      COMMAND_UNLOCK = 5; // Disable device lockdown.
+    }
+  }
+
+  message InstanceReboot {
+    // Always populated. Host selected for the reboot.
+    common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
+    // Always populated. Allocation that authorized the request, even after release.
+    common.InstanceId instance_id = 2;
+    // Always populated from the BMC endpoint captured for this request. Unknown fields are unset.
+    BmcEndpoint bmc = 3;
+    // Latest attempt checkpoint, saved before sending. Absent when no attempt is recorded.
+    optional google.protobuf.Timestamp last_attempt_at = 4;
+    // Earliest time the original worker's reservation permits another controller to reconcile.
+    // The separate retry interval must also elapse. Neither expiry settles the command.
+    // An older unresolved attempt can omit this timestamp. When the reboot handler encounters
+    // such an attempt it requires manual intervention.
+    optional google.protobuf.Timestamp reconcile_after = 5;
   }
 }
