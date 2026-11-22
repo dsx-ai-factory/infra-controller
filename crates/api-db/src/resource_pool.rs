@@ -635,6 +635,58 @@ where
     })
 }
 
+/// `release_by_recorded_owner` frees an exact value using its locked owner ID.
+/// The caller must first authorize release through an immutable entity/value
+/// association; a metadata name alone does not authorize this operation.
+/// Missing or free inventory returns `NotApplied`. Another owner type, or a
+/// rejected release after locking its owner, is an error. Inventory and the
+/// allocation record change through [`release`], preserving its diagnostics.
+/// Commit or roll back this operation together with the authorizing entity change.
+pub async fn release_by_recorded_owner<T>(
+    pool: &ResourcePool<T>,
+    txn: &mut Transaction<'_>,
+    value: T,
+    owner_type: OwnerType,
+) -> Result<ConditionalWrite<(), ResourcePoolAllocationNotOwned>, DatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    T::Err: std::error::Error,
+{
+    let value_text = value.to_string();
+    let query = "SELECT state FROM resource_pool
+                 WHERE name=$1 AND value=$2 FOR UPDATE";
+    let allocation: Option<sqlx::types::Json<ResourcePoolEntryState>> = sqlx::query_scalar(query)
+        .bind(pool.name())
+        .bind(&value_text)
+        .fetch_optional(txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    let owner = match allocation {
+        Some(sqlx::types::Json(ResourcePoolEntryState::Allocated {
+            owner,
+            owner_type: actual_owner_type,
+        })) => {
+            if actual_owner_type != owner_type.to_string() {
+                return Err(DatabaseError::FailedPrecondition(format!(
+                    "value `{value_text}` in pool `{}` is allocated to {actual_owner_type}, not {owner_type}",
+                    pool.name(),
+                )));
+            }
+            owner
+        }
+        None | Some(sqlx::types::Json(ResourcePoolEntryState::Free)) => {
+            return Ok(ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned));
+        }
+    };
+    match release(pool, txn, value, owner_type, &owner).await? {
+        ConditionalWrite::Applied(()) => Ok(ConditionalWrite::Applied(())),
+        ConditionalWrite::NotApplied(_) => Err(DatabaseError::FailedPrecondition(format!(
+            "value `{value_text}` in pool `{}` did not match its locked reservation for owner `{owner}`",
+            pool.name(),
+        ))),
+    }
+}
+
 async fn release_inner(
     txn: &mut PgConnection,
     pool_name: &str,
