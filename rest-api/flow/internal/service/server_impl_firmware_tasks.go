@@ -134,16 +134,22 @@ func (rs *FlowServerImpl) addFirmwareTaskExternalTargets(ctx context.Context, tr
 		}
 		return
 	}
-	results, identityErr := readTaskInventoryTargets(ctx, rs, rackID, details.Operations.Tasks.Entries)
+	rs.attachFirmwareTaskExternalTargets(ctx, tray.RackID, rackID, details.Operations.Tasks.Entries)
+}
+
+// attachFirmwareTaskExternalTargets uses the resolved rack identity for both
+// tray and rack reads. One lookup resolves retained targets for every task.
+func (rs *FlowServerImpl) attachFirmwareTaskExternalTargets(ctx context.Context, rackID uuid.UUID, externalRackID string, entries []*pb.FirmwareTaskDetails) {
+	results, identityErr := readTaskInventoryTargets(ctx, rs, externalRackID, entries)
 	if identityErr != nil {
-		logFirmwareIdentityReadFailure(ctx, tray.RackID.String(), "component_identity_read", identityErr)
+		logFirmwareIdentityReadFailure(ctx, rackID.String(), "component_identity_read", identityErr)
 	}
 	for i, result := range results {
 		external := &pb.FirmwareTaskExternalTargets{RackId: result.rackID, Targets: result.targets}
 		if result.err != nil {
 			external.Error = firmwareDetailsReadError(result.err).Enum()
 		}
-		details.Operations.Tasks.Entries[i].ExternalTargets = external
+		entries[i].ExternalTargets = external
 	}
 }
 

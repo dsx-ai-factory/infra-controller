@@ -99,15 +99,7 @@ func (rs *FlowServerImpl) readCoreFirmwareDetails(ctx context.Context, tray *com
 	if rs.firmwareReader == nil {
 		return unavailableCoreFirmwareDetails(pb.FirmwareDetailsReadError_FIRMWARE_DETAILS_READ_ERROR_NOT_CONFIGURED)
 	}
-	request := &corev1.GetComponentFirmwareDetailsRequest{}
-	switch tray.Type {
-	case devicetypes.ComponentTypeCompute:
-		request.Target = &corev1.GetComponentFirmwareDetailsRequest_MachineIds{MachineIds: &corev1.MachineIdList{MachineIds: []*corev1.MachineId{{Id: tray.ComponentID}}}}
-	case devicetypes.ComponentTypeNVSwitch:
-		request.Target = &corev1.GetComponentFirmwareDetailsRequest_SwitchIds{SwitchIds: &corev1.SwitchIdList{Ids: []*corev1.SwitchId{{Id: tray.ComponentID}}}}
-	case devicetypes.ComponentTypePowerShelf:
-		request.Target = &corev1.GetComponentFirmwareDetailsRequest_PowerShelfIds{PowerShelfIds: &corev1.PowerShelfIdList{Ids: []*corev1.PowerShelfId{{Id: tray.ComponentID}}}}
-	}
+	request := coreFirmwareDetailsRequest(tray.Type, []string{tray.ComponentID})
 	response, err := rs.firmwareReader.GetComponentFirmwareDetails(ctx, request)
 	if ctx.Err() != nil {
 		return unavailableCoreFirmwareDetails(firmwareDetailsReadError(ctx.Err()))
@@ -121,7 +113,39 @@ func (rs *FlowServerImpl) readCoreFirmwareDetails(ctx context.Context, tray *com
 		log.Warn().Str("component_id", tray.Info.ID.String()).Int("entry_count", len(entries)).Msg("Firmware details Core response did not match the requested component")
 		return unavailableCoreFirmwareDetails(pb.FirmwareDetailsReadError_FIRMWARE_DETAILS_READ_ERROR_INVALID_RESPONSE)
 	}
-	entry := entries[0]
+	return coreFirmwareDetailsSections(entries[0])
+}
+
+// coreFirmwareDetailsRequest builds the homogeneous selection required by Core.
+// Callers supply supported kinds and one to 64 unique managed IDs.
+func coreFirmwareDetailsRequest(kind devicetypes.ComponentType, ids []string) *corev1.GetComponentFirmwareDetailsRequest {
+	request := &corev1.GetComponentFirmwareDetailsRequest{}
+	switch kind {
+	case devicetypes.ComponentTypeCompute:
+		machines := &corev1.MachineIdList{}
+		for _, id := range ids {
+			machines.MachineIds = append(machines.MachineIds, &corev1.MachineId{Id: id})
+		}
+		request.Target = &corev1.GetComponentFirmwareDetailsRequest_MachineIds{MachineIds: machines}
+	case devicetypes.ComponentTypeNVSwitch:
+		switches := &corev1.SwitchIdList{}
+		for _, id := range ids {
+			switches.Ids = append(switches.Ids, &corev1.SwitchId{Id: id})
+		}
+		request.Target = &corev1.GetComponentFirmwareDetailsRequest_SwitchIds{SwitchIds: switches}
+	case devicetypes.ComponentTypePowerShelf:
+		shelves := &corev1.PowerShelfIdList{}
+		for _, id := range ids {
+			shelves.Ids = append(shelves.Ids, &corev1.PowerShelfId{Id: id})
+		}
+		request.Target = &corev1.GetComponentFirmwareDetailsRequest_PowerShelfIds{PowerShelfIds: shelves}
+	}
+	return request
+}
+
+// coreFirmwareDetailsSections preserves independent evidence after its caller
+// checks response identity and cardinality. Missing results remain Unsupported.
+func coreFirmwareDetailsSections(entry *corev1.ComponentFirmwareDetails) (*pb.FirmwareActualDetails, *pb.FirmwareDesiredDetails, *pb.FirmwareActionDetails) {
 	actual, desired, actions := unavailableCoreFirmwareDetails(pb.FirmwareDetailsReadError_FIRMWARE_DETAILS_READ_ERROR_UNSUPPORTED)
 	if entry.GetActual().GetResult() != nil {
 		actual.Result = &pb.FirmwareActualDetails_Value{Value: entry.Actual}
