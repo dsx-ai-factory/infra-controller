@@ -3017,7 +3017,7 @@ async fn test_ingestion_firmware_start_waits_when_all_compute_is_desired_off(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             firmware_object_fetcher: Some(Arc::new(StaticFirmwareObjectFetcher {
                 response: Mutex::new(Ok(r#"{"Id":"ingestion"}"#.to_string())),
                 requested_urls: Mutex::new(Vec::new()),
@@ -4275,10 +4275,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         )
     );
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "eligible-late-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             ..Default::default()
         })
         .await;
