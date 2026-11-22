@@ -3155,7 +3155,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg5,
 				reqUser:     tnu5,
 				respCode:    http.StatusBadRequest,
-				respMessage: "either `operatingSystemId` or `ipxeScript` must be specified",
+				respMessage: "either `operatingSystemId`, `ipxeScript` or `bootFromDhcpOptionSet` must be specified",
 			},
 			wantErr: false,
 		},

@@ -165,6 +165,7 @@ type Instance struct {
 	OperatingSystem                        *OperatingSystem                        `bun:"rel:belongs-to,join:operating_system_id=id"`
 	IpxeScript                             *string                                 `bun:"ipxe_script"`
 	AlwaysBootWithCustomIpxe               bool                                    `bun:"always_boot_with_custom_ipxe,notnull"`
+	BootFromDhcpOptionSet                  bool                                    `bun:"boot_from_dhcp_option_set,notnull"`
 	PhoneHomeEnabled                       bool                                    `bun:"phone_home_enabled,notnull"`
 	UserData                               *string                                 `bun:"user_data"`
 	AutoNetwork                            bool                                    `bun:"auto_network,notnull"`
@@ -307,6 +308,7 @@ type InstanceCreateInput struct {
 	OperatingSystemID                      *uuid.UUID
 	IpxeScript                             *string
 	AlwaysBootWithCustomIpxe               bool
+	BootFromDhcpOptionSet                  bool
 	PhoneHomeEnabled                       bool
 	UserData                               *string
 	AutoNetwork                            bool
@@ -343,6 +345,7 @@ type InstanceUpdateCommonInput struct {
 	OperatingSystemID                      *uuid.UUID
 	IpxeScript                             *string
 	AlwaysBootWithCustomIpxe               *bool
+	BootFromDhcpOptionSet                  *bool
 	PhoneHomeEnabled                       *bool
 	UserData                               *string
 	AutoNetwork                            *bool
@@ -919,6 +922,7 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 			OperatingSystemID:                      input.OperatingSystemID,
 			IpxeScript:                             input.IpxeScript,
 			AlwaysBootWithCustomIpxe:               input.AlwaysBootWithCustomIpxe,
+			BootFromDhcpOptionSet:                  input.BootFromDhcpOptionSet,
 			PhoneHomeEnabled:                       input.PhoneHomeEnabled,
 			UserData:                               input.UserData,
 			AutoNetwork:                            input.AutoNetwork,
@@ -1094,6 +1098,11 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 		proto.AlwaysBootWithCustomIpxe = *c.AlwaysBootWithCustomIpxe
 		columns = append(columns, "always_boot_with_custom_ipxe")
 		trace("always_boot_with_custom_ipxe", strconv.FormatBool(*c.AlwaysBootWithCustomIpxe))
+	}
+	if c.BootFromDhcpOptionSet != nil {
+		proto.BootFromDhcpOptionSet = *c.BootFromDhcpOptionSet
+		columns = append(columns, "boot_from_dhcp_option_set")
+		trace("boot_from_dhcp_option_set", fmt.Sprintf("%t", *c.BootFromDhcpOptionSet))
 	}
 	if c.PhoneHomeEnabled != nil {
 		proto.PhoneHomeEnabled = *c.PhoneHomeEnabled

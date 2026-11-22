@@ -26956,6 +26956,9 @@ components:
         alwaysBootWithCustomIpxe:
           type: boolean
           description: Indicates whether the Instance should always execute custom iPXE script when rebooting
+        bootFromDhcpOptionSet:
+          type: boolean
+          description: Indicates whether the Instance boots from the boot URL of its or its VPC's DHCP Option Set
         phoneHomeEnabled:
           type: boolean
           description: Indicates whether the Phone Home service should be enabled or disabled for the Instance
@@ -27257,7 +27260,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: Must be specified if iPXE Script field is empty
+          description: Must be specified if iPXE Script field is empty, unless `bootFromDhcpOptionSet` is true
         powerProfile:
           type:
             - string
@@ -27279,10 +27282,13 @@ components:
           type:
             - string
             - 'null'
-          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified'
+          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified, unless `bootFromDhcpOptionSet` is true'
         alwaysBootWithCustomIpxe:
           type: boolean
           description: 'When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instance. OS must be of iPXE type.'
+        bootFromDhcpOptionSet:
+          type: boolean
+          description: When set to true, the Instance boots from the boot URL of its DHCP Option Set, or of its VPC's DHCP Option Set when the Instance's set has no boot URL. Cannot be specified with `operatingSystemId` or `ipxeScript`. Every boot uses the boot URL, so `alwaysBootWithCustomIpxe` defaults to true and cannot be false.
         phoneHomeEnabled:
           type: boolean
           description: 'When set to true, the Instance will be enabled with the Phone Home service.'
@@ -27441,7 +27447,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: Must be specified if iPXE Script field is empty
+          description: Must be specified if iPXE Script field is empty, unless `bootFromDhcpOptionSet` is true
         powerProfile:
           type:
             - string
@@ -27464,10 +27470,13 @@ components:
           type:
             - string
             - 'null'
-          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified'
+          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified, unless `bootFromDhcpOptionSet` is true'
         alwaysBootWithCustomIpxe:
           type: boolean
           description: 'When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instances. OS must be of iPXE type.'
+        bootFromDhcpOptionSet:
+          type: boolean
+          description: When set to true, the Instances boot from the boot URL of their DHCP Option Set, or of their VPC's DHCP Option Set when the Instances' set has no boot URL. Cannot be specified with `operatingSystemId` or `ipxeScript`. Every boot uses the boot URL, so `alwaysBootWithCustomIpxe` defaults to true and cannot be false.
         phoneHomeEnabled:
           type: boolean
           description: 'When set to true, the Instances will be enabled with the Phone Home service.'
@@ -27668,6 +27677,11 @@ components:
             - boolean
             - 'null'
           description: Whether the custom iPXE data should be used for every boot.
+        bootFromDhcpOptionSet:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the Instance boots from the boot URL of its DHCP Option Set, or of its VPC's DHCP Option Set when the Instance's set has no boot URL. True cannot be specified with `operatingSystemId` or `ipxeScript`, and then `alwaysBootWithCustomIpxe` is set to true and cannot be false. Specifying `operatingSystemId` or `ipxeScript` switches it off, which also sets `alwaysBootWithCustomIpxe` to false unless the request specifies it. Omission or `null` keeps the current value.
         phoneHomeEnabled:
           type:
             - boolean

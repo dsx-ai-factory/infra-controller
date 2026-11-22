@@ -63,6 +63,8 @@ type Instance struct {
 	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// Indicates whether the Instance should always execute custom iPXE script when rebooting
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe,omitempty"`
+	// Indicates whether the Instance boots from the boot URL of its or its VPC's DHCP Option Set
+	BootFromDhcpOptionSet *bool `json:"bootFromDhcpOptionSet,omitempty"`
 	// Indicates whether the Phone Home service should be enabled or disabled for the Instance
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
 	// UserData is inherited from Operating System or specified by user if allowed
@@ -824,6 +826,38 @@ func (o *Instance) SetAlwaysBootWithCustomIpxe(v bool) {
 	o.AlwaysBootWithCustomIpxe = &v
 }
 
+// GetBootFromDhcpOptionSet returns the BootFromDhcpOptionSet field value if set, zero value otherwise.
+func (o *Instance) GetBootFromDhcpOptionSet() bool {
+	if o == nil || IsNil(o.BootFromDhcpOptionSet) {
+		var ret bool
+		return ret
+	}
+	return *o.BootFromDhcpOptionSet
+}
+
+// GetBootFromDhcpOptionSetOk returns a tuple with the BootFromDhcpOptionSet field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Instance) GetBootFromDhcpOptionSetOk() (*bool, bool) {
+	if o == nil || IsNil(o.BootFromDhcpOptionSet) {
+		return nil, false
+	}
+	return o.BootFromDhcpOptionSet, true
+}
+
+// HasBootFromDhcpOptionSet returns a boolean if a field has been set.
+func (o *Instance) HasBootFromDhcpOptionSet() bool {
+	if o != nil && !IsNil(o.BootFromDhcpOptionSet) {
+		return true
+	}
+
+	return false
+}
+
+// SetBootFromDhcpOptionSet gets a reference to the given bool and assigns it to the BootFromDhcpOptionSet field.
+func (o *Instance) SetBootFromDhcpOptionSet(v bool) {
+	o.BootFromDhcpOptionSet = &v
+}
+
 // GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
 func (o *Instance) GetPhoneHomeEnabled() bool {
 	if o == nil || IsNil(o.PhoneHomeEnabled) {
@@ -1529,6 +1563,9 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.AlwaysBootWithCustomIpxe) {
 		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe
+	}
+	if !IsNil(o.BootFromDhcpOptionSet) {
+		toSerialize["bootFromDhcpOptionSet"] = o.BootFromDhcpOptionSet
 	}
 	if !IsNil(o.PhoneHomeEnabled) {
 		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled

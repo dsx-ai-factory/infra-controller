@@ -80,6 +80,17 @@ func (bcih BatchCreateInstanceHandler) buildBatchInstanceCreateRequestOsConfig(c
 			return nil, nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate OperatingSystem data", err)
 		}
 
+		if apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet {
+			return &corev1.InstanceOperatingSystemConfig{
+				RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
+				PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
+				Variant: &corev1.InstanceOperatingSystemConfig_DhcpOptionSet{
+					DhcpOptionSet: &corev1.DhcpOptionSetBoot{},
+				},
+				UserData: apiRequest.UserData,
+			}, nil, nil
+		}
+
 		return &corev1.InstanceOperatingSystemConfig{
 			RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
 			PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
@@ -1479,6 +1490,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				OperatingSystemID:        osID,
 				IpxeScript:               apiRequest.IpxeScript,
 				AlwaysBootWithCustomIpxe: *apiRequest.AlwaysBootWithCustomIpxe,
+				BootFromDhcpOptionSet:    apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet,
 				PhoneHomeEnabled:         *apiRequest.PhoneHomeEnabled,
 				UserData:                 apiRequest.UserData,
 				AutoNetwork:              apiRequest.AutoNetwork,

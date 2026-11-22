@@ -498,6 +498,8 @@ type APIInstanceCreateRequest struct {
 	IpxeScript *string `json:"ipxeScript"`
 	// AlwaysBootWithCustomIpxe is the flag to allow always boot with ipxe
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe"`
+	// BootFromDhcpOptionSet is the flag to boot from the boot URL of the instance's or VPC's DHCP Option Set
+	BootFromDhcpOptionSet *bool `json:"bootFromDhcpOptionSet"`
 	// PhoneHomeEnabled is the flag to allow enable phone home for the instance
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled"`
 	// UserData is the ID of the Operating System
@@ -571,6 +573,8 @@ type APIBatchInstanceCreateRequest struct {
 	IpxeScript *string `json:"ipxeScript"`
 	// AlwaysBootWithCustomIpxe is the flag to allow always boot with ipxe
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe"`
+	// BootFromDhcpOptionSet is the flag to boot from the boot URL of the instance's or VPC's DHCP Option Set
+	BootFromDhcpOptionSet *bool `json:"bootFromDhcpOptionSet"`
 	// PhoneHomeEnabled is the flag to allow enable phone home for the instance
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled"`
 	// UserData is the user data for the instances
@@ -675,10 +679,15 @@ func (icr APIInstanceCreateRequest) Validate() error {
 	}
 
 	// make sure either of them provided
-	if icr.OperatingSystemID == nil {
+	if icr.BootFromDhcpOptionSet != nil && *icr.BootFromDhcpOptionSet {
+		err = validateBootFromDhcpOptionSet(icr.OperatingSystemID, icr.IpxeScript, icr.AlwaysBootWithCustomIpxe)
+		if err != nil {
+			return err
+		}
+	} else if icr.OperatingSystemID == nil {
 		if icr.IpxeScript == nil {
 			return validation.Errors{
-				"operatingSystemId": errors.New("either `operatingSystemId` or `ipxeScript` must be specified"),
+				"operatingSystemId": errors.New("either `operatingSystemId`, `ipxeScript` or `bootFromDhcpOptionSet` must be specified"),
 			}
 		} else if *icr.IpxeScript == "" {
 			return validation.Errors{
@@ -750,6 +759,24 @@ func (icr APIInstanceCreateRequest) ValidateForVpc(vpc *cdbm.Vpc) error {
 	return nil
 }
 
+// validateBootFromDhcpOptionSet checks the boot options sent with `bootFromDhcpOptionSet` set to true.
+// Core serves the DHCP Option Set's boot URL on every boot, so it requires booting with custom iPXE on every boot.
+func validateBootFromDhcpOptionSet(operatingSystemID *string, ipxeScript *string, alwaysBootWithCustomIpxe *bool) error {
+	if (operatingSystemID != nil && *operatingSystemID != "") || ipxeScript != nil {
+		return validation.Errors{
+			"bootFromDhcpOptionSet": errors.New("cannot be specified with `operatingSystemId` or `ipxeScript`"),
+		}
+	}
+
+	if alwaysBootWithCustomIpxe != nil && !*alwaysBootWithCustomIpxe {
+		return validation.Errors{
+			"alwaysBootWithCustomIpxe": errors.New("cannot be false when `bootFromDhcpOptionSet` is true"),
+		}
+	}
+
+	return nil
+}
+
 // phoneHomeUserDataError names the operation that failed, so a failure to take
 // phone-home out does not send whoever reads it looking at the path that puts it
 // in.
@@ -792,7 +819,9 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 		// The expectation is that iPXE, user-data, and phone-home
 		// settings must all be explicitly passed in..
 
-		if mergedIpxeScript == nil {
+		bootFromDhcpOptionSet := icr.BootFromDhcpOptionSet != nil && *icr.BootFromDhcpOptionSet
+
+		if mergedIpxeScript == nil && !bootFromDhcpOptionSet {
 			return validation.Errors{
 				"ipxeScript": errors.New("cannot be unset or empty if no Operating System is specified"),
 			}
@@ -804,7 +833,7 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 		}
 
 		if mergedAlwaysBootWithCustomIpxe == nil {
-			mergedAlwaysBootWithCustomIpxe = cutil.GetPtr(false)
+			mergedAlwaysBootWithCustomIpxe = cutil.GetPtr(bootFromDhcpOptionSet)
 			icr.AlwaysBootWithCustomIpxe = mergedAlwaysBootWithCustomIpxe
 		}
 
@@ -1161,11 +1190,16 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 		}
 	}
 
-	// Validate that either OperatingSystemID or IpxeScript is specified
-	if bicr.OperatingSystemID == nil {
+	// Validate that either OperatingSystemID, IpxeScript or BootFromDhcpOptionSet is specified
+	if bicr.BootFromDhcpOptionSet != nil && *bicr.BootFromDhcpOptionSet {
+		err = validateBootFromDhcpOptionSet(bicr.OperatingSystemID, bicr.IpxeScript, bicr.AlwaysBootWithCustomIpxe)
+		if err != nil {
+			return err
+		}
+	} else if bicr.OperatingSystemID == nil {
 		if bicr.IpxeScript == nil {
 			return validation.Errors{
-				"operatingSystemId": errors.New("either `operatingSystemId` or `ipxeScript` must be specified"),
+				"operatingSystemId": errors.New("either `operatingSystemId`, `ipxeScript` or `bootFromDhcpOptionSet` must be specified"),
 			}
 		} else if *bicr.IpxeScript == "" {
 			return validation.Errors{
@@ -1294,7 +1328,9 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 		// The expectation is that iPXE, user-data, and phone-home
 		// settings must all be explicitly passed in..
 
-		if mergedIpxeScript == nil {
+		bootFromDhcpOptionSet := bicr.BootFromDhcpOptionSet != nil && *bicr.BootFromDhcpOptionSet
+
+		if mergedIpxeScript == nil && !bootFromDhcpOptionSet {
 			return validation.Errors{
 				"ipxeScript": errors.New("cannot be unset or empty if no Operating System is specified"),
 			}
@@ -1306,7 +1342,7 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 		}
 
 		if mergedAlwaysBootWithCustomIpxe == nil {
-			mergedAlwaysBootWithCustomIpxe = cutil.GetPtr(false)
+			mergedAlwaysBootWithCustomIpxe = cutil.GetPtr(bootFromDhcpOptionSet)
 			bicr.AlwaysBootWithCustomIpxe = mergedAlwaysBootWithCustomIpxe
 		}
 
@@ -1436,6 +1472,8 @@ type APIInstanceUpdateRequest struct {
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled"`
 	// AlwaysBootWithCustomIpxe is an attribute which is specified by user if instance boot with ipxe or not
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe"`
+	// BootFromDhcpOptionSet is an attribute which is specified by user if instance boots from the boot URL of its or its VPC's DHCP Option Set
+	BootFromDhcpOptionSet *bool `json:"bootFromDhcpOptionSet"`
 	// SecondaryVpcIDs lists additional VPC IDs for non-primary interfaces on the
 	// Instance that select a prefix. This field will be rejected unless
 	// Interfaces is provided and non-empty and every entry in Interfaces uses
@@ -1467,6 +1505,20 @@ type APIInstanceUpdateRequest struct {
 	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// PowerProfile updates the external power provisioning profile. An empty string clears it.
 	PowerProfile *string `json:"powerProfile"`
+}
+
+// BootsFromDhcpOptionSet reports whether the Instance boots from its DHCP Option Set's boot URL after this update.
+// Choosing an Operating System or an iPXE script switches it off.
+func (iur *APIInstanceUpdateRequest) BootsFromDhcpOptionSet(instance *cdbm.Instance) bool {
+	if iur.BootFromDhcpOptionSet != nil {
+		return *iur.BootFromDhcpOptionSet
+	}
+
+	if (iur.OperatingSystemID != nil && *iur.OperatingSystemID != "") || iur.IpxeScript != nil {
+		return false
+	}
+
+	return instance.BootFromDhcpOptionSet
 }
 
 // Validate the OS against any additional option combinations specified.
@@ -1503,7 +1555,40 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 		}
 	}
 
-	if os == nil {
+	bootFromDhcpOptionSet := iur.BootsFromDhcpOptionSet(instance)
+	if bootFromDhcpOptionSet != instance.BootFromDhcpOptionSet {
+		// Set it so the DB gets updated.
+		iur.BootFromDhcpOptionSet = &bootFromDhcpOptionSet
+
+		// Booting from a DHCP Option Set required booting with custom iPXE on every boot,
+		// so switching away resets it unless the request sets it.
+		if !bootFromDhcpOptionSet && mergedAlwaysBootWithCustomIpxe == nil {
+			mergedAlwaysBootWithCustomIpxe = cutil.GetPtr(false)
+			iur.AlwaysBootWithCustomIpxe = mergedAlwaysBootWithCustomIpxe
+		}
+	}
+
+	if bootFromDhcpOptionSet {
+		// The DHCP Option Set's boot URL is served on every boot, so Core requires booting with custom iPXE on every boot.
+		if mergedAlwaysBootWithCustomIpxe != nil && !*mergedAlwaysBootWithCustomIpxe {
+			return validation.Errors{
+				"alwaysBootWithCustomIpxe": errors.New("cannot be false when the Instance boots from its DHCP Option Set"),
+			}
+		}
+
+		if !instance.AlwaysBootWithCustomIpxe {
+			// Set it so the DB gets updated.
+			iur.AlwaysBootWithCustomIpxe = cutil.GetPtr(true)
+		}
+
+		if mergedUserData == nil {
+			mergedUserData = instance.UserData
+		}
+
+		if mergedPhoneHomeEnabled == nil {
+			mergedPhoneHomeEnabled = &instance.PhoneHomeEnabled
+		}
+	} else if os == nil {
 		// If the OS is being cleared...
 		// The expectation is that iPXE, user-data, and phone-home
 		// settings must all be explicitly passed in..
@@ -1728,6 +1813,7 @@ func (iur *APIInstanceUpdateRequest) IsUpdateRequest() bool {
 		iur.SSHKeyGroupIDs != nil ||
 		iur.NetworkSecurityGroupID != nil ||
 		iur.DhcpOptionSetID != nil ||
+		iur.BootFromDhcpOptionSet != nil ||
 		iur.PowerProfile != nil
 }
 
@@ -1803,6 +1889,13 @@ func (iur APIInstanceUpdateRequest) Validate() error {
 	if iur.IsRebootRequest() && iur.IsUpdateRequest() {
 		return validation.Errors{
 			"triggerReboot": errors.New("reboot cannot be triggered if Instance attributes are being updated in the same request"),
+		}
+	}
+
+	if iur.BootFromDhcpOptionSet != nil && *iur.BootFromDhcpOptionSet {
+		err = validateBootFromDhcpOptionSet(iur.OperatingSystemID, iur.IpxeScript, iur.AlwaysBootWithCustomIpxe)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -2029,6 +2122,8 @@ type APIInstance struct {
 	IpxeScript *string `json:"ipxeScript"`
 	// AlwaysBootWithCustomIpxe is an attribute which is specified by user if instance boot with ipxe or not
 	AlwaysBootWithCustomIpxe bool `json:"alwaysBootWithCustomIpxe"`
+	// BootFromDhcpOptionSet is an attribute which is specified by user if instance boots from the boot URL of its or its VPC's DHCP Option Set
+	BootFromDhcpOptionSet bool `json:"bootFromDhcpOptionSet"`
 	// PhoneHomeEnabled is an attribute which is specified by user if instance needs to be enabled for phone home or not
 	PhoneHomeEnabled bool `json:"phoneHomeEnabled"`
 	// UserData is inherited from Operating System or specified by user if allowed
@@ -2133,6 +2228,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		DhcpOptionSetID:                        util.GetUUIDPtrToStrPtr(dbinst.DhcpOptionSetID),
 		IpxeScript:                             dbinst.IpxeScript,
 		AlwaysBootWithCustomIpxe:               dbinst.AlwaysBootWithCustomIpxe,
+		BootFromDhcpOptionSet:                  dbinst.BootFromDhcpOptionSet,
 		PhoneHomeEnabled:                       dbinst.PhoneHomeEnabled,
 		UserData:                               dbinst.UserData,
 		AutoNetwork:                            dbinst.AutoNetwork,

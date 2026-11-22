@@ -29,12 +29,16 @@ func init() {
 		_, err = tx.NewAddColumn().Model((*model.Instance)(nil)).IfNotExists().ColumnExpr("dhcp_option_set_id uuid REFERENCES dhcp_option_set(id)").Exec(ctx)
 		handleError(tx, err)
 
+		// Let Instances boot from their DHCP Option Set's boot URL
+		_, err = tx.NewAddColumn().Model((*model.Instance)(nil)).IfNotExists().ColumnExpr("boot_from_dhcp_option_set BOOLEAN NOT NULL DEFAULT false").Exec(ctx)
+		handleError(tx, err)
+
 		terr = tx.Commit()
 		if terr != nil {
 			handlePanic(terr, "failed to commit transaction")
 		}
 
-		fmt.Print(" [up migration] Added dhcp_option_set_id column to vpc and instance tables. ")
+		fmt.Print(" [up migration] Added dhcp_option_set_id column to vpc and instance tables, and boot_from_dhcp_option_set column to instance table. ")
 		return nil
 	}, func(ctx context.Context, db *bun.DB) error {
 		fmt.Print(" [down migration] ")

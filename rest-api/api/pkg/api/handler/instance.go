@@ -235,6 +235,17 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 			return nil, nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate OperatingSystem data", err)
 		}
 
+		if apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet {
+			return &corev1.InstanceOperatingSystemConfig{
+				RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
+				PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
+				Variant: &corev1.InstanceOperatingSystemConfig_DhcpOptionSet{
+					DhcpOptionSet: &corev1.DhcpOptionSetBoot{},
+				},
+				UserData: apiRequest.UserData,
+			}, nil, nil
+		}
+
 		return &corev1.InstanceOperatingSystemConfig{
 			RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
 			PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
@@ -1736,6 +1747,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			OperatingSystemID:        osID,
 			IpxeScript:               apiRequest.IpxeScript,
 			AlwaysBootWithCustomIpxe: *apiRequest.AlwaysBootWithCustomIpxe,
+			BootFromDhcpOptionSet:    apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet,
 			PhoneHomeEnabled:         *apiRequest.PhoneHomeEnabled,
 			UserData:                 apiRequest.UserData,
 			AutoNetwork:              apiRequest.AutoNetwork,
@@ -2453,6 +2465,33 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 	var osID *uuid.UUID
 
 	ctx := c.Request().Context()
+
+	// The Instance boots from its DHCP Option Set's boot URL, so it has no OS or iPXE script.
+	if apiRequest.BootsFromDhcpOptionSet(instance) {
+		if err := apiRequest.ValidateAndSetOperatingSystemData(uih.cfg, instance, nil); err != nil {
+			logger.Error().Err(err).Msg("failed to validate OperatingSystem")
+			return nil, nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate OperatingSystem data", err)
+		}
+
+		userData := instance.UserData
+		if apiRequest.UserData != nil {
+			userData = apiRequest.UserData
+		}
+
+		phoneHomeEnabled := instance.PhoneHomeEnabled
+		if apiRequest.PhoneHomeEnabled != nil {
+			phoneHomeEnabled = *apiRequest.PhoneHomeEnabled
+		}
+
+		return &corev1.InstanceOperatingSystemConfig{
+			RunProvisioningInstructionsOnEveryBoot: true,
+			PhoneHomeEnabled:                       phoneHomeEnabled,
+			Variant: &corev1.InstanceOperatingSystemConfig_DhcpOptionSet{
+				DhcpOptionSet: &corev1.DhcpOptionSetBoot{},
+			},
+			UserData: userData,
+		}, nil, nil
+	}
 
 	// The OS is being cleared.
 	if apiRequest.OperatingSystemID != nil && *apiRequest.OperatingSystemID == "" {
@@ -3723,6 +3762,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					OperatingSystemID:        osID,
 					IpxeScript:               apiRequest.IpxeScript,
 					AlwaysBootWithCustomIpxe: apiRequest.AlwaysBootWithCustomIpxe,
+					BootFromDhcpOptionSet:    apiRequest.BootFromDhcpOptionSet,
 					NetworkSecurityGroupID:   nsgID,
 					DhcpOptionSetID:          dhcpOptionSetID,
 					PhoneHomeEnabled:         apiRequest.PhoneHomeEnabled,
@@ -3744,6 +3784,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		// If this request is attempting to clear the OS for the instance, set it.
 		if apiRequest.OperatingSystemID != nil && *apiRequest.OperatingSystemID == "" {
 			clearInput.OperatingSystemID = true
+			shouldClear = true
+		}
+
+		// An Instance switching to boot from its DHCP Option Set no longer uses its OS or iPXE script.
+		if apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet && !instance.BootFromDhcpOptionSet {
+			clearInput.OperatingSystemID = true
+			clearInput.IpxeScript = true
 			shouldClear = true
 		}
 
