@@ -39,15 +39,15 @@ import (
 	tmocks "go.temporal.io/sdk/mocks"
 )
 
-// Interleave a committed PATCH transition immediately before or after the binding SELECT.
+// Commit a PATCH transition before inventory counts the bindings or after it fetches them.
 type nvlinkInventoryReadHook struct {
 	instanceID uuid.UUID
 	beforeRead func()
 	afterRead  func()
 }
 
-func (h *nvlinkInventoryReadHook) runOnce(event *bun.QueryEvent, callback *func()) {
-	if *callback == nil || event.Err != nil || !strings.HasPrefix(event.Query, `SELECT "nvli"."id"`) ||
+func (h *nvlinkInventoryReadHook) runOnce(event *bun.QueryEvent, prefix string, callback *func()) {
+	if *callback == nil || event.Err != nil || !strings.HasPrefix(event.Query, prefix) ||
 		!strings.Contains(event.Query, `FROM "nvlink_interface"`) || !strings.Contains(event.Query, h.instanceID.String()) {
 		return
 	}
@@ -57,12 +57,12 @@ func (h *nvlinkInventoryReadHook) runOnce(event *bun.QueryEvent, callback *func(
 }
 
 func (h *nvlinkInventoryReadHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	h.runOnce(event, &h.beforeRead)
+	h.runOnce(event, "SELECT ", &h.beforeRead)
 	return ctx
 }
 
 func (h *nvlinkInventoryReadHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
-	h.runOnce(event, &h.afterRead)
+	h.runOnce(event, `SELECT "nvli"."id"`, &h.afterRead)
 }
 
 // testTemporalSiteClientPool Building site client pool
@@ -2285,7 +2285,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	gpuGuidDel4 := "gpu-guid-nvlink-del-4"
 	gpuGuidDel5 := "gpu-guid-nvlink-del-5"
 
-	// Instance A: inventory preserves REST changes made after it reads NVLink rows
+	// Instance A: inventory must leave a binding retired after the inventory read in Deleting.
 	machineNvlA := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
 	nvlinkDelInstA, err := instanceDAO.Create(ctx, nil, cdbm.InstanceCreateInput{
 		Name: "test-instance-nvlink-A", TenantID: tenant.ID, InfrastructureProviderID: ip.ID, SiteID: site4.ID,
@@ -2297,10 +2297,6 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlinkDelInstA.ID.String())
 	assert.NoError(t, err)
 	_ = util.TestBuildInterface(t, dbSession, &nvlinkDelInstA.ID, &subnet4.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
-
-	nvlifcDelA1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 0, cutil.GetPtr(gpuGuidDel1), nil, cdbm.NVLinkInterfaceStatusDeleting)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlifcDelA1.ID.String())
-	assert.NoError(t, err)
 
 	nvlifcDelA2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel2), nil, cdbm.NVLinkInterfaceStatusPending)
 	assert.NotNil(t, nvlifcDelA2)
@@ -2545,8 +2541,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		status     string
 	}
 
-	// The captured report still lists the assignment that PATCH is about to revive.
-	beforeReadInstance := util.TestBuildInstance(t, dbSession, "nvlink-revival-before-read", tenant.ID, ip.ID, site4.ID, instanceType.ID, vpc4.ID, nil, operatingSystem.ID, cdbm.InstanceStatusReady)
+	// The captured report lists the retired assignment that PATCH is about to request again.
+	beforeReadInstance := util.TestBuildInstance(t, dbSession, "nvlink-replacement-before-read", tenant.ID, ip.ID, site4.ID, instanceType.ID, vpc4.ID, nil, operatingSystem.ID, cdbm.InstanceStatusReady)
 	beforeReadBinding := util.TestBuildNVLinkInterface(t, dbSession, beforeReadInstance.ID, site4.ID, nvllPartition4.ID, nil, 1, nil, nil, cdbm.NVLinkInterfaceStatusDeleting)
 
 	tests := []struct {
@@ -2754,7 +2750,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			metadataInstanceUpdate: pagedIns[1],
 		},
 		{
-			name:             "stale synced report preserves an NVLink binding revived before the binding read",
+			name:             "stale synced report preserves a replacement NVLink binding created before the binding read",
 			siteID:           site4.ID,
 			clientPoolSiteID: site4.ID.String(),
 			clientPoolClient: mtc4,
@@ -2771,10 +2767,10 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				require.NoError(t, err)
 
 				dao := cdbm.NewNVLinkInterfaceDAO(dbSession)
-				var revived *cdbm.NVLinkInterface
+				var replacement *cdbm.NVLinkInterface
 				hook := &nvlinkInventoryReadHook{instanceID: beforeReadInstance.ID}
 				hook.beforeRead = func() {
-					revived, err = cdb.WithTxResult(ctx, dbSession, func(tx *cdb.Tx) (*cdbm.NVLinkInterface, error) {
+					replacement, err = cdb.WithTxResult(ctx, dbSession, func(tx *cdb.Tx) (*cdbm.NVLinkInterface, error) {
 						_, updateErr := instanceDAO.Update(ctx, tx, cdbm.InstanceUpdateInput{
 							InstanceID:                beforeReadInstance.ID,
 							InstanceUpdateCommonInput: cdbm.InstanceUpdateCommonInput{Status: cutil.GetPtr(cdbm.InstanceStatusConfiguring)},
@@ -2782,19 +2778,22 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 						if updateErr != nil {
 							return nil, updateErr
 						}
-						return dao.Update(ctx, tx, cdbm.NVLinkInterfaceUpdateInput{
-							NVLinkInterfaceID: beforeReadBinding.ID, Status: cutil.GetPtr(cdbm.NVLinkInterfaceStatusPending),
+						return dao.Create(ctx, tx, cdbm.NVLinkInterfaceCreateInput{
+							InstanceID: beforeReadInstance.ID, SiteID: site4.ID, CreatedBy: tnu.ID,
+							NVLinkLogicalPartitionID: beforeReadBinding.NVLinkLogicalPartitionID,
+							DeviceInstance:           beforeReadBinding.DeviceInstance, Status: cdbm.NVLinkInterfaceStatusPending,
 						})
 					})
 					require.NoError(t, err)
 				}
 				dbSession.DB.AddQueryHook(hook)
 				t.Cleanup(func() {
-					require.NotNil(t, revived, "PATCH must commit before inventory reads the bindings")
-					row, err := dao.GetByID(ctx, nil, beforeReadBinding.ID, nil)
+					require.NotNil(t, replacement, "PATCH must commit before inventory reads the bindings")
+					require.NotEqual(t, beforeReadBinding.ID, replacement.ID)
+					row, err := dao.GetByID(ctx, nil, replacement.ID, nil)
 					require.NoError(t, err)
 					require.Equal(t, cdbm.NVLinkInterfaceStatusPending, row.Status)
-					require.Equal(t, revived, row)
+					require.Equal(t, replacement, row)
 				})
 			},
 		},
@@ -2810,28 +2809,20 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			beforeInventory: func(t *testing.T) {
 				dao := cdbm.NewNVLinkInterfaceDAO(dbSession)
 				hook := &nvlinkInventoryReadHook{instanceID: nvlinkDelInstA.ID}
-				var revived, retired *cdbm.NVLinkInterface
+				var retired *cdbm.NVLinkInterface
 				hook.afterRead = func() {
-					err := cdb.WithTx(ctx, dbSession, func(tx *cdb.Tx) error {
-						changed, err := dao.UpdateMultiple(ctx, tx, []cdbm.NVLinkInterfaceUpdateInput{
-							{NVLinkInterfaceID: nvlifcDelA1.ID, Status: cutil.GetPtr(cdbm.NVLinkInterfaceStatusPending)},
-							{NVLinkInterfaceID: nvlifcDelA2.ID, Status: cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting)},
-						})
-						if err == nil {
-							revived, retired = &changed[0], &changed[1]
-						}
-						return err
+					var err error
+					retired, err = dao.Update(ctx, nil, cdbm.NVLinkInterfaceUpdateInput{
+						NVLinkInterfaceID: nvlifcDelA2.ID, Status: cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
 					})
 					require.NoError(t, err)
 				}
 				dbSession.DB.AddQueryHook(hook)
 				t.Cleanup(func() {
-					require.NotNil(t, revived, "inventory must read the bindings before the concurrent update")
-					for _, want := range []*cdbm.NVLinkInterface{revived, retired} {
-						got, err := dao.GetByID(ctx, nil, want.ID, nil)
-						require.NoError(t, err)
-						require.Equal(t, want, got)
-					}
+					require.NotNil(t, retired, "inventory must read the binding before PATCH retires it")
+					got, err := dao.GetByID(ctx, nil, retired.ID, nil)
+					require.NoError(t, err)
+					require.Equal(t, retired, got)
 				})
 			},
 		},

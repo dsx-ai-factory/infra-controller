@@ -5471,6 +5471,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	defaultInstance := testInstanceBuildInstance(t, dbSession, "nvlink-default-instance", tn1.ID, ip.ID, st3.ID, &ist4.ID, defaultVPC.ID, &mc5.ID, &os2.ID, nil, cdbm.InstanceStatusReady)
 	firstAssignmentInstance := testInstanceBuildInstance(t, dbSession, "nvlink-first-assignment", tn1.ID, ip.ID, st3.ID, &ist4.ID, defaultVPC.ID, &mc5.ID, &os2.ID, nil, cdbm.InstanceStatusReady)
 	var firstBinding *cdbm.NVLinkInterface
+	lastBindingInstance := testInstanceBuildInstance(t, dbSession, "nvlink-last-binding", tn1.ID, ip.ID, st3.ID, &ist4.ID, defaultVPC.ID, &mc5.ID, &os2.ID, nil, cdbm.InstanceStatusReady)
+	lastBinding := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, lastBindingInstance.ID, nvllp1.ID, nil, nil, 0, cdbm.NVLinkInterfaceStatusReady)
 	var defaultBindings []*cdbm.NVLinkInterface
 	for gpu := range 2 {
 		row := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, defaultInstance.ID, nvllp1.ID, nil, nil, gpu, cdbm.NVLinkInterfaceStatusReady)
@@ -5572,7 +5574,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	inst13pfNvl4 := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, inst13PendingFresh.ID, nvllp2.ID, cutil.GetPtr(uuid.New()), cutil.GetPtr("NVIDIA GB200"), 3, cdbm.NVLinkInterfaceStatusPending)
 	assert.NotNil(t, inst13pfNvl4)
 
-	// Instance with four Deleting NVLink rows (devices 0–3 across nvllp1/nvllp2); requesting them again must reuse their IDs.
+	// Re-requesting these four assignments creates new bindings and leaves the original rows Deleting.
 	instFourDeletingNVLink := testInstanceBuildInstance(t, dbSession, "test-instance-nvlink-four-all-deleting", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(mc5.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, instFourDeletingNVLink)
 
@@ -5837,7 +5839,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	instRetiringNVLink := testInstanceBuildInstance(t, dbSession, "test-instance-retiring-nvlink", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(mc5.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 	retiringNVLink := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, instRetiringNVLink.ID, nvllp1.ID, nil, nil, 0, cdbm.NVLinkInterfaceStatusDeleting)
 	activeNVLink := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, instRetiringNVLink.ID, nvllp2.ID, nil, nil, 1, cdbm.NVLinkInterfaceStatusReady)
-	omittedRetiringNVLink := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, instRetiringNVLink.ID, nvllp2.ID, nil, nil, 2, cdbm.NVLinkInterfaceStatusDeleting)
 
 	assertDefaultBindingsUnchanged := func(t *testing.T) {
 		t.Helper()
@@ -5894,7 +5895,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
 		expectedSiteSpectrumXAttachmentBridge *string
 		expectSpectrumXUnchanged              bool
-		revivedNVLinkInterfaces               []*cdbm.NVLinkInterface
 		retainedNVLinkInterfaces              []*cdbm.NVLinkInterface
 		// Override the request list when Site receives persisted bindings in the order read by PATCH.
 		expectedSiteNVLinkInterfaces []model.APINVLinkInterfaceCreateOrUpdateRequest
@@ -5908,7 +5908,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		respSecondaryVpcIDs []string
 	}
 
-	// A P1 → P2 → P1 round trip before inventory must reuse the P1 row and send only P1 on a later rename.
+	// A P1 → P2 → P1 round trip before inventory must leave the original P1 row Deleting and send only the replacement P1 on a later rename.
 	roundTripInstance := testInstanceBuildInstance(t, dbSession, "nvlink-round-trip", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, &mc5.ID, &os2.ID, os2.IpxeScript, cdbm.InstanceStatusReady)
 	originalP1 := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, roundTripInstance.ID, nvllp1.ID, nil, nil, 0, cdbm.NVLinkInterfaceStatusReady)
 	roundTrip := args{
@@ -5928,13 +5928,13 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	returnToP1 := roundTrip
 	returnToP1.reqData = &model.APIInstanceUpdateRequest{NVLinkInterfaces: existingNVLinkBindings[:1]}
-	returnToP1.revivedNVLinkInterfaces = []*cdbm.NVLinkInterface{originalP1}
+	returnToP1.nvlinkInterfacesToDelete = moveToP2.nvlinkInterfacesToDelete
+	returnToP1.expectedRespNVLinkInterfaceCount = cutil.GetPtr(3)
 
-	rename := roundTrip
+	rename := returnToP1
 	rename.reqData = &model.APIInstanceUpdateRequest{Name: cutil.GetPtr("renamed after reissue")}
 	rename.requestJSON = `{"name":"renamed after reissue"}`
 	rename.expectedSiteNVLinkInterfaces = returnToP1.reqData.NVLinkInterfaces
-	rename.revivedNVLinkInterfaces = []*cdbm.NVLinkInterface{originalP1}
 
 	// Baseline intent belongs to the registration and must block instance-scoped deployments.
 	baselineService, baselineErr := cdbm.NewDpuExtensionServiceDAO(dbSession).Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
@@ -8750,6 +8750,32 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
+			name:   "allow a VPC-default NVLink repeat when the last binding retires after validation",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript:       os2.IpxeScript,
+					NVLinkInterfaces: existingNVLinkBindings[:1],
+				},
+				reqInstance:                      lastBindingInstance.ID.String(),
+				reqOrg:                           tnOrg1,
+				reqUser:                          tnu1,
+				respCode:                         http.StatusOK,
+				expectedRespNVLinkInterfaceCount: cutil.GetPtr(2),
+				nvlinkInterfacesToDelete:         []cdbm.NVLinkInterface{*lastBinding},
+				beforeHandle: func(t *testing.T) {
+					// Retire the matching binding between preflight and the transaction.
+					dbSession.DB.AddQueryHook(&expectedMachineQueryHook{queryPrefix: "BEGIN", armed: true, beforeQuery: func() {
+						_, err := cdbm.NewNVLinkInterfaceDAO(dbSession).Update(ctx, nil, cdbm.NVLinkInterfaceUpdateInput{
+							NVLinkInterfaceID: lastBinding.ID, Status: cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
+						})
+						require.NoError(t, err)
+					}})
+				},
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
 			name:   "omitting NVLink interfaces preserves VPC-default assignments in the Site config",
 			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
 			args: args{
@@ -8966,7 +8992,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			args: args{
 				reqData: &model.APIInstanceUpdateRequest{
 					IpxeScript: os2.IpxeScript,
-					// Shuffle the four retiring bindings to check that revival uses their keys.
+					// Request all four retired assignments again in a different order.
 					NVLinkInterfaces: []model.APINVLinkInterfaceCreateOrUpdateRequest{
 						{NVLinkLogicalPartitionID: nvllp2.ID.String(), DeviceInstance: 3},
 						{NVLinkLogicalPartitionID: nvllp1.ID.String(), DeviceInstance: 0},
@@ -8978,18 +9004,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:                           tnOrg1,
 				reqUser:                          tnu1,
 				respCode:                         http.StatusOK,
-				revivedNVLinkInterfaces:          []*cdbm.NVLinkInterface{inst4DelNvl1, inst4DelNvl2, inst4DelNvl3, inst4DelNvl4},
-				expectedSiteNVLinkInterfaces:     existingNVLinkBindings,
-				expectedRespNVLinkInterfaceCount: cutil.GetPtr(4),
-				beforeHandle: func(t *testing.T) {
-					recent := time.Now().UTC().Add(-45 * time.Second)
-					_, err := dbSession.DB.Exec(
-						"UPDATE nvlink_interface SET updated = ? WHERE instance_id = ?",
-						recent,
-						instFourDeletingNVLink.ID,
-					)
-					require.NoError(t, err)
-				},
+				nvlinkInterfacesToDelete:         []cdbm.NVLinkInterface{*inst4DelNvl1, *inst4DelNvl2, *inst4DelNvl3, *inst4DelNvl4},
+				expectedRespNVLinkInterfaceCount: cutil.GetPtr(8),
 			},
 			wantErr:                     false,
 			verifySiteControllerRequest: true,
@@ -9280,7 +9296,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifySiteControllerRequest: true,
 		},
 		{
-			name:   "NVLink reissue advances revived and newly retiring bindings but preserves an omitted retirement",
+			name:   "NVLink reissue preserves an already Deleting interface timestamp",
 			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
 			args: args{
 				reqData: &model.APIInstanceUpdateRequest{
@@ -9293,8 +9309,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:                           tnOrg1,
 				reqUser:                          tnu1,
 				respCode:                         http.StatusOK,
-				revivedNVLinkInterfaces:          []*cdbm.NVLinkInterface{retiringNVLink},
-				nvlinkInterfacesToDelete:         []cdbm.NVLinkInterface{*activeNVLink, *omittedRetiringNVLink},
+				nvlinkInterfacesToDelete:         []cdbm.NVLinkInterface{*activeNVLink, *retiringNVLink},
 				expectedRespNVLinkInterfaceCount: cutil.GetPtr(3),
 				beforeHandle: func(t *testing.T) {
 					_, err := dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE instance_id = ?", retiringUpdated, instRetiringNVLink.ID)
@@ -9302,21 +9317,18 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				},
 				afterHandle: func(t *testing.T) {
 					dao := cdbm.NewNVLinkInterfaceDAO(dbSession)
-					revived, err := dao.GetByID(ctx, nil, retiringNVLink.ID, nil)
+					retiring, err := dao.GetByID(ctx, nil, retiringNVLink.ID, nil)
 					require.NoError(t, err)
-					assert.True(t, revived.Updated.After(retiringUpdated), "reviving the original row must advance its version")
+					assert.True(t, retiring.Updated.Equal(retiringUpdated), "reissue must preserve the original retirement time")
 					active, err := dao.GetByID(ctx, nil, activeNVLink.ID, nil)
 					require.NoError(t, err)
 					assert.True(t, active.Updated.After(retiringUpdated), "new deletion must update the active row")
-					omitted, err := dao.GetByID(ctx, nil, omittedRetiringNVLink.ID, nil)
-					require.NoError(t, err)
-					assert.True(t, omitted.Updated.Equal(retiringUpdated), "reissue must not refresh an omitted Deleting row")
 				},
 			},
 			verifySiteControllerRequest: true,
 		},
 		{
-			name:                        "rapid partition reassignment and rename reuse the original GPU binding",
+			name:                        "rapid partition reassignment and rename send only the replacement GPU binding",
 			fields:                      fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
 			args:                        moveToP2,
 			followUp:                    []args{returnToP1, rename},
@@ -9834,9 +9846,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				assert.ElementsMatch(t, expectedNVLink, active)
 				for id, status := range retained {
 					assert.Equal(t, status, byID[id])
-				}
-				for _, row := range tt.args.revivedNVLinkInterfaces {
-					assert.Equal(t, cdbm.NVLinkInterfaceStatusPending, byID[row.ID])
 				}
 				for _, row := range tt.args.nvlinkInterfacesToDelete {
 					assert.Equal(t, cdbm.NVLinkInterfaceStatusDeleting, byID[row.ID])

@@ -3499,19 +3499,18 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	const defaultNVLinkUpdateError = "Cannot update NVLink Interfaces if VPC has default NVLink Logical Partition and NVLink Interfaces already exist for the Instance"
-	checkDefaultNVLink := apiRequest.NVLinkInterfaces != nil && vpc.NVLinkLogicalPartitionID != nil
-	hadDefaultNVLinkBindings := false
-	if checkDefaultNVLink {
+	if apiRequest.NVLinkInterfaces != nil && vpc.NVLinkLogicalPartitionID != nil {
 		nvlIfcDAO := cdbm.NewNVLinkInterfaceDAO(uih.dbSession)
-		nvlIfcs, err := nvlIfcDAO.GetByInstanceID(ctx, nil, instance.ID, false)
+		nvlIfcs, _, err := nvlIfcDAO.GetAll(ctx, nil,
+			cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving NVLink Interfaces from DB for Instance")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve NVLink Interfaces for Instance", nil)
 		}
 
 		// A VPC default permits the first assignment and exact repeats of current bindings.
-		hadDefaultNVLinkBindings = hasCurrentNVLinkBindings(nvlIfcs)
-		if hadDefaultNVLinkBindings && !matchesNVLinkAssignments(apiRequest.NVLinkInterfaces, nvlIfcs) {
+		if hasCurrentNVLinkBindings(nvlIfcs) && !matchesNVLinkAssignments(apiRequest.NVLinkInterfaces, nvlIfcs) {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, defaultNVLinkUpdateError, nil)
 		}
 	}
@@ -4354,13 +4353,18 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		nvlIfcDAO := cdbm.NewNVLinkInterfaceDAO(uih.dbSession)
-		newOrExistingNvlIfcs, derr = nvlIfcDAO.GetByInstanceID(ctx, tx, instanceID, apiRequest.NVLinkInterfaces != nil)
+		newOrExistingNvlIfcs, _, derr = nvlIfcDAO.GetAll(ctx, tx,
+			cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{instanceID}},
+			cdbp.PageInput{
+				Limit:   cutil.GetPtr(cdbp.TotalLimit),
+				OrderBy: &cdbp.OrderBy{Field: cdbm.NVLinkInterfaceOrderByDefault, Order: cdbp.OrderAscending},
+			}, nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("failed to retrieve NVLink Interfaces for Instance")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve NVLink interfaces for Instance, DB error", nil)
 		}
 
-		if checkDefaultNVLink && (hadDefaultNVLinkBindings || hasCurrentNVLinkBindings(newOrExistingNvlIfcs)) {
+		if apiRequest.NVLinkInterfaces != nil && vpc.NVLinkLogicalPartitionID != nil && hasCurrentNVLinkBindings(newOrExistingNvlIfcs) {
 			// Recheck under the instance lock in case another PATCH changed the bindings.
 			// A protected match keeps every row, including Error and stale Pending rows.
 			if !matchesNVLinkAssignments(apiRequest.NVLinkInterfaces, newOrExistingNvlIfcs) {
@@ -4374,12 +4378,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			existing := newOrExistingNvlIfcs
 			indexByBinding := make(map[binding]int, len(existing))
 			for i, row := range existing {
-				key := binding{row.NVLinkLogicalPartitionID, row.DeviceInstance}
-				// Prefer a live row to a retiring duplicate for the same assignment.
-				_, found := indexByBinding[key]
-				if !found || row.Status != cdbm.NVLinkInterfaceStatusDeleting {
-					indexByBinding[key] = i
+				if row.Status == cdbm.NVLinkInterfaceStatusDeleting {
+					continue
 				}
+				key := binding{row.NVLinkLogicalPartitionID, row.DeviceInstance}
+				indexByBinding[key] = i
 			}
 
 			retained := make([]bool, len(existing))
@@ -4390,19 +4393,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				i, found := indexByBinding[key]
 				if found {
 					row := existing[i]
-					if row.Status == cdbm.NVLinkInterfaceStatusDeleting {
-						revived, err := nvlIfcDAO.Update(ctx, tx, cdbm.NVLinkInterfaceUpdateInput{
-							NVLinkInterfaceID: row.ID,
-							Status:            cutil.GetPtr(cdbm.NVLinkInterfaceStatusPending),
-						})
-						if err != nil {
-							logger.Error().Err(err).Msg("failed to reuse retiring NVLink Interface")
-							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update NVLink Interface for Instance, DB error", nil)
-						}
-						existing[i] = *revived
-						retained[i] = true
-						continue
-					}
 					// Give a Pending binding time to sync before retrying it.
 					if row.Status == cdbm.NVLinkInterfaceStatusReady ||
 						(row.Status == cdbm.NVLinkInterfaceStatusPending && row.Updated.After(pendingCutoff)) {

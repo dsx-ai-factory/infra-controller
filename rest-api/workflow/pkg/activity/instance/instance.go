@@ -82,67 +82,6 @@ func dpuExtensionServiceDeploymentStatusFromSite(status corev1.DpuExtensionServi
 	}
 }
 
-type instanceInventorySnapshot struct {
-	instances        []cdbm.Instance
-	nvlinkByInstance map[uuid.UUID][]*cdbm.NVLinkInterface
-}
-
-// Read the parent freshness timestamps and NVLink row versions from the same snapshot.
-// The row-version guards protect subsequent writes if PATCH changes a binding after this read.
-func (mi ManageInstance) readInstanceInventorySnapshot(ctx context.Context, siteID uuid.UUID, pageIDs []uuid.UUID) (instanceInventorySnapshot, error) {
-	if len(pageIDs) == 0 {
-		return instanceInventorySnapshot{}, nil
-	}
-	opts := &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
-	return cdb.WithTxResultOpts(ctx, mi.dbSession, opts, func(tx *cdb.Tx) (instanceInventorySnapshot, error) {
-		var snapshot instanceInventorySnapshot
-		all := cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}
-		instanceDAO := cdbm.NewInstanceDAO(mi.dbSession)
-		instances, _, err := instanceDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{siteID}, ControllerInstanceIDs: pageIDs}, all, nil)
-		if err != nil {
-			return snapshot, err
-		}
-
-		// REST sets the controller Instance ID to the Instance ID, so the fallback is normally skipped.
-		matchedIDs := make(map[uuid.UUID]bool, len(instances))
-		for _, instance := range instances {
-			matchedIDs[*instance.ControllerInstanceID] = true
-		}
-		var unmatchedIDs []uuid.UUID
-		for _, id := range pageIDs {
-			if !matchedIDs[id] {
-				unmatchedIDs = append(unmatchedIDs, id)
-			}
-		}
-		if len(unmatchedIDs) > 0 {
-			fallback, _, err := instanceDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{siteID}, InstanceIDs: unmatchedIDs}, all, nil)
-			if err != nil {
-				return snapshot, err
-			}
-			instances = append(instances, fallback...)
-		}
-		if len(instances) == 0 {
-			return snapshot, nil
-		}
-
-		instanceIDs := make([]uuid.UUID, 0, len(instances))
-		for _, instance := range instances {
-			instanceIDs = append(instanceIDs, instance.ID)
-		}
-		rows, _, err := cdbm.NewNVLinkInterfaceDAO(mi.dbSession).GetAll(ctx, tx, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: instanceIDs}, all, nil)
-		if err != nil {
-			return snapshot, err
-		}
-		snapshot.instances = instances
-		snapshot.nvlinkByInstance = make(map[uuid.UUID][]*cdbm.NVLinkInterface)
-		for i := range rows {
-			row := &rows[i]
-			snapshot.nvlinkByInstance[row.InstanceID] = append(snapshot.nvlinkByInstance[row.InstanceID], row)
-		}
-		return snapshot, nil
-	})
-}
-
 // Activity functions
 
 // UpdateInstancesInDB is a Temporal activity that takes a collection of Instance data pushed by Site Agent and updates the DB
@@ -195,17 +134,41 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		}
 	}
 
-	snapshot, err := mi.readInstanceInventorySnapshot(ctx, siteID, pageInstanceIDs)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to read Instances and NVLink bindings for inventory page")
-		return nil, err
+	existingInstances := []cdbm.Instance{}
+	if len(pageInstanceIDs) > 0 {
+		existingInstances, _, err = instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}, ControllerInstanceIDs: pageInstanceIDs}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get Instances for Site from DB")
+			return nil, err
+		}
+
+		// REST sets the controller Instance ID to the Instance ID, so the Instance ID lookup is normally skipped
+		matchedIDs := map[uuid.UUID]bool{}
+		for _, instance := range existingInstances {
+			matchedIDs[*instance.ControllerInstanceID] = true
+		}
+		unmatchedIDs := []uuid.UUID{}
+		for _, id := range pageInstanceIDs {
+			if !matchedIDs[id] {
+				unmatchedIDs = append(unmatchedIDs, id)
+			}
+		}
+
+		if len(unmatchedIDs) > 0 {
+			instances, _, serr := instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}, InstanceIDs: unmatchedIDs}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("failed to get Instances for Site from DB")
+				return nil, serr
+			}
+			existingInstances = append(existingInstances, instances...)
+		}
 	}
 
 	// Construct a map of Controller Instance ID to Instance
 	existingInstanceIDMap := make(map[string]*cdbm.Instance)
 	existingInstanceCtrlIDMap := make(map[string]*cdbm.Instance)
 
-	for _, instance := range snapshot.instances {
+	for _, instance := range existingInstances {
 		curInstance := instance
 		existingInstanceIDMap[instance.ID.String()] = &curInstance
 
@@ -1133,21 +1096,27 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			}
 		}
 
+		existingNvlIfcs, _, err := nvlifcDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get NVLink Interfaces for Instance from DB")
+			continue
+		}
+
 		// Process/update NVLink Interfaces in DB
 		type nvLinkBinding struct {
 			partitionID    string
 			deviceInstance int
 		}
-		// Match Site observations to live bindings only. A PATCH can revive a retiring row.
+		// Match Site observations to live bindings only. A replacement has its own row ID.
 		nvLinkInterfaceMap := map[nvLinkBinding]*cdbm.NVLinkInterface{}
 		deletingNVLinkInterfaces := []*cdbm.NVLinkInterface{}
-		for _, nvlifc := range snapshot.nvlinkByInstance[instance.ID] {
+		for _, nvlifc := range existingNvlIfcs {
 			if nvlifc.Status == cdbm.NVLinkInterfaceStatusDeleting {
-				deletingNVLinkInterfaces = append(deletingNVLinkInterfaces, nvlifc)
+				deletingNVLinkInterfaces = append(deletingNVLinkInterfaces, &nvlifc)
 				continue
 			}
 			nvlifcKey := nvLinkBinding{nvlifc.NVLinkLogicalPartitionID.String(), nvlifc.DeviceInstance}
-			nvLinkInterfaceMap[nvlifcKey] = nvlifc
+			nvLinkInterfaceMap[nvlifcKey] = &nvlifc
 		}
 
 		isNVLinkConfigStatusEmpty := true
@@ -1231,13 +1200,12 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
-				updated, serr := nvlifcDAO.UpdateFromInventoryIfUnchanged(ctx, nil, nvlifc, gpuGuid, nvLinkDomainID, status)
+				updated, serr := nvlifcDAO.UpdateFromInventoryIfLive(ctx, nil, nvlifc.ID, gpuGuid, nvLinkDomainID, status)
 				if serr != nil {
 					slogger.Error().Err(serr).Str("NVLink Interface ID", nvlifc.ID.String()).Msg("Failed to update NVLink Interface, DB error")
 				} else if !updated {
 					slogger.Debug().Str("NVLink Interface ID", nvlifc.ID.String()).
-						Str("Observed status", nvlifc.Status).Str("Observed updated", nvlifc.Updated.Format(time.RFC3339Nano)).
-						Msg("Skipped NVLink inventory update because the observed row no longer matches")
+						Msg("Skipped NVLink inventory update because the binding is no longer live")
 				}
 			}
 		}
@@ -1441,14 +1409,9 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	// Delete eligible NVLink Interfaces which are in Deleting state
 	if len(nvLinkInterfacesToDelete) > 0 {
 		for _, nvlifc := range nvLinkInterfacesToDelete {
-			deleted, serr := nvlifcDAO.DeleteRetiredIfUnchanged(ctx, nil, nvlifc)
+			serr := nvlifcDAO.Delete(ctx, nil, nvlifc.ID)
 			if serr != nil {
 				logger.Error().Err(serr).Str("NVLink Interface ID", nvlifc.ID.String()).Msg("Failed to delete NVLink Interface, DB error")
-			} else if !deleted {
-				logger.Debug().Str("NVLink Interface ID", nvlifc.ID.String()).
-					Str("Instance ID", nvlifc.InstanceID.String()).
-					Str("Observed status", nvlifc.Status).Str("Observed updated", nvlifc.Updated.Format(time.RFC3339Nano)).
-					Msg("Skipped NVLink inventory delete because the observed row no longer matches")
 			}
 		}
 	}
