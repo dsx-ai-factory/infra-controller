@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverVpcPrefixInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("VpcPrefix: Successfully registered DiscoverVpcPrefixInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

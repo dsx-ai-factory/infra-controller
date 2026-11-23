@@ -261,7 +261,8 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 	}
 
 	// Other registration failures are logged, but the worker still starts so
-	// successfully registered workflows can run.
+	// successfully registered workflows can run. Where a publisher result is
+	// explicitly discarded below, its cron method already logged the error.
 	logRegistrationError := func(registration string, err error) {
 		if err != nil {
 			log.Error().Err(err).Str("registration", registration).Msg("Failed to register workflow handler")
@@ -269,13 +270,13 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 	}
 
 	logRegistrationError("VPC subscriber", ManagerAccess.API.VPC.RegisterSubscriber())
-	logRegistrationError("VPC publisher", ManagerAccess.API.VPC.RegisterPublisher())
+	_ = ManagerAccess.API.VPC.RegisterPublisher()
 
 	logRegistrationError("VpcPrefix subscriber", ManagerAccess.API.VpcPrefix.RegisterSubscriber())
-	logRegistrationError("VpcPrefix publisher", ManagerAccess.API.VpcPrefix.RegisterPublisher())
+	_ = ManagerAccess.API.VpcPrefix.RegisterPublisher()
 
 	logRegistrationError("VpcPeering subscriber", ManagerAccess.API.VpcPeering.RegisterSubscriber())
-	logRegistrationError("VpcPeering publisher", ManagerAccess.API.VpcPeering.RegisterPublisher())
+	_ = ManagerAccess.API.VpcPeering.RegisterPublisher()
 
 	// Inventory only: SpectrumX Partition CRUD goes through the generic Core gRPC proxy.
 	err = ManagerAccess.API.SpectrumXPartition.RegisterPublisher()
@@ -284,24 +285,24 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 	}
 
 	logRegistrationError("Subnet subscriber", ManagerAccess.API.Subnet.RegisterSubscriber())
-	logRegistrationError("Subnet publisher", ManagerAccess.API.Subnet.RegisterPublisher())
+	_ = ManagerAccess.API.Subnet.RegisterPublisher()
 
 	logRegistrationError("InfiniBandPartition subscriber", ManagerAccess.API.InfiniBandPartition.RegisterSubscriber())
-	logRegistrationError("InfiniBandPartition publisher", ManagerAccess.API.InfiniBandPartition.RegisterPublisher())
+	_ = ManagerAccess.API.InfiniBandPartition.RegisterPublisher()
 
 	logRegistrationError("SSHKeyGroup subscriber", ManagerAccess.API.SSHKeyGroup.RegisterSubscriber())
-	logRegistrationError("SSHKeyGroup publisher", ManagerAccess.API.SSHKeyGroup.RegisterPublisher())
+	_ = ManagerAccess.API.SSHKeyGroup.RegisterPublisher()
 
 	logRegistrationError("Machine subscriber", ManagerAccess.API.Machine.RegisterSubscriber())
 	logRegistrationError("Machine publisher", ManagerAccess.API.Machine.RegisterPublisher())
 
 	logRegistrationError("Instance subscriber", ManagerAccess.API.Instance.RegisterSubscriber())
-	logRegistrationError("Instance publisher", ManagerAccess.API.Instance.RegisterPublisher())
+	_ = ManagerAccess.API.Instance.RegisterPublisher()
 
 	logRegistrationError("Bootstrap subscriber", ManagerAccess.API.Bootstrap.RegisterSubscriber())
 
 	logRegistrationError("Tenant subscriber", ManagerAccess.API.Tenant.RegisterSubscriber())
-	logRegistrationError("Tenant publisher", ManagerAccess.API.Tenant.RegisterPublisher())
+	_ = ManagerAccess.API.Tenant.RegisterPublisher()
 
 	logRegistrationError("OperatingSystem subscriber", ManagerAccess.API.OperatingSystem.RegisterSubscriber())
 	// RegisterCron logs failures; publisher registration is best effort.
@@ -314,16 +315,16 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 	logRegistrationError("CoreGrpc subscriber", ManagerAccess.API.CoreGrpc.RegisterSubscriber())
 
 	logRegistrationError("InstanceType subscriber", ManagerAccess.API.InstanceType.RegisterSubscriber())
-	logRegistrationError("InstanceType publisher", ManagerAccess.API.InstanceType.RegisterPublisher())
+	_ = ManagerAccess.API.InstanceType.RegisterPublisher()
 
 	logRegistrationError("NetworkSecurityGroup subscriber", ManagerAccess.API.NetworkSecurityGroup.RegisterSubscriber())
-	logRegistrationError("NetworkSecurityGroup publisher", ManagerAccess.API.NetworkSecurityGroup.RegisterPublisher())
+	_ = ManagerAccess.API.NetworkSecurityGroup.RegisterPublisher()
 
 	logRegistrationError("ExpectedMachine subscriber", ManagerAccess.API.ExpectedMachine.RegisterSubscriber())
-	logRegistrationError("ExpectedMachine publisher", ManagerAccess.API.ExpectedMachine.RegisterPublisher())
+	_ = ManagerAccess.API.ExpectedMachine.RegisterPublisher()
 
 	logRegistrationError("ExpectedPowerShelf subscriber", ManagerAccess.API.ExpectedPowerShelf.RegisterSubscriber())
-	logRegistrationError("ExpectedPowerShelf publisher", ManagerAccess.API.ExpectedPowerShelf.RegisterPublisher())
+	_ = ManagerAccess.API.ExpectedPowerShelf.RegisterPublisher()
 
 	logRegistrationError("ExpectedRack subscriber", ManagerAccess.API.ExpectedRack.RegisterSubscriber())
 	// RegisterCron logs failures; publisher registration is best effort.
@@ -334,16 +335,16 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 	}
 
 	logRegistrationError("ExpectedSwitch subscriber", ManagerAccess.API.ExpectedSwitch.RegisterSubscriber())
-	logRegistrationError("ExpectedSwitch publisher", ManagerAccess.API.ExpectedSwitch.RegisterPublisher())
+	_ = ManagerAccess.API.ExpectedSwitch.RegisterPublisher()
 
 	logRegistrationError("SKU subscriber", ManagerAccess.API.SKU.RegisterSubscriber())
-	logRegistrationError("SKU publisher", ManagerAccess.API.SKU.RegisterPublisher())
+	_ = ManagerAccess.API.SKU.RegisterPublisher()
 
 	logRegistrationError("DpuExtensionService subscriber", ManagerAccess.API.DpuExtensionService.RegisterSubscriber())
-	logRegistrationError("DpuExtensionService publisher", ManagerAccess.API.DpuExtensionService.RegisterPublisher())
+	_ = ManagerAccess.API.DpuExtensionService.RegisterPublisher()
 
 	logRegistrationError("NVLinkLogicalPartition subscriber", ManagerAccess.API.NVLinkLogicalPartition.RegisterSubscriber())
-	logRegistrationError("NVLinkLogicalPartition publisher", ManagerAccess.API.NVLinkLogicalPartition.RegisterPublisher())
+	_ = ManagerAccess.API.NVLinkLogicalPartition.RegisterPublisher()
 
 	logRegistrationError("TenantIdentity subscriber", ManagerAccess.API.TenantIdentity.RegisterSubscriber())
 
