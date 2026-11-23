@@ -15,9 +15,14 @@
  * limitations under the License.
  */
 
+use carbide_uuid::extension_service::ExtensionServiceId;
 use clap::Parser;
+use config_version::ConfigVersion;
 
 #[derive(Parser, Debug)]
+#[command(
+    long_about = "Show the selected service VPC and attachment ID for each matching instance. Without a version filter the active attachment is preferred. If only terminating attachments remain, Core can return any retained version. Removing indicates asynchronous cleanup."
+)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -26,22 +31,26 @@ Show all instances using an extension service:
 
 Show instances using a specific version of the service:
     $ nico-admin-cli extension-service show-instances --service-id 12345678-1234-5678-90ab-cdef01234567 \
-    --version 1.0
+    --version V1-T1720000000000000
 
 ")]
 pub(crate) struct Args {
     #[clap(short = 'i', long, help = "The extension service ID")]
-    service_id: String,
+    service_id: ExtensionServiceId,
 
-    #[clap(short = 'v', long, help = "Version string to filter by (optional)")]
-    version: Option<String>,
+    #[clap(
+        short = 'v',
+        long,
+        help = "Exact service version (V<number>-T<timestamp>)"
+    )]
+    version: Option<ConfigVersion>,
 }
 
 impl From<Args> for ::rpc::forge::FindInstancesByDpuExtensionServiceRequest {
     fn from(args: Args) -> Self {
         Self {
-            service_id: args.service_id,
-            version: args.version,
+            service_id: args.service_id.to_string(),
+            version: args.version.map(|version| version.to_string()),
         }
     }
 }
