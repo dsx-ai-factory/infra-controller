@@ -18,10 +18,11 @@
 use std::collections::BTreeMap;
 
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
 use model::instance::config::extension_services::{
-    InstanceExtensionServicesConfig, RequestedInstanceExtensionServiceConfig,
-    RequestedInstanceExtensionServicesConfig,
+    InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
+    RequestedInstanceExtensionServiceConfig, RequestedInstanceExtensionServicesConfig,
 };
 use model::instance::config::network::InstanceServiceInterfaceConfig;
 
@@ -85,49 +86,60 @@ pub(super) fn to_rpc_config(
 ) -> Result<rpc::InstanceDpuExtensionServicesConfig, RpcDataConversionError> {
     let mut service_configs = Vec::with_capacity(config.service_configs.len());
     for attachment in config.service_configs {
-        let mut vpcs_by_ordinal = BTreeMap::new();
-        for service_interface in service_interfaces
-            .iter()
-            .filter(|service_interface| Some(service_interface.attachment_id) == attachment.id)
-        {
-            // Every DPU copy of one service interface must select the same VPC.
-            if let Some(existing) = vpcs_by_ordinal.insert(
-                service_interface.interface_ordinal,
-                service_interface.vpc_id,
-            ) && existing != service_interface.vpc_id
-            {
-                return Err(RpcDataConversionError::InvalidValue(
-                    "service_vpc_ids".to_string(),
-                    format!(
-                        "extension service {} version {} has inconsistent VPCs for interface ordinal {}",
-                        attachment.service_id,
-                        attachment.version,
-                        service_interface.interface_ordinal
-                    ),
-                ));
-            }
-        }
-        // The MVP supports only the first registered service interface.
-        if vpcs_by_ordinal.len() > 1
-            || vpcs_by_ordinal
-                .first_key_value()
-                .is_some_and(|(&ordinal, _)| ordinal != 0)
+        service_configs.push(rpc::InstanceDpuExtensionServiceConfig {
+            service_id: attachment.service_id.into(),
+            version: attachment.version.to_string(),
+            service_vpc_ids: service_vpc_ids_for_attachment(&attachment, service_interfaces)?,
+        });
+    }
+    Ok(rpc::InstanceDpuExtensionServicesConfig { service_configs })
+}
+
+/// Recovers the VPC selection for one active or terminating attachment from the
+/// supplied service-interface records that match its attachment ID.
+///
+/// Returns an empty vector when no records match, including when the attachment
+/// has no ID. Returns an error if a matching record uses a nonzero interface
+/// ordinal or matching records disagree on the VPC ID for the same ordinal.
+pub fn service_vpc_ids_for_attachment(
+    attachment: &InstanceExtensionServiceConfig,
+    service_interfaces: &[InstanceServiceInterfaceConfig],
+) -> Result<Vec<VpcId>, RpcDataConversionError> {
+    let mut vpcs_by_ordinal = BTreeMap::new();
+    for service_interface in service_interfaces
+        .iter()
+        .filter(|service_interface| Some(service_interface.attachment_id) == attachment.id)
+    {
+        // Every DPU copy of one service interface must select the same VPC.
+        if let Some(existing) = vpcs_by_ordinal.insert(
+            service_interface.interface_ordinal,
+            service_interface.vpc_id,
+        ) && existing != service_interface.vpc_id
         {
             return Err(RpcDataConversionError::InvalidValue(
                 "service_vpc_ids".to_string(),
                 format!(
-                    "extension service {} version {} has unsupported interface ordinals",
-                    attachment.service_id, attachment.version
+                    "extension service {} version {} has inconsistent VPCs for interface ordinal {}",
+                    attachment.service_id, attachment.version, service_interface.interface_ordinal
                 ),
             ));
         }
-        service_configs.push(rpc::InstanceDpuExtensionServiceConfig {
-            service_id: attachment.service_id.into(),
-            version: attachment.version.to_string(),
-            service_vpc_ids: vpcs_by_ordinal.into_values().collect(),
-        });
     }
-    Ok(rpc::InstanceDpuExtensionServicesConfig { service_configs })
+    // The MVP supports only the first registered service interface.
+    if vpcs_by_ordinal.len() > 1
+        || vpcs_by_ordinal
+            .first_key_value()
+            .is_some_and(|(&ordinal, _)| ordinal != 0)
+    {
+        return Err(RpcDataConversionError::InvalidValue(
+            "service_vpc_ids".to_string(),
+            format!(
+                "extension service {} version {} has unsupported interface ordinals",
+                attachment.service_id, attachment.version
+            ),
+        ));
+    }
+    Ok(vpcs_by_ordinal.into_values().collect())
 }
 
 #[cfg(test)]

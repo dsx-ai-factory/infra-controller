@@ -185,6 +185,17 @@ async fn main() -> color_eyre::Result<()> {
             )
             .exit();
     }
+    // Validate service commands before opening --output or contacting Core.
+    let extension_service_validation = match config.commands.as_ref() {
+        Some(CliCommand::Instance(command)) => {
+            command.validate_extension_service_arguments(config.cloud_unsafe_op.is_some())
+        }
+        Some(CliCommand::ExtensionService(command)) => command.validate_create_arguments(),
+        _ => Ok(()),
+    };
+    if let Err(error) = extension_service_validation {
+        error.exit();
+    }
     let file_config = get_config_from_file();
 
     // Log level is set from, in order of preference:
