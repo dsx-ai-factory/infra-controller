@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn millisecond_latency_histograms_resolve_slow_calls() {
+    fn handler_latency_histograms_resolve_slow_handlers() {
         let default_buckets: Vec<_> = [
             0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0,
             7500.0, 10000.0,
@@ -569,8 +569,8 @@ mod tests {
         .into_iter()
         .map(|boundary| (boundary, u64::from(boundary >= 50.0)))
         .collect();
-        let mut five_minute_buckets = default_buckets.clone();
-        five_minute_buckets.extend([
+        let mut handler_buckets = default_buckets.clone();
+        handler_buckets.extend([
             (15000.0, 1),
             (30000.0, 2),
             (60000.0, 2),
@@ -587,7 +587,7 @@ mod tests {
                         "carbide_power_shelves_handler_latency_in_state",
                         "carbide_power_shelves_handler_latency_in_state_milliseconds",
                     ),
-                    expect: five_minute_buckets.clone(),
+                    expect: handler_buckets.clone(),
                 },
                 Check {
                     scenario: "gRPC server duration covers the admission execution limit",
@@ -595,7 +595,7 @@ mod tests {
                         "carbide-api.grpc.server.duration",
                         "carbide_api_grpc_server_duration_milliseconds",
                     ),
-                    expect: five_minute_buckets,
+                    expect: handler_buckets,
                 },
                 Check {
                     scenario: "unrelated controller latency keeps default buckets",
@@ -646,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn time_in_state_histograms_resolve_multi_week_dwells() {
+    fn time_in_state_histograms_resolve_multi_day_dwells() {
         let registry = prometheus::Registry::new();
         let exporter = opentelemetry_prometheus::exporter()
             .with_registry(registry.clone())

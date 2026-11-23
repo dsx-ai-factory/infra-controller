@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_budget_histograms_resolve_requests_past_ten_seconds() {
+    fn upstream_budget_histograms_resolve_slow_requests_and_uploads() {
         let setup = new_metrics_setup(false).expect("metrics setup succeeds");
         for name in [
             "carbide_bmc_proxy_upstream_request_duration",
@@ -482,6 +482,27 @@ mod tests {
         }
         let families = setup.registry.gather();
 
+        let default_buckets: Vec<_> = [
+            0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0,
+            7500.0, 10000.0,
+        ]
+        .into_iter()
+        .map(|boundary| (boundary, 0))
+        .collect();
+        let mut slot_wait_buckets = default_buckets;
+        slot_wait_buckets.extend([
+            (15000.0, 0),
+            (30000.0, 0),
+            (60000.0, 1),
+            (120000.0, 1),
+            (300000.0, 1),
+            (600000.0, 1),
+            (1200000.0, 1),
+            (1800000.0, 1),
+        ]);
+        let mut upstream_request_buckets = slot_wait_buckets.clone();
+        upstream_request_buckets.extend([(3600000.0, 1), (7200000.0, 1), (14400000.0, 2)]);
+
         value_scenarios!(
             run = |exported_name: &str| {
                 let family = families
@@ -493,19 +514,15 @@ mod tests {
                     .get_bucket()
                     .iter()
                     .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
-                    .filter(|(upper_bound, _)| {
-                        [10000.0, 60000.0, 1800000.0, 14400000.0].contains(upper_bound)
-                    })
                     .collect::<Vec<_>>()
             };
             "a forwarded request resolves through the four-hour upload cap" {
                 "carbide_bmc_proxy_upstream_request_duration_milliseconds" =>
-                    vec![(10000.0, 0), (60000.0, 1), (1800000.0, 1), (14400000.0, 2)],
+                    upstream_request_buckets.clone(),
             }
 
             "a slot wait resolves through the 30-minute class budget" {
-                "carbide_bmc_proxy_admission_wait_milliseconds" =>
-                    vec![(10000.0, 0), (60000.0, 1), (1800000.0, 1)],
+                "carbide_bmc_proxy_admission_wait_milliseconds" => slot_wait_buckets.clone(),
             }
         );
     }
