@@ -1368,6 +1368,7 @@ dependencies = [
 name = "carbide-api-model"
 version = "0.0.0"
 dependencies = [
+ "arrayvec",
  "async-trait",
  "base64",
  "bmc-vendor",

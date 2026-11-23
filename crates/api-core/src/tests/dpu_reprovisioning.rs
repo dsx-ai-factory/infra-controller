@@ -861,9 +861,21 @@ async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool
     assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
 }
 
-#[crate::sqlx_test]
-async fn test_instance_reprov_with_firmware_upgrade(pool: sqlx::PgPool) {
-    Box::pin(test_instance_reprov_with_firmware_upgrade_impl(pool)).await;
+#[test]
+fn test_instance_reprov_with_firmware_upgrade() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_instance_reprov_with_firmware_upgrade"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = test_instance_reprov_with_firmware_upgrade_impl;
+    // Match Core's worker stack: driving the machine state handler through
+    // reprovisioning in a debug build exceeds libtest's default.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .unwrap()
+        .join()
+        .expect("instance reprovisioning test panicked");
 }
 
 async fn test_instance_reprov_with_firmware_upgrade_impl(pool: sqlx::PgPool) {
@@ -2054,9 +2066,21 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
 }
 
-#[crate::sqlx_test]
-async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
-    Box::pin(test_instance_reprov_restart_failed_impl(pool)).await;
+#[test]
+fn test_instance_reprov_restart_failed() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_instance_reprov_restart_failed"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = test_instance_reprov_restart_failed_impl;
+    // Match Core's worker stack: driving the machine state handler through
+    // reprovisioning in a debug build exceeds libtest's default.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .unwrap()
+        .join()
+        .expect("instance reprovisioning test panicked");
 }
 
 async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {

@@ -67,6 +67,22 @@ pub(crate) fn find_scout_script(
     )
 }
 
+pub fn has_packaged_scout_script(
+    vendor: bmc_vendor::BMCVendor,
+    model: &str,
+    component_type: FirmwareComponentType,
+) -> eyre::Result<bool> {
+    // The URL base only shapes the returned task URL, which is discarded.
+    find_scout_script_in(
+        Path::new(SCOUT_FIRMWARE_SCRIPTS_DIR),
+        "",
+        vendor,
+        model,
+        component_type,
+    )
+    .map(|script| script.is_some())
+}
+
 fn resolve_scout_script_in(
     root: &Path,
     pxe_public_base_url: &str,

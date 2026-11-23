@@ -23,3 +23,20 @@ PATCH /v2/org/{org}/nico/machine/{machineId} the `health/alerts/items/inAlertSin
 GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/health/alerts/items/inAlertSince` response's property type/format changed from `string, null`/`` to `string, null`/`date-time` for status `200`
 PATCH /v2/org/{org}/nico/machine/{machineId}/dpu-reprovision api path removed without deprecation
 POST /v2/org/{org}/nico/machine/{machineId}/bmc-reset api path removed without deprecation
+
+# Host firmware config: an ordering entry is a bare component type, as before, or a {type, driveModel} object that can name a drive model. Existing requests still validate and responses keep bare types for every component without a drive model; oasdiff reports the enum moving into the oneOf as removed and the item type as changed.
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `BMC` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `CEC` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `CombinedBmcUefi` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `CpldMb` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `CpldPdb` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `Cx7` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `GPU` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `HgxBmc` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `NIC` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `UEFI` of the request property `ordering/items/`
+API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/HostFirmwareComponentType, #/components/schemas/HostFirmwareComponentRef` to the `ordering/items/` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/HostFirmwareComponentType, #/components/schemas/HostFirmwareComponentRef` to the `ordering/items/` response property `oneOf` list for the response status `201`
+API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` request property type/format changed from `string`/`` to ``/``
+API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property type/format changed from `string`/`` to ``/`` for status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property type/format changed from `string`/`` to ``/`` for status `201`
