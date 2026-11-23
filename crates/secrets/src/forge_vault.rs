@@ -1947,7 +1947,7 @@ mod tests {
             client.set_credentials(&key, &expected).await?;
             let actual = client.get_credentials(&key).await;
             client.delete_credentials(&key).await?;
-            eyre::ensure!(actual? == Some(expected));
+            eyre::ensure!(actual? == Some(expected), "Vault credential did not match");
             eyre::ensure!(client.get_credentials(&key).await?.is_none());
             Ok::<_, eyre::Report>(())
         })
