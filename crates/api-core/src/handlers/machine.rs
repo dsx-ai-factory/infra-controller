@@ -879,6 +879,26 @@ async fn force_delete_cleanup_txn(
         .await?;
     }
 
+    if let Some(host) = host_machine
+        && host.config.dpf.used_for_ingestion
+        && current_machine_ids.contains(host.id.as_machine_id())
+    {
+        db::dpf_bmc_rotation::detach(&mut txn, &host.id.to_string(), &bmc_macs).await?;
+        let recovering = db::dpf_bmc_rotation::detached_macs(&mut *txn, &bmc_macs).await?;
+        let released = bmc_macs
+            .iter()
+            .copied()
+            .filter(|mac| !recovering.contains(mac))
+            .collect::<Vec<_>>();
+        db::bmc_suppression::delete_many_for_source(
+            &mut txn,
+            &released,
+            BmcSuppressionSubsystem::SiteExplorer,
+            BmcSuppressionSource::BmcCredentialRotation,
+        )
+        .await?;
+    }
+
     txn.commit().await?;
 
     Ok(response)
@@ -1001,6 +1021,9 @@ pub(crate) async fn admin_force_delete_machine(
 
     if let Some(host_machine) = &mut host_machine {
         let host_machine_id = host_machine.id;
+        if host_machine.config.dpf.used_for_ingestion {
+            db::dpf_bmc_rotation::lock_host(&mut txn, &host_machine_id.to_string()).await?;
+        }
         *host_machine = db::machine::find_one(
             &mut txn,
             &host_machine_id,
@@ -1273,6 +1296,26 @@ pub(crate) async fn admin_force_delete_machine(
         }
     }
 
+    // Keep a concurrent delete from doing DPF work against a replacement host.
+    let mut dpf_delete_fence = None;
+    if let Some(host) = &host_machine
+        && host.config.dpf.used_for_ingestion
+    {
+        let mut fence = api.txn_begin().await?;
+        db::dpf_bmc_rotation::lock_host(&mut fence, &host.id.to_string()).await?;
+        let live =
+            db::machine::find_one(&mut *fence, &host.id, MachineSearchConfig::default()).await?;
+        let live_identity =
+            db::machine::MachineCreationIdentity::capture(&mut *fence, host.id.as_machine_id())
+                .await?;
+        if !live.is_some_and(|live| {
+            matches!(live.state.value, ManagedHostState::ForceDeletion)
+                && live_identity.created() == identities[host.id.as_machine_id()].created()
+        }) {
+            return Ok(Response::new(response));
+        }
+        dpf_delete_fence = Some(fence);
+    }
     if let Some(machine) = &host_machine {
         if let Some(ref ops) = api.dpf_sdk
             && !dpu_machines.is_empty()
@@ -1490,10 +1533,23 @@ pub(crate) async fn admin_force_delete_machine(
             clear_bmc_credentials(api, machine).await?;
         }
         for dpu_machine in &dpu_machines {
+            // Recovery may already have recorded the active credential and
+            // started removing its saved copies. Keep that credential usable.
+            if dpf_delete_fence.is_some()
+                && let Some(mac) = dpu_machine.status.bmc_info.mac
+                && db::dpf_bmc_rotation::get(api.pg_pool(), mac)
+                    .await?
+                    .is_some_and(|recovery| recovery.detached && !recovery.patch_pending)
+            {
+                continue;
+            }
             clear_bmc_credentials(api, dpu_machine).await?;
         }
     }
 
+    if let Some(fence) = dpf_delete_fence {
+        fence.commit().await?;
+    }
     Ok(Response::new(response))
 }
 

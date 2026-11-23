@@ -3023,6 +3023,74 @@ async fn test_admin_force_delete_with_instance_type(pool: sqlx::PgPool) {
     assert!(env.find_machine(&tmp_machine_id).await.is_empty());
 }
 
+#[crate::sqlx_test]
+async fn test_admin_force_delete_with_dpf_keeps_reconciled_credential(pool: sqlx::PgPool) {
+    use carbide_secrets::credentials::{
+        BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,
+    };
+
+    let mut mock = MockDpfOperations::new();
+    mock.expect_force_delete_host().returning(|_, _| Ok(()));
+    let env = dpf_force_delete_test_env(pool, mock).await;
+    let mh = create_managed_host_with_dpf(&env).await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let device_mac = snapshot.dpu_snapshots[0].status.bmc_info.mac.unwrap();
+    db::dpf_bmc_rotation::insert(
+        txn.as_mut(),
+        &db::dpf_bmc_rotation::Recovery {
+            device_mac,
+            operation_id: uuid::Uuid::new_v4(),
+            host_machine_id: mh.id.to_string(),
+            host_dpf_id: snapshot.host_snapshot.dpf_id().unwrap(),
+            previous_version: Some(0),
+            target_version: 1,
+            patch_pending: false,
+            detached: false,
+        },
+    )
+    .await
+    .unwrap();
+    db::dpf_bmc_rotation::record_applied_version(txn.as_mut(), device_mac, Some(1))
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::BmcRoot {
+            bmc_mac_address: device_mac,
+        },
+    };
+    let reconciled = Credentials::new("root".to_string(), "test-password".to_string());
+    env.test_credential_manager
+        .set_credentials(&key, &reconciled)
+        .await
+        .unwrap();
+
+    let mut request = force_delete_request(&mh.id);
+    request.delete_bmc_credentials = true;
+    let deleted = env
+        .api
+        .admin_force_delete_machine(Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(deleted.all_done);
+    assert_eq!(
+        env.test_credential_manager
+            .get_credentials(&key)
+            .await
+            .unwrap(),
+        Some(reconciled)
+    );
+    assert!(
+        db::dpf_bmc_rotation::get(&env.pool, device_mac)
+            .await
+            .unwrap()
+            .is_some_and(|recovery| recovery.detached && !recovery.patch_pending)
+    );
+}
+
 /// An interrupted DPF cleanup of an Admin-only host remains retryable without
 /// its offline DPU. Both calls use BMC MAC-derived CR names within the SDK limit.
 #[crate::sqlx_test]
@@ -3078,6 +3146,25 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
         snapshot.host_snapshot.status.bmc_info.mac.unwrap(),
         snapshot.dpu_snapshots[0].status.bmc_info.mac.unwrap(),
     ];
+    let operation_id = uuid::Uuid::new_v4();
+    db::dpf_bmc_rotation::insert(
+        txn.as_mut(),
+        &db::dpf_bmc_rotation::Recovery {
+            device_mac: bmc_macs[1],
+            operation_id,
+            host_machine_id: host_id.to_string(),
+            host_dpf_id: snapshot.host_snapshot.dpf_id().unwrap(),
+            previous_version: Some(0),
+            target_version: 1,
+            patch_pending: false,
+            detached: false,
+        },
+    )
+    .await
+    .unwrap();
+    db::dpf_bmc_rotation::set_patch_pending(txn.as_mut(), bmc_macs[1], operation_id, true)
+        .await
+        .unwrap();
     for bmc_mac_address in bmc_macs {
         for source in [
             BmcSuppressionSource::DpfProvisioning,
@@ -3144,13 +3231,25 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
     txn.commit().await.unwrap();
 
     // Retry with the same missing observation once credential cleanup is complete.
+    let mut request = force_delete_request(&host_id);
+    request.delete_bmc_credentials = true;
     let response = env
         .api
-        .admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
+        .admin_force_delete_machine(Request::new(request))
         .await
         .expect("retry must preserve offline Admin cleanup")
         .into_inner();
     assert!(response.all_done);
+    let recovery = db::dpf_bmc_rotation::get(&env.pool, bmc_macs[1])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovery.operation_id, operation_id);
+    assert!(recovery.detached);
+    assert!(
+        recovery.patch_pending,
+        "force-delete must preserve an uncertain credential change"
+    );
     for machine_id in [host_id.into(), mh.dpu_ids[0].into()] {
         validate_machine_deletion(&env, &machine_id, None).await;
     }

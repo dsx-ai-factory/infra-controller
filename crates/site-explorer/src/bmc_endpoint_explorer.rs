@@ -16,8 +16,8 @@
  */
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bmc_explorer::Product;
@@ -27,8 +27,11 @@ use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
-use carbide_secrets::credentials::{CredentialManager, Credentials};
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialManager, Credentials, DpfBmcRotationCandidate,
+};
 use db::TransactionVending as _;
+use futures_util::future::BoxFuture;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::expected_entity::{BmcCredentialsData, ExpectedEntity};
@@ -44,6 +47,10 @@ use super::redfish::{BmcAccess, EstablishedBmc, ProxiedPools, RedfishClient};
 use super::{AuthenticatedBmc, EndpointExplorer, SiteWideBmcPassword, SiteWideBmcPasswordLoader};
 
 const BMC_AUTH_RETRY_DURATION: Duration = Duration::from_secs(3);
+
+/// The production DPF SDK checks that the previously managed resources are gone.
+pub type DpfBmcRecoveryDrainCheck =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<bool, String>> + Send + Sync;
 
 /// The site explorer moved a device's BMC root password onto the site-wide
 /// credential during ingestion (or failed to). Rotations are infrequent and
@@ -129,6 +136,7 @@ pub struct BmcEndpointExplorer {
     /// Whether nv-redfish reports include drive firmware inventory entries.
     explore_drive_firmware: bool,
     dpf_per_dpu_bmc_credentials: AtomicBool,
+    dpf_recovery_drain_check: OnceLock<Box<DpfBmcRecoveryDrainCheck>>,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -152,6 +160,7 @@ impl BmcEndpointExplorer {
             rotate_switch_nvos_credentials,
             explore_drive_firmware: false,
             dpf_per_dpu_bmc_credentials: AtomicBool::new(false),
+            dpf_recovery_drain_check: OnceLock::new(),
             database_connection,
         }
     }
@@ -168,6 +177,147 @@ impl BmcEndpointExplorer {
     pub fn set_dpf_per_dpu_bmc_credentials(&self, enabled: bool) {
         self.dpf_per_dpu_bmc_credentials
             .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Set before exploration starts. Needed when force-delete did not drain DPF.
+    pub fn set_dpf_recovery_drain_check(&self, check: Box<DpfBmcRecoveryDrainCheck>) {
+        self.dpf_recovery_drain_check.get_or_init(|| check);
+    }
+
+    async fn reconcile_detached_dpf_bmc(
+        &self,
+        address: SocketAddr,
+        mac: MacAddress,
+    ) -> Result<(), EndpointExplorationError> {
+        use DpfBmcRotationCandidate::{Previous, Target};
+        use db::dpf_bmc_rotation as recovery;
+        use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
+
+        let Some(pool) = &self.database_connection else {
+            return Ok(());
+        };
+        let error = |detail: &str| EndpointExplorationError::Other {
+            details: format!("DPF BMC credential recovery for {mac}: {detail}"),
+        };
+        let Some(pending) = recovery::get(pool, mac)
+            .await
+            .map_err(|_| error("could not read recovery record"))?
+        else {
+            return Ok(());
+        };
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .map_err(|_| error("could not start recovery transaction"))?;
+        recovery::lock_host(&mut txn, &pending.host_machine_id)
+            .await
+            .map_err(|_| error("could not lock the old host"))?;
+        let Some(current) = recovery::get(&mut *txn, mac)
+            .await
+            .map_err(|_| error("could not read recovery record"))?
+        else {
+            return Ok(());
+        };
+        if current.operation_id != pending.operation_id || !current.detached {
+            return Err(error(
+                "waiting for DPF credential rotation or teardown to finish",
+            ));
+        }
+        let device_id = mac.to_string().to_lowercase().replace(':', "-");
+        let Some(check) = self.dpf_recovery_drain_check.get() else {
+            return Err(error(
+                "waiting for DPF to confirm that the old resources have drained",
+            ));
+        };
+        if !check(current.host_dpf_id.clone(), device_id)
+            .await
+            .map_err(|detail| error(&detail))?
+        {
+            return Err(error("waiting for the old DPF resources to drain"));
+        }
+
+        let store = self.bmc_client.credential_client.manager();
+        let key = |candidate| CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::DpfBmcRotation {
+                operation_id: *current.operation_id.as_bytes(),
+                candidate,
+            },
+        };
+        if current.patch_pending {
+            let read = |candidate| async move {
+                store
+                    .get_credentials_from_writer(&key(candidate))
+                    .await
+                    .map_err(|_| error("could not read the saved credential"))?
+                    .ok_or_else(|| error("saved credential is missing"))
+            };
+            let redfish = &self.bmc_client.redfish_client;
+            let target = read(Target).await?;
+            let (credential, version) = match redfish
+                .validate_bmc_credentials(address, target.clone())
+                .await
+            {
+                Ok(()) => (target, Some(current.target_version)),
+                Err(EndpointExplorationError::Unauthorized { .. }) => {
+                    let previous = read(Previous).await?;
+                    if previous == target {
+                        return Err(recovery_rejected(mac));
+                    }
+                    tokio::time::sleep(BMC_AUTH_RETRY_DURATION).await;
+                    match redfish
+                        .validate_bmc_credentials(address, previous.clone())
+                        .await
+                    {
+                        Ok(()) => (previous, current.previous_version),
+                        Err(EndpointExplorationError::Unauthorized { .. }) => {
+                            return Err(recovery_rejected(mac));
+                        }
+                        Err(_) => return Err(error("could not verify the previous credential")),
+                    }
+                }
+                Err(_) => return Err(error("could not verify the pending credential")),
+            };
+            store
+                .set_credentials(&get_bmc_root_credential_key(mac), &credential)
+                .await
+                .map_err(|_| error("could not save the verified credential"))?;
+            db::bmc_redfish_session::delete_by_mac(&mut txn, mac)
+                .await
+                .map_err(|_| error("could not invalidate old BMC sessions"))?;
+            recovery::record_applied_version(&mut txn, mac, version)
+                .await
+                .map_err(|_| error("could not record the verified version"))?;
+            recovery::set_patch_pending(&mut txn, mac, current.operation_id, false)
+                .await
+                .map_err(|_| error("could not resolve the recovery record"))?;
+            txn.commit()
+                .await
+                .map_err(|_| error("could not commit the verified credential"))?;
+            return Err(error(
+                "verified the credential; waiting to finish recovery cleanup",
+            ));
+        }
+        for candidate in [Previous, Target] {
+            store
+                .delete_credentials(&key(candidate))
+                .await
+                .map_err(|_| error("could not remove the saved recovery credential"))?;
+        }
+        recovery::remove(&mut txn, mac, current.operation_id)
+            .await
+            .map_err(|_| error("could not remove the recovery record"))?;
+        db::bmc_suppression::delete_many_for_source(
+            &mut txn,
+            &[mac],
+            BmcSuppressionSubsystem::SiteExplorer,
+            BmcSuppressionSource::BmcCredentialRotation,
+        )
+        .await
+        .map_err(|_| error("could not release the rotation suppression"))?;
+        txn.commit()
+            .await
+            .map_err(|_| error("could not commit recovery cleanup"))?;
+        Ok(())
     }
 
     async fn get_sitewide_dpu_bmc_service_password(
@@ -715,6 +865,16 @@ impl BmcEndpointExplorer {
     }
 }
 
+fn recovery_rejected(mac: MacAddress) -> EndpointExplorationError {
+    EndpointExplorationError::Unauthorized {
+        details: format!(
+            "no saved DPF BMC credential authenticated for {mac}; operator recovery is required"
+        ),
+        response_body: None,
+        response_code: None,
+    }
+}
+
 impl AuthenticatedBmcClient {
     async fn prepare_power(
         &self,
@@ -850,6 +1010,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
         }
 
         let bmc_mac_address = interface.mac_address;
+        self.reconcile_detached_dpf_bmc(bmc_ip_address, bmc_mac_address)
+            .await?;
         let vendor = self
             .resolve_redfish_vendor(bmc_ip_address, bmc_mac_address, expected)
             .await?;
@@ -1662,6 +1824,131 @@ mod tests {
             None,
             instrumentation,
         )
+    }
+
+    #[sqlx_test]
+    async fn dpf_force_delete_recovers_the_exact_credential_after_drain(pool: PgPool) {
+        use DpfBmcRotationCandidate::{Previous, Target};
+        use db::credential_rotation::{CredentialRotationType, device_rotation_operation_state};
+        use db::dpf_bmc_rotation as recovery;
+
+        let test_meter = TestMeter::default();
+        let address = "127.0.0.1:443".parse().unwrap();
+        let sim = Arc::new(RedfishSim::default());
+        sim.set_enforce_auth(true);
+        let mut explorer = explorer_with_redfish_sim(
+            sim.clone(),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        );
+        explorer.database_connection = Some(pool.clone());
+        let drained = Arc::new(AtomicBool::new(false));
+        let observed_drain = drained.clone();
+        explorer.set_dpf_recovery_drain_check(Box::new(move |_, _| {
+            let observed_drain = observed_drain.clone();
+            Box::pin(async move { Ok(observed_drain.load(Ordering::Relaxed)) })
+        }));
+        let store = explorer.bmc_client.credential_client.manager();
+
+        for (mac, hardware_password, expected_version) in [
+            ("02:00:00:00:00:01", "pending-password", Some(3)),
+            ("02:00:00:00:00:02", "previous-password", Some(2)),
+            ("02:00:00:00:00:03", "unrecognized-password", None),
+        ] {
+            let mac = mac.parse().unwrap();
+            let id = uuid::Uuid::new_v4();
+            sim.seed_user("root", hardware_password);
+            let mut txn = pool.txn_begin().await.unwrap();
+            recovery::insert(
+                &mut txn,
+                &recovery::Recovery {
+                    device_mac: mac,
+                    operation_id: id,
+                    host_machine_id: "force-deleted-host".to_string(),
+                    host_dpf_id: "02-00-00-00-00-10".to_string(),
+                    previous_version: Some(2),
+                    target_version: 3,
+                    patch_pending: false,
+                    detached: false,
+                },
+            )
+            .await
+            .unwrap();
+            recovery::set_patch_pending(&mut txn, mac, id, true)
+                .await
+                .unwrap();
+            recovery::detach(&mut txn, "force-deleted-host", &[mac])
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            for (candidate, password) in [
+                (Previous, "previous-password"),
+                (Target, "pending-password"),
+            ] {
+                store
+                    .set_credentials(
+                        &CredentialKey::BmcCredentials {
+                            credential_type: BmcCredentialType::DpfBmcRotation {
+                                operation_id: *id.as_bytes(),
+                                candidate,
+                            },
+                        },
+                        &Credentials::new("root", password),
+                    )
+                    .await
+                    .unwrap();
+            }
+            drained.store(false, Ordering::Relaxed);
+            let attempts = sim.auth_attempts().len();
+            assert!(
+                explorer
+                    .reconcile_detached_dpf_bmc(address, mac)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                sim.auth_attempts().len(),
+                attempts,
+                "orphaned DPF resources must block re-ingestion"
+            );
+
+            drained.store(true, Ordering::Relaxed);
+            let error = explorer
+                .reconcile_detached_dpf_bmc(address, mac)
+                .await
+                .unwrap_err();
+            let pending = recovery::get(&pool, mac).await.unwrap().unwrap();
+            assert_eq!(pending.patch_pending, expected_version.is_none());
+            if let Some(version) = expected_version {
+                explorer
+                    .reconcile_detached_dpf_bmc(address, mac)
+                    .await
+                    .unwrap();
+                assert!(recovery::get(&pool, mac).await.unwrap().is_none());
+                assert_eq!(
+                    store
+                        .get_credentials(&get_bmc_root_credential_key(mac))
+                        .await
+                        .unwrap(),
+                    Some(Credentials::new("root", hardware_password)),
+                );
+                assert_eq!(
+                    device_rotation_operation_state(&pool, CredentialRotationType::Bmc, mac)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .current_version,
+                    Some(version),
+                );
+            } else {
+                assert!(error.is_unauthorized());
+                assert!(
+                    device_rotation_operation_state(&pool, CredentialRotationType::Bmc, mac)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
     }
 
     #[sqlx_test]
