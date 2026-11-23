@@ -1943,12 +1943,18 @@ mod tests {
             password: "disposable-test-value".to_string(),
         };
         let result = tokio::time::timeout(Duration::from_secs(15), async {
-            eyre::ensure!(client.get_credentials(&key).await?.is_none());
+            eyre::ensure!(
+                client.get_credentials(&key).await?.is_none(),
+                "Vault credential must be absent before creation"
+            );
             client.set_credentials(&key, &expected).await?;
             let actual = client.get_credentials(&key).await;
             client.delete_credentials(&key).await?;
             eyre::ensure!(actual? == Some(expected), "Vault credential did not match");
-            eyre::ensure!(client.get_credentials(&key).await?.is_none());
+            eyre::ensure!(
+                client.get_credentials(&key).await?.is_none(),
+                "Vault credential must be absent after deletion"
+            );
             Ok::<_, eyre::Report>(())
         })
         .await;
