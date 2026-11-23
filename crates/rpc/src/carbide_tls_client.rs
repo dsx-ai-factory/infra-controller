@@ -1190,6 +1190,9 @@ mod tests {
     // Tests that install tracing subscribers or issue traced transport requests
     // share the grpc_client_tracing lock: callsite interest is cached globally.
 
+    // TODO: We should be able to drop the `serial_test` annotations once this issue is fixed:
+    // https://github.com/tokio-rs/tracing/issues/3611
+
     /// A connection task spawned while a call's span is current runs outside
     /// it, where a task spawned in the current span, as hyper-util's
     /// `TokioExecutor` spawns under its `tracing` feature, runs inside it.
