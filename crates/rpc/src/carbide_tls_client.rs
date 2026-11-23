@@ -1187,10 +1187,17 @@ mod tests {
         );
     }
 
+    // Tests that install tracing subscribers or issue traced transport requests
+    // share the grpc_client_tracing lock: callsite interest is cached globally.
+
+    // TODO: We should be able to drop the `serial_test` annotations once this issue is fixed:
+    // https://github.com/tokio-rs/tracing/issues/3611
+
     /// A connection task spawned while a call's span is current runs outside
     /// it, where a task spawned in the current span, as hyper-util's
     /// `TokioExecutor` spawns under its `tracing` feature, runs inside it.
     #[tokio::test]
+    #[serial_test::serial(grpc_client_tracing)]
     async fn connection_tasks_run_outside_the_callers_span() {
         let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
         let call = tracing::info_span!("call");
@@ -1217,6 +1224,7 @@ mod tests {
     /// client span, and neither span is retained by the pooled HTTP/2 connection.
     /// The public RPC records RED metrics in its explicitly supplied provider.
     #[tokio::test]
+    #[serial_test::serial(grpc_client_tracing)]
     async fn carbide_api_client_traces_each_wire_request() {
         use http_body_util::StreamBody;
         use hyper::body::{Bytes, Frame};
@@ -1640,6 +1648,7 @@ mod tests {
     /// below the 300s default so the test itself stays fast) has to fire and return an error
     /// within roughly that bound.
     #[tokio::test]
+    #[serial_test::serial(grpc_client_tracing)]
     async fn version_call_times_out_against_a_silent_peer() {
         let addr = spawn_silent_peer().await;
         let mut config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
@@ -1676,6 +1685,7 @@ mod tests {
     /// built by `build_nmx_c_client` -- CodeRabbit review r3962056313 asked for coverage on both
     /// builders, not just the Forge one, since they duplicate the same timeout-wrapping logic.
     #[tokio::test]
+    #[serial_test::serial(grpc_client_tracing)]
     async fn hello_call_times_out_against_a_silent_peer() {
         let addr = spawn_silent_peer().await;
         let mut config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
