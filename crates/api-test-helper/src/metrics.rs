@@ -106,11 +106,21 @@ pub async fn wait_for_metric_line(
     expected_line: &str,
 ) -> eyre::Result<String> {
     const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    wait_for_metric_line_within(metrics_endpoints, expected_line, MAX_WAIT).await
+}
+
+/// [`wait_for_metric_line`] with a polling budget chosen by the caller, for a
+/// line that can take longer than 30 seconds to show up.
+pub async fn wait_for_metric_line_within(
+    metrics_endpoints: &[SocketAddr],
+    expected_line: &str,
+    max_wait: std::time::Duration,
+) -> eyre::Result<String> {
     let start = std::time::Instant::now();
 
     let mut last_metrics = String::new();
 
-    while start.elapsed() < MAX_WAIT {
+    while start.elapsed() < max_wait {
         for addr in metrics_endpoints {
             last_metrics = metrics(addr)?;
             if last_metrics.contains(expected_line) {
@@ -123,7 +133,7 @@ pub async fn wait_for_metric_line(
     }
 
     panic!(
-        "Even after {MAX_WAIT:?} time, Metric line {expected_line} was not visible.\n
+        "Even after {max_wait:?} time, Metric line {expected_line} was not visible.\n
         Last metrics: {last_metrics}"
     );
 }

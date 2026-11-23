@@ -163,7 +163,8 @@ pub async fn find_outstanding_by_machine_ids(
 /// One statement for the whole fleet, for callers that summarize rather than
 /// page. Only the outstanding rows are read, which their partial index covers,
 /// so the cost follows the number of waiting hosts and not the size of the
-/// fleet or of the retained history.
+/// fleet or of the retained history. A host has at most one outstanding action
+/// of a kind, so the result is bounded by the number of hosts.
 pub async fn find_outstanding_hosts(
     db: impl DbReader<'_>,
     kind: MachinePendingActionKind,

@@ -677,14 +677,17 @@ async fn run_integration() -> eyre::Result<()> {
     )
     .await?;
     // The hold gauges are read from the database with or without DPF, so they
-    // are in the scrape, at zero, before any hold exists.
+    // are in the scrape, at zero, before any hold exists. A read that fails
+    // publishes nothing and is retried a minute later with a 30 second
+    // deadline, so the wait is long enough for one retry.
     for gauge in [
         "carbide_hosts_dpu_service_sync_pending_count",
         "carbide_hosts_dpu_service_sync_oldest_pending_age_seconds",
     ] {
-        metrics::wait_for_metric_line(
+        metrics::wait_for_metric_line_within(
             &test_env.carbide_metrics_addrs,
             &format!("# TYPE {gauge} gauge\n"),
+            Duration::from_secs(120),
         )
         .await?;
     }
