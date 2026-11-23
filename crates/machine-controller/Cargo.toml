@@ -88,6 +88,7 @@ version-compare = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 arc-swap = { workspace = true }
 axum = { workspace = true }
+bmc-drivers = { path = "../bmc-drivers" }
 bmc-mock = { path = "../bmc-mock" }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
