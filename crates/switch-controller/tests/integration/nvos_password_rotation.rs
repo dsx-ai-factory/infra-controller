@@ -237,7 +237,6 @@ fn switch_services(
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         redfish_client_pool: env.redfish_sim.clone(),
         bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
-        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,
         ),

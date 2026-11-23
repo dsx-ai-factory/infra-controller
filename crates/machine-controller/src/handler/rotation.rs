@@ -281,28 +281,23 @@ async fn rotate_endpoint(
     endpoint: BmcEndpoint,
     force: bool,
 ) -> BmcRotationTick {
-    // The precise `RedfishVendor` is not persisted for a machine BMC (the stored
-    // hardware vendor is DMI-derived and too coarse), so defer resolution to the
-    // engine's probe, which runs inside the same quarantine-on-failure envelope
-    // as the rotation and reuses its credential candidates.
-    let target = endpoint.into_target_probing_vendor();
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.bmc_credential_ops.as_ref(),
-        &target,
+        &services.bmc_connector,
+        &endpoint,
         force,
         &services.instrumentation,
     )
     .await
     {
         Ok(RotateOutcome::Converged) => {
-            tracing::info!(mac = %target.device_mac, force, "BMC converged to site-wide rotation target");
+            tracing::info!(mac = %endpoint.device_mac, force, "BMC converged to site-wide rotation target");
             BmcRotationTick::Settled
         }
         Ok(RotateOutcome::Quarantined { until }) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 %until,
                 "BMC rotation attempt failed; quarantined until backoff elapses"
             );
@@ -310,7 +305,7 @@ async fn rotate_endpoint(
         }
         Ok(RotateOutcome::CredentialStoreReconcilePending) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 "BMC hardware changed but the per-device secret persist failed; holding rotation until the credential store reconciles"
             );
             BmcRotationTick::WaitForCredentialStoreReconcile
@@ -318,7 +313,7 @@ async fn rotate_endpoint(
         Ok(RotateOutcome::NoWork) => BmcRotationTick::Settled,
         Err(e) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 error = %e,
                 "transient BMC rotation bookkeeping failure; will retry the tick"
             );
@@ -344,7 +339,7 @@ async fn rotate_dpu_service_endpoint(
     match rotate_dpu_bmc_service(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.bmc_credential_ops.as_ref(),
+        &services.bmc_connector,
         &endpoint,
         force,
         &services.instrumentation,

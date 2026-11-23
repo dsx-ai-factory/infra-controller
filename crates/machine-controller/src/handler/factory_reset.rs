@@ -75,10 +75,12 @@
 //!   rather than silently attempting a speculative unlock.
 
 use bmc_platform::PlatformError;
+use carbide_credential_rotation::bmc_accounts::{change_bmc_root_password, probe_bmc_credentials};
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use db::TransactionVending as _;
 use eyre::eyre;
 use libredfish::model::service_root::RedfishVendor;
@@ -560,13 +562,28 @@ async fn restore_credentials(
     }
 
     let (host, port) = bmc_host_port(mh_snapshot)?;
-    let redfish = ctx.services.bmc_credential_ops.clone();
+    let report = match parse_uri_host_ip(&host) {
+        Some(ip) => db::explored_endpoints::find_report_by_ip(&ctx.services.db_pool, ip).await?,
+        None => None,
+    };
+    let access = BmcAccessInfo {
+        host,
+        port,
+        mac_address: host_bmc_mac,
+    };
+    let connector = ctx.services.bmc_connector.clone();
 
     // Step 1: verify the factory credentials. Until they authenticate we never
     // mutate and never park.
-    if !redfish
-        .bmc_credentials_valid(&host, port, factory_creds.clone())
-        .await?
+    if !probe_bmc_credentials(
+        &connector,
+        &access,
+        report.as_ref(),
+        factory_creds.clone(),
+        false,
+    )
+    .await
+    .map_err(|e| platform_error("accounts.list", e))?
     {
         // Factory creds rejected: normally the BMC just is not ready yet. Rarely,
         // a prior attempt already restored the per-device credential and crashed
@@ -578,9 +595,9 @@ async fn restore_credentials(
         // needed.
         if retry_count.is_multiple_of(CRASH_RECOVERY_PROBE_INTERVAL)
             && let Some(per_device) = read_per_device_bmc_cred(ctx, host_bmc_mac).await?
-            && redfish
-                .bmc_credentials_valid(&host, port, per_device)
-                .await?
+            && probe_bmc_credentials(&connector, &access, report.as_ref(), per_device, false)
+                .await
+                .map_err(|e| platform_error("accounts.list", e))?
         {
             tracing::warn!(
                 %host_bmc_mac,
@@ -623,15 +640,14 @@ async fn restore_credentials(
         ..
     } = per_device.clone();
 
-    // Resolve the exact dispatch vendor, then change the device from factory
-    // default back to its previous per-device password.
-    let vendor = redfish
-        .probe_bmc_vendor(&host, port, factory_creds.clone())
-        .await?;
-
-    match redfish
-        .set_bmc_root_password(&host, port, vendor, factory_creds, per_device_password)
-        .await
+    match change_bmc_root_password(
+        &connector,
+        &access,
+        report.as_ref(),
+        factory_creds,
+        &per_device_password,
+    )
+    .await
     {
         Ok(()) => {
             flush_bmc_session(ctx, host_bmc_mac).await?;
@@ -649,9 +665,9 @@ async fn restore_credentials(
             // credential a prior attempt succeeded and we crashed before
             // advancing. Verify before parking.
             tokio::time::sleep(std::time::Duration::from_secs(BMC_AUTH_PROBE_DELAY_SECS)).await;
-            if redfish
-                .bmc_credentials_valid(&host, port, per_device)
-                .await?
+            if probe_bmc_credentials(&connector, &access, report.as_ref(), per_device, false)
+                .await
+                .map_err(|e| platform_error("accounts.list", e))?
             {
                 flush_bmc_session(ctx, host_bmc_mac).await?;
                 tracing::warn!(
@@ -662,7 +678,7 @@ async fn restore_credentials(
                     FactoryResetBmcState::RemoveSuppression,
                 ));
             }
-            Err(StateHandlerError::from(change_err))
+            Err(platform_error("accounts.change_password", change_err))
         }
     }
 }

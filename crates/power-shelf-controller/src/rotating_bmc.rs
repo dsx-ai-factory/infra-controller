@@ -207,29 +207,23 @@ async fn rotate_power_shelf_bmc(
     endpoint: BmcEndpoint,
     force: bool,
 ) -> BmcRotationTick {
-    // A power shelf's Lite-On/Delta PMC vendor is neither persisted nor exposed
-    // in the Redfish service root, so the engine resolves it at rotation time by
-    // probing the Chassis manufacturer (the repo's standard power-shelf vendor
-    // determination). The probe runs inside the engine's quarantine-on-failure
-    // envelope, so a failed probe records backoff rather than looping the guard.
-    let target = endpoint.into_target_probing_vendor();
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.bmc_credential_ops.as_ref(),
-        &target,
+        &services.bmc_connector,
+        &endpoint,
         force,
         &services.instrumentation,
     )
     .await
     {
         Ok(RotateOutcome::Converged) => {
-            tracing::info!(mac = %target.device_mac, force, "power shelf BMC (PMC) converged to site-wide rotation target");
+            tracing::info!(mac = %endpoint.device_mac, force, "power shelf BMC (PMC) converged to site-wide rotation target");
             BmcRotationTick::Settled
         }
         Ok(RotateOutcome::Quarantined { until }) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 %until,
                 "power shelf BMC (PMC) rotation attempt failed; quarantined until backoff elapses"
             );
@@ -237,7 +231,7 @@ async fn rotate_power_shelf_bmc(
         }
         Ok(RotateOutcome::CredentialStoreReconcilePending) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 "PMC's credential changed but persisting the new credential to the credential store failed; holding rotation until the credential store reconciles"
             );
             BmcRotationTick::WaitForCredentialStoreReconcile
@@ -245,7 +239,7 @@ async fn rotate_power_shelf_bmc(
         Ok(RotateOutcome::NoWork) => BmcRotationTick::Settled,
         Err(e) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 error = %e,
                 "transient power shelf BMC (PMC) rotation bookkeeping failure; will retry the tick"
             );

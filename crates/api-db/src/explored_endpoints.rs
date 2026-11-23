@@ -178,6 +178,19 @@ pub async fn find_by_ips(
         .map_err(|e| DatabaseError::new("explored_endpoints::find_by_ips", e))
 }
 
+/// The exploration report recorded for the BMC at `ip`, or `None` before
+/// site explorer has explored it.
+pub async fn find_report_by_ip(
+    db: impl DbReader<'_>,
+    ip: IpAddr,
+) -> Result<Option<EndpointExplorationReport>, DatabaseError> {
+    Ok(find_by_ips(db, vec![ip])
+        .await?
+        .into_iter()
+        .next()
+        .map(|endpoint| endpoint.report))
+}
+
 // PostgreSQL's default trim removes only ASCII space. Match Rust's `str::trim`
 // when selecting candidates, including its Unicode whitespace characters.
 const PAIRING_SERIAL_TRIM_CHARACTERS: &str = concat!(

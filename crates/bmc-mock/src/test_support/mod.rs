@@ -18,6 +18,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use axum::extract::Request;
+use axum::http::{Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_http_client::AxumRouterHttpClient;
@@ -516,19 +519,59 @@ pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
     .await
 }
 
-/// Builds a LiteOn power shelf router that enforces Redfish authentication,
-/// as `bmc-mock --redfish-auth` does. Power shelves accept their factory-default
-/// password, [`crate::DUMMY_FACTORY_PASSWORD`] for [`crate::DUMMY_FACTORY_USERNAME`];
-/// rotate it with `state.account_service_state.change_factory_default_password`.
-/// Serve the router with [`serve_https`].
-pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>) {
+/// Builds a `hw_type` host router that enforces Redfish authentication, as
+/// `bmc-mock --redfish-auth` does. The administrator starts on
+/// [`crate::DUMMY_FACTORY_PASSWORD`] for [`crate::DUMMY_FACTORY_USERNAME`];
+/// hardware that requires a factory password change refuses it outside
+/// AccountService with 403. Rotate it with
+/// `state.account_service_state.change_factory_default_password`. Serve the
+/// router with [`serve_https`].
+pub fn host_router_with_auth(hw_type: HardwareType) -> (Router, BmcState<TestCallbacks>) {
     create_test_bmc(
-        &host_info(HardwareType::LiteOnPowerShelf),
+        &host_info(hw_type),
         TestBmcConfig::default(),
         "test-host-id".to_string(),
         true,
         MachineRouterOptions::default(),
     )
+}
+
+/// [`host_router_with_auth`] for a LiteOn power shelf, which accepts its
+/// factory-default password everywhere.
+pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>) {
+    host_router_with_auth(HardwareType::LiteOnPowerShelf)
+}
+
+/// A non-`GET` request a mock BMC answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnsweredWrite {
+    pub method: Method,
+    pub path: String,
+    pub status: StatusCode,
+}
+
+/// Wraps a mock BMC `router` to record every non-`GET` request it answers,
+/// including those its authentication refuses.
+pub fn record_writes(router: Router) -> (Router, Arc<Mutex<Vec<AnsweredWrite>>>) {
+    let writes: Arc<Mutex<Vec<AnsweredWrite>>> = Arc::default();
+    let recorded = writes.clone();
+    let router = router.layer(middleware::from_fn(move |request: Request, next: Next| {
+        let recorded = recorded.clone();
+        async move {
+            let method = request.method().clone();
+            let path = request.uri().path().to_string();
+            let response = next.run(request).await;
+            if method != Method::GET {
+                recorded.lock().unwrap().push(AnsweredWrite {
+                    method,
+                    path,
+                    status: response.status(),
+                });
+            }
+            response
+        }
+    }));
+    (router, writes)
 }
 
 /// Lite-On power shelf with an undeclared but available Systems collection.

@@ -236,6 +236,7 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         username: &str,
         password: &str,
         role_id: RoleId,
@@ -245,18 +246,20 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         username: &str,
     ) -> Result<(), EndpointExplorationError>;
 
     // set_bmc_root_password authenticates with the endpoint's currently stored
-    // BMC root credentials, probes the vendor, sets `new_password` on the
-    // device, and records it as the device's per-BMC credential. This is an
-    // out-of-band set that does not update rotation convergence; the rotation
-    // engine will reassert the site-wide password on its next pass.
+    // BMC root credentials, sets `new_password` on the device, and records it
+    // as the device's per-BMC credential. This is an out-of-band set that does
+    // not update rotation convergence; the rotation engine will reassert the
+    // site-wide password on its next pass.
     async fn set_bmc_root_password(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         new_password: &str,
     ) -> Result<(), EndpointExplorationError>;
 

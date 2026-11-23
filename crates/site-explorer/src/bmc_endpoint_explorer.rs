@@ -496,7 +496,12 @@ impl BmcEndpointExplorer {
             .await?;
         self.bmc_client
             .redfish_client
-            .set_bf4_dpu_service_password(bmc_ip_address, root_credentials.clone(), new_password)
+            .set_bf4_dpu_service_password(
+                bmc_ip_address,
+                bmc_mac_address,
+                root_credentials.clone(),
+                new_password,
+            )
             .await?;
 
         // Record the password we sent, even if a newer target was published
@@ -646,7 +651,6 @@ impl BmcEndpointExplorer {
                         bmc_ip_address,
                         bmc_mac_address,
                         bmc_cred_data.username,
-                        vendor,
                         &sitewide_bmc_password,
                     )
                     .await?
@@ -695,7 +699,8 @@ impl BmcEndpointExplorer {
             .bmc_client
             .set_bmc_root_password(
                 bmc_ip_address,
-                vendor,
+                bmc_mac_address,
+                None,
                 current_bmc_credentials,
                 sitewide_bmc_password.password.clone(),
             )
@@ -730,7 +735,6 @@ impl BmcEndpointExplorer {
         bmc_ip_address: SocketAddr,
         bmc_mac_address: MacAddress,
         username: &str,
-        vendor: RedfishVendor,
         sitewide_bmc_password: &SiteWideBmcPassword,
     ) -> Result<Credentials, EndpointExplorationError> {
         tracing::info!(
@@ -750,12 +754,11 @@ impl BmcEndpointExplorer {
 
         self.bmc_client
             .redfish_client
-            .validate_bmc_credentials(bmc_ip_address, credentials.clone())
-            .await?;
-
-        self.bmc_client
-            .redfish_client
-            .restore_bmc_root_ipmi_access(bmc_ip_address, vendor, credentials.clone())
+            .validate_and_apply_bmc_root_credentials(
+                bmc_ip_address,
+                bmc_mac_address,
+                credentials.clone(),
+            )
             .await?;
 
         self.set_bmc_root_credentials(
@@ -909,14 +912,16 @@ impl AuthenticatedBmcClient {
     async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
-        vendor: RedfishVendor,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
         current_bmc_credentials: Credentials,
         new_password: String,
     ) -> Result<Credentials, EndpointExplorationError> {
         self.redfish_client
             .set_bmc_root_password(
                 bmc_ip_address,
-                vendor,
+                bmc_mac_address,
+                report,
                 current_bmc_credentials.clone(),
                 new_password.clone(),
             )
@@ -1607,6 +1612,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         username: &str,
         password: &str,
         role_id: libredfish::RoleId,
@@ -1615,8 +1621,19 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
+                let request = nv_redfish::account::ManagerAccountCreate::builder(
+                    password.to_string(),
+                    username.to_string(),
+                    role_id.to_string(),
+                );
                 self.redfish_client
-                    .create_bmc_user(bmc_ip_address, credentials, username, password, role_id)
+                    .create_bmc_user(
+                        bmc_ip_address,
+                        bmc_mac_address,
+                        report,
+                        credentials,
+                        request,
+                    )
                     .await
             }
             Err(e) => {
@@ -1635,6 +1652,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         username: &str,
     ) -> Result<(), EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
@@ -1642,7 +1660,13 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
                 self.redfish_client
-                    .delete_bmc_user(bmc_ip_address, credentials, username)
+                    .delete_bmc_user(
+                        bmc_ip_address,
+                        bmc_mac_address,
+                        report,
+                        credentials,
+                        username,
+                    )
                     .await
             }
             Err(e) => {
@@ -1661,6 +1685,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         new_password: &str,
     ) -> Result<(), EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
@@ -1677,16 +1702,11 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                 );
             })?;
 
-        // Resolve the dispatch vendor `set_bmc_root_password` branches on using
-        // the current credentials, then set the new password on the device.
-        let vendor = self
-            .redfish_client
-            .probe_bmc_vendor(bmc_ip_address, current_credentials.clone())
-            .await?;
         let new_credentials = self
             .set_bmc_root_password(
                 bmc_ip_address,
-                vendor,
+                bmc_mac_address,
+                report,
                 current_credentials,
                 new_password.to_string(),
             )
@@ -2611,6 +2631,9 @@ mod tests {
         .unwrap();
         let sitewide_bmc_password = fixture.explorer.load_sitewide_bmc_password().await.unwrap();
         // Model a Lenovo whose password changed before the IPMI repair completed.
+        fixture
+            .sim
+            .set_service_root_vendor(Some("Lenovo".to_string()));
         fixture.sim.seed_user("1", SITEWIDE_PASSWORD);
         fixture
             .sim
@@ -2621,7 +2644,6 @@ mod tests {
                 fixture.bmc_ip_address,
                 fixture.interface.mac_address,
                 "1",
-                RedfishVendor::Lenovo,
                 &sitewide_bmc_password,
             )
             .await;
@@ -2642,7 +2664,6 @@ mod tests {
                 fixture.bmc_ip_address,
                 fixture.interface.mac_address,
                 "1",
-                RedfishVendor::Lenovo,
                 &sitewide_bmc_password,
             )
             .await
