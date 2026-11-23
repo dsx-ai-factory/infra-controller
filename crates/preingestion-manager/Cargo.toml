@@ -61,6 +61,7 @@ libc = { workspace = true }
 librms = { workspace = true }
 prometheus-text-parser = { path = "../prometheus-text-parser" }
 tempfile = { workspace = true }
+tonic = { workspace = true }
 
 [lints]
 workspace = true

@@ -3200,6 +3200,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tonic",
  "tracing",
  "version-compare 0.2.1",
 ]

@@ -700,10 +700,6 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     );
     let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
         bmc_client.clone(),
-        carbide_config
-            .site_explorer
-            .rotate_switch_nvos_credentials
-            .clone(),
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
         instrumentation.clone(),
@@ -2789,6 +2785,12 @@ async fn initialize_and_start_controllers<'a>(
         api_service.instrumentation.clone(),
     )
     .with_driver_connector(driver_connector.clone());
+
+    let preingestion_manager = match component_manager.as_ref() {
+        Some(manager) => preingestion_manager
+            .with_component_manager(Arc::new(manager.clone()), credential_manager.clone()),
+        None => preingestion_manager,
+    };
 
     let preingestion_manager = match component_manager.as_ref() {
         Some(manager)

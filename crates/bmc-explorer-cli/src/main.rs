@@ -95,8 +95,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         proxy_address.clone(),
         instrumentation.clone(),
     );
-    let rotate_switch_nvos_credentials = Default::default();
-
     let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         redfish_client_pool,
         Arc::new(NvRedfishClientPool::new(proxy_address)),
@@ -107,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let explorer = BmcEndpointExplorer::new(
         bmc_client,
-        rotate_switch_nvos_credentials,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.
         None,
         instrumentation,

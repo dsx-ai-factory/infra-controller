@@ -1039,11 +1039,7 @@ async fn test_failed_first_probe_is_retried_before_routine_refresh(
     let routine_before = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
     txn.commit().await?;
 
-    // Keep automatic ingestion enabled so the failure retains the production Initial state.
-    let explorer = env.test_site_explorer(SiteExplorerConfig {
-        create_machines: Arc::new(true.into()),
-        ..suppression_test_config(1)
-    });
+    let explorer = env.test_site_explorer(suppression_test_config(1));
     let error = EndpointExplorationError::ConnectionRefused {
         details: "synthetic first probe failure".to_string(),
     };
@@ -4394,6 +4390,24 @@ async fn test_site_explorer_ingests_serial_matched_dpu_without_part_number(
     explorer.insert_endpoints(vec![(host_ip, host_report), (dpu_ip, dpu.into())]);
     explorer.run_single_iteration().await?;
 
+    let preingestion =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(&env.pool).await?;
+    for (kind, ip) in [("host", host_ip), ("DPU", dpu_ip)] {
+        let endpoint = preingestion
+            .iter()
+            .find(|endpoint| endpoint.address == ip)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{kind} BMC must remain eligible for preingestion with create_machines=false"
+                )
+            });
+        assert_eq!(
+            endpoint.preingestion_state,
+            PreingestionState::Initial,
+            "{kind}"
+        );
+    }
+
     let mut txn = env.pool.txn_begin().await?;
     for ip in [host_ip, dpu_ip] {
         db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
@@ -4859,6 +4873,12 @@ async fn test_site_explorer_resets_inventory_dpu_with_ready_fallback(
         (fallback_ip, fallback_dpu.into()),
     ]);
     explorer.run_single_iteration().await?;
+    let mut txn = env.pool.txn_begin().await?;
+    for ip in [host_ip, inventory_ip, fallback_ip] {
+        db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
+    }
+    txn.commit().await?;
+    explorer.run_single_iteration().await?;
 
     assert!(
         db::explored_managed_host::find_all(&env.pool)
@@ -4945,6 +4965,12 @@ async fn test_site_explorer_waits_for_all_fallback_dpus(
     });
     explorer.insert_endpoints(vec![(host_ip, host.into()), (ready_ip, ready_dpu.into())]);
     let endpoint_explorer = explorer.endpoint_explorer();
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.txn_begin().await?;
+    for ip in [host_ip, ready_ip] {
+        db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
+    }
+    txn.commit().await?;
 
     // A fully matched PCIe/chassis inventory must still wait for another DPU
     // listed only in expected serials. The reported DPU is also in that list.
@@ -4977,6 +5003,10 @@ async fn test_site_explorer_waits_for_all_fallback_dpus(
     let pending_address = std::net::SocketAddr::new(pending_ip, 443);
     let host_address = std::net::SocketAddr::new(host_ip, 443);
     explorer.insert_endpoints(vec![(pending_ip, pending_dpu.clone().into())]);
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.txn_begin().await?;
+    db::explored_endpoints::set_preingestion_complete(pending_ip, &mut txn).await?;
+    txn.commit().await?;
     endpoint_explorer.fail_next_set_nic_mode(EndpointExplorationError::ConnectionTimeout {
         details: "injected transient fallback mode-setting failure".to_string(),
         consecutive_count: 1,
@@ -5321,8 +5351,14 @@ async fn test_site_explorer_combines_dpu_matching_sources(
         hosts.push((case, host_ip, additional_ip));
     }
 
-    // Manual ingestion completes preingestion during exploration, so the same
-    // iteration can pair endpoints and persist the managed-host decision.
+    // Complete preparation before testing DPU matching and configuration.
+    explorer.run_single_iteration().await?;
+    let endpoints = db::explored_endpoints::find_all(&env.pool).await?;
+    let mut txn = env.pool.txn_begin().await?;
+    for endpoint in endpoints {
+        db::explored_endpoints::set_preingestion_complete(endpoint.address, &mut txn).await?;
+    }
+    txn.commit().await?;
     explorer.run_single_iteration().await?;
 
     let expected_mode_calls = hosts

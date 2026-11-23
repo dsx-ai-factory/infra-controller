@@ -26,6 +26,7 @@ use mac_address::MacAddress;
 use model::metadata::Metadata;
 use model::site_explorer::{
     Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, EthernetInterface,
+    PreingestionState,
 };
 use model::switch::SwitchSearchFilter;
 use rpc::forge::DhcpDiscovery;
@@ -92,7 +93,7 @@ async fn test_site_explorer_switch_discovery(
         explorations_per_run: 1,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
-        create_machines: Arc::new(true.into()),
+        create_machines: Arc::new(false.into()),
         create_switches: Arc::new(true.into()),
         switches_created_per_run: 1,
         ..Default::default()
@@ -139,6 +140,13 @@ async fn test_site_explorer_switch_discovery(
 
     let explored = db_explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
+    assert_eq!(explored[0].preingestion_state, PreingestionState::Initial);
+    assert!(
+        db::switch::find_ids(&env.pool, SwitchSearchFilter::default())
+            .await?
+            .is_empty(),
+        "switch creation must wait for BMC preingestion even when host creation is disabled"
+    );
 
     for report in &explored {
         assert_eq!(report.report_version.version_nr(), 1);
