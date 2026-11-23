@@ -1950,6 +1950,7 @@ async fn create_test_env_with_overrides_inner(
             create_switches: Arc::new(true.into()),
             switches_created_per_run: 1,
             rotate_switch_nvos_credentials: Arc::new(false.into()),
+            host_bluefield_rules: Default::default(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             deprecated_explore_mode: None,
