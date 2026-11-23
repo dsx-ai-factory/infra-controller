@@ -24,9 +24,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use carbide_instrument::{Event, LabelValue, MetricFamily};
+use carbide_metrics_utils::OtelView;
 use http::Method;
 use metrics_endpoint::{MetricsEndpointConfig, MetricsSetup};
 use opentelemetry::StringValue;
+use opentelemetry_sdk::metrics::{Aggregation, InstrumentKind};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -497,6 +499,32 @@ pub(crate) struct UpstreamRequestCompleted {
     pub(crate) status: UpstreamStatus,
     #[observation]
     pub(crate) took: Duration,
+}
+
+/// OpenTelemetry's default millisecond boundaries, so existing `le` series remain,
+/// extended through the 30-minute maximum upstream budget. That budget bounds both a
+/// forwarded request and its wait for a slot at the BMC.
+const UPSTREAM_BUDGET_BOUNDARIES_MS: [f64; 23] = [
+    0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
+    10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 300000.0, 600000.0, 1200000.0, 1800000.0,
+];
+
+/// Views for the histograms that time forwarded BMC requests and their slot waits.
+pub(crate) fn upstream_budget_histogram_views() -> carbide_metrics_utils::Result<[OtelView; 2]> {
+    let view = |name| {
+        carbide_metrics_utils::new_view(
+            name,
+            Some(InstrumentKind::Histogram),
+            Aggregation::ExplicitBucketHistogram {
+                boundaries: UPSTREAM_BUDGET_BOUNDARIES_MS.to_vec(),
+                record_min_max: true,
+            },
+        )
+    };
+    Ok([
+        view("carbide_bmc_proxy_upstream_request_duration")?,
+        view("carbide_bmc_proxy_admission_wait")?,
+    ])
 }
 
 #[cfg(test)]

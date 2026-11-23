@@ -225,6 +225,17 @@ pub fn new_metrics_setup(
     service_namespace: &'static str,
     set_global_meter: bool,
 ) -> eyre::Result<MetricsSetup> {
+    new_metrics_setup_with_views(service_name, service_namespace, set_global_meter, [])
+}
+
+/// Like [`new_metrics_setup`], and also registers the service's own `views`, for
+/// example explicit bucket boundaries for histograms the default boundaries do not fit.
+pub fn new_metrics_setup_with_views(
+    service_name: &'static str,
+    service_namespace: &'static str,
+    set_global_meter: bool,
+    views: impl IntoIterator<Item = OtelView>,
+) -> eyre::Result<MetricsSetup> {
     // This defines attributes that are set on the exported metrics
     let service_telemetry_attributes = opentelemetry_sdk::Resource::builder()
         .with_attributes(vec![
@@ -243,11 +254,16 @@ pub fn new_metrics_setup(
         .without_scope_info()
         .without_target_info()
         .build()?;
-    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-        .with_reader(metrics_exporter)
-        .with_resource(service_telemetry_attributes)
-        .with_view(create_metric_view_for_retry_histograms("*_attempts_*")?)
-        .with_view(create_metric_view_for_retry_histograms("*_retries_*")?)
+    let meter_provider = views
+        .into_iter()
+        .fold(
+            opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+                .with_reader(metrics_exporter)
+                .with_resource(service_telemetry_attributes)
+                .with_view(create_metric_view_for_retry_histograms("*_attempts_*")?)
+                .with_view(create_metric_view_for_retry_histograms("*_retries_*")?),
+            |builder, view| builder.with_view(view),
+        )
         .build();
 
     if set_global_meter {

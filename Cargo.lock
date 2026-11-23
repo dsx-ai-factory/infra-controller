@@ -1781,6 +1781,7 @@ dependencies = [
  "bytes",
  "carbide-authn",
  "carbide-instrument",
+ "carbide-metrics-utils",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",

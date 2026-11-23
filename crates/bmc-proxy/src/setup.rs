@@ -211,8 +211,19 @@ fn should_accept_span_or_event(metadata: &tracing::Metadata<'_>) -> bool {
 }
 
 pub(crate) fn setup_metrics() -> SetupResult<MetricsSetup> {
-    metrics_endpoint::new_metrics_setup("carbide-bmc-proxy", "carbide-system", true)
-        .map_err(|e| SetupError::Metrics(e.to_string()))
+    new_metrics_setup(true)
+}
+
+fn new_metrics_setup(set_global_meter: bool) -> SetupResult<MetricsSetup> {
+    let views = crate::metrics::upstream_budget_histogram_views()
+        .map_err(|e| SetupError::Metrics(e.to_string()))?;
+    metrics_endpoint::new_metrics_setup_with_views(
+        "carbide-bmc-proxy",
+        "carbide-system",
+        set_global_meter,
+        views,
+    )
+    .map_err(|e| SetupError::Metrics(e.to_string()))
 }
 
 fn dep_log_filter(env_filter: EnvFilter) -> EnvFilter {
@@ -450,11 +461,49 @@ mod tests {
         // carbide_instrument::testing) owns instrument bindings for this
         // binary's event tests, and swapping the global provider mid-run
         // would steal first-emit bindings from them.
-        let setup =
-            metrics_endpoint::new_metrics_setup("carbide-bmc-proxy", "carbide-system", false)
-                .expect("metrics setup succeeds");
+        let setup = new_metrics_setup(false).expect("metrics setup succeeds");
 
         assert!(setup.health_controller.is_ready());
         assert!(setup.health_controller.is_healthy());
+    }
+
+    #[test]
+    fn upstream_budget_histograms_resolve_requests_past_ten_seconds() {
+        let setup = new_metrics_setup(false).expect("metrics setup succeeds");
+        for name in [
+            "carbide_bmc_proxy_upstream_request_duration",
+            "carbide_bmc_proxy_admission_wait",
+        ] {
+            setup
+                .meter
+                .f64_histogram(name)
+                .with_unit("ms")
+                .build()
+                .record(45_000.0, &[]);
+        }
+        let families = setup.registry.gather();
+
+        let expected = vec![(10000.0, 0), (30000.0, 0), (60000.0, 1), (1800000.0, 1)];
+        value_scenarios!(
+            run = |exported_name: &str| {
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == exported_name)
+                    .unwrap_or_else(|| panic!("missing {exported_name} histogram"));
+                family.get_metric()[0]
+                    .get_histogram()
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+                    .filter(|(upper_bound, _)| {
+                        [10000.0, 30000.0, 60000.0, 1800000.0].contains(upper_bound)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            "a 45-second observation lands in a finite bucket" {
+                "carbide_bmc_proxy_upstream_request_duration_milliseconds" => expected.clone(),
+                "carbide_bmc_proxy_admission_wait_milliseconds" => expected.clone(),
+            }
+        );
     }
 }
