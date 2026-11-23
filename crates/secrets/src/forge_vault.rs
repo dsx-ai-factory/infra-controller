@@ -1924,7 +1924,15 @@ mod tests {
             pki_role_name: Some("unused".to_string()),
             ..Default::default()
         };
-        let client = super::create_vault_client(&config)?;
+        let mut join_set = JoinSet::new();
+        let cancel_token = CancellationToken::new();
+        let client = super::create_vault_client(
+            &config,
+            Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+            Some((&mut join_set, cancel_token.clone())),
+        )?;
         let key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {
                 bmc_mac_address: mac_address::MacAddress::new([0x02, 0, 0, 0, 0x54, 0x03]),
@@ -1934,16 +1942,21 @@ mod tests {
             username: "dependency-qualification".to_string(),
             password: "disposable-test-value".to_string(),
         };
-        tokio::time::timeout(Duration::from_secs(15), async {
-            assert_eq!(client.get_credentials(&key).await?, None);
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            eyre::ensure!(client.get_credentials(&key).await?.is_none());
             client.set_credentials(&key, &expected).await?;
             let actual = client.get_credentials(&key).await;
             client.delete_credentials(&key).await?;
-            assert_eq!(actual?, Some(expected));
-            assert_eq!(client.get_credentials(&key).await?, None);
+            eyre::ensure!(actual? == Some(expected));
+            eyre::ensure!(client.get_credentials(&key).await?.is_none());
             Ok::<_, eyre::Report>(())
         })
-        .await??;
+        .await;
+        cancel_token.cancel();
+        while let Some(task) = join_set.join_next().await {
+            task?;
+        }
+        result??;
         Ok(())
     }
 
