@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use carbide_hw_identification::host_serial::is_compute_tray_assembly;
 use carbide_network::BaseMac;
 use carbide_utils::arch::CpuArchitecture;
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -1373,7 +1374,7 @@ impl EndpointExplorationReport {
     /// enough data for generation is available
     pub fn generate_power_shelf_id(&mut self) -> ModelResult<Option<&PowerShelfId>> {
         let chassis = self.chassis.first().unwrap();
-        let serial_number = chassis.serial_number.as_deref().unwrap_or_default();
+        let serial_number = chassis.inventory_serial_number().unwrap_or_default();
         let manufacturer = chassis.manufacturer.as_deref().unwrap_or_default();
         let model = chassis.model.as_deref().unwrap_or_default();
 
@@ -1406,7 +1407,7 @@ impl EndpointExplorationReport {
     /// chassis selection fall through to a subsystem that reports a real serial.
     fn is_switch_chassis_valid(chassis: &Chassis) -> bool {
         matches!(
-            chassis.serial_number.as_deref().map(str::trim),
+            chassis.inventory_serial_number(),
             Some(serial) if !serial.is_empty() && serial != "NA"
         )
     }
@@ -1441,7 +1442,7 @@ impl EndpointExplorationReport {
             HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
         ))?;
 
-        let serial_number = chassis.serial_number.as_deref();
+        let serial_number = chassis.inventory_serial_number();
         let manufacturer = chassis.manufacturer.as_deref().unwrap_or("NVIDIA");
         let model = "Switch";
 
@@ -2069,6 +2070,23 @@ impl FromStr for UefiDevicePath {
     }
 }
 
+/// Inventory fields from one member of a Redfish chassis Assembly.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChassisAssembly {
+    /// Redfish member ID within this chassis's Assembly.
+    pub member_id: String,
+    /// Name of the FRU as reported by the BMC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Model of this assembly member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Serial number reported on this member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+}
+
 /// `Chassis` definition. Matches redfish definition
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -2077,7 +2095,11 @@ pub struct Chassis {
     pub manufacturer: Option<String>,
     pub model: Option<String>,
     pub part_number: Option<String>,
+    /// SerialNumber on the chassis resource. Older reports may contain the compute-tray serial here.
     pub serial_number: Option<String>,
+    /// Assembly members collected for this chassis, in BMC order. Absent in older reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assemblies: Vec<ChassisAssembly>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_adapters: Vec<NetworkAdapter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2088,6 +2110,19 @@ pub struct Chassis {
     pub topology_id: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<i32>,
+}
+
+impl Chassis {
+    /// Serial used for inventory matching and the RPC view. For reports without
+    /// assembly inventory, the saved chassis serial already provides the fallback.
+    pub fn inventory_serial_number(&self) -> Option<&str> {
+        self.assemblies
+            .iter()
+            .find(|assembly| is_compute_tray_assembly(&self.id, assembly.model.as_deref()))
+            .and_then(|assembly| assembly.serial_number.as_deref())
+            .or(self.serial_number.as_deref())
+            .map(str::trim)
+    }
 }
 
 /// `NetworkAdapter` definition. Matches redfish definition
@@ -4884,6 +4919,7 @@ mod tests {
                 model: None,
                 serial_number: Some("MT2242XZ00NX".to_string()),
                 part_number: None,
+                assemblies: Vec::new(),
                 network_adapters: vec![],
                 physical_slot_number: None,
                 compute_tray_index: None,
@@ -5114,6 +5150,7 @@ mod tests {
                 model: None,
                 serial_number: Some("MT2242XZ00NX".to_string()),
                 part_number: None,
+                assemblies: Vec::new(),
                 network_adapters: vec![],
                 physical_slot_number: None,
                 compute_tray_index: None,

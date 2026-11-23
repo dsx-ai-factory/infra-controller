@@ -230,7 +230,7 @@ impl PowerShelfCreator {
         }
 
         let power_shelf_serial = power_shelf_chassis
-            .and_then(|c| c.serial_number.as_deref())
+            .and_then(|c| c.inventory_serial_number())
             .unwrap_or(expected_shelf.metadata.name.as_str());
         let power_shelf_vendor = power_shelf_chassis
             .and_then(|c| c.manufacturer.as_deref())

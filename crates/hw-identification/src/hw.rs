@@ -34,3 +34,6 @@ pub mod nvidia_bluefield;
 pub mod nvidia_bluefield_2;
 pub mod nvidia_bluefield_3;
 pub mod nvidia_bluefield_4;
+pub mod nvidia_openbmc;
+pub mod nvidia_titania_bianca_pdb;
+pub mod nvidia_vr_nvl_pdb;
