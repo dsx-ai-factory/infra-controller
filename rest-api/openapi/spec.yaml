@@ -27368,14 +27368,19 @@ components:
             - array
             - 'null'
           description: >-
+            Stored NVLink Interface records for the Instance. The list can include
+            interfaces in `Deleting` status and can contain both retiring and
+            replacement records for the same GPU.
+
             Omit this field or send `null` to keep the current GPU assignments.
             A supplied list specifies the complete set of desired assignments.
             Omit a GPU from the list to remove its assignment. Send `[]` to
             remove all assignments where permitted by the VPC rules.
 
             Each entry maps a GPU index (`deviceInstance`) to an NVLink Logical
-            Partition (`nvLinkLogicalPartitionId`). GPU indexes must be unique
-            and in the range supported by the Instance, from 0 through 3.
+            Partition (`nvLinkLogicalPartitionId`). Each `deviceInstance`
+            must be unique within the list, be between 0 and 3 inclusive, and
+            identify a GPU supported by the Instance.
             Use a partition in the Instance's Site that the tenant owns and
             that is `Ready`. Different GPUs can use different NVLink Logical
             Partitions.

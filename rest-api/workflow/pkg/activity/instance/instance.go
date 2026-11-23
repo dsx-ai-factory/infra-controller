@@ -1200,12 +1200,18 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
-				updated, serr := nvlifcDAO.UpdateFromInventoryIfLive(ctx, nil, nvlifc.ID, gpuGuid, nvLinkDomainID, status)
+				_, serr = nvlifcDAO.Update(
+					ctx,
+					nil,
+					cdbm.NVLinkInterfaceUpdateInput{
+						NVLinkInterfaceID: nvlifc.ID,
+						GpuGUID:           gpuGuid,
+						NVLinkDomainID:    nvLinkDomainID,
+						Status:            status,
+					},
+				)
 				if serr != nil {
 					slogger.Error().Err(serr).Str("NVLink Interface ID", nvlifc.ID.String()).Msg("Failed to update NVLink Interface, DB error")
-				} else if !updated {
-					slogger.Debug().Str("NVLink Interface ID", nvlifc.ID.String()).
-						Msg("Skipped NVLink inventory update because the binding is no longer live")
 				}
 			}
 		}

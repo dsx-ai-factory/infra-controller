@@ -154,8 +154,6 @@ func (ibi *NVLinkInterface) BeforeCreateTable(ctx context.Context, query *bun.Cr
 
 // NVLinkInterfaceDAO is an interface for interacting with the NVLinkInterface model
 type NVLinkInterfaceDAO interface {
-	UpdateFromInventoryIfLive(ctx context.Context, tx *db.Tx, id uuid.UUID, gpuGUID *string, domainID *uuid.UUID, status *string) (bool, error)
-	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*NVLinkInterface, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter NVLinkInterfaceFilterInput, page paginator.PageInput, includeRelations []string) ([]NVLinkInterface, int, error)
@@ -285,30 +283,6 @@ func (nvlisd NVLinkInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input
 		return nil, err
 	}
 	return &results[0], nil
-}
-
-// UpdateFromInventoryIfLive applies Site observations only while the binding is live.
-func (nvlisd NVLinkInterfaceSQLDAO) UpdateFromInventoryIfLive(ctx context.Context, tx *db.Tx, id uuid.UUID, gpuGUID *string, domainID *uuid.UUID, status *string) (_ bool, retErr error) {
-	ctx, span := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.UpdateFromInventoryIfLive")
-	defer func() { cotel.EndSpan(span, retErr) }()
-	query := db.GetIDB(tx, nvlisd.dbSession).NewUpdate().Model((*NVLinkInterface)(nil)).
-		Set("updated = ?", db.GetCurTime()).
-		Where("id = ? AND status <> ?", id, NVLinkInterfaceStatusDeleting)
-	if gpuGUID != nil {
-		query = query.Set("gpu_guid = ?", *gpuGUID)
-	}
-	if domainID != nil {
-		query = query.Set("nvlink_domain_id = ?", *domainID)
-	}
-	if status != nil {
-		query = query.Set("status = ?", *status)
-	}
-	result, err := query.Exec(ctx)
-	if err != nil {
-		return false, err
-	}
-	count, err := result.RowsAffected()
-	return count > 0, err
 }
 
 // Update updates an existing NVLinkInterface from the given parameters

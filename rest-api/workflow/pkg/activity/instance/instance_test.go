@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +21,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"github.com/uptrace/bun"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
@@ -38,32 +36,6 @@ import (
 	"go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 )
-
-// Commit a PATCH transition before inventory counts the bindings or after it fetches them.
-type nvlinkInventoryReadHook struct {
-	instanceID uuid.UUID
-	beforeRead func()
-	afterRead  func()
-}
-
-func (h *nvlinkInventoryReadHook) runOnce(event *bun.QueryEvent, prefix string, callback *func()) {
-	if *callback == nil || event.Err != nil || !strings.HasPrefix(event.Query, prefix) ||
-		!strings.Contains(event.Query, `FROM "nvlink_interface"`) || !strings.Contains(event.Query, h.instanceID.String()) {
-		return
-	}
-	run := *callback
-	*callback = nil
-	run()
-}
-
-func (h *nvlinkInventoryReadHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	h.runOnce(event, "SELECT ", &h.beforeRead)
-	return ctx
-}
-
-func (h *nvlinkInventoryReadHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
-	h.runOnce(event, `SELECT "nvli"."id"`, &h.afterRead)
-}
 
 // testTemporalSiteClientPool Building site client pool
 // TODO commonize this
@@ -2285,7 +2257,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	gpuGuidDel4 := "gpu-guid-nvlink-del-4"
 	gpuGuidDel5 := "gpu-guid-nvlink-del-5"
 
-	// Instance A: inventory must leave a binding retired after the inventory read in Deleting.
+	// Instance A: Site reports only GPU 1, so inventory deletes the aged GPU 0 binding and marks GPU 1 Ready.
 	machineNvlA := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
 	nvlinkDelInstA, err := instanceDAO.Create(ctx, nil, cdbm.InstanceCreateInput{
 		Name: "test-instance-nvlink-A", TenantID: tenant.ID, InfrastructureProviderID: ip.ID, SiteID: site4.ID,
@@ -2297,6 +2269,10 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlinkDelInstA.ID.String())
 	assert.NoError(t, err)
 	_ = util.TestBuildInterface(t, dbSession, &nvlinkDelInstA.ID, &subnet4.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
+
+	nvlifcDelA1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 0, cutil.GetPtr(gpuGuidDel1), nil, cdbm.NVLinkInterfaceStatusDeleting)
+	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-2*cutil.DefaultInventoryReceiptInterval), nvlifcDelA1.ID)
+	require.NoError(t, err)
 
 	nvlifcDelA2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel2), nil, cdbm.NVLinkInterfaceStatusPending)
 	assert.NotNil(t, nvlifcDelA2)
@@ -2541,10 +2517,6 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		status     string
 	}
 
-	// The captured report lists the retired assignment that PATCH is about to request again.
-	beforeReadInstance := util.TestBuildInstance(t, dbSession, "nvlink-replacement-before-read", tenant.ID, ip.ID, site4.ID, instanceType.ID, vpc4.ID, nil, operatingSystem.ID, cdbm.InstanceStatusReady)
-	beforeReadBinding := util.TestBuildNVLinkInterface(t, dbSession, beforeReadInstance.ID, site4.ID, nvllPartition4.ID, nil, 1, nil, nil, cdbm.NVLinkInterfaceStatusDeleting)
-
 	tests := []struct {
 		name                                  string
 		siteID                                uuid.UUID
@@ -2582,7 +2554,6 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		readyNVLinkInterfaces                 []*cdbm.NVLinkInterface
 		deletedNVLinkInterfaces               []*cdbm.NVLinkInterface
 		deletingNVLinkInterfaces              []*cdbm.NVLinkInterface
-		beforeInventory                       func(*testing.T)
 		requiredMetadataUpdate                bool
 		metadataInstanceUpdate                *cdbm.Instance
 		tpmCertificateUpdatedInstance         *cdbm.Instance
@@ -2750,81 +2721,14 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			metadataInstanceUpdate: pagedIns[1],
 		},
 		{
-			name:             "stale synced report preserves a replacement NVLink binding created before the binding read",
-			siteID:           site4.ID,
-			clientPoolSiteID: site4.ID.String(),
-			clientPoolClient: mtc4,
-			instanceInventory: &corev1.InstanceInventory{
-				InventoryPage: &corev1.InventoryPage{CurrentPage: 1, TotalPages: 2},
-				Instances: []*corev1.Instance{{
-					Id:     &corev1.InstanceId{Value: beforeReadInstance.ID.String()},
-					Config: nvlinkDelInventory.Instances[0].Config,
-					Status: nvlinkDelInventory.Instances[0].Status,
-				}},
-			},
-			beforeInventory: func(t *testing.T) {
-				_, err := dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-2*cutil.DefaultInventoryReceiptInterval), beforeReadInstance.ID)
-				require.NoError(t, err)
-
-				dao := cdbm.NewNVLinkInterfaceDAO(dbSession)
-				var replacement *cdbm.NVLinkInterface
-				hook := &nvlinkInventoryReadHook{instanceID: beforeReadInstance.ID}
-				hook.beforeRead = func() {
-					replacement, err = cdb.WithTxResult(ctx, dbSession, func(tx *cdb.Tx) (*cdbm.NVLinkInterface, error) {
-						_, updateErr := instanceDAO.Update(ctx, tx, cdbm.InstanceUpdateInput{
-							InstanceID:                beforeReadInstance.ID,
-							InstanceUpdateCommonInput: cdbm.InstanceUpdateCommonInput{Status: cutil.GetPtr(cdbm.InstanceStatusConfiguring)},
-						})
-						if updateErr != nil {
-							return nil, updateErr
-						}
-						return dao.Create(ctx, tx, cdbm.NVLinkInterfaceCreateInput{
-							InstanceID: beforeReadInstance.ID, SiteID: site4.ID, CreatedBy: tnu.ID,
-							NVLinkLogicalPartitionID: beforeReadBinding.NVLinkLogicalPartitionID,
-							DeviceInstance:           beforeReadBinding.DeviceInstance, Status: cdbm.NVLinkInterfaceStatusPending,
-						})
-					})
-					require.NoError(t, err)
-				}
-				dbSession.DB.AddQueryHook(hook)
-				t.Cleanup(func() {
-					require.NotNil(t, replacement, "PATCH must commit before inventory reads the bindings")
-					require.NotEqual(t, beforeReadBinding.ID, replacement.ID)
-					row, err := dao.GetByID(ctx, nil, replacement.ID, nil)
-					require.NoError(t, err)
-					require.Equal(t, cdbm.NVLinkInterfaceStatusPending, row.Status)
-					require.Equal(t, replacement, row)
-				})
-			},
-		},
-		{
 			name:                     "test NVLink Interface deletion strategy with synced/unsynced configs and stale inventory",
 			siteID:                   site4.ID,
 			clientPoolSiteID:         site4.ID.String(),
 			clientPoolClient:         mtc4,
 			instanceInventory:        nvlinkDelInventory,
-			deletedNVLinkInterfaces:  []*cdbm.NVLinkInterface{nvlifcDelB1, retiredIntermediate, nvlifcDelC1},
-			readyNVLinkInterfaces:    []*cdbm.NVLinkInterface{nvlifcDelB2},
-			deletingNVLinkInterfaces: []*cdbm.NVLinkInterface{nvlifcDelA2, nvlifcDelD1, nvlifcDelE1},
-			beforeInventory: func(t *testing.T) {
-				dao := cdbm.NewNVLinkInterfaceDAO(dbSession)
-				hook := &nvlinkInventoryReadHook{instanceID: nvlinkDelInstA.ID}
-				var retired *cdbm.NVLinkInterface
-				hook.afterRead = func() {
-					var err error
-					retired, err = dao.Update(ctx, nil, cdbm.NVLinkInterfaceUpdateInput{
-						NVLinkInterfaceID: nvlifcDelA2.ID, Status: cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
-					})
-					require.NoError(t, err)
-				}
-				dbSession.DB.AddQueryHook(hook)
-				t.Cleanup(func() {
-					require.NotNil(t, retired, "inventory must read the binding before PATCH retires it")
-					got, err := dao.GetByID(ctx, nil, retired.ID, nil)
-					require.NoError(t, err)
-					require.Equal(t, retired, got)
-				})
-			},
+			deletedNVLinkInterfaces:  []*cdbm.NVLinkInterface{nvlifcDelA1, nvlifcDelB1, retiredIntermediate, nvlifcDelC1},
+			readyNVLinkInterfaces:    []*cdbm.NVLinkInterface{nvlifcDelA2, nvlifcDelB2},
+			deletingNVLinkInterfaces: []*cdbm.NVLinkInterface{nvlifcDelD1, nvlifcDelE1},
 		},
 	}
 
@@ -2834,9 +2738,6 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			ms := NewManageInstance(dbSession, tSiteClientPool, wtc, cfg)
 			ms.siteClientPool.IDClientMap[tc.clientPoolSiteID] = tc.clientPoolClient
 
-			if tc.beforeInventory != nil {
-				tc.beforeInventory(t)
-			}
 			_, err := ms.UpdateInstancesInDB(ctx, tc.siteID, tc.instanceInventory)
 			assert.Equal(t, tc.expectErr, err != nil)
 

@@ -688,48 +688,6 @@ func TestNVLinkInterfaceSQLDAO_Update(t *testing.T) {
 	}
 }
 
-func TestNVLinkInterfaceSQLDAO_UpdateFromInventoryIfLive(t *testing.T) {
-	ctx := t.Context()
-	session, newBinding := testSetupNVLinkBindings(t)
-	dao := NewNVLinkInterfaceDAO(session)
-	tests := []struct {
-		name           string
-		status         string
-		observedStatus *string
-		wantUpdated    bool
-	}{
-		{name: "synced observation updates a Pending binding", status: NVLinkInterfaceStatusPending, observedStatus: cutil.GetPtr(NVLinkInterfaceStatusReady), wantUpdated: true},
-		{name: "synced observation cannot restore a Deleting binding", status: NVLinkInterfaceStatusDeleting, observedStatus: cutil.GetPtr(NVLinkInterfaceStatusReady)},
-		{name: "metadata observation cannot update a Deleting binding", status: NVLinkInterfaceStatusDeleting},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			row := newBinding(t, tt.status)
-			tx, err := db.BeginTx(ctx, session, nil)
-			require.NoError(t, err)
-			defer func() { assert.NoError(t, tx.Rollback()) }()
-			guid := "inventory GUID"
-			domainID := uuid.New()
-			updated, err := dao.UpdateFromInventoryIfLive(ctx, tx, row.ID, &guid, &domainID, tt.observedStatus)
-			require.NoError(t, err)
-			require.Equal(t, tt.wantUpdated, updated)
-			got, err := dao.GetByID(ctx, tx, row.ID, nil)
-			require.NoError(t, err)
-			if tt.wantUpdated {
-				assert.Equal(t, NVLinkInterfaceStatusReady, got.Status)
-				assert.Equal(t, &guid, got.GpuGUID)
-				assert.Equal(t, &domainID, got.NVLinkDomainID)
-				assert.True(t, got.Updated.After(row.Updated))
-			} else {
-				assert.Equal(t, row, got)
-			}
-			outside, err := dao.GetByID(ctx, nil, row.ID, nil)
-			require.NoError(t, err)
-			assert.Equal(t, row, outside)
-		})
-	}
-}
-
 func TestNVLinkInterfaceSQLDAO_UpdateMultiple(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)

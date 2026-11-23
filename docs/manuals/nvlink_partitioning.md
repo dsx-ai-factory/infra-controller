@@ -95,8 +95,8 @@ assignments.
 ### Remove GPU Partition Assignments
 
 Change assignments while the Instance is `Ready`, before requesting
-deprovisioning. Where the VPC permits replacement, the following request keeps
-GPU 0 in the specified partition and requests removal of all other assignments.
+deprovisioning. Where the VPC permits replacement, this request assigns GPU 0
+to the specified partition and requests removal of all other assignments.
 
 ```json
 {
@@ -109,7 +109,7 @@ GPU 0 in the specified partition and requests removal of all other assignments.
 }
 ```
 
-To clear all assignments, send `{"nvLinkInterfaces": []}`.
+Where the VPC permits replacement, clear all assignments with `{"nvLinkInterfaces": []}`.
 
 A GPU can remain in its previous physical partition after the REST API stops
 returning its `Deleting` interface. Use the
@@ -126,7 +126,7 @@ A NICo user can call [`DELETE /v2/org/{org}/nico/nvlink-logical-partition/{nvLin
 
 ### Retrieving NVLink Partition Information for an Instance
 
-A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve information about an Instance. As part of the `200` response body, NICo will return a `nvLinkInterfaces` list that includes both the `nvLinkLogicalPartitionId` and `nvLinkDomainId` for each GPU in the Instance.
+A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve the Instance’s stored nvLinkInterfaces. Each record identifies the GPU by deviceInstance and its assigned partition by nvLinkLogicalPartitionId. The nvLinkDomainId field is null until the physical domain is known. A GPU can appear more than once while earlier bindings are Deleting. That status means REST has marked the binding for removal. To confirm physical removal, check the previous partition’s current NMX-C membership.
 
 ### Default NVLink Logical Partition for a VPC
 
@@ -151,7 +151,7 @@ If you want finer control, leave `nvLinkLogicalPartitionId` unset on the VPC and
 | Configuration | Behavior |
 | ------------- | -------- |
 | VPC has `nvLinkLogicalPartitionId`, Instance creation omits `nvLinkInterfaces` | API auto-populates all GPUs to the VPC's NVLink Logical Partition |
-| VPC has `nvLinkLogicalPartitionId`, Instance creation specifies `nvLinkInterfaces` | Instance-level values must align with VPC's Partition, rendering the specification redundant |
+| VPC has `nvLinkLogicalPartitionId`, Instance creation specifies `nvLinkInterfaces` | Instance-level values must align with VPC's Partition |
 | VPC doesn't have `nvLinkLogicalPartitionId` set, Instance creation specifies `nvLinkInterfaces` | Per-GPU NVLink Logical Partition assignments are used |
 | Same `nvLinkLogicalPartitionId` on multiple VPCs | Allowed — no implicit exclusivity |
 

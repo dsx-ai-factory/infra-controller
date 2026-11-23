@@ -7,8 +7,9 @@ tags: ["unreleased", "rest-api", "nvlink"]
 For an Instance in a VPC without a default NVLink Logical Partition,
 [Update Instance](api:PATCH/v2/org/:org/nico/instance/:instanceId) now
 consistently requests removal of assignments for GPUs omitted from a supplied
-`nvLinkInterfaces` list. Sending `[]` now requests removal of all assignments.
-To keep existing assignments, omit the field or send `null`.
+`nvLinkInterfaces` list. Sending `[]` previously left assignments unchanged.
+It now requests removal of all assignments. To keep existing assignments, omit
+the field or send `null`.
 
 The [NVLink Partitioning guide](../../docs/manuals/nvlink_partitioning.md)
 explains the update rules and how to verify removal.
