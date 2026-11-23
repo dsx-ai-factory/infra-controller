@@ -22,13 +22,16 @@ use crate::credential::common::url_validator;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
 #[derive(Parser, Debug, Clone)]
-#[command(after_long_help = "\
+#[command(
+    long_about = "Remove the UFM credential from the configured writer backend.",
+    after_long_help = "\
 EXAMPLES:
 
-Delete a UFM credential by its URL:
+Remove a UFM credential from the configured writer backend by its URL:
     $ nico-admin-cli credential delete-ufm --url https://192.0.2.10
 
-")]
+"
+)]
 pub(crate) struct Args {
     #[clap(long, required(true), help = "The UFM url")]
     url: String,

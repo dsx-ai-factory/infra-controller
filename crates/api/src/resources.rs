@@ -21,7 +21,7 @@ use std::sync::Arc;
 use carbide_api_core::bootstrap::acquire_vault_import_work_lock;
 use carbide_api_core::cfg::file::{
     BmcSiteWideRootSource, CarbideConfig, CertBackendKind, CredentialBackend, ImportSource,
-    ProviderConfig, SecretsConfig, UfmCredentialSource,
+    ProviderConfig, SecretsConfig, UfmAuthMode, UfmCredentialSource,
 };
 use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, SecretsContext};
 use carbide_kmip::KmipClientConfig;
@@ -630,7 +630,11 @@ async fn validate_local_ufm_credentials(
     {
         return Ok(());
     }
-    for fabric in carbide_config.ib_fabrics.keys() {
+    for (fabric, definition) in &carbide_config.ib_fabrics {
+        // Explicit certificate authentication has no credential prerequisite.
+        if definition.auth == Some(UfmAuthMode::ClientCertificate) {
+            continue;
+        }
         let key = carbide_secrets::credentials::CredentialKey::UfmAuth {
             fabric: fabric.clone(),
         };
@@ -1490,6 +1494,62 @@ mod tests {
         )
         .await
         .expect("disabled IB management must not require dormant UFM credentials");
+    }
+
+    /// Verifies local ownership skips only explicit certificate fabrics because other modes still
+    /// depend on a readable local credential.
+    #[tokio::test]
+    async fn local_ufm_validation_follows_explicit_auth_mode() {
+        /// Describes one auth policy and whether it can start without local credentials.
+        #[derive(Debug)]
+        struct Case {
+            name: &'static str,
+            auth: Option<UfmAuthMode>,
+            succeeds_without_credentials: bool,
+        }
+
+        let cases = [
+            // Explicit certificate mode must start without a local credential because it never reads one.
+            Case {
+                name: "client certificate",
+                auth: Some(UfmAuthMode::ClientCertificate),
+                succeeds_without_credentials: true,
+            },
+            // Explicit token mode must retain the local credential prerequisite for its bearer token.
+            Case {
+                name: "token",
+                auth: Some(UfmAuthMode::Token),
+                succeeds_without_credentials: false,
+            },
+            // Omitted auth must preserve the legacy startup requirement under local ownership.
+            Case {
+                name: "legacy",
+                auth: None,
+                succeeds_without_credentials: false,
+            },
+        ];
+
+        for case in cases {
+            // Enable IB and apply the case's auth policy to the configured default fabric.
+            let mut config = carbide_api_core::test_support::default_config::get();
+            config.ib_config.get_or_insert_default().enabled = true;
+            config
+                .ib_fabrics
+                .get_mut("default")
+                .expect("default fabric")
+                .auth = case.auth;
+
+            // No local readers means success can only come from certificate-mode exemption.
+            let result = validate_local_ufm_credentials(&config, &[]).await;
+
+            // Distinguish the exempt mode from both credential-dependent modes.
+            assert_eq!(
+                result.is_ok(),
+                case.succeeds_without_credentials,
+                "{}: {result:?}",
+                case.name
+            );
+        }
     }
 
     #[tokio::test]

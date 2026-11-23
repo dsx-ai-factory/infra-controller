@@ -37,20 +37,35 @@ Unknown fields in either table fail the boot.
 | `"backend"` | Backends only; local UFM entries are ignored | Write to the backend |
 | `"local"` | Environment, then file; never a backend | Rejected before any write. The CLI reports the command as unavailable and repeats the API's reason. |
 
-With `ufm_source = "local"` and InfiniBand management enabled, startup requires a local `ufm_auth_by_fabric` entry for every configured fabric and fails naming the missing fabric. With InfiniBand management disabled, startup succeeds because UFM is dormant. In this mode a Vault import configured by `[secrets] import_from` skips the `ufm/` subtree, so local ownership survives the import.
+With `ufm_source = "local"` and InfiniBand management enabled, startup requires
+a local `ufm_auth_by_fabric` entry for every configured fabric unless that
+fabric sets `auth = "client_certificate"`. Startup fails naming a fabric whose
+required local credential is missing. With InfiniBand management disabled,
+startup succeeds because UFM is dormant. In this mode a Vault import configured
+by `[secrets] import_from` skips the `ufm/` subtree, so local ownership survives
+the import. Local sources remain operator-managed and read-only.
 
-An empty UFM password selects the default SPIFFE client certificate only when
-the source that supplies the credential returns it. Vault and the environment
-and file sources return an empty password. Postgres reads the newest entry with
-an empty password as no credential, which also hides an earlier token stored
-there. When Postgres is the only source that supplies a fabric's credential,
-`credential add-ufm` without `--token` leaves the fabric without a credential:
-UFM client creation fails and the fabric monitor cannot load the fabric. To use
-the SPIFFE certificate with Postgres storage, put the fabric's entry with an
-empty password in the environment or file source and set `ufm_source` to
-`"local_first"` or `"local"`; with `"backend"`, local UFM entries are ignored.
-Native Postgres support is tracked by
-[#9232](https://github.com/dsx-ai-factory/infra-controller/issues/9232).
+Each `[ib_fabrics.<name>]` table has an optional `auth` setting with no default:
+
+- `auth = "client_certificate"` uses the default SPIFFE client certificate
+  files. NICo does not read a UFM credential for that fabric, so none needs to
+  be stored.
+- `auth = "token"` sends the stored password unchanged as the bearer token. A
+  missing credential or an empty or whitespace-only password is an error.
+- With `auth` unset, an empty or whitespace-only password selects the default
+  SPIFFE client certificate, any other password is the bearer token, and a
+  missing credential is an error.
+
+Postgres reads an exactly empty password as no credential. An empty entry
+therefore leaves the fabric without a credential and hides an earlier token
+stored in Postgres. `credential add-ufm` without `--token` does not select
+certificate authentication when Postgres supplies the credential and `auth` is
+unset. Set `auth = "client_certificate"` instead. Changing `auth` takes effect
+when Core restarts.
+
+`credential delete-ufm` removes the UFM credential from the configured writer
+backend. A credential in another source or a lower-priority backend can then
+answer the read.
 
 ### Site-wide BMC Root Version 0 Ownership Policy
 
@@ -139,9 +154,10 @@ machine_identity:
 
 The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`.
 
-UFM passwords have two supported forms: an empty or whitespace-only password
+When a fabric leaves `auth` unset, an empty or whitespace-only UFM password
 selects the default SPIFFE client certificate, and any other value is the bearer
-token. The credential source affects whether an empty password is returned; see
+token. Explicit `client_certificate` authentication reads no credential, while
+explicit `token` authentication requires a nonblank password. See
 [UFM Ownership Policy](#ufm-ownership-policy).
 
 The watcher reloads the file on filesystem events and on every `poll_interval`, so a Kubernetes projected Secret that is replaced atomically takes effect without restarting NICo. A valid reload replaces the whole snapshot, and entries removed from the file stop resolving. A reload that is malformed or unreadable keeps the last valid snapshot and logs the failure with the secret values redacted. A file that is missing, unreadable, or malformed at startup, or a zero `poll_interval`, fails startup with an error that redacts the secret values in the same way.

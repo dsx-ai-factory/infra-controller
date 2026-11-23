@@ -25,9 +25,10 @@ The UFM url
 
 `--token <TOKEN> [default: ]`
 
-The UFM token. Omitting it stores an empty password, which selects the
-SPIFFE default client certificate only if the credential source returns
-it; Postgres reads it as no credential and hides an earlier token. See
+The UFM bearer token. With auth = "client_certificate" in the fabric
+configuration, do not add a credential. When auth is not set, omitting
+--token stores an empty password, which selects the client certificate;
+Postgres reads an empty password as no credential. See
 [UFM Ownership Policy](../../../../configuration/credential-sources.md#ufm-ownership-policy)
 
 `--extended`
@@ -56,7 +57,6 @@ Print help (see a summary with '-h')
 
 ```sh
 nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
-nico-admin-cli credential add-ufm --url https://192.0.2.10
 ```
 
 ---

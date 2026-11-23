@@ -620,6 +620,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     )
     .await?;
 
+    // Pass only enabled fabrics and explicitly selected auth modes into the runtime manager.
     let ib_fabric_manager_impl = ib::create_ib_fabric_manager(
         credential_manager.clone(),
         ib::IBFabricManagerConfig {
@@ -629,6 +630,17 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
                     .iter()
                     .map(|(fabric_id, fabric_definition)| {
                         (fabric_id.clone(), fabric_definition.endpoints.clone())
+                    })
+                    .collect()
+            } else {
+                Default::default()
+            },
+            auth_modes: if ib_config.enabled {
+                carbide_config
+                    .ib_fabrics
+                    .iter()
+                    .filter_map(|(fabric_id, fabric_definition)| {
+                        fabric_definition.auth.map(|auth| (fabric_id.clone(), auth))
                     })
                     .collect()
             } else {

@@ -113,7 +113,7 @@ for the role and interface model.
 | Task | Role | Interface |
 |---|---|---|
 | UFM endpoint(s), P_Key ranges, fabric toggles | Operator | **TOML** (`[ib_fabrics.default]`, `[ib_config]`) — Day 0 / rare |
-| UFM API credentials | Operator | Secrets backend (Vault) |
+| UFM authentication mode and API credentials | Operator | Fabric TOML and the configured credential sources |
 | Create / update / delete an InfiniBand partition | Tenant | **REST** `…/nico/infiniband-partition` · `nicocli infiniband-partition create` |
 | Assign an instance's IB interface to a partition | Tenant | **REST** `…/nico/instance` (update) · `nicocli instance update` |
 | List partitions and check sync state for triage | Operator | `nicocli infiniband-partition list`; [`nico-admin-cli ib-partition show`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/ib-partition/ib-partition-show.md) for deeper state |
@@ -139,6 +139,7 @@ When InfiniBand is enabled, NICo supports at most one configured fabric, named
 ```toml
 [ib_fabrics.default]
 endpoints = ["https://ufm-a.example.internal:443"]
+auth = "client_certificate"
 
   [[ib_fabrics.default.pkeys]]
   start = "0x100"
@@ -154,11 +155,14 @@ Fields:
 | Field | Purpose |
 |---|---|
 | `endpoints` | UFM server URLs. At the time of writing only the first endpoint is consulted; multi-endpoint support exists in the schema for forward compatibility |
+| `auth` | Optional UFM authentication mode: `"client_certificate"` uses the default SPIFFE client certificate files without reading a credential; `"token"` requires a stored, nonblank bearer token. When omitted, an empty or whitespace-only password selects the client certificate and any other password is a token |
 | `pkeys` | One or more P_Key ranges, hex-encoded, with an inclusive start and an exclusive end. These define the pool from which Core allocates P_Keys for tenant REST requests |
 
 P_Key ranges may be **extended in future restarts but never shrunk**:
 removing or narrowing a range under live tenants would orphan allocated
 partitions. Plan the pool with headroom.
+
+An `auth` change takes effect when Core restarts.
 
 ### `[ib_config]` — Fabric Toggles
 
@@ -181,10 +185,13 @@ fabric_monitor_run_interval = "60s"
 
 ### UFM credentials
 
-UFM API credentials are not stored in TOML. They are read from the
-configured secrets backend (Vault under standard deployments) by the UFM
-client during initialisation. Rotate them at the secrets backend; NICo
-picks up the new value on its next client re-initialisation.
+UFM API credentials are not stored in TOML. Token authentication reads the
+credential from the configured credential sources. Rotate tokens at the secrets
+backend; NICo picks up the new value on its next client re-initialisation.
+Explicit client-certificate authentication reads no UFM credential. When `auth`
+is omitted, NICo reads the credential to select the authentication method. See
+[UFM Ownership Policy](../../configuration/credential-sources.md#ufm-ownership-policy)
+for source order and empty-password behavior.
 
 ---
 

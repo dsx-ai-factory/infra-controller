@@ -30,7 +30,7 @@ pub use iface::{
 };
 pub use model::ib::{IBMtu, IBRateLimit, IBServiceLevel};
 
-use crate::config;
+use crate::config::{self, UfmAuthMode};
 use crate::errors::IbError;
 
 mod disable;
@@ -66,22 +66,31 @@ pub struct IBFabricManagerImpl {
     rest_clients: ClientCache<String, u64, Arc<dyn IBFabric>>,
     /// Directory containing the SPIFFE certificate files selected by an empty
     /// UFM credential. Fixed for the manager's lifetime.
+    /// Explicit client-certificate mode uses the same files without reading a credential.
     spiffe_cert_dir: PathBuf,
 }
 
+/// Authentication input hashed into a fabric client's cache fingerprint.
+#[derive(Debug, Hash, PartialEq, Eq)]
+enum FabricClientAuth {
+    /// Explicit certificate authentication has no credential input.
+    ClientCertificate,
+    /// Token or legacy authentication retains the complete credential input.
+    Credentials(Credentials),
+}
+
 /// Fingerprint of everything a REST client is built from by value: the
-/// resolved endpoint and the fabric's credentials. Changed credentials (secret
-/// rotation) produce a new fingerprint and therefore a rebuilt client. A
+/// resolved endpoint and the resolved authentication input. Changed credentials
+/// (secret rotation) produce a new fingerprint and therefore a rebuilt client. A
 /// manager's endpoints are fixed for its lifetime, but the endpoint is hashed
 /// too so the fingerprint covers every by-value input. The SPIFFE certificate
 /// directory is a fixed path, not an input, so it is not hashed.
-/// Certificate material selected by the credentials lives on disk rather than
-/// in them, so the client cache tracks its rotation separately by modification
-/// time.
-fn fabric_client_fingerprint(endpoint: &str, credentials: &Credentials) -> u64 {
+/// Certificate material lives on disk rather than in the fingerprint, so the
+/// client cache tracks its rotation separately by modification time.
+fn fabric_client_fingerprint(endpoint: &str, auth: &FabricClientAuth) -> u64 {
     let mut hasher = DefaultHasher::new();
     endpoint.hash(&mut hasher);
-    credentials.hash(&mut hasher);
+    auth.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -106,12 +115,78 @@ impl IBFabricManagerImpl {
     pub fn get_mock_manager(&self) -> Arc<mock::MockIBFabric> {
         self.mock_fabric.clone()
     }
+
+    /// Resolves one fabric's runtime authentication and matching cache input so explicit policy
+    /// cannot diverge from client reuse behavior.
+    async fn resolve_auth_method(
+        &self,
+        fabric_name: &str,
+    ) -> Result<(rest::AuthMethod, FabricClientAuth), IbError> {
+        let configured_auth = self.config.auth_modes.get(fabric_name).copied();
+
+        // Explicit certificate mode has no secret input and must work without a stored credential.
+        if configured_auth == Some(UfmAuthMode::ClientCertificate) {
+            return Ok((
+                rest::client_certificate_auth(&self.spiffe_cert_dir),
+                FabricClientAuth::ClientCertificate,
+            ));
+        }
+
+        // Token and legacy modes share the existing reader error classification.
+        let key = &CredentialKey::UfmAuth {
+            fabric: fabric_name.to_string(),
+        };
+        let token_required = configured_auth == Some(UfmAuthMode::Token);
+        let token_required_error = || {
+            IbError::internal(format!(
+                "Cannot create UFM client: token is required because auth is \"token\": {}",
+                key.to_key_str()
+            ))
+        };
+        let credentials = self
+            .credential_reader
+            .get_credentials(key)
+            .await
+            .map_err(|error| match error {
+                error @ SecretsError::UfmCredentialReadBlocked { .. } => {
+                    IbError::CredentialConfigurationError(error.to_string())
+                }
+                error => IbError::internal(format!(
+                    "Cannot create UFM client: secret manager error: {error}"
+                )),
+            })?
+            .ok_or_else(|| {
+                if token_required {
+                    token_required_error()
+                } else {
+                    IbError::internal(format!(
+                        "Cannot create UFM client: vault key not found or token is not set: {}",
+                        key.to_key_str()
+                    ))
+                }
+            })?;
+
+        let Credentials::UsernamePassword { password, .. } = &credentials;
+        // Explicit token mode rejects blank values; omission preserves legacy certificate selection.
+        let auth_method = if token_required {
+            if password.trim().is_empty() {
+                return Err(token_required_error());
+            }
+            rest::AuthMethod::Token(password.clone())
+        } else {
+            rest::auth_method(password, &self.spiffe_cert_dir)
+        };
+
+        Ok((auth_method, FabricClientAuth::Credentials(credentials)))
+    }
 }
 
 #[derive(Clone)]
 pub struct IBFabricManagerConfig {
     /// List of endpoint per fabric
     pub endpoints: HashMap<String, Vec<String>>,
+    /// Explicit UFM authentication modes by fabric; absence preserves legacy selection.
+    pub auth_modes: HashMap<String, UfmAuthMode>,
     pub manager_type: IBFabricManagerType,
     pub max_partition_per_tenant: i32,
     pub mtu: IBMtu,
@@ -127,6 +202,7 @@ impl Default for IBFabricManagerConfig {
         IBFabricManagerConfig {
             allow_insecure_fabric_configuration: false,
             endpoints: HashMap::default(),
+            auth_modes: HashMap::default(),
             manager_type: IBFabricManagerType::default(),
             max_partition_per_tenant: config::IBFabricConfig::default_max_partition_per_tenant(),
             mtu: IBMtu::default(),
@@ -184,13 +260,13 @@ impl IBFabricManager for IBFabricManagerImpl {
     /// Returns the client for `fabric_name`, building one only when needed.
     ///
     /// The `Rest` client lives for the life of the process: every call still
-    /// reads the fabric's credentials from the secret manager -- so rotations
-    /// are picked up promptly -- but the client is rebuilt only when that read
-    /// returns different credentials, or the fabric's endpoint resolves
-    /// differently, than the cached client was built from. An empty credential
-    /// selects certificate authentication, whose TLS material is the SPIFFE
-    /// files on disk rather than part of the credential, so a rebuild also
-    /// happens once any of those files is newer than the cached client
+    /// reads the fabric's credentials from the secret manager -- except for
+    /// explicit client-certificate mode -- so token rotations are picked up
+    /// promptly. The client is rebuilt only when the resolved authentication
+    /// input or endpoint differs from the cached client. When `auth` is not set,
+    /// an empty credential selects certificate authentication, whose TLS
+    /// material is the SPIFFE files on disk rather than part of the credential,
+    /// so a rebuild also happens once any file is newer than the cached client
     /// (certificate rotation), unless another is unreadable, such as one
     /// missing mid-rotation.
     /// [`ClientCache::get_or_build`] owns that lifecycle. Between rebuilds all
@@ -219,37 +295,12 @@ impl IBFabricManager for IBFabricManagerImpl {
                         id: fabric_name.to_string(),
                     })?;
 
-                let key = &CredentialKey::UfmAuth {
-                    fabric: fabric_name.to_string(),
-                };
-                let credentials = self
-                    .credential_reader
-                    .get_credentials(key)
-                    .await
-                    .map_err(|error| match error {
-                        error @ SecretsError::UfmCredentialReadBlocked { .. } => {
-                            IbError::CredentialConfigurationError(error.to_string())
-                        }
-                        error => IbError::internal(format!(
-                            "Cannot create UFM client: secret manager error: {error}"
-                        )),
-                    })?
-                    .ok_or_else(|| {
-                        IbError::internal(format!(
-                            "Cannot create UFM client: vault key not found or token is not set: {}",
-                            key.to_key_str()
-                        ))
-                    })?;
-
-                let fingerprint = fabric_client_fingerprint(endpoint, &credentials);
-                let (_deprecated_address, auth) = match credentials {
-                    Credentials::UsernamePassword { username, password } => (username, password),
-                };
                 // Resolve the auth method once and build from that resolution,
                 // so the client loads exactly the on-disk material (if any)
                 // this call watches for rotation. Authentication selection
-                // depends only on the credential, which the fingerprint covers.
-                let auth_method = rest::auth_method(&auth, &self.spiffe_cert_dir);
+                // and the fingerprint come from the same policy decision.
+                let (auth_method, fingerprint_auth) = self.resolve_auth_method(fabric_name).await?;
+                let fingerprint = fabric_client_fingerprint(endpoint, &fingerprint_auth);
                 let tls_material: Vec<&Path> = match &auth_method {
                     rest::AuthMethod::Cert(cert) => vec![
                         Path::new(&cert.ca_crt),
@@ -272,6 +323,7 @@ impl IBFabricManager for IBFabricManagerImpl {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
 
     use async_trait::async_trait;
@@ -484,6 +536,208 @@ mod tests {
             ..Default::default()
         };
         create_ib_fabric_manager(reader, config).unwrap()
+    }
+
+    /// Counts credential lookups while returning one fixed optional password so explicit
+    /// certificate mode can prove it bypasses the secret store.
+    struct CountingCredentialReader {
+        credentials: Option<Credentials>,
+        calls: AtomicUsize,
+    }
+
+    impl CountingCredentialReader {
+        /// Creates a reader whose optional password represents one credential-state table row.
+        fn new(password: Option<&str>) -> Self {
+            Self {
+                credentials: password.map(|password| Credentials::new("", password)),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        /// Returns the number of lookups so tests can distinguish bypass from a successful read.
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl CredentialReader for CountingCredentialReader {
+        async fn get_credentials(
+            &self,
+            _key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.credentials.clone())
+        }
+    }
+
+    /// Describes the observable authentication result expected from one policy and credential.
+    #[derive(Clone, Copy, Debug)]
+    enum ExpectedAuth {
+        Certificate,
+        Token(&'static str),
+        Error(&'static str),
+    }
+
+    /// Defines one auth-policy and credential-state combination for the complete behavior matrix.
+    #[derive(Clone, Copy, Debug)]
+    struct AuthResolutionCase {
+        name: &'static str,
+        mode: Option<UfmAuthMode>,
+        password: Option<&'static str>,
+        expected: ExpectedAuth,
+        expected_reads: usize,
+    }
+
+    /// Verifies explicit auth policy owns selection while omission preserves every legacy outcome.
+    #[tokio::test]
+    async fn resolves_configured_auth_against_every_credential_state() {
+        const TOKEN_REQUIRED: &str = "token is required because auth is \"token\": ufm/fabric/auth";
+        const LEGACY_MISSING: &str = "vault key not found or token is not set: ufm/fabric/auth";
+        let cases = [
+            // Explicit certificate mode must work without any stored credential and skip the reader.
+            AuthResolutionCase {
+                name: "certificate without credential",
+                mode: Some(UfmAuthMode::ClientCertificate),
+                password: None,
+                expected: ExpectedAuth::Certificate,
+                expected_reads: 0,
+            },
+            // An empty stored value must be irrelevant when certificate policy bypasses credentials.
+            AuthResolutionCase {
+                name: "certificate with empty credential",
+                mode: Some(UfmAuthMode::ClientCertificate),
+                password: Some(""),
+                expected: ExpectedAuth::Certificate,
+                expected_reads: 0,
+            },
+            // Whitespace must also be irrelevant instead of reintroducing credential-based selection.
+            AuthResolutionCase {
+                name: "certificate with whitespace credential",
+                mode: Some(UfmAuthMode::ClientCertificate),
+                password: Some(" \t"),
+                expected: ExpectedAuth::Certificate,
+                expected_reads: 0,
+            },
+            // A nonblank stored token must not override an explicit certificate policy.
+            AuthResolutionCase {
+                name: "certificate with ordinary token",
+                mode: Some(UfmAuthMode::ClientCertificate),
+                password: Some("ordinary-token"),
+                expected: ExpectedAuth::Certificate,
+                expected_reads: 0,
+            },
+            // Explicit token mode must report a missing credential rather than falling back to certificates.
+            AuthResolutionCase {
+                name: "token without credential",
+                mode: Some(UfmAuthMode::Token),
+                password: None,
+                expected: ExpectedAuth::Error(TOKEN_REQUIRED),
+                expected_reads: 1,
+            },
+            // An exactly empty password must fail the explicit token contract after a successful read.
+            AuthResolutionCase {
+                name: "token with empty credential",
+                mode: Some(UfmAuthMode::Token),
+                password: Some(""),
+                expected: ExpectedAuth::Error(TOKEN_REQUIRED),
+                expected_reads: 1,
+            },
+            // Whitespace-only input must fail token validation just like an exactly empty password.
+            AuthResolutionCase {
+                name: "token with whitespace credential",
+                mode: Some(UfmAuthMode::Token),
+                password: Some(" \t"),
+                expected: ExpectedAuth::Error(TOKEN_REQUIRED),
+                expected_reads: 1,
+            },
+            // Surrounding whitespace on a nonblank token must be preserved, unlike the ordinary token.
+            AuthResolutionCase {
+                name: "token with surrounding whitespace",
+                mode: Some(UfmAuthMode::Token),
+                password: Some(" ordinary-token "),
+                expected: ExpectedAuth::Token(" ordinary-token "),
+                expected_reads: 1,
+            },
+            // A nonblank token must be selected and preserved unchanged in explicit token mode.
+            AuthResolutionCase {
+                name: "token with ordinary token",
+                mode: Some(UfmAuthMode::Token),
+                password: Some("ordinary-token"),
+                expected: ExpectedAuth::Token("ordinary-token"),
+                expected_reads: 1,
+            },
+            // Legacy mode must retain its established missing-credential error text.
+            AuthResolutionCase {
+                name: "legacy without credential",
+                mode: None,
+                password: None,
+                expected: ExpectedAuth::Error(LEGACY_MISSING),
+                expected_reads: 1,
+            },
+            // Legacy exact-empty behavior must continue to select certificate authentication.
+            AuthResolutionCase {
+                name: "legacy with empty credential",
+                mode: None,
+                password: Some(""),
+                expected: ExpectedAuth::Certificate,
+                expected_reads: 1,
+            },
+            // Legacy trimming must continue to treat whitespace-only passwords as certificate selection.
+            AuthResolutionCase {
+                name: "legacy with whitespace credential",
+                mode: None,
+                password: Some(" \t"),
+                expected: ExpectedAuth::Certificate,
+                expected_reads: 1,
+            },
+            // Legacy nonblank behavior must continue to send the stored password as a token.
+            AuthResolutionCase {
+                name: "legacy with ordinary token",
+                mode: None,
+                password: Some("ordinary-token"),
+                expected: ExpectedAuth::Token("ordinary-token"),
+                expected_reads: 1,
+            },
+        ];
+
+        for case in cases {
+            // Build one REST manager with only the case's explicit mode and credential state.
+            let reader = Arc::new(CountingCredentialReader::new(case.password));
+            let mut config = IBFabricManagerConfig {
+                manager_type: IBFabricManagerType::Rest,
+                endpoints: HashMap::from([(
+                    "fabric".to_string(),
+                    vec!["https://ufm.example".to_string()],
+                )]),
+                ..Default::default()
+            };
+            if let Some(mode) = case.mode {
+                config.auth_modes.insert("fabric".to_string(), mode);
+            }
+            let manager = create_ib_fabric_manager(reader.clone(), config)
+                .unwrap_or_else(|error| panic!("{}: create manager: {error}", case.name));
+
+            // Resolve without building a network client so the table observes policy directly.
+            let result = manager.resolve_auth_method("fabric").await;
+
+            // Check the selected method or stable error and prove whether the reader was consulted.
+            match (case.expected, result) {
+                (ExpectedAuth::Certificate, Ok((rest::AuthMethod::Cert(_), _))) => {}
+                (ExpectedAuth::Token(expected), Ok((rest::AuthMethod::Token(actual), _))) => {
+                    assert_eq!(actual, expected, "{}", case.name);
+                }
+                (ExpectedAuth::Error(expected), Err(error)) => {
+                    assert!(
+                        error.to_string().contains(expected),
+                        "{}: {error}",
+                        case.name
+                    );
+                }
+                (_, result) => panic!("{}: unexpected result: {}", case.name, result.is_ok()),
+            }
+            assert_eq!(reader.call_count(), case.expected_reads, "{}", case.name);
+        }
     }
 
     /// Verifies manager-built token clients authenticate real mock requests,
@@ -798,14 +1052,38 @@ mod tests {
         .await;
     }
 
+    /// Verifies endpoint changes remain part of the cache identity for the same auth input.
     #[test]
     fn fingerprint_covers_the_endpoint() {
-        let credentials = SwappableCredentialReader::credentials("token-a");
+        let auth = FabricClientAuth::Credentials(SwappableCredentialReader::credentials("token-a"));
 
         assert_ne!(
-            fabric_client_fingerprint("https://127.0.0.1:443", &credentials),
-            fabric_client_fingerprint("https://127.0.0.2:443", &credentials),
+            fabric_client_fingerprint("https://127.0.0.1:443", &auth),
+            fabric_client_fingerprint("https://127.0.0.2:443", &auth),
             "the same credentials at another endpoint need another client"
+        );
+    }
+
+    /// Verifies explicit certificate policy and each token value produce distinct cache inputs so
+    /// policy selection and token rotation rebuild clients.
+    #[test]
+    fn fingerprint_covers_auth_mode_and_token_rotation() {
+        let endpoint = "https://ufm.example";
+        let certificate = FabricClientAuth::ClientCertificate;
+        let first_token =
+            FabricClientAuth::Credentials(SwappableCredentialReader::credentials("token-a"));
+        let second_token =
+            FabricClientAuth::Credentials(SwappableCredentialReader::credentials("token-b"));
+
+        // Explicit certificate policy must never reuse a token-authenticated client.
+        assert_ne!(
+            fabric_client_fingerprint(endpoint, &certificate),
+            fabric_client_fingerprint(endpoint, &first_token),
+        );
+        // Changing only the stored token must invalidate the existing token client.
+        assert_ne!(
+            fabric_client_fingerprint(endpoint, &first_token),
+            fabric_client_fingerprint(endpoint, &second_token),
         );
     }
 

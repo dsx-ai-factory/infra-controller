@@ -28,9 +28,8 @@ EXAMPLES:
 Add a UFM credential with a token:
     $ nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
 
-Store an empty password to select the SPIFFE default client certificate (not with Postgres \
-    credential storage; see --token):
-    $ nico-admin-cli credential add-ufm --url https://192.0.2.10
+With auth = \"client_certificate\" in the fabric configuration, NICo uses the SPIFFE default \
+client certificate and no UFM credential is needed.
 
 ")]
 pub(crate) struct Args {
@@ -40,9 +39,10 @@ pub(crate) struct Args {
     #[clap(
         long,
         default_value(""),
-        help = "The UFM token. Omitting it stores an empty password, which selects the SPIFFE \
-            default client certificate only if the credential source returns it; Postgres reads \
-            it as no credential and hides an earlier token. See \
+        help = "The UFM bearer token. With auth = \"client_certificate\" in the fabric \
+            configuration, do not add a credential. When auth is not set, omitting --token stores \
+            an empty password, which selects the client certificate; Postgres reads an empty \
+            password as no credential. See \
             https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy"
     )]
     token: String,

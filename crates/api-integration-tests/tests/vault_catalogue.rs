@@ -152,6 +152,56 @@ async fn setup_vault_with_secrets() -> Option<(
     Some((vault, client, secrets))
 }
 
+/// Verifies Vault can recreate a UFM key after metadata deletion because `delete-ufm` now uses the
+/// backend's real delete operation.
+#[tokio::test]
+#[serial]
+async fn ufm_credential_can_be_set_after_delete() {
+    // Reuse the existing Vault harness and skip consistently when its binary is unavailable.
+    let (_vault, client, _) = match setup_vault_with_secrets().await {
+        Some(value) => value,
+        None => {
+            eprintln!("vault not available, skipping");
+            return;
+        }
+    };
+    let key = CredentialKey::UfmAuth {
+        fabric: "fabric-1".to_string(),
+    };
+
+    // Remove the seeded key completely, then recreate it with a replacement token.
+    client
+        .delete_credentials(&key)
+        .await
+        .expect("delete UFM credential");
+    assert_eq!(
+        client
+            .get_credentials(&key)
+            .await
+            .expect("read deleted UFM credential"),
+        None
+    );
+    // `delete-ufm` must stay successful when nothing is stored.
+    client
+        .delete_credentials(&key)
+        .await
+        .expect("delete missing UFM credential");
+    let replacement = cred("", "replacement-token");
+    client
+        .set_credentials(&key, &replacement)
+        .await
+        .expect("set replacement UFM credential");
+
+    // Vault must return the replacement after metadata recreation.
+    assert_eq!(
+        client
+            .get_credentials(&key)
+            .await
+            .expect("read replacement UFM credential"),
+        Some(replacement)
+    );
+}
+
 // Verifies that list_secrets returns all paths.
 #[tokio::test]
 #[serial]

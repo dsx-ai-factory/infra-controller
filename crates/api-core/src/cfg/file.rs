@@ -31,6 +31,7 @@ use carbide_firmware::defaults::{
     BF3_CEC_VERSION, BF3_NIC_VERSION, BF3_UEFI_VERSION,
 };
 use carbide_host_support::bootstrap_ca::BootstrapCaSource;
+pub use carbide_ib_fabric::config::UfmAuthMode;
 use carbide_ib_fabric::config::{IBFabricConfig, IbFabricDefinition};
 use carbide_machine_controller::config::power_manager::default_power_options;
 use carbide_machine_controller::config::{

@@ -290,14 +290,18 @@ async fn test_ufm_credential_mutations_reject_local_ownership(pool: PgPool) {
     );
 }
 
+/// Verifies backend-owned UFM deletion removes the key and a later add recreates it, because
+/// deletion no longer doubles as certificate selection.
 #[sqlx_test]
 async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
+    // Build the public API over a backend-owned writer and its underlying test store.
     let (env, credential_manager) =
         init_with_runtime_config(pool, config_with_ufm_source(UfmCredentialSource::Backend)).await;
     let key = CredentialKey::UfmAuth {
         fabric: "default".to_string(),
     };
 
+    // Add the initial token and prove the configured writer received it.
     env.api()
         .create_credential(tonic::Request::new(ufm_create_request()))
         .await
@@ -313,6 +317,7 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
         })
     );
 
+    // Delete through the public handler and prove no tombstone remains in the writer.
     env.api()
         .delete_credential(tonic::Request::new(ufm_delete_request()))
         .await
@@ -322,9 +327,22 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
             .get_credentials_from_writer(&key)
             .await
             .expect("read backend after delete"),
+        None
+    );
+
+    // Re-add through the public handler to prove deletion does not prevent later configuration.
+    env.api()
+        .create_credential(tonic::Request::new(ufm_create_request()))
+        .await
+        .expect("backend ownership must allow recreate after delete");
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read backend after recreate"),
         Some(Credentials::UsernamePassword {
             username: "https://ufm.example.com".to_string(),
-            password: String::new(),
+            password: "test-ufm-token".to_string(),
         })
     );
 }

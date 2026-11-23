@@ -2175,6 +2175,7 @@ mod tests {
             endpoints: vec![],
             backend: None,
             remote_pool: None,
+            auth: None,
             pkeys: ranges
                 .into_iter()
                 .map(|(start, end)| Range {
@@ -2574,6 +2575,7 @@ mod tests {
                         pkeys: Vec::new(),
                         backend: None,
                         remote_pool: None,
+                        auth: None,
                     };
                     let mut fabric_data = FabricData::default();
                     let mut fabric_metrics = FabricMetrics::default();

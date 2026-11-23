@@ -15,7 +15,7 @@ nico-admin-cli credential delete-ufm <--url>
 
 ## DESCRIPTION
 
-Delete UFM credential
+Remove the UFM credential from the configured writer backend.
 
 ## OPTIONS
 

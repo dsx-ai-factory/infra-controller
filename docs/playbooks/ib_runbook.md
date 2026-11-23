@@ -246,13 +246,15 @@ No additional steps are required to enable Infiniband in NVIDIA Infra Controller
 
 #### UFM Credential
 
-One of two options can be selected for UFM authentication: token authentication
-uses the password as the bearer token, while client authentication uses an empty
-or whitespace-only password to select the default SPIFFE client certificate.
-Follow the instructions in the section that applies to the selected option.
+One of two options can be selected for UFM authentication. Set `auth = "token"`
+or `auth = "client_certificate"` in the fabric configuration to select one
+explicitly. Token authentication uses the password as the bearer token. Client
+authentication uses the default SPIFFE client certificate files and needs no
+UFM credential.
 
-An empty password works only when the credential source returns it. With
-Postgres credential storage it does not; see
+When `auth` is not set, an empty or whitespace-only password selects the default
+SPIFFE client certificate, while any other password is a bearer token. The
+empty-password route does not work with Postgres credential storage. See
 [UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
 
 ##### Token Authentication
@@ -272,7 +274,8 @@ root:/# curl -s -k -XGET -u admin:password https://ufm:443/ufmRest/app/tokens | 
 ]
 ```
 
-Create the credential for UFM client in NICo by nico-admin-cli as follows:
+Set `auth = "token"` in the fabric configuration. Then create the credential
+for the UFM client:
 
 ```text
 root:/# nico-admin-cli credential add-ufm --url=https://<address:port> --token=<access_token>
@@ -315,15 +318,17 @@ openssl x509 -in server.crt -text -noout | grep DNS
 
 **Select Client Authentication mode.**
 
-Existing NICo certificates such as `/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` are used for client side.
+Set the fabric to use the default SPIFFE client certificate:
 
-```bash
-nico-admin-cli credential add-ufm --url=<ufm host name>
+```toml
+[ib_fabrics.default]
+endpoints = ["https://ufm.example:443"]
+auth = "client_certificate"
 ```
 
-Omitting `--token` stores an empty password. This selects these SPIFFE files
-with Vault credential storage, but not with Postgres; see
-[UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
+No UFM credential is needed. NICo reads
+`/var/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` for client
+authentication.
 
 **Generate UFM server certificate using Vault.**
 

@@ -42,6 +42,18 @@ const DEFAULT_MEMBERSHIP: PortMembership = PortMembership::Full;
 /// Directory containing the SPIFFE files used for UFM client authentication.
 pub(super) const SPIFFE_CERT_DIR: &str = "/var/run/secrets/spiffe.io";
 
+/// Builds certificate authentication from the fixed SPIFFE filenames so explicit and legacy
+/// certificate selection load and watch the same material.
+pub(super) fn client_certificate_auth(spiffe_cert_dir: &Path) -> AuthMethod {
+    // Keep the paths together so the client and cache observe one certificate set.
+    let path = |file| spiffe_cert_dir.join(file).to_string_lossy().into_owned();
+    AuthMethod::Cert(UFMCert {
+        ca_crt: path("ca.crt"),
+        tls_key: path("tls.key"),
+        tls_crt: path("tls.crt"),
+    })
+}
+
 /// Detects the authentication method `auth` selects: a bearer token, or
 /// client-certificate files on disk. An empty or whitespace-only `auth` string
 /// selects the SPIFFE certificate files under `spiffe_cert_dir`; every other
@@ -50,12 +62,7 @@ pub(super) const SPIFFE_CERT_DIR: &str = "/var/run/secrets/spiffe.io";
 /// watches those paths for rotation, and builds from the same result.
 pub(super) fn auth_method(auth: &str, spiffe_cert_dir: &Path) -> AuthMethod {
     if auth.trim().is_empty() {
-        let path = |file| spiffe_cert_dir.join(file).to_string_lossy().into_owned();
-        AuthMethod::Cert(UFMCert {
-            ca_crt: path("ca.crt"),
-            tls_key: path("tls.key"),
-            tls_crt: path("tls.crt"),
-        })
+        client_certificate_auth(spiffe_cert_dir)
     } else {
         AuthMethod::Token(auth.to_string())
     }

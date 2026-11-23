@@ -252,6 +252,7 @@ pub fn get() -> CarbideConfig {
                 endpoints: vec!["https://127.0.0.1:443".to_string()],
                 backend: None,
                 remote_pool: None,
+                auth: None,
                 pkeys: vec![resource_pool::Range {
                     start: "1".to_string(),
                     end: "100".to_string(),

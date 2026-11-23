@@ -382,6 +382,49 @@ async fn delete_removes_all_journal_entries(pool: sqlx::PgPool) {
     assert!(mgr.get_history(&key).await.expect("history").is_empty());
 }
 
+/// Verifies a real UFM deletion clears its journal without preventing a later token from becoming
+/// the current credential.
+#[crate::sqlx_test]
+async fn ufm_credential_can_be_set_after_delete(pool: sqlx::PgPool) {
+    // Build a Postgres manager and seed the UFM key with its original token.
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
+    let key = ufm_key("fabric");
+    mgr.set_credentials(&key, &cred("", "token-before-delete"))
+        .await
+        .expect("set original UFM token");
+
+    // Delete every journal row, then recreate the same key with a different token.
+    mgr.delete_credentials(&key)
+        .await
+        .expect("delete UFM credential");
+    // `delete-ufm` must stay successful when nothing is stored.
+    mgr.delete_credentials(&key)
+        .await
+        .expect("delete missing UFM credential");
+    mgr.set_credentials(&key, &cred("", "token-after-delete"))
+        .await
+        .expect("set replacement UFM token");
+
+    // The replacement must be readable and must be the only remaining journal entry.
+    assert_eq!(
+        mgr.get_credentials(&key).await.expect("get replacement"),
+        Some(cred("", "token-after-delete"))
+    );
+    assert_eq!(
+        mgr.get_history(&key)
+            .await
+            .expect("replacement history")
+            .len(),
+        1
+    );
+}
+
 // Verifies that the journal order is true write order even when two
 // entries record the identical created_at (Postgres fixes now() per
 // transaction): the second insert wins, by seq, not by chance.
@@ -464,8 +507,8 @@ async fn delete_by_id_restores_previous_credential(pool: sqlx::PgPool) {
 }
 
 // Verifies the empty-password tombstone behavior the Vault reader
-// established: several delete flows "delete" by writing an empty password,
-// and reads must answer None for it.
+// established: the site-wide BMC root delete flow "deletes" by writing an
+// empty password, and reads must answer None for it.
 #[crate::sqlx_test]
 async fn empty_password_reads_as_none(pool: sqlx::PgPool) {
     let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
