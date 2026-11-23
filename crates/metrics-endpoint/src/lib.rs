@@ -228,8 +228,7 @@ pub fn new_metrics_setup(
     new_metrics_setup_with_views(service_name, service_namespace, set_global_meter, [])
 }
 
-/// Like [`new_metrics_setup`], and also registers the service's own `views`, for
-/// example explicit bucket boundaries for histograms the default boundaries do not fit.
+/// Like [`new_metrics_setup`], and also registers the service's own `views`.
 pub fn new_metrics_setup_with_views(
     service_name: &'static str,
     service_namespace: &'static str,

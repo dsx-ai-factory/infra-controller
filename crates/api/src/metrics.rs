@@ -112,10 +112,9 @@ fn admission_duration_histogram_view() -> carbide_metrics_utils::Result<OtelView
 }
 
 /// Configures a View for the state controllers' `*_time_in_state` histograms, which
-/// record seconds. Objects can wait hours, days or weeks in one state, beyond the last
-/// default boundary of 10000; states such as a machine's `Ready` have no SLA. The default
-/// boundaries are kept so existing `le` series remain, with larger ones appended up to
-/// 90 days.
+/// record seconds. Objects can wait hours or days in one state, beyond the last default
+/// boundary of 10000. The default boundaries are kept so existing `le` series remain,
+/// with larger ones appended up to 90 days.
 fn time_in_state_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
     carbide_metrics_utils::new_view(
         "carbide_*_time_in_state",
@@ -131,15 +130,15 @@ fn time_in_state_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
     )
 }
 
-/// OpenTelemetry's default millisecond boundaries, so existing `le` series remain,
-/// extended to resolve calls that run for up to five minutes.
+/// OpenTelemetry's default millisecond boundaries, kept so existing `le` series remain,
+/// extended to five minutes.
 const FIVE_MINUTE_LATENCY_BOUNDARIES_MS: [f64; 21] = [
     0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
     10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 180000.0, 300000.0,
 ];
 
-/// Resolves handlers through the default three-minute handling budget, with headroom
-/// up to five minutes.
+/// Keeps existing millisecond buckets and resolves handlers through the default
+/// three-minute handling budget, with headroom up to five minutes.
 fn handler_latency_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
     carbide_metrics_utils::new_view(
         "carbide_*_handler_latency_in_state",
@@ -664,7 +663,7 @@ mod tests {
             .f64_histogram("carbide_machines_time_in_state")
             .with_unit("s")
             .build();
-        // Two days and twelve days: past the default 10000 and past one week.
+        // Two days and twelve days, past the default 10000 and past one week.
         for seconds in [172800.0, 1036800.0] {
             histogram.record(seconds, &[]);
         }

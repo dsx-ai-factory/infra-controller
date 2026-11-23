@@ -475,7 +475,6 @@ mod tests {
             "carbide_bmc_proxy_admission_wait",
         ] {
             let histogram = setup.meter.f64_histogram(name).with_unit("ms").build();
-            // 45 seconds, and three hours: past the 30-minute class budget.
             for milliseconds in [45_000.0, 10_800_000.0] {
                 histogram.record(milliseconds, &[]);
             }
