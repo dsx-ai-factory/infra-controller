@@ -502,28 +502,39 @@ pub(crate) struct UpstreamRequestCompleted {
 }
 
 /// OpenTelemetry's default millisecond boundaries, so existing `le` series remain,
-/// extended through the 30-minute maximum upstream budget. That budget bounds both a
-/// forwarded request and its wait for a slot at the BMC.
-const UPSTREAM_BUDGET_BOUNDARIES_MS: [f64; 23] = [
+/// extended through the 30-minute maximum class budget. That budget bounds a
+/// request's wait for a slot at its BMC.
+const SLOT_WAIT_BOUNDARIES_MS: [f64; 23] = [
     0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
     10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 300000.0, 600000.0, 1200000.0, 1800000.0,
 ];
 
+/// The slot-wait boundaries extended through four hours, the cap on a streamed
+/// upload's size-scaled timeout, which replaces the class budget for that request.
+const UPSTREAM_REQUEST_BOUNDARIES_MS: [f64; 26] = [
+    0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
+    10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 300000.0, 600000.0, 1200000.0, 1800000.0,
+    3600000.0, 7200000.0, 14400000.0,
+];
+
 /// Views for the histograms that time forwarded BMC requests and their slot waits.
 pub(crate) fn upstream_budget_histogram_views() -> carbide_metrics_utils::Result<[OtelView; 2]> {
-    let view = |name| {
+    let view = |name, boundaries: &[f64]| {
         carbide_metrics_utils::new_view(
             name,
             Some(InstrumentKind::Histogram),
             Aggregation::ExplicitBucketHistogram {
-                boundaries: UPSTREAM_BUDGET_BOUNDARIES_MS.to_vec(),
+                boundaries: boundaries.to_vec(),
                 record_min_max: true,
             },
         )
     };
     Ok([
-        view("carbide_bmc_proxy_upstream_request_duration")?,
-        view("carbide_bmc_proxy_admission_wait")?,
+        view(
+            "carbide_bmc_proxy_upstream_request_duration",
+            &UPSTREAM_REQUEST_BOUNDARIES_MS,
+        )?,
+        view("carbide_bmc_proxy_admission_wait", &SLOT_WAIT_BOUNDARIES_MS)?,
     ])
 }
 

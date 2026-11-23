@@ -474,16 +474,14 @@ mod tests {
             "carbide_bmc_proxy_upstream_request_duration",
             "carbide_bmc_proxy_admission_wait",
         ] {
-            setup
-                .meter
-                .f64_histogram(name)
-                .with_unit("ms")
-                .build()
-                .record(45_000.0, &[]);
+            let histogram = setup.meter.f64_histogram(name).with_unit("ms").build();
+            // 45 seconds, and three hours: past the 30-minute class budget.
+            for milliseconds in [45_000.0, 10_800_000.0] {
+                histogram.record(milliseconds, &[]);
+            }
         }
         let families = setup.registry.gather();
 
-        let expected = vec![(10000.0, 0), (30000.0, 0), (60000.0, 1), (1800000.0, 1)];
         value_scenarios!(
             run = |exported_name: &str| {
                 let family = families
@@ -496,13 +494,18 @@ mod tests {
                     .iter()
                     .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
                     .filter(|(upper_bound, _)| {
-                        [10000.0, 30000.0, 60000.0, 1800000.0].contains(upper_bound)
+                        [10000.0, 60000.0, 1800000.0, 14400000.0].contains(upper_bound)
                     })
                     .collect::<Vec<_>>()
             };
-            "a 45-second observation lands in a finite bucket" {
-                "carbide_bmc_proxy_upstream_request_duration_milliseconds" => expected.clone(),
-                "carbide_bmc_proxy_admission_wait_milliseconds" => expected.clone(),
+            "a forwarded request resolves through the four-hour upload cap" {
+                "carbide_bmc_proxy_upstream_request_duration_milliseconds" =>
+                    vec![(10000.0, 0), (60000.0, 1), (1800000.0, 1), (14400000.0, 2)],
+            }
+
+            "a slot wait resolves through the 30-minute class budget" {
+                "carbide_bmc_proxy_admission_wait_milliseconds" =>
+                    vec![(10000.0, 0), (60000.0, 1), (1800000.0, 1)],
             }
         );
     }
