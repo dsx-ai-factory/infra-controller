@@ -1098,7 +1098,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 		existingNvlIfcs, _, err := nvlifcDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to get NVLink Interfaces for Instance from DB")
+			slogger.Error().Err(err).Msg("failed to get NVLink Interfaces for Instance from DB")
 			continue
 		}
 

@@ -126,7 +126,7 @@ A NICo user can call [`DELETE /v2/org/{org}/nico/nvlink-logical-partition/{nvLin
 
 ### Retrieving NVLink Partition Information for an Instance
 
-A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve the Instance’s stored nvLinkInterfaces. Each record identifies the GPU by deviceInstance and its assigned partition by nvLinkLogicalPartitionId. The nvLinkDomainId field is null until the physical domain is known. A GPU can appear more than once while earlier bindings are Deleting. That status means REST has marked the binding for removal. To confirm physical removal, check the previous partition’s current NMX-C membership.
+A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve the Instance's stored `nvLinkInterfaces`. Each record identifies the GPU by `deviceInstance` and its assigned partition by `nvLinkLogicalPartitionId`. The `nvLinkDomainId` field is null until the physical domain is known. A GPU can appear more than once while earlier bindings are `Deleting`. That status means REST has marked the binding for removal. To confirm physical removal, check the previous partition's current NMX-C membership.
 
 ### Default NVLink Logical Partition for a VPC
 
