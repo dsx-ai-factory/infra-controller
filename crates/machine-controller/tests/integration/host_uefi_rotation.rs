@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use carbide_secrets::credentials::{CredentialKey, Credentials};
+use carbide_secrets::credentials::{CredentialKey, CredentialWriter as _, Credentials};
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
@@ -192,11 +192,12 @@ async fn stage_lagging_host_uefi(
             "target must advance from version 0"
         );
     }
-    // The controller resolves the site-wide UEFI credential through the Redfish
-    // pool's own store, so seed it there rather than in the API credential store.
-    env.redfish_sim
-        .seed_credential(&site_key(1), &uefi_creds("uefi-v1"))
-        .await;
+    // The controller resolves the site-wide UEFI credential through its own
+    // credential manager, so seed it there rather than in the API credential store.
+    env.credential_manager
+        .set_credentials(&site_key(1), &uefi_creds("uefi-v1"))
+        .await
+        .expect("seed site host UEFI credential");
     Ok(())
 }
 

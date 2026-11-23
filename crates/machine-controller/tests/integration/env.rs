@@ -37,6 +37,8 @@ use tokio_util::sync::CancellationToken;
 pub(super) struct Env {
     pub(super) test_harness: TestHarness,
     pub(super) redfish_sim: Arc<RedfishSim>,
+    /// The controller services' credential store.
+    pub(super) credential_manager: Arc<dyn CredentialManager>,
     machine_controller: StateController<MachineStateControllerIO>,
     _cancel_token: CancellationToken,
 }
@@ -206,7 +208,7 @@ impl EnvBuilder {
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: runtime_config.machine_state_handler_site_config().into(),
             component_manager,
-            credential_manager,
+            credential_manager: credential_manager.clone(),
             // Zero TTL: every guard re-queries the aggregate so tests observe a
             // freshly staged rotation on the next iteration without waiting out
             // the cache window.
@@ -258,6 +260,7 @@ impl EnvBuilder {
         Env {
             test_harness,
             redfish_sim,
+            credential_manager,
             machine_controller,
             _cancel_token: cancel_token,
         }
