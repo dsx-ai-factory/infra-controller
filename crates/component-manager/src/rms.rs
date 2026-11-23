@@ -4993,9 +4993,18 @@ impl NvSwitchManager for RmsBackend {
     ) -> Result<String, ComponentManagerError> {
         let macs = std::slice::from_ref(&endpoint.bmc_mac);
         let mut identities = resolve_switch_identities(&self.db, macs).await?;
-        // Initial password rotation precedes managed switch creation. Keep a
-        // managed identity authoritative when expected inventory also exists.
-        if !identities.contains_key(&endpoint.bmc_mac) {
+        // Initial password rotation precedes managed switch creation. A managed
+        // row with missing rack metadata must not fall back to expected inventory.
+        if !identities.contains_key(&endpoint.bmc_mac)
+            && db::switch::find_ids_by_bmc_macs(&self.db, macs)
+                .await
+                .map_err(|error| {
+                    ComponentManagerError::Internal(format!(
+                        "failed to look up switch for password rotation: {error}"
+                    ))
+                })?
+                .is_empty()
+        {
             identities.extend(resolve_pre_ingestion_switch_identities(&self.db, macs).await?);
         }
 
@@ -12549,6 +12558,23 @@ mod tests {
             Some("nvos-pass"),
             "endpoint must retain the current password until RMS accepts the job"
         );
+
+        // Expected inventory still has a valid rack, but it must not mask
+        // missing rack metadata on the managed switch.
+        let updated = sqlx::query("UPDATE switches SET rack_id = NULL WHERE id = $1")
+            .bind(sw1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        let error = NvSwitchManager::ensure_password_rotation(&backend, &endpoint, "next-password")
+            .await
+            .expect_err("a managed switch without a rack must prevent RMS dispatch");
+        assert!(matches!(
+            error,
+            ComponentManagerError::Internal(message) if message == RMS_IDENTITY_LOOKUP_ERROR
+        ));
+        assert_eq!(mock.update_switch_system_password_calls().await.len(), 1);
     }
 
     #[carbide_macros::sqlx_test]

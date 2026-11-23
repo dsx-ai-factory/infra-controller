@@ -21,6 +21,9 @@ allows firmware work to proceed. Disabling firmware updates or switch creation
 does not disable the password step.
 Compute-tray and DPU BMCs do not enter `NvosPasswordRotation` or its
 `CheckFirmware` continuation; they proceed through their existing firmware path.
+For a switch BMC with IPv4 and IPv6 endpoints, one endpoint owns the persisted
+NVOS rotation and the other waits in `Check`. Both continue to firmware checks
+after the owner records the confirmed password version.
 
 ## Rack compute trays
 
@@ -179,7 +182,10 @@ The state machine performs the following work:
    cannot be verified or selected for another update.
 1. **Continue ingestion.** NICo repeats target selection for the remaining
    ordered components. When none need an update, it marks pre-ingestion
-   complete and the normal ingestion process can continue.
+   complete and the normal ingestion process can continue. Switch creation
+   waits until every existing explored endpoint on the BMC interface is
+   `Complete`, including aliases waiting for exploration or in an error state.
+   An allocated address without an explored endpoint does not block creation.
 
 `firmware_global.max_uploads` limits concurrent uploads across firmware
 workflows. `firmware_global.concurrency_limit` limits how many endpoints the

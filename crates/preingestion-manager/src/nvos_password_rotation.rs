@@ -15,6 +15,9 @@ use db::credential_rotation::CredentialRotationType;
 use mac_address::MacAddress;
 use model::site_explorer::{ExploredEndpoint, NvosPasswordRotationState, PreingestionState};
 
+#[cfg(test)]
+mod tests;
+
 use super::{ComponentManager, PreingestionManagerStatic};
 use crate::errors::{PreingestionManagerError, PreingestionManagerResult};
 
@@ -79,12 +82,8 @@ impl PreingestionManagerStatic {
 
         match state {
             NvosPasswordRotationState::Check => {
-                self.check_nvos_password_rotation_eligibility(
-                    endpoint.address,
-                    bmc_mac,
-                    dependencies,
-                )
-                .await
+                self.claim_nvos_password_rotation(endpoint.address, bmc_mac)
+                    .await
             }
             NvosPasswordRotationState::Rotate {
                 target_version,
@@ -155,51 +154,6 @@ impl PreingestionManagerStatic {
         }
     }
 
-    async fn check_nvos_password_rotation_eligibility(
-        &self,
-        address: IpAddr,
-        bmc_mac: MacAddress,
-        dependencies: &ComponentManager,
-    ) -> PreingestionManagerResult<()> {
-        let operation = db::credential_rotation::device_rotation_operation_state(
-            &self.database_connection,
-            CredentialRotationType::Nvos,
-            bmc_mac,
-        )
-        .await?;
-        if let Some(current_version) = operation.and_then(|operation| operation.current_version) {
-            tracing::info!(
-                %bmc_mac,
-                bmc_ip_address = %address,
-                current_version,
-                "NVOS password already has a confirmed site version; continuing to firmware checks"
-            );
-            return self
-                .set_nvos_state(address, PreingestionState::CheckFirmware)
-                .await;
-        }
-        let Some(target_version) = db::credential_rotation::current_target_version(
-            &self.database_connection,
-            CredentialRotationType::Nvos,
-        )
-        .await?
-        else {
-            return Err(PreingestionManagerError::internal(format!(
-                "NVOS site password target is missing during preingestion for BMC {bmc_mac}",
-            )));
-        };
-        let target_version = u32::try_from(target_version).map_err(|_| {
-            PreingestionManagerError::internal("NVOS target version is negative".to_string())
-        })?;
-        // Validate the immutable target before staging work.
-        let current = self
-            .get_current_nvos_credentials(bmc_mac, dependencies)
-            .await?;
-        get_target_credentials(dependencies, target_version, &current).await?;
-        self.set_nvos_rotation_state(address, target_version, None)
-            .await
-    }
-
     async fn complete_nvos_password_rotation(
         &self,
         address: IpAddr,
@@ -220,21 +174,8 @@ impl PreingestionManagerStatic {
                 "NVOS target version exceeds database range".to_string(),
             )
         })?;
-        let mut txn = self.txn_begin().await?;
-        db::credential_rotation::record_nvos_preingestion_rotation_succeeded(
-            &mut txn,
-            bmc_mac,
-            applied_version,
-        )
-        .await?;
-        db::explored_endpoints::set_preingestion_for_addresses(
-            &[address],
-            PreingestionState::CheckFirmware,
-            &mut txn,
-        )
-        .await?;
-        txn.commit().await?;
-        Ok(())
+        self.record_nvos_password_rotation_succeeded(address, bmc_mac, applied_version)
+            .await
     }
 
     /// Use expected-switch credentials until a per-switch credential has been stored.
@@ -278,6 +219,130 @@ impl PreingestionManagerStatic {
     ) -> PreingestionManagerResult<()> {
         let mut txn = self.txn_begin().await?;
         db::explored_endpoints::set_preingestion_for_addresses(&[address], state, &mut txn).await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Claim rotation under the common interface lock, respecting aliases excluded
+    /// from the current iteration by an exploration error or refresh wait.
+    async fn claim_nvos_password_rotation(
+        &self,
+        address: IpAddr,
+        bmc_mac: MacAddress,
+    ) -> PreingestionManagerResult<()> {
+        let mut txn = self.txn_begin().await?;
+        let interfaces =
+            db::machine_interface::find_by_mac_address_for_update(&mut txn, bmc_mac).await?;
+        let addresses = interfaces
+            .into_iter()
+            .flat_map(|interface| interface.addresses)
+            .collect();
+        // Read aliases before the version: completion atomically publishes the
+        // version and removes the Rotate owner, so a claimant sees at least one.
+        let aliases = db::explored_endpoints::find_by_ips(&mut *txn, addresses).await?;
+        if !aliases.iter().any(|alias| {
+            alias.address == address
+                && matches!(
+                    alias.preingestion_state,
+                    PreingestionState::NvosPasswordRotation {
+                        rotation_state: NvosPasswordRotationState::Check,
+                    }
+                )
+        }) {
+            // A stale Check must not overwrite a claim or a later state.
+            txn.commit().await?;
+            return Ok(());
+        }
+
+        let operation = db::credential_rotation::device_rotation_operation_state(
+            &mut *txn,
+            CredentialRotationType::Nvos,
+            bmc_mac,
+        )
+        .await?;
+        if let Some(current_version) = operation.and_then(|operation| operation.current_version) {
+            tracing::info!(
+                %bmc_mac,
+                bmc_ip_address = %address,
+                current_version,
+                "NVOS password already has a confirmed site version; continuing to firmware checks"
+            );
+            db::explored_endpoints::set_preingestion_for_addresses(
+                &[address],
+                PreingestionState::CheckFirmware,
+                &mut txn,
+            )
+            .await?;
+            txn.commit().await?;
+            return Ok(());
+        }
+
+        if let Some(owner) = aliases.iter().find(|alias| {
+            matches!(
+                alias.preingestion_state,
+                PreingestionState::NvosPasswordRotation {
+                    rotation_state: NvosPasswordRotationState::Rotate { .. },
+                }
+            )
+        }) {
+            tracing::info!(
+                %bmc_mac,
+                bmc_ip_address = %address,
+                owner_ip_address = %owner.address,
+                "Waiting for the NVOS password rotation owner"
+            );
+            txn.commit().await?;
+            return Ok(());
+        }
+        let Some(target_version) = db::credential_rotation::current_target_version(
+            &mut *txn,
+            CredentialRotationType::Nvos,
+        )
+        .await?
+        else {
+            return Err(PreingestionManagerError::internal(format!(
+                "NVOS site password target is missing during preingestion for BMC {bmc_mac}",
+            )));
+        };
+        let target_version = u32::try_from(target_version).map_err(|_| {
+            PreingestionManagerError::internal("NVOS target version is negative".to_string())
+        })?;
+
+        // Capture the target with the claim; Rotate validates credentials before dispatch.
+        db::explored_endpoints::set_preingestion_for_addresses(
+            &[address],
+            PreingestionState::NvosPasswordRotation {
+                rotation_state: NvosPasswordRotationState::Rotate {
+                    target_version,
+                    job_id: None,
+                },
+            },
+            &mut txn,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    async fn record_nvos_password_rotation_succeeded(
+        &self,
+        address: IpAddr,
+        bmc_mac: MacAddress,
+        applied_version: i32,
+    ) -> PreingestionManagerResult<()> {
+        let mut txn = self.txn_begin().await?;
+        db::credential_rotation::record_nvos_preingestion_rotation_succeeded(
+            &mut txn,
+            bmc_mac,
+            applied_version,
+        )
+        .await?;
+        db::explored_endpoints::set_preingestion_for_addresses(
+            &[address],
+            PreingestionState::CheckFirmware,
+            &mut txn,
+        )
+        .await?;
         txn.commit().await?;
         Ok(())
     }

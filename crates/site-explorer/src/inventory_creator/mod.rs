@@ -27,7 +27,8 @@ use mac_address::MacAddress;
 use model::expected_machine::HostDpuPolicy;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgPool;
+use model::site_explorer::PreingestionState;
+use sqlx::{PgConnection, PgPool};
 
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
@@ -275,4 +276,34 @@ impl InventoryCreator {
 
         Ok(())
     }
+}
+
+/// Check existing explored endpoints for every BMC address and the candidate IP.
+/// The caller must retain the interface locks through its inventory creation writes.
+async fn is_preingestion_complete(
+    txn: &mut PgConnection,
+    bmc_mac_address: MacAddress,
+    bmc_ip_address: IpAddr,
+) -> SiteExplorerResult<bool> {
+    // Re-read aliases under the shared interface lock because candidate selection can be stale.
+    let interfaces =
+        db::machine_interface::find_by_mac_address_for_update(txn, bmc_mac_address).await?;
+    let mut addresses = interfaces
+        .iter()
+        .flat_map(|interface| interface.addresses.iter().copied())
+        .collect::<Vec<_>>();
+    addresses.push(bmc_ip_address);
+    let endpoints = db::explored_endpoints::find_by_ips(&mut *txn, addresses).await?;
+    if let Some(endpoint) = endpoints
+        .iter()
+        .find(|endpoint| endpoint.preingestion_state != PreingestionState::Complete)
+    {
+        tracing::info!(
+            %bmc_mac_address,
+            bmc_ip_address = %endpoint.address,
+            "Waiting for all BMC endpoints to complete preingestion",
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }

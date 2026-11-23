@@ -16,6 +16,7 @@
  */
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use carbide_site_explorer::SwitchCreator;
@@ -23,10 +24,11 @@ use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::prelude::*;
 use db::{self, TransactionVending as _, explored_endpoints as db_explored_endpoints};
 use mac_address::MacAddress;
+use model::allocation_type::AllocationType;
 use model::metadata::Metadata;
 use model::site_explorer::{
     Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, EthernetInterface,
-    PreingestionState,
+    NvosPasswordRotationState, PreingestionState,
 };
 use model::switch::SwitchSearchFilter;
 use rpc::forge::DhcpDiscovery;
@@ -222,6 +224,124 @@ async fn test_site_explorer_switch_discovery(
         expected_switches[0].nvos_mac_addresses(),
         vec![bmc_mac],
         "exploration must preserve the expected-switch NVOS interfaces"
+    );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn switch_creation_waits_for_all_known_bmc_preingestion_endpoints(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let bmc_mac: MacAddress = "B8:3F:D2:90:97:F0".parse()?;
+    let nvos_mac: MacAddress = "B8:3F:D2:90:97:F1".parse()?;
+    let ipv4: IpAddr = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder(
+                bmc_mac.to_string(),
+                env.underlay_segment.relay_address.to_string(),
+            )
+            .tonic_request(),
+        )
+        .await?
+        .into_inner()
+        .address
+        .parse()?;
+    let ipv6: IpAddr = "2001:db8::97f0".parse()?;
+    let expected_switch = expected_switch_fixture(bmc_mac, nvos_mac, "SW-DUAL-STACK");
+    let explored_switch = explored_managed_switch_fixture(ipv4, nvos_mac, Some("SW-DUAL-STACK"));
+
+    let mut txn = env.pool.txn_begin().await?;
+    db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
+    let interface_id = interfaces
+        .first()
+        .expect("DHCP created the BMC interface")
+        .id;
+    db::machine_interface_address::insert(&mut txn, interface_id, ipv6, AllocationType::Dhcp)
+        .await?;
+    for address in [ipv4, ipv6] {
+        db_explored_endpoints::insert(address, &explored_switch.report, false, &mut txn).await?;
+    }
+    db_explored_endpoints::set_preingestion_complete(ipv4, &mut txn).await?;
+    txn.commit().await?;
+
+    let switch_creator =
+        SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
+    let cases = [
+        (
+            "NVOS job pending",
+            PreingestionState::NvosPasswordRotation {
+                rotation_state: NvosPasswordRotationState::Rotate {
+                    target_version: 1,
+                    job_id: Some("pending-job".to_string()),
+                },
+            },
+            false,
+        ),
+        (
+            "failed preingestion",
+            PreingestionState::Failed {
+                reason: "preingestion failed".to_string(),
+            },
+            false,
+        ),
+        (
+            "waiting for explorer refresh",
+            PreingestionState::FirmwareCheckRefreshWait,
+            true,
+        ),
+    ];
+    for (scenario, state, waiting_for_refresh) in cases {
+        let mut txn = env.pool.txn_begin().await?;
+        db_explored_endpoints::set_preingestion_for_addresses(&[ipv6], state.clone(), &mut txn)
+            .await?;
+        if waiting_for_refresh {
+            db_explored_endpoints::set_waiting_for_explorer_refresh(ipv6, &mut txn).await?;
+        }
+        txn.commit().await?;
+
+        // Exercise the creation transaction directly: a Complete IPv4 candidate
+        // must not bypass an unfinished IPv6 alias, even when it is not runnable.
+        assert!(
+            !switch_creator
+                .create_managed_switch(&explored_switch, &expected_switch, &env.pool)
+                .await?,
+            "{scenario}"
+        );
+        assert!(
+            db::switch::find_ids(&env.pool, SwitchSearchFilter::default())
+                .await?
+                .is_empty(),
+            "{scenario}"
+        );
+        let endpoints = db_explored_endpoints::find_by_ips(&env.pool, vec![ipv4, ipv6]).await?;
+        assert_eq!(endpoints.len(), 2, "{scenario}");
+        for endpoint in endpoints {
+            let expected_state = if endpoint.address == ipv4 {
+                PreingestionState::Complete
+            } else {
+                state.clone()
+            };
+            assert_eq!(endpoint.preingestion_state, expected_state, "{scenario}");
+        }
+    }
+
+    let mut txn = env.pool.txn_begin().await?;
+    db_explored_endpoints::set_preingestion_complete(ipv6, &mut txn).await?;
+    txn.commit().await?;
+    assert!(
+        switch_creator
+            .create_managed_switch(&explored_switch, &expected_switch, &env.pool)
+            .await?
+    );
+    assert_eq!(
+        db::switch::find_ids(&env.pool, SwitchSearchFilter::default())
+            .await?
+            .len(),
+        1
     );
 
     Ok(())

@@ -24,7 +24,7 @@ use model::expected_switch::ExpectedSwitch;
 use model::site_explorer::{EndpointType, ExploredManagedSwitch};
 use sqlx::{PgConnection, PgPool};
 
-use super::Config;
+use super::{Config, is_preingestion_complete};
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::metrics::SiteExplorationMetrics;
@@ -151,6 +151,9 @@ impl SwitchCreator {
         Ok(())
     }
 
+    /// Creates a switch only after every existing explored endpoint on its BMC
+    /// interface has completed preingestion. Returns false while any alias is
+    /// unfinished or the switch already exists.
     pub async fn create_managed_switch(
         &self,
         explored_managed_switch: &ExploredManagedSwitch,
@@ -175,6 +178,16 @@ impl SwitchCreator {
         explored_managed_switch: &ExploredManagedSwitch,
         expected_switch: &ExpectedSwitch,
     ) -> SiteExplorerResult<Option<SwitchId>> {
+        if !is_preingestion_complete(
+            txn,
+            expected_switch.bmc_mac_address,
+            explored_managed_switch.bmc_ip,
+        )
+        .await?
+        {
+            return Ok(None);
+        }
+
         // Defense against the duplicate-switches bug: if a switch already
         // exists in the database for this BMC MAC, don't make another one.
         // This catches the case where the chassis serial drifts between

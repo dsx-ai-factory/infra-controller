@@ -19,6 +19,7 @@ use db::TransactionVending as _;
 use db::credential_rotation::CredentialRotationType;
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
+use model::allocation_type::AllocationType;
 use model::expected_rack::ExpectedRack;
 use model::expected_switch::{ExpectedNvosInterface, ExpectedSwitch};
 use model::firmware::FirmwareComponentType;
@@ -262,7 +263,11 @@ impl Fixture {
     }
 
     async fn state(&self, pool: &PgPool) -> TestResult<PreingestionState> {
-        Ok(db::explored_endpoints::find_by_ips(pool, vec![self.bmc_ip])
+        self.state_at(pool, self.bmc_ip).await
+    }
+
+    async fn state_at(&self, pool: &PgPool, address: IpAddr) -> TestResult<PreingestionState> {
+        Ok(db::explored_endpoints::find_by_ips(pool, vec![address])
             .await?
             .pop()
             .expect("explored switch endpoint")
@@ -536,6 +541,147 @@ async fn rotates_factory_password_before_firmware_and_resumes_job(pool: PgPool) 
 }
 
 #[sqlx_test]
+async fn dual_stack_aliases_keep_one_rotation_owner_until_completion(pool: PgPool) -> TestResult {
+    let fixture = Fixture::new(&pool, true).await?;
+    fixture.publish_target(&pool, TARGET_PASSWORD).await?;
+    let ipv6: IpAddr = "2001:db8::40".parse()?;
+    let interface = db::machine_interface::find_by_ip(&pool, fixture.bmc_ip)
+        .await?
+        .expect("BMC interface");
+    let endpoint = db::explored_endpoints::find_by_ips(&pool, vec![fixture.bmc_ip])
+        .await?
+        .pop()
+        .expect("explored BMC endpoint");
+    let mut txn = pool.txn_begin().await?;
+    db::machine_interface_address::insert(&mut txn, interface.id, ipv6, AllocationType::Dhcp)
+        .await?;
+    db::explored_endpoints::insert(ipv6, &endpoint.report, false, &mut txn).await?;
+    db::explored_endpoints::set_preingestion_for_addresses(
+        &[fixture.bmc_ip, ipv6],
+        check_state(),
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Both aliases are handled concurrently, but only one may stage Rotate.
+    let manager = fixture.manager(&pool);
+    manager.run_single_iteration().await?;
+    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![fixture.bmc_ip, ipv6]).await?;
+    assert_eq!(endpoints.len(), 2);
+    let owners: Vec<_> = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.preingestion_state == rotation_state(0, None))
+        .collect();
+    assert_eq!(owners.len(), 1, "persisted endpoints: {endpoints:?}");
+    let owner = owners[0].address;
+    let follower = if owner == ipv6 { fixture.bmc_ip } else { ipv6 };
+    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
+    assert_no_controller_operation(&pool, &fixture).await?;
+
+    // An owner excluded from this iteration still owns the rotation, even
+    // before it has submitted a job. Recreating the manager cannot steal it.
+    let mut txn = pool.txn_begin().await?;
+    db::explored_endpoints::set_waiting_for_explorer_refresh(owner, &mut txn).await?;
+    txn.commit().await?;
+    let runnable = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
+    assert_eq!(runnable.len(), 1);
+    assert_eq!(runnable[0].address, follower);
+    let restarted = fixture.manager(&pool);
+    restarted.run_single_iteration().await?;
+    assert_eq!(
+        fixture.state_at(&pool, owner).await?,
+        rotation_state(0, None)
+    );
+    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
+    assert!(
+        fixture
+            .rms
+            .update_switch_system_password_calls()
+            .await
+            .is_empty()
+    );
+    assert!(fixture.credentials().await?.is_none());
+
+    sqlx::query(
+        "UPDATE explored_endpoints SET waiting_for_explorer_refresh = false WHERE address = $1",
+    )
+    .bind(owner)
+    .execute(&pool)
+    .await?;
+    enqueue_rotation(&fixture, "shared-password-job").await;
+    restarted.run_single_iteration().await?;
+    assert_eq!(
+        fixture.state_at(&pool, owner).await?,
+        rotation_state(0, Some("shared-password-job"))
+    );
+    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
+    fixture
+        .rms
+        .enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+            "shared-password-job",
+            rms::JobExecutionState::Running,
+        )))
+        .await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state_at(&pool, owner).await?,
+        rotation_state(0, Some("shared-password-job"))
+    );
+    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
+    assert_no_controller_operation(&pool, &fixture).await?;
+
+    // Run completion before the follower resumes so its next iteration must
+    // observe the committed version and skip rotation.
+    let mut txn = pool.txn_begin().await?;
+    db::explored_endpoints::set_waiting_for_explorer_refresh(follower, &mut txn).await?;
+    txn.commit().await?;
+    fixture
+        .rms
+        .enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+            "shared-password-job",
+            rms::JobExecutionState::Completed,
+        )))
+        .await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state_at(&pool, owner).await?,
+        PreingestionState::CheckFirmware
+    );
+    assert_eq!(operation(&pool, &fixture).await?.current_version, Some(0));
+    assert_eq!(
+        fixture.credentials().await?,
+        Some(Credentials::new("nvos-admin", TARGET_PASSWORD))
+    );
+    sqlx::query("UPDATE explored_endpoints SET waiting_for_explorer_refresh = (address = $1) WHERE address = ANY($2)")
+        .bind(owner)
+        .bind(vec![owner, follower])
+        .execute(&pool)
+        .await?;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state_at(&pool, follower).await?,
+        PreingestionState::CheckFirmware
+    );
+    assert_eq!(
+        fixture
+            .rms
+            .update_switch_system_password_calls()
+            .await
+            .len(),
+        1
+    );
+    let polls = fixture.rms.get_job_status_calls().await;
+    assert_eq!(polls.len(), 2);
+    assert!(
+        polls
+            .iter()
+            .all(|poll| poll.job_id == "shared-password-job")
+    );
+    Ok(())
+}
+
+#[sqlx_test]
 async fn factory_copy_waits_for_address_then_rotates(pool: PgPool) -> TestResult {
     let fixture = Fixture::new(&pool, false).await?;
     fixture.publish_target(&pool, CURRENT_PASSWORD).await?;
@@ -640,23 +786,105 @@ async fn factory_copy_waits_for_address_then_rotates(pool: PgPool) -> TestResult
 }
 
 #[sqlx_test]
-async fn missing_factory_credentials_waits_for_expected_switch_update(pool: PgPool) -> TestResult {
+async fn credential_errors_preserve_claim_and_retry_after_repair(pool: PgPool) -> TestResult {
     let fixture = Fixture::new(&pool, true).await?;
     fixture.publish_target(&pool, TARGET_PASSWORD).await?;
-    sqlx::query("UPDATE expected_switches SET nvos_username = NULL, nvos_password = NULL WHERE bmc_mac_address = $1")
-        .bind(fixture.bmc_mac).execute(&pool).await?;
     let manager = fixture.manager(&pool);
-    fixture.run_to_state(&pool, &manager, check_state()).await?;
-    manager.run_single_iteration().await?;
-    assert_eq!(fixture.state(&pool).await?, check_state());
-    assert!(fixture.credentials().await?.is_none());
-    assert_no_controller_operation(&pool, &fixture).await?;
+    let target_key = CredentialKey::switch_nvos_site_admin(0);
+    let cases = [
+        (
+            "missing factory credentials",
+            None,
+            None,
+            "no credentials found for SwitchNvos",
+        ),
+        (
+            "missing target credential",
+            Some(("nvos-admin", CURRENT_PASSWORD)),
+            None,
+            "NVOS target credential version 0 is missing",
+        ),
+        (
+            "empty target password",
+            Some(("nvos-admin", CURRENT_PASSWORD)),
+            Some(""),
+            "NVOS target password must not be empty",
+        ),
+    ];
+    for (index, (label, factory, target_password, expected_error)) in cases.into_iter().enumerate()
+    {
+        // Repair the preceding failure while injecting the next one. Every
+        // retry keeps the same captured target and persisted owner.
+        match target_password {
+            Some(password) => fixture
+                .env
+                .api()
+                .credential_manager()
+                .set_credentials(&target_key, &Credentials::new("", password))
+                .await
+                .expect("inject target credential for retry scenario"),
+            None => fixture
+                .env
+                .api()
+                .credential_manager()
+                .delete_credentials(&target_key)
+                .await
+                .expect("remove target credential for retry scenario"),
+        }
+        sqlx::query("UPDATE expected_switches SET nvos_username = $2, nvos_password = $3 WHERE bmc_mac_address = $1")
+            .bind(fixture.bmc_mac)
+            .bind(factory.map(|(username, _)| username))
+            .bind(factory.map(|(_, password)| password))
+            .execute(&pool).await?;
 
-    sqlx::query("UPDATE expected_switches SET nvos_username = $2, nvos_password = $3 WHERE bmc_mac_address = $1")
-        .bind(fixture.bmc_mac).bind("nvos-admin").bind(CURRENT_PASSWORD).execute(&pool).await?;
-    manager.run_single_iteration().await?;
-    assert_eq!(fixture.state(&pool).await?, rotation_state(0, None));
-    assert!(fixture.credentials().await?.is_none());
+        if index == 0 {
+            // Check claims the published version even while both current
+            // and target credentials are absent.
+            fixture
+                .run_to_state(&pool, &manager, rotation_state(0, None))
+                .await?;
+        }
+        assert_eq!(
+            fixture.state(&pool).await?,
+            rotation_state(0, None),
+            "{label}"
+        );
+        let (result, logs) =
+            carbide_instrument::testing::capture_logs_async(manager.run_single_iteration()).await;
+        result?;
+        assert!(
+            logs.iter().any(|log| {
+                log.message == "Error handling preingestion update"
+                    && log
+                        .field("error")
+                        .is_some_and(|error| error.contains(expected_error))
+            }),
+            "{label}: expected credential error, got {logs:?}"
+        );
+        assert_eq!(
+            fixture.state(&pool).await?,
+            rotation_state(0, None),
+            "{label}"
+        );
+        assert!(fixture.credentials().await?.is_none(), "{label}");
+        assert_no_controller_operation(&pool, &fixture).await?;
+        assert!(
+            fixture
+                .rms
+                .update_switch_system_password_calls()
+                .await
+                .is_empty(),
+            "{label}"
+        );
+    }
+
+    fixture
+        .env
+        .api()
+        .credential_manager()
+        .set_credentials(&target_key, &Credentials::new("", TARGET_PASSWORD))
+        .await
+        .expect("repair captured target credential");
     enqueue_rotation(&fixture, "credentials-ready-job").await;
     manager.run_single_iteration().await?;
     assert_eq!(
@@ -665,6 +893,9 @@ async fn missing_factory_credentials_waits_for_expected_switch_update(pool: PgPo
     );
     assert!(fixture.credentials().await?.is_none());
     assert_no_controller_operation(&pool, &fixture).await?;
+    let calls = fixture.rms.update_switch_system_password_calls().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].password, TARGET_PASSWORD);
 
     fixture
         .rms
@@ -696,6 +927,14 @@ async fn confirmed_version_skips_preingestion_rotation_even_if_site_target_is_ne
     let fixture = Fixture::new(&pool, true).await?;
     fixture.publish_target(&pool, CURRENT_PASSWORD).await?;
     fixture.publish_target(&pool, TARGET_PASSWORD).await?;
+    // Eligibility skips a confirmed rotation without reading the newer secret.
+    fixture
+        .env
+        .api()
+        .credential_manager()
+        .delete_credentials(&CredentialKey::switch_nvos_site_admin(1))
+        .await
+        .expect("remove newer target credential for confirmed-version skip");
     let stored = Credentials::new("nvos-admin", CURRENT_PASSWORD);
     fixture.store_credentials(&stored).await;
     let mut txn = pool.txn_begin().await?;
@@ -927,7 +1166,13 @@ async fn password_job_errors_retry_the_captured_target(pool: PgPool) -> TestResu
             "not found",
             Err(tonic::Status::not_found("expired RMS job").into()),
         ),
-        ("unknown", Ok(rms::GetJobStatusResponse::default())),
+        (
+            "unknown",
+            Ok(MockRmsApi::job_status_ok(
+                "retry-job",
+                rms::JobExecutionState::Unspecified,
+            )),
+        ),
     ]
     .into_iter()
     .enumerate()
