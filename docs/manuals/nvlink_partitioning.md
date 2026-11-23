@@ -130,7 +130,7 @@ A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v
 
 ### Default NVLink Logical Partition for a VPC
 
-**A VPC default is optional.** 
+**A VPC default is optional.**
 VPCs can be created with or without a default NVLink Logical Partition.
 
 **How the VPC default works**
@@ -150,8 +150,8 @@ If you want finer control, leave `nvLinkLogicalPartitionId` unset on the VPC and
 
 | Configuration | Behavior |
 | ------------- | -------- |
-| VPC has `nvLinkLogicalPartitionId`, Instance creation omits `nvLinkInterfaces` | API auto-populates all GPUs to the VPC's NVLink Logical Partition |
-| VPC has `nvLinkLogicalPartitionId`, Instance creation specifies `nvLinkInterfaces` | Instance-level values must align with VPC's Partition |
+| VPC has `nvLinkLogicalPartitionId`, Instance creation omits `nvLinkInterfaces` or sends an empty list | API auto-populates all GPUs to the VPC's NVLink Logical Partition |
+| VPC has `nvLinkLogicalPartitionId`, Instance creation specifies `nvLinkInterfaces` as a non-empty list | NICo assigns only the GPUs in that list. Each entry must reference the VPC’s default partition. |
 | VPC doesn't have `nvLinkLogicalPartitionId` set, Instance creation specifies `nvLinkInterfaces` | Per-GPU NVLink Logical Partition assignments are used |
 | Same `nvLinkLogicalPartitionId` on multiple VPCs | Allowed — no implicit exclusivity |
 
@@ -479,7 +479,7 @@ below should be repeatable as a checklist.
 1. **Per-instance configuration has converged.** The instance's
    `InstanceStatus` reports `configs_synced.nvlink = true` and the
    `nvLinkInterfaces` list on the instance shows the expected
-   `nvLinkLogicalPartitionId` and `nvLinkDomainId` for each GPU.
+   `nvLinkLogicalPartitionId` and `nvLinkDomainId` for each desired assignment.
 1. **Per-machine GPU placement.**
 
    ```bash
