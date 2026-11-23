@@ -78,6 +78,11 @@
 #   NICO_DPF_K8S_API_VIP   Host-cluster API server IP reachable from DPUs.
 #                          Default: derived from the kubernetes Endpoints.
 #   NICO_DPF_K8S_API_PORT  Host-cluster API server port. Default: derived.
+#   NICO_DPF_COREDNS_UPSTREAM
+#                          Space-separated resolvers the DPU cluster CoreDNS
+#                          forwards to. Must serve the .forge zone. Default:
+#                          nico-dhcp.config.kea.hookParameters.nameservers from
+#                          the core values. REQUIRED with --skip-core.
 #   NICO_DPF_DPU_INTERFACE Controller interface for the Kamaji keepalived VIP.
 #                          REQUIRED when DPF install is enabled.
 #   NICO_DPF_DPU_CLUSTER_VIP
@@ -1502,10 +1507,11 @@ if "${INSTALL_DPF}"; then
         NICO_DPF_K8S_API_PORT="$(kubectl get endpoints kubernetes -n default \
             -o jsonpath='{.subsets[0].ports[0].port}')"
     fi
-    export NICO_DPF_K8S_API_VIP NICO_DPF_K8S_API_PORT
+    export NICO_DPF_K8S_API_VIP NICO_DPF_K8S_API_PORT NICO_DPF_COREDNS_UPSTREAM
     export NICO_DPF_DPU_INTERFACE NICO_DPF_DPU_CLUSTER_VIP
     export NICO_DPF_CP_LABEL_VALUE="${NICO_DPF_CP_LABEL_VALUE:-}"
-    envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT}' \
+    echo "DPU cluster CoreDNS upstream: ${NICO_DPF_COREDNS_UPSTREAM}"
+    envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT} ${NICO_DPF_COREDNS_UPSTREAM}' \
         < operators/dpf/dpfoperatorconfig.yaml.tmpl | kubectl apply -f -
     envsubst '${NICO_DPF_DPU_INTERFACE} ${NICO_DPF_DPU_CLUSTER_VIP} ${NICO_DPF_CP_LABEL_VALUE}' \
         < operators/dpf/dpucluster.yaml.tmpl | kubectl apply -f -

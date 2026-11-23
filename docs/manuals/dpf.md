@@ -72,7 +72,7 @@ The following table maps the sections on this page to what the run does:
 | [Prerequisites](#1-prerequisites) (Argo CD, Kamaji, NFD, maintenance-operator) | Installed with the NICo 2.4 versions and values in `helm-prereqs/helmfile.yaml`. Setup reuses cert-manager and local-path-provisioner from the base install.<br/><br/>Kamaji has a cold-start deadlock because its controller needs the `default` DataStore and serves its admission webhook. Setup breaks the deadlock automatically. |
 | §2 [Operator install](#2-dpf-installation) | Installs `deploy/charts/dpf-operator` from a `NVIDIA/doca-platform` checkout at the reviewed commit this repository pins (`v30.0.0` for NICo 2.4). Two source paths enforce that commit: the `helm-prereqs/doca-platform` git submodule in a git checkout (initialized automatically), or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged `nico-prereqs` chart. `NICO_DPF_SRC` overrides both with an operator-managed local checkout (air-gapped sites); keep it at the pinned commit, because setup.sh installs whatever it contains and only warns when its HEAD differs from the pin.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_IMAGE_TAG` (defaults to the pinned release; override the repository with `NICO_DPF_IMAGE_REPO`).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default - a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
 | §3.1 [RBAC](#31-rbac-for-the-nico-orchestrator) | Created by the NICo Core chart (`nico-api.dpf.rbacCreate=true`, set automatically) — the Role/RoleBinding subject is the chart's actual ServiceAccount. |
-| §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
+| §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set, CoreDNS upstream from `NICO_DPF_COREDNS_UPSTREAM` or the kea `nameservers` value), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
 | §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-start-carbide-api-to-create-the-dpf-initialization-objects) | `setup.sh` renders `[dpf].enabled = true` and deploys Core once after the DPF prerequisites are ready. carbide-api initializes the DPF SDK and creates the BFB, DPUFlavor, and DPUDeployment on that first startup.<br/><br/>When `NICO_DPF_BMC_ROOT_PASSWORD` is set, setup creates or reuses a persistent watched version-0 credential Secret after deployment is accepted and configures local ownership before that rollout. Declining deployment leaves the Secret untouched. Otherwise the credential may come from an operator-managed credential-file Secret or be configured through the API later. In `local_first` or `backend` mode, a fresh site starts without it and the 60-second refresh writes the derived current-version `bmc-shared-password` Secret after the credential becomes available. Authoritative `local` mode requires version 0 before startup when v0 is current or the current target cannot be resolved. |
 
 [Per-host enablement](#37-mark-hosts-as-dpf-managed-in-expected-machines) (§3.7) and the [CLI appendix](#appendix-nico-admin-cli-dpf-command-reference) still apply unchanged. The sections below remain the reference for what is being installed, for manual installs, and for environments not using `setup.sh`.
@@ -543,6 +543,9 @@ spec:
     argoCDNamespace: argocd
   kamajiClusterManager:
     disable: false
+  coreDNS:
+    # Replace with the resolver that serves the .forge zone (the unbound VIP)
+    upstreamNameservers: "REPLACE_ME"
   networking:
     highSpeedMTU: 9000
   imagePullSecrets:
@@ -558,6 +561,7 @@ Field-by-field:
 | `provisioningController.osInstallTimeout: "90m"` | Total budget for the OS install flow per DPU. |
 | `provisioningController.installViaRedfish` | Provision DPUs by talking Redfish to the host BMC (vs. PXE-based). |
 | `skipDPUNodeDiscovery: true` | Do not auto-detect DPUs as Kubernetes nodes — DPF is told about them explicitly by NICo. |
+| `coreDNS.upstreamNameservers` | Resolvers that the DPU cluster CoreDNS forwards to for names outside the cluster domain. The value is a space-separated string. Without it, CoreDNS uses `/etc/resolv.conf` of the host node it runs on, which usually cannot resolve `carbide-pxe.forge` and the other `.forge` names. Set it to the same resolver that DPUs get from DHCP (`nico-dhcp.config.kea.hookParameters.nameservers`). |
 | `overrides.kubernetesAPIServerVIP` | Replace `REPLACE_ME` with the host-cluster API-server VIP that DPUs should reach. |
 | `overrides.kubernetesAPIServerPort` | Host-cluster API-server port (`6443` by default). |
 | `overrides.argoCDNamespace` | Namespace where Argo CD is installed. |

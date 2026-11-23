@@ -477,6 +477,19 @@ if [[ -n "${KUBECONFIG:-}" && ! -f "${KUBECONFIG}" ]]; then
     ERRORS+=("KUBECONFIG='${KUBECONFIG}' does not exist — check the path to your cluster kubeconfig")
 fi
 
+# Prints nico-dhcp.config.kea.hookParameters.nameservers from core values file
+# $1, space-separated. Prints nothing when the file or value is missing.
+_kea_nameservers() {
+    [[ -f "$1" ]] && command -v python3 &>/dev/null || return 0
+    python3 - "$1" <<'PY' 2>/dev/null || true
+import sys, yaml
+v = yaml.safe_load(open(sys.argv[1])) or {}
+for k in ("nico-dhcp", "config", "kea", "hookParameters", "nameservers"):
+    v = v.get(k) if isinstance(v, dict) else None
+print(" ".join(s.strip() for s in str(v or "").split(",") if s.strip()))
+PY
+}
+
 # A phase that installs from a pinned helm-prereqs/<name> submodule needs git
 # and a record of the pinned commit: the gitlink in a git checkout of this
 # repository, or the helm-prereqs/<name>.pin file shipped with the packaged
@@ -530,6 +543,14 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
         ERRORS+=("NICO_DPF_DPU_INTERFACE is not set    (controller interface for the DPU cluster keepalived VIP; required unless --skip-dpf)")
     [[ -z "${NICO_DPF_DPU_CLUSTER_VIP:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_CLUSTER_VIP is not set    (VIP the DPUs use to reach their control plane; required unless --skip-dpf)")
+    # The DPU cluster CoreDNS otherwise forwards to the host node's resolv.conf,
+    # which does not serve the .forge zone. Default to the DHCP resolver.
+    if [[ -z "${NICO_DPF_COREDNS_UPSTREAM:-}" && "${SKIP_CORE:-false}" != "true" ]]; then
+        NICO_DPF_COREDNS_UPSTREAM="$(_kea_nameservers "${_CORE_VALUES_CFG}")"
+    fi
+    export NICO_DPF_COREDNS_UPSTREAM="${NICO_DPF_COREDNS_UPSTREAM:-}"
+    [[ -z "${NICO_DPF_COREDNS_UPSTREAM}" ]] && \
+        ERRORS+=("NICO_DPF_COREDNS_UPSTREAM is not set and nico-dhcp.config.kea.hookParameters.nameservers is empty    (resolver serving .forge for the DPU cluster CoreDNS; required unless --skip-dpf)")
     if [[ -z "${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}" ]]; then
         WARNINGS+=("NICO_DPF_NGC_API_KEY / REGISTRY_PULL_SECRET not set — the DPF operator + public DOCA images still pull anonymously, but the Argo repo secrets are skipped, so the private NICo DPUService charts (carbide) won't authenticate unless you mirror/build them into your own registry")
     fi

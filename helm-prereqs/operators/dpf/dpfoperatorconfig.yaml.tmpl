@@ -2,8 +2,8 @@
 # operators/dpf/dpfoperatorconfig.yaml.tmpl — DPFOperatorConfig for NICo
 #
 # Rendered by setup.sh with:
-#   envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT}'
-# Only the two whitelisted variables are substituted.
+#   envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT} ${NICO_DPF_COREDNS_UPSTREAM}'
+# Only the whitelisted variables are substituted.
 #
 # NICo-specific choices (docs/manuals/dpf.md §3.2):
 #   - dpuDetector disabled: NICo feeds DPUs in explicitly, no auto-discovery.
@@ -35,6 +35,10 @@ spec:
     argoCDNamespace: dpf-operator-system
   kamajiClusterManager:
     disable: false
+  coreDNS:
+    # Resolver for names outside the DPU cluster domain, such as the .forge
+    # zone. Same resolver the DPUs get from DHCP.
+    upstreamNameservers: "${NICO_DPF_COREDNS_UPSTREAM}"
   networking:
     highSpeedMTU: 9000
   # No imagePullSecrets: the GA nvidia/doca operand images are public and pull
