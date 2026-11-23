@@ -943,7 +943,9 @@ fn lockdown_status<B: Bmc>(
             );
 
             let model = system.hardware_id().model.map(|v| v.into_inner());
-            let is_ars_121l_dnr = model == Some("ARS-121L-DNR");
+            let must_keep_host_interface_enabled = model.is_some_and(|model| {
+                model.contains("ARS-121L-DNR") || model.contains("ARS-221GL-FNB-NC24B")
+            });
             let (inband_locked, inband_unlocked) = if explored_chassis.is_mgx_c2() {
                 (
                     ipmi_host_interface_enabled.is_none_or(|enabled| !enabled),
@@ -956,8 +958,8 @@ fn lockdown_status<B: Bmc>(
                         || kcs_privilege == Some(SupermicroPrivilege::Administrator),
                 )
             };
-            // ARS-121L-DNR must keep HostInterface enabled to PXE boot.
-            let host_interface_locked = hi_enabled == is_ars_121l_dnr;
+            // ARS-121L-DNR and ARS-221GL-FNB-NC24B must keep HostInterface enabled to PXE boot.
+            let host_interface_locked = must_keep_host_interface_enabled || !hi_enabled;
 
             let status = if is_syslockdown && inband_locked && host_interface_locked {
                 InternalLockdownStatus::Enabled
