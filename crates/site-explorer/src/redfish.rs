@@ -420,6 +420,7 @@ impl RedfishClient {
         bmc_ip_address: SocketAddr,
         credentials: Credentials,
         boot_interface_mac: Option<MacAddress>,
+        explore_drive_firmware: bool,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let service_root = self
             .nv_redfish_client_pool
@@ -431,7 +432,7 @@ impl RedfishClient {
 
         bmc_explorer::nv_generate_exploration_report(
             service_root,
-            &nv_bmc_explore_config(boot_interface_mac),
+            &nv_bmc_explore_config(boot_interface_mac, explore_drive_firmware),
         )
         .await
         .map_err(map_nv_redfish_explore_error)
@@ -1222,6 +1223,7 @@ async fn fetch_service(client: &dyn Redfish) -> Result<Vec<Service>, RedfishErro
             description: value.description,
             version: value.version,
             release_date: value.release_date,
+            drive: None,
         };
 
         inventories.push(inventory);
@@ -1405,6 +1407,7 @@ fn nv_error_classifier(
 
 fn nv_bmc_explore_config(
     boot_interface_mac: Option<MacAddress>,
+    explore_drive_firmware: bool,
 ) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac,
@@ -1413,6 +1416,7 @@ fn nv_bmc_explore_config(
         // but not for too long relative to the total exploration
         // time.
         retry_timeout: Duration::from_millis(1000),
+        explore_drive_firmware,
     }
 }
 

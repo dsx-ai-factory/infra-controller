@@ -233,6 +233,7 @@ impl TestApiBuilder {
             credential_manager.clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             SiteExplorerExploreMode::NvRedfish,
+            false,
             self.db_pool.clone(),
         );
         let endpoint_explorer: Arc<dyn EndpointExplorer> = match self.endpoint_explorer {

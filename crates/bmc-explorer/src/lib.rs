@@ -17,6 +17,7 @@
 
 mod chassis;
 mod computer_system;
+mod drives;
 mod error;
 pub mod hw;
 mod inventories;
@@ -31,6 +32,7 @@ use std::time::Duration;
 
 use chassis::ExploredChassisCollection;
 use computer_system::ExploredComputerSystem;
+use drives::ExploredDrives;
 pub use error::Error;
 use inventories::ExploredInventories;
 use itertools::Itertools;
@@ -66,6 +68,11 @@ pub struct Config<'a, B: Bmc> {
     pub boot_interface_mac: Option<MacAddress>,
     pub error_classifier: ErrorClassifier<'a, B>,
     pub retry_timeout: Duration,
+    /// Whether to read drive firmware versions from the primary system's
+    /// Storage subsystems and report each enabled drive with a usable model
+    /// and version as a `Drive_<Model>_<DriveId>` firmware inventory entry.
+    /// Costs one request per Storage subsystem and per drive.
+    pub explore_drive_firmware: bool,
 }
 
 /// Builds the chassis exploration config shared by [`nv_generate_exploration_report`]
@@ -152,6 +159,11 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let explored_system = ExploredComputerSystem::explore(system, &system_explore_config).await?;
 
     let hw_type = hw_type(&root, &explored_system, &explored_chassis);
+    let explored_drives = if config.explore_drive_firmware {
+        Some(ExploredDrives::explore(&explored_system.system).await)
+    } else {
+        None
+    };
     let is_mgx_c2 = explored_chassis.is_mgx_c2();
     let manager_explore_config = hw_type
         .map(|hw_type| match hw_type {
@@ -260,7 +272,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
 
     let system = explored_system.to_model(hw_type, &explored_chassis, &pcie_devices)?;
     let manager = explored_manager.to_model()?;
-    let service = explored_inventories.to_model(hw_type);
+    let service = explored_inventories.to_model(hw_type, explored_drives.as_ref());
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -323,7 +335,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
         managers: vec![explored_manager.to_model()?],
         systems: vec![system],
         chassis: explored_chassis.to_model(),
-        service: explored_inventories.to_model(Some(hw_type)),
+        service: explored_inventories.to_model(Some(hw_type), None),
         vendor: hw_type.bmc_vendor(),
         versions: HashMap::default(),
         model: None,

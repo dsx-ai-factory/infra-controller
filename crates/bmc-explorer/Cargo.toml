@@ -57,6 +57,7 @@ nv-redfish = { workspace = true, features = [
   "oem-liteon",
   "oem-delta",
   "bmc-http",
+  "storages",
 ] }
 regex = { workspace = true }
 lazy_static = { workspace = true }
@@ -76,6 +77,7 @@ bmc-mock = { path = "../bmc-mock" }
 # Self dev-dependency so the crate's own integration tests get the test-support
 # helpers; applies only to test/bench targets, never the production library.
 bmc-explorer = { path = ".", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

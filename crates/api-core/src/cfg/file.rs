@@ -2946,6 +2946,7 @@ mod tests {
                 rotate_switch_nvos_credentials: Arc::new(false.into()),
                 dpu_mode: None,
                 explore_mode: SiteExplorerExploreMode::LibRedfish,
+                explore_drive_firmware: false,
             }
         );
         assert_eq!(
@@ -3143,6 +3144,7 @@ mod tests {
                 rotate_switch_nvos_credentials: Arc::new(false.into()),
                 dpu_mode: None,
                 explore_mode: SiteExplorerExploreMode::LibRedfish,
+                explore_drive_firmware: false,
             }
         );
 
@@ -3487,6 +3489,7 @@ mod tests {
                 rotate_switch_nvos_credentials: Arc::new(false.into()),
                 dpu_mode: None,
                 explore_mode: SiteExplorerExploreMode::LibRedfish,
+                explore_drive_firmware: false,
             }
         );
 

@@ -52,6 +52,8 @@ pub struct BmcEndpointExplorer {
     credential_client: CredentialClient,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish reports include drive firmware inventory entries.
+    explore_drive_firmware: bool,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -76,8 +78,16 @@ impl BmcEndpointExplorer {
             credential_client: CredentialClient::new(credential_manager),
             rotate_switch_nvos_credentials,
             mode,
+            explore_drive_firmware: false,
             database_connection,
         }
+    }
+
+    /// Sets whether nv-redfish reports include drive firmware inventory
+    /// entries; off unless set.
+    pub fn with_drive_firmware(mut self, explore_drive_firmware: bool) -> Self {
+        self.explore_drive_firmware = explore_drive_firmware;
+        self
     }
 
     pub async fn get_sitewide_bmc_password(&self) -> Result<String, EndpointExplorationError> {
@@ -252,7 +262,12 @@ impl BmcEndpointExplorer {
             }
             SiteExplorerExploreMode::NvRedfish => {
                 self.redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, credentials, boot_interface_mac)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        credentials,
+                        boot_interface_mac,
+                        self.explore_drive_firmware,
+                    )
                     .await
             }
             SiteExplorerExploreMode::CompareResult => {
@@ -267,7 +282,12 @@ impl BmcEndpointExplorer {
                     .await;
                 let nvredfish = self
                     .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, credentials, boot_interface_mac)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        credentials,
+                        boot_interface_mac,
+                        self.explore_drive_firmware,
+                    )
                     .await;
                 match (&libredfish, &nvredfish) {
                     (Ok(report), Ok(nv_report)) => warn_report_diff(report, nv_report),

@@ -103,6 +103,7 @@ use self::metrics::{DpuMigrationSignal, PairingBlockerReason, exploration_error_
 use crate::config::SiteExplorerExploreMode;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 
+#[allow(clippy::too_many_arguments)]
 pub fn new_bmc_explorer(
     redfish_client_pool: Arc<dyn RedfishClientPool>,
     nv_redfish_client_pool: Arc<NvRedfishClientPool>,
@@ -110,6 +111,7 @@ pub fn new_bmc_explorer(
     credential_manager: Arc<dyn CredentialManager>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     mode: SiteExplorerExploreMode,
+    explore_drive_firmware: bool,
     database_connection: PgPool,
 ) -> Arc<BmcEndpointExplorer> {
     BmcEndpointExplorer::new(
@@ -121,6 +123,7 @@ pub fn new_bmc_explorer(
         mode,
         Some(database_connection),
     )
+    .with_drive_firmware(explore_drive_firmware)
     .into()
 }
 

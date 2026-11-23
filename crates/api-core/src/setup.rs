@@ -475,6 +475,7 @@ pub async fn start_api(
             .rotate_switch_nvos_credentials
             .clone(),
         carbide_config.site_explorer.explore_mode,
+        carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
     );
     // Shared between the API's `RefreshEndpointReport` handler and the site-explorer loop so they

@@ -839,6 +839,7 @@ dependencies = [
  "bmc-vendor",
  "carbide-api-model",
  "carbide-network",
+ "carbide-test-support",
  "itertools 0.14.0",
  "lazy_static",
  "mac_address",

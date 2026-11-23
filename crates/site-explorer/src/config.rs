@@ -193,6 +193,16 @@ pub struct SiteExplorerConfig {
     /// CompareResult for side-by-side validation).
     #[serde(default = "SiteExplorerConfig::default_explore_mode")]
     pub explore_mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish exploration reads drive firmware versions from each
+    /// host's Redfish Storage subsystems and reports each enabled drive with
+    /// a usable model and version as a
+    /// `Drive_<Model>_<DriveId>` firmware inventory entry, which host firmware
+    /// configuration can select. Adds one request per Storage subsystem and
+    /// per drive to every exploration. Takes effect only when `explore_mode`
+    /// is `nv-redfish`: `libredfish` ignores it, and `compare-result` reads
+    /// the drives but returns the libredfish report, which omits them.
+    #[serde(default)]
+    pub explore_drive_firmware: bool,
 }
 
 impl Default for SiteExplorerConfig {
@@ -220,6 +230,7 @@ impl Default for SiteExplorerConfig {
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
             dpu_mode: None,
             explore_mode: Self::default_explore_mode(),
+            explore_drive_firmware: false,
         }
     }
 }

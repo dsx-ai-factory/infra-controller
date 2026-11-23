@@ -293,6 +293,7 @@ flows.
 | `switches_created_per_run` | `u64` | `9` | Max switches created per run. |
 | `use_onboard_nic` | `bool` | `false` | Use onboard NIC instead of DPU NICs. |
 | `explore_mode` | `SiteExplorerExploreMode` | `LibRedfish` | Redfish backend: `libredfish`, `nv-redfish`, or `compare-result`. |
+| `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. Takes effect only when `explore_mode` is `nv-redfish`: `libredfish` ignores it, and `compare-result` reads the drives but returns the libredfish report, which omits them. |
 
 ### `StateControllerConfig`
 

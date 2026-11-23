@@ -1649,6 +1649,7 @@ async fn test_site_explorer_audit_exploration_results(
         dpu_mode: None,
         // Tests use MockEndpointExplorer. So this doesn't affect anything.
         explore_mode: SiteExplorerExploreMode::NvRedfish,
+        explore_drive_firmware: false,
     };
     let explorer = env.test_site_explorer(explorer_config);
     explorer.insert_endpoints(vec![
@@ -3251,6 +3252,7 @@ async fn test_site_explorer_pairs_bf4_dpu_from_bluefield_bmc_chassis_serial(
         boot_interface_mac: None,
         error_classifier: &error_classifier,
         retry_timeout: Duration::from_millis(0),
+        explore_drive_firmware: false,
     };
     let host_bmc = bmc_mock_support::bmc_for_machine(MachineInfo::Host(host_info)).await;
     let dpu_bmc_report_source =
