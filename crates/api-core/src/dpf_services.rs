@@ -2745,8 +2745,8 @@ mod tests {
             11
         );
         let underlay = &config["weaveFlowController"]["underlayConfigMapData"];
-        assert_eq!(underlay["softwarePlaneIDBitLength"], 8);
-        assert_eq!(underlay["railIDBitLength"], 4);
+        assert_eq!(underlay["softwarePlaneIDBitLength"], 2);
+        assert_eq!(underlay["railIDBitLength"], 3);
 
         let interfaces = config["weaveFlowController"]["underlayConfigMapData"]["interfaces"]
             .as_array()

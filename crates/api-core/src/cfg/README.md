@@ -1877,8 +1877,13 @@ the existing `DPUDevice` values and does not apply the new prefixes.
 | ------- | ------ | --------- | ------------- |
 | `underlay_rail_route_prefix_len` | `u8` | `16` | Optional override for IPv4 route prefix length (0–31) for each rail in Astra DPUDevice values. |
 | `underlay_software_plane_route_prefix_len` | `u8` | `13` | Optional override for IPv4 route prefix length (0–31) for each software plane in Astra DPUDevice values. |
-| `underlay_ip_rail_id_bit_len` | `u8` | `4` | Optional override for the number of bits used to identify a rail in the Weave service configuration. |
-| `underlay_ip_software_plane_id_bit_len` | `u8` | `8` | Optional override for the number of bits used to identify a software plane in the Weave service configuration. |
+| `underlay_ip_rail_id_bit_len` | `u8` | `3` | Optional override for the number of bits used to identify a rail in the Weave service configuration. |
+| `underlay_ip_software_plane_id_bit_len` | `u8` | `2` | Optional override for the number of bits used to identify a software plane in the Weave service configuration. |
+
+Weave adds the software-plane identifier bit length to `ewethers_config.subnet_mask`
+to derive the software-plane DHCP route prefix, then adds the rail identifier bit
+length for the rail route prefix. With the default `/11` overlay, the default bit
+lengths `2` and `3` produce `/13` software-plane and `/16` rail DHCP routes.
 
 Configuration loading rejects route prefix lengths of 32 or greater and a combined
 rail/software-plane identifier bit length of 32 or greater for IPv4.
