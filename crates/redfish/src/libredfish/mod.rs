@@ -240,41 +240,6 @@ mod sealed {
 /// built by some other pool.
 #[async_trait]
 pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
-    /// Updates the host UEFI password from Forge's sitewide password to an
-    /// empty string. Assumes the machine has already updated its UEFI
-    /// password to match the Forge sitewide password.
-    ///
-    /// `current_device_credentials` is the credential the device currently
-    /// carries (the host UEFI password to authenticate the clear with). The
-    /// caller resolves it -- this low-level crate intentionally knows nothing
-    /// about credential versions or the rotation table; it just applies the
-    /// password it is handed.
-    ///
-    /// Builds its own Redfish client from `access`; [`CredentialOpError`]
-    /// separates client-creation failures from device-level ones.
-    async fn clear_host_uefi_password(
-        &self,
-        access: &BmcAccessInfo,
-        current_device_credentials: Credentials,
-    ) -> Result<Option<String>, CredentialOpError> {
-        let client = self
-            .client_by_info(access)
-            .await
-            .map_err(CredentialOpError::ClientCreation)?;
-        let client = client.as_ref();
-        let Credentials::UsernamePassword {
-            password: current_password,
-            ..
-        } = current_device_credentials;
-
-        client
-            .clear_uefi_password(current_password.as_str())
-            .await
-            .map_err(|err| redact_password(err, current_password.as_str()))
-            .map_err(RedfishClientCreationError::RedfishError)
-            .map_err(CredentialOpError::Operation)
-    }
-
     /// Sets the device's UEFI (BIOS setup) password to the site-wide value.
     ///
     /// `sitewide_uefi_credentials` is the site-wide UEFI credential to set on
@@ -386,65 +351,6 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
             .map_err(|err| redact_password(err, current_password.as_str()))
             .map_err(RedfishClientCreationError::RedfishError)
             .map_err(CredentialOpError::Operation)
-    }
-
-    /// Rotate a UEFI (BIOS setup) password to the site-wide target,
-    /// authenticating with the current-version credential. Family-agnostic: the
-    /// same candidate walk serves a host (via a host power-cycle) and a DPU (via
-    /// a DPU restart) -- the caller owns the reboot and the bookkeeping.
-    ///
-    /// `current_password_candidates` is an ordered, bounded, non-empty list of
-    /// plausible current passwords (the caller resolves them: the device's
-    /// tracked current site version, then the rotating-to version, then the
-    /// terminal fallback -- empty for a never-set host, the factory default for
-    /// a never-set DPU). The first candidate that authenticates the change wins;
-    /// the returned `Option<String>` is the vendor BIOS job id to poll (when the
-    /// vendor schedules one) or `None` (DPUs never schedule one).
-    ///
-    /// Unlike [`Self::uefi_setup`], this never assumes the empty/factory case
-    /// first, so a mid-rotation device at v1 rotating to v2 authenticates with
-    /// the v1 secret rather than failing. This crate still knows nothing about
-    /// credential versions -- it just applies the ordered candidates it is
-    /// handed. All errors are password-redacted before they leave this method.
-    async fn rotate_uefi_password(
-        &self,
-        access: &BmcAccessInfo,
-        current_password_candidates: &[String],
-        new_password: String,
-    ) -> Result<Option<String>, CredentialOpError> {
-        let client = self
-            .client_by_info(access)
-            .await
-            .map_err(CredentialOpError::ClientCreation)?;
-        let client = client.as_ref();
-        let mut last_err = None;
-        for candidate in current_password_candidates {
-            match client
-                .change_uefi_password(candidate.as_str(), new_password.as_str())
-                .await
-            {
-                Ok(job_id) => return Ok(job_id),
-                Err(e) => {
-                    let redacted =
-                        redact_passwords(e, &[new_password.as_str(), candidate.as_str()]);
-                    tracing::warn!(
-                        error = %redacted,
-                        "UEFI password change failed for a current-password candidate; trying the next"
-                    );
-                    last_err = Some(redacted);
-                }
-            }
-        }
-        // The caller contract guarantees at least one candidate (empty for a
-        // never-set host, the factory default for a never-set DPU), so `last_err`
-        // is populated whenever the loop fell through without an Ok.
-        Err(CredentialOpError::Operation(
-            RedfishClientCreationError::RedfishError(
-                last_err.expect(
-                    "rotate_uefi_password requires at least one current-password candidate",
-                ),
-            ),
-        ))
     }
 
     /// Restore account 1 IPMI access after a recovered Lenovo password change.

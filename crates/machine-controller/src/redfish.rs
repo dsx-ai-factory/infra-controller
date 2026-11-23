@@ -15,14 +15,18 @@
  * limitations under the License.
  */
 
-use bmc_backend::BackendBmc;
-use bmc_platform::{BootProgress, BootProgressTypes, PlatformError, PowerState, ResetType};
+use bmc_backend::{BackendBmc, idrac_job};
+use bmc_platform::{
+    BootProgress, BootProgressTypes, OperationStatus, PlatformError, PowerState, ResetType,
+    VendorJobId,
+};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine::MachineIdSubtypeTrait;
 use chrono::{DateTime, Utc};
 use model::machine::{Machine, MachineLastRebootRequestedMode};
-use state_controller::state_handler::StateHandlerContext;
+use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
-use crate::context::MachineStateHandlerContextObjects;
+use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 use crate::write_ops::MachineWriteOp;
 
 /// `PowerControlError` distinguishes preparation failures from possibly applied power changes.
@@ -268,4 +272,18 @@ pub async fn did_dpu_finish_booting(
         .as_ref()
         .is_some_and(|progress| progress.last_state == Some(BootProgressTypes::OsRunning));
     Ok((os_running, boot_progress))
+}
+
+/// Connects to `machine`'s BMC and polls the iDRAC vendor job `job_id`.
+pub(crate) async fn poll_idrac_job(
+    services: &MachineStateHandlerServices,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
+    job_id: &str,
+) -> Result<OperationStatus, StateHandlerError> {
+    let bmc = services.connect_bmc(machine).await?;
+    let vendor_job_id = VendorJobId::new(job_id.to_string())
+        .map_err(|error| StateHandlerError::GenericError(eyre::eyre!("invalid job id: {error}")))?;
+    bmc.operation_status(&idrac_job(vendor_job_id))
+        .await
+        .map_err(|error| platform_error("operation_status", error))
 }

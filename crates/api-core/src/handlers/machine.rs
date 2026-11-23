@@ -62,12 +62,9 @@ async fn resolve_host_uefi_clear_credentials(
         crate::handlers::uefi::host_uefi_clear_credential_key(api.pg_pool(), bmc_mac_address)
             .await
             .ok()?;
-    crate::handlers::uefi::read_uefi_credentials(
-        api.bmc_credential_ops.credential_reader(),
-        &clear_key,
-    )
-    .await
-    .ok()
+    crate::handlers::uefi::read_uefi_credentials(api.credential_manager.as_ref(), &clear_key)
+        .await
+        .ok()
 }
 
 pub(crate) async fn find_machine_ids(
@@ -1378,12 +1375,16 @@ pub(crate) async fn admin_force_delete_machine(
                             // force-delete.
                             let clear_credentials =
                                 resolve_host_uefi_clear_credentials(api, bmc_mac_address).await;
-                            if let Some(clear_credentials) = clear_credentials {
-                                match api
-                                    .bmc_credential_ops
-                                    .clear_host_uefi_password(&access, clear_credentials)
-                                    .await
-                                {
+                            if let Some(Credentials::UsernamePassword {
+                                password: current_password,
+                                ..
+                            }) = clear_credentials
+                            {
+                                let clear_result = async {
+                                    bmc.bios()?.clear_uefi_password(&current_password).await
+                                }
+                                .await;
+                                match clear_result {
                                     Ok(_) => {
                                         // The UEFI password was reset on the device, so the host no
                                         // longer carries the site-wide UEFI value: drop the host_uefi
