@@ -32,6 +32,7 @@ use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, Resource};
 use tokio_util::sync::CancellationToken;
 
+use super::BMC_CREDENTIAL_DEVICE_LABEL;
 use super::traits::*;
 use crate::crds::bfbs_generated::BFB;
 use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
@@ -896,6 +897,17 @@ impl K8sConfigRepository for KubeRepository {
 
 #[async_trait]
 impl BmcCredentialRepository for KubeRepository {
+    async fn list_bmc_credential_secrets(
+        &self,
+        device_id: &str,
+        namespace: &str,
+    ) -> Result<Vec<Secret>, DpfError> {
+        let api: Api<Secret> = self.api(namespace);
+        let params =
+            ListParams::default().labels(&format!("{BMC_CREDENTIAL_DEVICE_LABEL}={device_id}"));
+        Ok(api.list(&params).await?.items)
+    }
+
     async fn get_bmc_credential_secret(
         &self,
         name: &str,

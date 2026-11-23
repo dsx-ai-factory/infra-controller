@@ -107,6 +107,7 @@ async fn fixture_with_config(
     let verified_deployments = Arc::new(Mutex::new(Vec::new()));
     let reject_next_reads = Arc::new(AtomicUsize::new(0));
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));

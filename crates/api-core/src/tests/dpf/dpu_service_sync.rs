@@ -62,6 +62,7 @@ pub(super) fn mock(
     release_fails: Arc<AtomicBool>,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));

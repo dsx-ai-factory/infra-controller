@@ -88,6 +88,7 @@ fn provisioning_mock_with_dpu_count(
     dpu_count: usize,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
@@ -112,23 +113,23 @@ fn provisioning_mock_with_dpu_count(
     mock
 }
 
-/// Missing DPF BMC credentials are an admission condition, not a persisted
-/// provisioning failure. Both registration entry points must keep their
-/// current state and make progress on a later controller iteration.
+/// Missing credentials and credential publication races preserve registration
+/// state and make progress on a later controller iteration.
 #[crate::sqlx_test]
-async fn test_missing_dpf_credential_retries_registration(pool: sqlx::PgPool) {
-    let credential_available = Arc::new(AtomicBool::new(true));
+async fn test_dpf_credential_admission_retries_registration(pool: sqlx::PgPool) {
+    let registration_failure = Arc::new(Mutex::new(None));
+    let registration_attempts = Arc::new(AtomicUsize::new(0));
     let resources_present = Arc::new(AtomicBool::new(true));
     let mut mock = MockDpfOperations::new();
 
-    let credential_available_for_mock = credential_available.clone();
+    let registration_failure_for_mock = registration_failure.clone();
+    let registration_attempts_for_mock = registration_attempts.clone();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device().returning(move |_, _, _| {
-        if credential_available_for_mock.load(Ordering::SeqCst) {
-            Ok(())
-        } else {
-            Err(DpfError::BmcPasswordSourceUnavailable(
-                "credential has not been published".to_string(),
-            ))
+        registration_attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+        match registration_failure_for_mock.lock().unwrap().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     });
     mock.expect_register_dpu_node().returning(|_| Ok(()));
@@ -164,18 +165,40 @@ async fn test_missing_dpf_credential_retries_registration(pool: sqlx::PgPool) {
         .await
         .expect("timed out during initial provisioning");
 
-    for dpf_state in [DpfState::Provisioning, DpfState::Reprovisioning] {
+    for (dpf_state, error) in [
+        (
+            DpfState::Provisioning,
+            DpfError::BmcPasswordSourceUnavailable("credential unavailable".to_string()),
+        ),
+        (
+            DpfState::Reprovisioning,
+            DpfError::BmcPasswordSourceUnavailable("credential unavailable".to_string()),
+        ),
+        (
+            DpfState::Provisioning,
+            DpfError::BmcCredentialPublicationRetry(Box::new(DpfError::already_exists(
+                "Secret",
+                "device-v1",
+            ))),
+        ),
+    ] {
         resources_present.store(
             !matches!(dpf_state, DpfState::Reprovisioning),
             Ordering::SeqCst,
         );
-        credential_available.store(false, Ordering::SeqCst);
+        *registration_failure.lock().unwrap() = Some(error);
+        let attempts_before = registration_attempts.load(Ordering::SeqCst);
         set_reprovision_dpf_state(&pool, &mh.id, &mh.dpu_ids, dpf_state.clone()).await;
 
         timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
             .await
             .expect("timed out while waiting for the DPF credential");
 
+        assert_eq!(
+            registration_attempts.load(Ordering::SeqCst),
+            attempts_before + 1,
+            "the registration attempt must encounter the injected failure"
+        );
         assert!(
             matches!(
                 get_host_state(&env, &mh).await,
@@ -184,14 +207,18 @@ async fn test_missing_dpf_credential_retries_registration(pool: sqlx::PgPool) {
                         matches!(state, ReprovisionState::DpfStates { substate } if substate == &dpf_state)
                     })
             ),
-            "missing credentials must preserve {dpf_state:?} for retry"
+            "credential admission must preserve {dpf_state:?} for retry"
         );
 
-        credential_available.store(true, Ordering::SeqCst);
         timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
             .await
             .expect("timed out while retrying DPF registration");
 
+        assert_eq!(
+            registration_attempts.load(Ordering::SeqCst),
+            attempts_before + 2,
+            "the next iteration must retry registration"
+        );
         assert!(
             matches!(
                 get_host_state(&env, &mh).await,
@@ -222,6 +249,7 @@ fn source_deployment_mock_with_phase_reader(
     phase_reader: impl Fn(&str) -> DpuPhase + Send + Sync + 'static,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
@@ -841,6 +869,7 @@ fn capturing_mock(
     let mut mock = MockDpfOperations::new();
     expect_dpf_service_inventory(&mut mock);
 
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(move |info, _, _| {
             registered_devices.lock().unwrap().push(info.device_id);
@@ -950,6 +979,7 @@ async fn test_gb200_b3240_pair_uses_specialized_deployment_from_report_or_rack(p
 
     let mut mock = MockDpfOperations::new();
     expect_dpf_service_inventory(&mut mock);
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     let registered_deployments_for_mock = registered_deployments.clone();
@@ -1169,6 +1199,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
     mock.expect_find_outdated_dpus_dpf()
         .returning(move || Ok(outdated_for_mock.lock().unwrap().clone()));
     expect_dpf_service_inventory(&mut mock);
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
@@ -1939,6 +1970,7 @@ async fn test_mixed_dpu_deployment_types_fail_without_registration(pool: sqlx::P
     let mut mock = MockDpfOperations::new();
     expect_dpf_service_inventory(&mut mock);
     let registered_devices_for_mock = registered_devices.clone();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device().returning(move |_, _, _| {
         registered_devices_for_mock.fetch_add(1, Ordering::SeqCst);
         Ok(())

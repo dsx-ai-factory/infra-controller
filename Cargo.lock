@@ -2846,6 +2846,8 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.14.0",
+ "k8s-openapi",
+ "kube",
  "lazy_static",
  "libredfish",
  "mac_address",

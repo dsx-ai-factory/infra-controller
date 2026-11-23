@@ -3505,6 +3505,7 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
     // Establish a Ready two-slot registration and the durable attachment consumed by repair policy.
     let service_id = ExtensionServiceId::new();
     let mut initial_mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut initial_mock);
     initial_mock
         .expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
@@ -9889,6 +9890,7 @@ async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
     )]);
     let label_reads = Arc::new(AtomicUsize::new(0));
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
@@ -10048,6 +10050,7 @@ async fn test_helm_target_placement_status_and_detach(
     ));
     let failed_device = Arc::new(Mutex::new(None::<String>));
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));

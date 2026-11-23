@@ -99,6 +99,7 @@ fn dpf_error(error: DpfError) -> StateHandlerError {
 
 enum DpfResourceRegistrationError {
     CredentialUnavailable(String),
+    Retry(String),
     Fatal(StateHandlerError),
 }
 
@@ -111,8 +112,23 @@ impl From<StateHandlerError> for DpfResourceRegistrationError {
 fn classify_dpf_registration_error(error: DpfError) -> DpfResourceRegistrationError {
     if error.is_bmc_password_source_unavailable() {
         DpfResourceRegistrationError::CredentialUnavailable(error.to_string())
+    } else if matches!(&error, DpfError::BmcCredentialPublicationRetry(_)) {
+        DpfResourceRegistrationError::Retry(error.to_string())
     } else {
         DpfResourceRegistrationError::Fatal(dpf_error(error))
+    }
+}
+
+async fn bmc_credential_wait_reason(
+    dpf_sdk: &dyn DpfOperations,
+    device_id: &str,
+) -> Option<String> {
+    match dpf_sdk.reconcile_bmc_credential(device_id).await {
+        Ok(true) => None,
+        Ok(false) => Some("Waiting for DPF to adopt the DPU BMC credential".to_string()),
+        Err(error) => Some(format!(
+            "Waiting to synchronize the DPU BMC credential: {error}"
+        )),
     }
 }
 
@@ -594,7 +610,12 @@ async fn handle_dpf_provisioning(
         Ok(()) => {}
         Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
             return Ok(StateHandlerOutcome::wait(format!(
-                "waiting for the site-wide BMC credential before DPF registration: {error}"
+                "waiting for the BMC credential before DPF registration: {error}"
+            )));
+        }
+        Err(DpfResourceRegistrationError::Retry(error)) => {
+            return Ok(StateHandlerOutcome::wait(format!(
+                "waiting for DPF device registration: {error}"
             )));
         }
         Err(DpfResourceRegistrationError::Fatal(error)) => {
@@ -836,6 +857,16 @@ async fn handle_dpf_waiting_for_ready(
         }
     }
 
+    if let Some(reason) = bmc_credential_wait_reason(dpf_sdk, &dpu_device_name).await {
+        return update_phase_detail_or_wait(
+            state,
+            &dpu_machine_id,
+            waiting_phase_detail,
+            &current_phase,
+            &reason,
+        );
+    }
+
     dpf_sdk
         .release_maintenance_hold(&node_name)
         .await
@@ -1044,7 +1075,12 @@ async fn handle_dpf_reprovisioning(
             Ok(()) => {}
             Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
                 return Ok(StateHandlerOutcome::wait(format!(
-                    "waiting for the site-wide BMC credential before DPF registration: {error}"
+                    "waiting for the BMC credential before DPF registration: {error}"
+                )));
+            }
+            Err(DpfResourceRegistrationError::Retry(error)) => {
+                return Ok(StateHandlerOutcome::wait(format!(
+                    "waiting for DPF device registration: {error}"
                 )));
             }
             Err(DpfResourceRegistrationError::Fatal(error)) => {
@@ -1061,6 +1097,10 @@ async fn handle_dpf_reprovisioning(
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &state.host_snapshot.id)
             .await?;
         return Ok(outcome.with_txn(txn));
+    }
+
+    if let Some(reason) = bmc_credential_wait_reason(dpf_sdk, &dpf_id(dpu_snapshot)?).await {
+        return Ok(StateHandlerOutcome::wait(reason));
     }
 
     tracing::info!(machine_id = %dpu_snapshot.id, "DPF initiate reprovision of DPU");
@@ -1241,11 +1281,48 @@ pub(super) async fn handle_dpf_state(
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use model::machine::ReprovisionRequest;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
+
+    #[test]
+    fn registration_preserves_credential_error_classification() {
+        value_scenarios!(
+            run = |error: DpfError| match classify_dpf_registration_error(error) {
+                DpfResourceRegistrationError::CredentialUnavailable(_) => "credential unavailable",
+                DpfResourceRegistrationError::Retry(_) => "retry",
+                DpfResourceRegistrationError::Fatal(_) => "fatal",
+            };
+            "unavailable credentials retain their original classification" {
+                DpfError::BmcPasswordSourceUnavailable("credential unavailable".to_string()) => "credential unavailable",
+                DpfError::LocalBmcPasswordSourceUnavailable("local credential unavailable".to_string()) => "credential unavailable",
+            }
+            "publication races are classified separately" {
+                DpfError::BmcCredentialPublicationRetry(Box::new(
+                    DpfError::already_exists("Secret", "device-v1"),
+                )) => "retry",
+            }
+            "unrelated registration errors retain failure handling" {
+                DpfError::already_exists("DPUNode", "node") => "fatal",
+                DpfError::not_found("DPUDevice", "device") => "fatal",
+                DpfError::timeout("registration", "timed out") => "fatal",
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("forbidden", "Forbidden").with_code(403),
+                ))) => "fatal",
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("namespace missing", "NotFound").with_code(404),
+                ))) => "fatal",
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("node creation conflict", "Conflict").with_code(409),
+                ))) => "fatal",
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("invalid resource", "Invalid").with_code(422),
+                ))) => "fatal",
+            }
+        );
+    }
 
     #[test]
     fn exploration_pause_tracks_all_dpus_and_allocation_modes() {

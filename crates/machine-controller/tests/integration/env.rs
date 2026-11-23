@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_machine_controller::context::MachineStateHandlerServices;
+use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::handler::{
     MachineStateHandlerBuilder, PowerOptionConfig, ReachabilityParams,
 };
@@ -49,6 +50,7 @@ pub(super) struct EnvBuilder {
     runtime_config: CarbideConfig,
     component_manager: Option<Arc<ComponentManager>>,
     credential_manager: Option<Arc<dyn CredentialManager>>,
+    dpf_sdk: Option<Arc<dyn DpfOperations>>,
     controller_redfish_pool: Option<ControllerRedfishPool>,
 }
 
@@ -65,6 +67,7 @@ impl Env {
             runtime_config,
             component_manager: None,
             credential_manager: None,
+            dpf_sdk: None,
             controller_redfish_pool: None,
         }
     }
@@ -104,6 +107,11 @@ impl EnvBuilder {
         self
     }
 
+    pub(super) fn with_dpf_sdk(mut self, dpf_sdk: Arc<dyn DpfOperations>) -> Self {
+        self.dpf_sdk = Some(dpf_sdk);
+        self
+    }
+
     pub(super) fn with_controller_redfish_pool(
         mut self,
         pool: impl FnOnce(Arc<RedfishSim>, Arc<dyn CredentialManager>) -> Arc<dyn RedfishClientPool>
@@ -139,6 +147,7 @@ impl EnvBuilder {
             runtime_config,
             component_manager,
             credential_manager,
+            dpf_sdk,
             controller_redfish_pool,
         } = self;
         let controller_redfish_sim = redfish_sim.clone();
@@ -181,6 +190,7 @@ impl EnvBuilder {
                     .clone(),
             )
             .credential_reader(api.credential_manager().clone())
+            .dpf_sdk(dpf_sdk)
             .power_options_config(power_options)
             .build();
         let per_object_metrics_registry = PerObjectMetricsRegistry::new(

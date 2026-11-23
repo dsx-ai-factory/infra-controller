@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::LazyLock;
@@ -1586,13 +1586,17 @@ pub enum ManagedHostState {
 
     /// The host and/or its DPUs are converging their BMC root credential to the
     /// staged site-wide rotation target. A pool-only, top-level state:
-    /// it blocks instance creation (which requires exact `Ready`) for the bounded
-    /// duration of the rotation. Per-device backoff/quarantine is owned by the
-    /// rotation engine's `device_credential_rotation` bookkeeping, so this state
-    /// carries only a retry budget for transient handler failures.
+    /// it blocks instance creation (which requires exact `Ready`) through hardware
+    /// rotation and DPF adoption. Per-device backoff/quarantine is owned by the
+    /// rotation engine's `device_credential_rotation` bookkeeping. DPF hosts
+    /// also retain the selected DPU IDs through credential publication, DPF
+    /// acknowledgment, and obsolete Secret cleanup after hardware rotation ends.
     RotatingBmc {
         #[serde(default)]
         retry_count: u32,
+        /// Whether hardware rotation can still run or the DPF credential update step remains.
+        #[serde(default)]
+        rotation_state: BmcRotationState,
     },
 
     /// The host is converging its own UEFI (BIOS setup) password to the staged
@@ -1601,7 +1605,7 @@ pub enum ManagedHostState {
     /// duration of the rotation. Unlike `RotatingBmc`, applying a new UEFI
     /// password requires a BIOS config job plus a full host power-cycle, so this
     /// state carries the multi-tick [`UefiSetupInfo`] sub-state (job id + step).
-    /// Unlike the single-tick `RotatingBmc`, there is no separate handler retry
+    /// Unlike the hardware phase of `RotatingBmc`, there is no separate handler retry
     /// budget: transient failures use the state framework's built-in retry (as
     /// the ingestion UEFI-setup FSM does) and device-level faults are backed off
     /// by the rotation engine's `device_credential_rotation` bookkeeping.
@@ -2607,6 +2611,32 @@ pub enum DisableOnboardNicsState {
 pub struct LockdownInfo {
     pub state: LockdownState,
     pub mode: LockdownMode,
+}
+
+/// Separates the bounded hardware attempt from updating DPF without replaying force requests.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BmcRotationState {
+    /// Hardware rotation and its existing retry/quarantine policy are still active.
+    RotatingBmcPassword {
+        /// DPUs selected for credential publication before hardware rotation, retained across retries and restarts.
+        #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+        dpu_ids: BTreeSet<DpuMachineId>,
+    },
+    /// Hardware attempts ended. Publish selected, accepted root credentials,
+    /// update DPUDevice references, await DPF adoption, and clean up obsolete Secrets.
+    UpdateDpuBmcPasswordInDpf {
+        /// Selected DPUs carried from hardware rotation until DPF credential updates complete.
+        dpu_ids: BTreeSet<DpuMachineId>,
+    },
+}
+
+impl Default for BmcRotationState {
+    fn default() -> Self {
+        Self::RotatingBmcPassword {
+            dpu_ids: BTreeSet::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -6114,6 +6144,33 @@ mod tests {
     /// later PR; see the plan.)
     #[test]
     fn rotating_bmc_state_serde_display_and_sla() {
+        let dpu_id =
+            DpuMachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")
+                .unwrap();
+        let updating_dpf = ManagedHostState::RotatingBmc {
+            retry_count: 2,
+            rotation_state: BmcRotationState::UpdateDpuBmcPasswordInDpf {
+                dpu_ids: BTreeSet::from([dpu_id]),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&updating_dpf).unwrap()["rotation_state"]["state"],
+            "update_dpu_bmc_password_in_dpf",
+        );
+        let rotating_password = ManagedHostState::RotatingBmc {
+            retry_count: 0,
+            rotation_state: BmcRotationState::RotatingBmcPassword {
+                dpu_ids: BTreeSet::new(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&rotating_password).unwrap(),
+            serde_json::json!({
+                "state": "rotatingbmc",
+                "retry_count": 0,
+                "rotation_state": { "state": "rotating_bmc_password" },
+            }),
+        );
         // The literal wire form pins the `state` tag and the `#[serde(default)]`
         // retry_count (absent means 0); the `parse -> serialize -> reparse` run
         // then pins serializer symmetry, so a dropped/renamed retry_count or a
@@ -6128,18 +6185,36 @@ mod tests {
                     serde_json::from_str::<ManagedHostState>(&serialized).map_err(drop)?;
                 Ok::<_, ()>((parsed.clone(), roundtrip, parsed.to_string()))
             };
-            "absent retry_count defaults to 0" {
+            "absent rotation fields default to hardware rotation with no selected DPUs" {
                 r#"{"state":"rotatingbmc"}"# => Yields((
-                    ManagedHostState::RotatingBmc { retry_count: 0 },
-                    ManagedHostState::RotatingBmc { retry_count: 0 },
+                    rotating_password.clone(),
+                    rotating_password.clone(),
                     "RotatingBmc".to_string(),
                 )),
             }
 
             "explicit retry_count round-trips" {
                 r#"{"state":"rotatingbmc","retry_count":4}"# => Yields((
-                    ManagedHostState::RotatingBmc { retry_count: 4 },
-                    ManagedHostState::RotatingBmc { retry_count: 4 },
+                    ManagedHostState::RotatingBmc {
+                        retry_count: 4,
+                        rotation_state: BmcRotationState::RotatingBmcPassword {
+                            dpu_ids: BTreeSet::new(),
+                        },
+                    },
+                    ManagedHostState::RotatingBmc {
+                        retry_count: 4,
+                        rotation_state: BmcRotationState::RotatingBmcPassword {
+                            dpu_ids: BTreeSet::new(),
+                        },
+                    },
+                    "RotatingBmc".to_string(),
+                )),
+            }
+
+            "DPF credential update preserves the selected DPU IDs" {
+                r#"{"state":"rotatingbmc","retry_count":2,"rotation_state":{"state":"update_dpu_bmc_password_in_dpf","dpu_ids":["fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"]}}"# => Yields((
+                    updating_dpf.clone(),
+                    updating_dpf,
                     "RotatingBmc".to_string(),
                 )),
             }
@@ -6152,7 +6227,7 @@ mod tests {
                 .unwrap();
         let sla = state_sla(
             &machine_id,
-            &ManagedHostState::RotatingBmc { retry_count: 0 },
+            &rotating_password,
             &ConfigVersion::initial(),
             &health_report_with_alerts(vec![]),
             &slas::MachineSlaConfig::default(),

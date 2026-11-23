@@ -101,6 +101,8 @@ carbide-utils = { path = "../utils", default-features = false, features = [
 ] }
 
 figment = { workspace = true, features = ["env", "test", "toml"] }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
 lazy_static = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }

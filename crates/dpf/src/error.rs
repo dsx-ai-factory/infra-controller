@@ -56,11 +56,14 @@ pub enum DpfError {
         source: Box<DpfError>,
     },
 
-    /// The current site-wide BMC credential is absent from its authoritative
-    /// source. DPF leaves any derived Secret unchanged until the source
-    /// supplies a value or coordinated per-device fencing can remove it.
+    /// The selected BMC credential or its recorded revision is unavailable from
+    /// its authoritative source. Credential publication waits until it can be resolved.
     #[error("BMC password source unavailable: {0}")]
     BmcPasswordSourceUnavailable(String),
+
+    /// A credential publication race requires a fresh observation before retrying; retains its cause.
+    #[error("BMC credential publication must be retried: {0}")]
+    BmcCredentialPublicationRetry(#[source] Box<DpfError>),
 
     /// Local sources own version 0 of the site-wide BMC root but do not supply
     /// it. The SDK rejects startup so source-policy activation is safe across

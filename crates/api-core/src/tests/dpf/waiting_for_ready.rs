@@ -18,8 +18,8 @@
 //! Tests for the WaitingForReady DPF state handler.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use carbide_dpf::{
@@ -66,6 +66,7 @@ fn dpf_left_operator_provisioning_substates(host: &ManagedHostState) -> bool {
 /// Does NOT set up `get_dpu_phase_observation` -- each test configures it to control the
 /// DPU CR phase (the authoritative readiness signal).
 fn expect_provisioning(mock: &mut MockDpfOperations) {
+    crate::tests::dpf::expect_dpf_credential_reconciliation(mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
@@ -576,6 +577,124 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
         host
     );
     assert_provisioning_suppressed(&env, &mh, false).await;
+}
+
+/// Credential publication failures retry on an existing DPU CR before shared actions or readiness.
+#[crate::sqlx_test]
+async fn test_waiting_for_ready_retries_bmc_credential_reconciliation(pool: sqlx::PgPool) {
+    let mut mock = MockDpfOperations::new();
+    mock.expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    let dpu_ready = Arc::new(AtomicBool::new(false));
+    let ready_for_mock = dpu_ready.clone();
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |_, _| {
+            Ok(phase_observation(
+                if ready_for_mock.load(Ordering::SeqCst) {
+                    DpuPhase::Ready
+                } else {
+                    DpuPhase::Provisioning("InitializeInterface".to_string())
+                },
+            ))
+        });
+    let reconciled_devices = Arc::new(Mutex::new(Vec::new()));
+    let devices_for_mock = reconciled_devices.clone();
+    mock.expect_reconcile_bmc_credential()
+        .returning(move |device_id| {
+            let mut devices = devices_for_mock.lock().unwrap();
+            devices.push(device_id.to_string());
+            if devices.len() == 1 {
+                Err(DpfError::InvalidState(
+                    "transient credential reference update failure".to_string(),
+                ))
+            } else {
+                Ok(true)
+            }
+        });
+    let hold_releases = Arc::new(AtomicUsize::new(0));
+    let releases_for_mock = hold_releases.clone();
+    mock.expect_release_maintenance_hold().returning(move |_| {
+        releases_for_mock.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+    mock.expect_register_dpu_device().never();
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::default().with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    let mh = create_managed_host(&env).await;
+    reset_host_to_dpf_state(
+        &pool,
+        &mh.id,
+        &mh.dpu_ids,
+        DpfState::WaitingForReady {
+            phase_detail: Some("InitializeInterface".to_string()),
+        },
+    )
+    .await;
+    let before = get_host_state(&env, &mh).await;
+    let expected_device_id = {
+        let mut txn = env.db_txn().await;
+        mh.dpu()
+            .db_machine(&mut txn)
+            .await
+            .status
+            .bmc_info
+            .mac
+            .unwrap()
+            .to_string()
+            .to_ascii_lowercase()
+            .replace(':', "-")
+    };
+
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(host.state.value, before);
+    assert!(matches!(
+        host.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+            if reason.contains("transient credential reference update failure")
+    ));
+    txn.commit().await.unwrap();
+    assert_eq!(hold_releases.load(Ordering::SeqCst), 0);
+
+    env.run_machine_state_controller_iteration().await;
+    let host = get_host_state(&env, &mh).await;
+    let ManagedHostState::DPUInit { dpu_states } = host else {
+        panic!("expected DPUInit after credential repair, got {host:?}");
+    };
+    assert!(matches!(
+        dpu_states.states.get(&mh.dpu_ids[0]),
+        Some(DpuInitState::DpfStates {
+            state: DpfState::WaitingForReady { phase_detail: Some(detail) }
+        }) if detail == "InitializeInterface"
+    ));
+    assert_eq!(hold_releases.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *reconciled_devices.lock().unwrap(),
+        vec![expected_device_id.clone(), expected_device_id.clone()]
+    );
+
+    dpu_ready.store(true, Ordering::SeqCst);
+    env.run_machine_state_controller_iteration().await;
+    let host = get_host_state(&env, &mh).await;
+    let ManagedHostState::DPUInit { dpu_states } = host else {
+        panic!("expected DPUInit after operator readiness, got {host:?}");
+    };
+    assert!(matches!(
+        dpu_states.states.get(&mh.dpu_ids[0]),
+        Some(DpuInitState::DpfStates {
+            state: DpfState::DeviceReady
+        })
+    ));
+    assert_eq!(
+        *reconciled_devices.lock().unwrap(),
+        vec![expected_device_id; 3]
+    );
 }
 
 /// Regression for the reprovision race: after `reprovision_dpu` deletes the DPU

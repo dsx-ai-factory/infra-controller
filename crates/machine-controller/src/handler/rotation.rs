@@ -31,6 +31,10 @@
 //!   reports whether the tick settled (every device reached a terminal outcome)
 //!   or hit a transient bookkeeping failure worth retrying.
 //!
+//! Selected DPU root credentials are published only in the persisted
+//! `UpdateDpuBmcPasswordInDpf` step after hardware rotation ends. That step
+//! waits for DPF adoption and cleanup without repeating hardware rotation.
+//!
 //! The DPU BMC `service` account (BF4 only) rides this same `RotatingBmc` state
 //! rather than a state of its own: converging it is a single root-authenticated
 //! Redfish call with no host-power impact, exactly like BMC root, and only BF4
@@ -39,19 +43,232 @@
 //! secrets, and backoff, so a lagging or quarantined `service` account never
 //! blocks BMC-root convergence or vice versa.
 //!
-//! A BMC password change never touches host power or the running OS, so this is
-//! safe both for pool hosts (top-level [`ManagedHostState::RotatingBmc`]) and
-//! under live tenancy (`Assigned/RotatingBmc`).
+//! Rotation runs only for idle pool hosts in top-level [`ManagedHostState::RotatingBmc`].
 
+use std::collections::BTreeSet;
+
+use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_credential_rotation::{
-    BmcEndpoint, BmcRotationTick, RotateOutcome, rotate_bmc, rotate_dpu_bmc_service,
+    BmcEndpoint, BmcRotationTick, RotateOutcome, RotationStep, advance, needs_rotation, rotate_bmc,
+    rotate_dpu_bmc_service,
 };
-use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
-use model::machine::ManagedHostStateSnapshot;
+use carbide_uuid::machine::{AsMachineId, DpuMachineId, MachineId, MachineIdSubtypeTrait};
+use db::credential_rotation::{CredentialRotationType, device_rotation_status};
+use model::bmc_suppression::BmcSuppressionSource;
+use model::machine::{BmcRotationState, ManagedHostState, ManagedHostStateSnapshot};
 use sqlx::PgConnection;
-use state_controller::state_handler::StateHandlerError;
+use state_controller::state_handler::{
+    StateHandlerContext, StateHandlerError, StateHandlerOutcome,
+};
 
-use crate::context::MachineStateHandlerServices;
+use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
+use crate::dpf::DpfOperations;
+
+pub(super) async fn handle_rotating_bmc(
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    mh: &ManagedHostStateSnapshot,
+    retry_count: u32,
+    rotation_state: &BmcRotationState,
+    dpf_sdk: Option<&dyn DpfOperations>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let bmc_macs: Vec<_> = managed_host_bmc_endpoints(mh)
+        .map(|endpoint| endpoint.device_mac)
+        .collect();
+    let dpu_ids = match rotation_state {
+        BmcRotationState::RotatingBmcPassword { dpu_ids } => dpu_ids,
+        BmcRotationState::UpdateDpuBmcPasswordInDpf { dpu_ids } => {
+            if !reconcile_dpf_roots(ctx.services, mh, dpu_ids, dpf_sdk).await {
+                return Ok(StateHandlerOutcome::wait(
+                    "waiting for DPF to adopt the DPU BMC credentials".to_string(),
+                ));
+            }
+            // Force requests arriving during adoption belong to the next hardware
+            // attempt. This phase neither executes nor consumes them.
+            let mut txn = ctx.services.db_pool.begin().await?;
+            site_explorer_pause::resume_after_credential_change(
+                &mut txn,
+                &bmc_macs,
+                BmcSuppressionSource::BmcCredentialRotation,
+            )
+            .await?;
+            return Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn));
+        }
+    };
+
+    if matches!(
+        site_explorer_pause::gate_before_credential_change(
+            &ctx.services.db_pool,
+            &bmc_macs,
+            BmcSuppressionSource::BmcCredentialRotation,
+        )
+        .await?,
+        GateDecision::Wait
+    ) {
+        return Ok(StateHandlerOutcome::wait(
+            "waiting for site-explorer to acknowledge the BMC rotation suppression".to_string(),
+        ));
+    }
+
+    let prepared = if mh.host_snapshot.config.dpf.used_for_ingestion {
+        select_dpf_roots(ctx.services, mh, dpu_ids).await
+    } else {
+        Ok(dpu_ids.clone())
+    };
+    let tick = match prepared {
+        Ok(prepared) if prepared != *dpu_ids => {
+            // Save the selected DPUs before touching hardware. A crash after the
+            // engine commits its version must not lose the publication work.
+            return Ok(StateHandlerOutcome::transition(
+                ManagedHostState::RotatingBmc {
+                    retry_count,
+                    rotation_state: BmcRotationState::RotatingBmcPassword { dpu_ids: prepared },
+                },
+            ));
+        }
+        Ok(_) => rotate_managed_host_bmcs(ctx.services, mh, dpu_ids).await,
+        Err(error) => {
+            tracing::warn!(
+                machine_id = %mh.host_snapshot.id,
+                %error,
+                "could not select DPU roots before rotation; retrying the hardware tick"
+            );
+            BmcRotationTick::Retry
+        }
+    };
+    let step = advance(tick, retry_count, &mh.host_snapshot.id);
+    match step {
+        RotationStep::Settled | RotationStep::GaveUp => {
+            let mut txn = ctx.services.db_pool.begin().await?;
+            if matches!(step, RotationStep::Settled) {
+                clear_forced_bmc_requests(&mut txn, mh).await?;
+            }
+            if !dpu_ids.is_empty() {
+                // Consume settled force requests atomically with leaving the
+                // hardware phase. DPF outages must not bypass quarantine by
+                // replaying those requests, or suspend the hardware retry budget.
+                return Ok(
+                    StateHandlerOutcome::transition(ManagedHostState::RotatingBmc {
+                        retry_count,
+                        rotation_state: BmcRotationState::UpdateDpuBmcPasswordInDpf {
+                            dpu_ids: dpu_ids.clone(),
+                        },
+                    })
+                    .with_txn(txn),
+                );
+            }
+            site_explorer_pause::resume_after_credential_change(
+                &mut txn,
+                &bmc_macs,
+                BmcSuppressionSource::BmcCredentialRotation,
+            )
+            .await?;
+            Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
+        }
+        RotationStep::WaitForCredentialStoreReconcile => Ok(StateHandlerOutcome::wait(
+            "BMC hardware changed but its per-device secret has not been stored; holding rotation"
+                .to_string(),
+        )),
+        RotationStep::Retry { retry_count } => Ok(StateHandlerOutcome::transition(
+            ManagedHostState::RotatingBmc {
+                retry_count,
+                rotation_state: rotation_state.clone(),
+            },
+        )),
+    }
+}
+
+async fn select_dpf_roots(
+    services: &MachineStateHandlerServices,
+    mh: &ManagedHostStateSnapshot,
+    dpu_ids: &BTreeSet<DpuMachineId>,
+) -> Result<BTreeSet<DpuMachineId>, StateHandlerError> {
+    let mut selected = dpu_ids.clone();
+    for dpu in &mh.dpu_snapshots {
+        let force = dpu.bmc_credential_rotation_requested;
+        if !force && !services.site_config.bmc_rotation_enabled {
+            continue;
+        }
+        let Some(endpoint) = BmcEndpoint::from_machine(dpu) else {
+            continue;
+        };
+        let mut conn = services.db_pool.acquire().await?;
+        let Some(status) =
+            device_rotation_status(&mut conn, CredentialRotationType::Bmc, endpoint.device_mac)
+                .await?
+        else {
+            continue;
+        };
+        if !force && !needs_rotation(&status) {
+            continue;
+        }
+        selected.insert(dpu.id);
+    }
+    Ok(selected)
+}
+
+async fn reconcile_dpf_roots(
+    services: &MachineStateHandlerServices,
+    mh: &ManagedHostStateSnapshot,
+    dpu_ids: &BTreeSet<DpuMachineId>,
+    dpf_sdk: Option<&dyn DpfOperations>,
+) -> bool {
+    let mut adopted = true;
+    for id in dpu_ids {
+        match reconcile_dpf_root(services, mh, *id, dpf_sdk).await {
+            Ok(current_adopted) => adopted &= current_adopted,
+            Err(error) => {
+                adopted = false;
+                tracing::warn!(machine_id = %id, %error, "DPF BMC credential reconciliation failed");
+            }
+        }
+    }
+    adopted
+}
+
+async fn reconcile_dpf_root(
+    services: &MachineStateHandlerServices,
+    mh: &ManagedHostStateSnapshot,
+    id: DpuMachineId,
+    dpf_sdk: Option<&dyn DpfOperations>,
+) -> Result<bool, StateHandlerError> {
+    let missing = |missing| StateHandlerError::MissingData {
+        object_id: id.to_string(),
+        missing,
+    };
+    let dpu = mh
+        .dpu_snapshots
+        .iter()
+        .find(|dpu| dpu.id == id)
+        .ok_or_else(|| missing("selected DPU for BMC credential reconciliation"))?;
+    let mac = dpu
+        .status
+        .bmc_info
+        .mac
+        .ok_or_else(|| missing("DPU BMC MAC"))?;
+    let mut conn = services.db_pool.acquire().await?;
+    let status = device_rotation_status(&mut conn, CredentialRotationType::Bmc, mac).await?;
+    drop(conn);
+    if status
+        .as_ref()
+        .is_some_and(|status| status.rotating_to_version.is_some())
+    {
+        // An unresolved newer attempt can leave hardware ahead of the stored
+        // credential. Quarantine retains this marker, so skip publication
+        // without extending the hardware hold; the next authorized rotation
+        // must reconcile and promote the root before DPF can adopt it.
+        return Ok(true);
+    }
+    let dpf_sdk = dpf_sdk.ok_or_else(|| {
+        StateHandlerError::InvalidState(
+            "DPF credential reconciliation requires the DPF SDK".to_string(),
+        )
+    })?;
+    let device_id = dpu.dpf_id().ok_or_else(|| missing("DPU BMC MAC"))?;
+    dpf_sdk
+        .reconcile_bmc_credential(&device_id)
+        .await
+        .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))
+}
 
 /// The host BMC followed by each DPU BMC that exposes both a MAC and an IP. A
 /// device missing either cannot be keyed or reached, so it is skipped (the
@@ -61,7 +278,7 @@ use crate::context::MachineStateHandlerServices;
 /// rotation and resumed on when it ends -- a superset of the devices any single
 /// tick actually rotates, so a force flag that appears mid-rotation is already
 /// covered and the resume set always matches what was suppressed.
-pub(crate) fn managed_host_bmc_endpoints(
+fn managed_host_bmc_endpoints(
     mh: &ManagedHostStateSnapshot,
 ) -> impl Iterator<Item = BmcEndpoint> + '_ {
     BmcEndpoint::from_machine(&mh.host_snapshot)
@@ -144,9 +361,10 @@ pub(crate) async fn should_enter_bmc_rotation(
 /// backoff), so one lagging or quarantined device never blocks the others.
 /// Device-level failures are recorded and quarantined inside [`rotate_bmc`];
 /// only transient bookkeeping errors surface here as [`BmcRotationTick::Retry`].
-pub(crate) async fn rotate_managed_host_bmcs(
+async fn rotate_managed_host_bmcs(
     services: &MachineStateHandlerServices,
     mh: &ManagedHostStateSnapshot,
+    dpu_ids: &BTreeSet<DpuMachineId>,
 ) -> BmcRotationTick {
     let is_sitewide_bmc_rotation_enabled = services.site_config.bmc_rotation_enabled;
     let mut tick = BmcRotationTick::Settled;
@@ -177,7 +395,15 @@ pub(crate) async fn rotate_managed_host_bmcs(
                 // persist). `merge` keeps a lagging store dominant so the tick
                 // never settles out of the rotation state while any BMC's
                 // hardware is ahead of its stored secret.
-                tick = tick.merge(rotate_endpoint(services, endpoint.clone(), force).await);
+                // A live target can advance after selection. A DPF DPU root
+                // must have its ID saved before its first hardware call;
+                // an unselected root is picked up by a later sweep instead.
+                let root_selected = !is_dpu
+                    || !mh.host_snapshot.config.dpf.used_for_ingestion
+                    || dpu_ids.iter().any(|id| id.to_machine_id() == machine_id);
+                if root_selected {
+                    tick = tick.merge(rotate_endpoint(services, endpoint.clone(), force).await);
+                }
                 // A DPU additionally converges its `service` account under the
                 // same force flag. Non-BF4 DPUs are never enrolled, so the engine
                 // returns `NoWork` (a cheap, settled skip).
@@ -237,7 +463,7 @@ fn forced_bmc_machine_ids(mh: &ManagedHostStateSnapshot) -> impl Iterator<Item =
 /// acted on this tick) survives for the next sweep instead of being silently
 /// dropped. When nothing was forced this is a no-op. Call this only on a settled
 /// tick, where the forced attempt genuinely fired.
-pub(crate) async fn clear_forced_bmc_requests(
+async fn clear_forced_bmc_requests(
     txn: &mut PgConnection,
     mh: &ManagedHostStateSnapshot,
 ) -> Result<(), StateHandlerError> {

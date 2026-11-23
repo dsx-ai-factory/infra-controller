@@ -13,10 +13,10 @@ use serde_json::json;
 use super::{DpfSdk, SECRET_NAME, dpu_device_cr_name};
 use crate::crds::dpudevices_generated::DPUDevice;
 use crate::error::DpfError;
-use crate::repository::{BmcCredentialRepository, DpuDeviceRepository};
+use crate::repository::{
+    BMC_CREDENTIAL_DEVICE_LABEL, BmcCredentialRepository, DpuDeviceRepository,
+};
 use crate::types::DpfDeletePreconditions;
-
-const DEVICE_LABEL: &str = "carbide.nvidia.com/bmc-credential-device";
 
 /// Credential failure reasons reported by DPF's BMCCredentialsReady condition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +72,8 @@ impl BmcCredentialObservation {
     }
 }
 
-/// Stable Kubernetes Secret name for one device and credential revision. No password is encoded.
+/// Stable Secret name for one device and publication generation. No password is encoded.
+/// The generation is independent of site-wide credential versions.
 pub fn bmc_credential_secret_name(device_id: &str, revision: u32) -> String {
     format!("{device_id}-v{revision}")
 }
@@ -99,6 +100,64 @@ pub(super) fn check_registration_credential(
 }
 
 impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
+    /// Publish the supplied password using the latest matching device Secret or a new generation.
+    /// Only the highest owned generation is reused; older matching passwords receive a new name.
+    /// Terminating or malformed Secrets reserve their generations. The retained latest Secret
+    /// makes allocation restart-safe without a separate counter. Generation exhaustion is an error.
+    ///
+    /// Callers must serialize this device's credential lifecycle and supply its stored password
+    /// after hardware convergence. A conflicting allocation returns [`DpfError::AlreadyExists`];
+    /// reread the authoritative password before retrying instead of advancing a stale publication.
+    pub async fn ensure_current_bmc_credential_secret(
+        &self,
+        device_id: &str,
+        password: &str,
+    ) -> Result<String, DpfError> {
+        if device_id.is_empty() || password.is_empty() {
+            return Err(DpfError::InvalidState(
+                "DPU identity and BMC password must be nonempty".to_string(),
+            ));
+        }
+        let latest = BmcCredentialRepository::list_bmc_credential_secrets(
+            &*self.repo,
+            device_id,
+            &self.namespace,
+        )
+        .await?
+        .into_iter()
+        .filter(|secret| owns_bmc_credential_secret(secret, device_id))
+        .filter_map(|secret| {
+            let revision = bmc_credential_revision(device_id, secret.metadata.name.as_deref()?)?;
+            Some((revision, secret))
+        })
+        .max_by_key(|(revision, _)| *revision);
+        let revision = match latest {
+            Some((revision, secret))
+                if bmc_credential_secret_matches(&secret, device_id, password) =>
+            {
+                revision
+            }
+            Some((revision, _)) => revision.checked_add(1).ok_or_else(|| {
+                DpfError::InvalidState(
+                    "BMC credential publication generation exhausted".to_string(),
+                )
+            })?,
+            None => 0,
+        };
+        match self
+            .ensure_bmc_credential_secret(device_id, revision, password)
+            .await
+        {
+            // The selected generation changed after listing. Never overwrite it or silently
+            // allocate another generation using a password that may already be stale.
+            Err(DpfError::InvalidState(_)) => Err(DpfError::already_exists(
+                "Secret",
+                bmc_credential_secret_name(device_id, revision),
+            )),
+            result => result,
+        }
+    }
+
     /// Create an immutable per-device Secret or verify the identical result of an earlier attempt.
     /// A collision, mutable Secret, or Secret being deleted is an error; nothing is overwritten.
     pub async fn ensure_bmc_credential_secret(
@@ -124,7 +183,7 @@ impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
                         name: Some(name.clone()),
                         namespace: Some(self.namespace.clone()),
                         labels: Some(BTreeMap::from([(
-                            DEVICE_LABEL.to_string(),
+                            BMC_CREDENTIAL_DEVICE_LABEL.to_string(),
                             device_id.to_string(),
                         )])),
                         ..Default::default()
@@ -156,24 +215,7 @@ impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
                 .ok_or_else(|| DpfError::not_found("Secret", &name))?
             }
         };
-        let owned = secret
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get(DEVICE_LABEL))
-            .map(String::as_str)
-            == Some(device_id);
-        let same_password = secret
-            .data
-            .as_ref()
-            .and_then(|data| data.get("password"))
-            .is_some_and(|value| value.0 == password.as_bytes());
-        if !owned
-            || !same_password
-            || secret.type_.as_deref() != Some("Opaque")
-            || secret.immutable != Some(true)
-            || secret.metadata.deletion_timestamp.is_some()
-        {
+        if !bmc_credential_secret_matches(&secret, device_id, password) {
             return Err(DpfError::InvalidState(format!(
                 "BMC credential Secret {name} does not match the requested immutable credential"
             )));
@@ -262,6 +304,45 @@ impl<R: DpuDeviceRepository, L> DpfSdk<R, L> {
 }
 
 impl<R: BmcCredentialRepository + DpuDeviceRepository, L> DpfSdk<R, L> {
+    /// Delete owned credential Secrets whose publication generations precede the adopted one.
+    /// The adopted name must be generated by [`bmc_credential_secret_name`] for this device.
+    /// Each deletion rechecks adoption and uses the protections of
+    /// [`Self::delete_old_bmc_credential_secret`]. Newer pending generations and unrelated
+    /// Secrets are retained. Keeping the adopted Secret preserves the publication counter across
+    /// restarts. Listing on every call makes partial cleanup safe to retry.
+    pub async fn delete_obsolete_bmc_credential_secrets(
+        &self,
+        device_id: &str,
+        adopted_secret_name: &str,
+    ) -> Result<(), DpfError> {
+        let adopted_revision =
+            bmc_credential_revision(device_id, adopted_secret_name).ok_or_else(|| {
+                DpfError::InvalidState(
+                    "adopted BMC credential Secret name does not identify a publication generation"
+                        .to_string(),
+                )
+            })?;
+        let secrets = BmcCredentialRepository::list_bmc_credential_secrets(
+            &*self.repo,
+            device_id,
+            &self.namespace,
+        )
+        .await?;
+        for secret in secrets {
+            let Some(name) = secret.metadata.name.as_deref() else {
+                continue;
+            };
+            if owns_bmc_credential_secret(&secret, device_id)
+                && bmc_credential_revision(device_id, name)
+                    .is_some_and(|revision| revision < adopted_revision)
+            {
+                self.delete_old_bmc_credential_secret(device_id, name, adopted_secret_name)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Request deletion of a NICo-owned old Secret only after confirmed adoption of its replacement.
     /// Checks the target DPUDevice's adoption and Secret ownership. Callers must keep each credential
     /// Secret exclusive to its owning DPUDevice and serialize lifecycle work. UID and resource-version
@@ -294,14 +375,7 @@ impl<R: BmcCredentialRepository + DpuDeviceRepository, L> DpfSdk<R, L> {
         else {
             return Ok(());
         };
-        if secret
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get(DEVICE_LABEL))
-            .map(String::as_str)
-            != Some(device_id)
-        {
+        if !owns_bmc_credential_secret(&secret, device_id) {
             return Err(DpfError::InvalidState(
                 "BMC credential Secret is not owned by this NICo device".to_string(),
             ));
@@ -321,6 +395,35 @@ impl<R: BmcCredentialRepository + DpuDeviceRepository, L> DpfSdk<R, L> {
         )
         .await
     }
+}
+
+fn bmc_credential_revision(device_id: &str, secret_name: &str) -> Option<u32> {
+    let revision = secret_name
+        .strip_prefix(&format!("{device_id}-v"))?
+        .parse()
+        .ok()?;
+    (bmc_credential_secret_name(device_id, revision) == secret_name).then_some(revision)
+}
+
+fn owns_bmc_credential_secret(secret: &Secret, device_id: &str) -> bool {
+    secret
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(BMC_CREDENTIAL_DEVICE_LABEL))
+        .is_some_and(|owner| owner == device_id)
+}
+
+fn bmc_credential_secret_matches(secret: &Secret, device_id: &str, password: &str) -> bool {
+    owns_bmc_credential_secret(secret, device_id)
+        && secret
+            .data
+            .as_ref()
+            .and_then(|data| data.get("password"))
+            .is_some_and(|value| value.0 == password.as_bytes())
+        && secret.type_.as_deref() == Some("Opaque")
+        && secret.immutable == Some(true)
+        && secret.metadata.deletion_timestamp.is_none()
 }
 
 fn required_identity(value: Option<String>, field: &str) -> Result<String, DpfError> {

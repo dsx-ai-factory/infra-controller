@@ -403,6 +403,13 @@ pub trait K8sConfigRepository: Send + Sync {
 /// Immutable per-device BMC credential Secrets.
 #[async_trait]
 pub trait BmcCredentialRepository: Send + Sync {
+    /// List Secrets labeled as NICo-owned credentials for this device in the namespace.
+    async fn list_bmc_credential_secrets(
+        &self,
+        device_id: &str,
+        namespace: &str,
+    ) -> Result<Vec<k8s_openapi::api::core::v1::Secret>, DpfError>;
+
     /// Fetch the named Secret, returning `None` when it is absent from the namespace.
     async fn get_bmc_credential_secret(
         &self,

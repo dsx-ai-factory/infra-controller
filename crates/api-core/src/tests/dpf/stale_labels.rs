@@ -42,6 +42,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn provisioning_mock_with_labels_valid(labels_valid: Arc<AtomicBool>) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));

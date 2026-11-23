@@ -77,6 +77,12 @@ pub(super) fn expect_dpf_service_inventory(mock: &mut MockDpfOperations) {
     });
 }
 
+/// Models credentials already published for fixtures that exercise other DPF behavior.
+pub(super) fn expect_dpf_credential_reconciliation(mock: &mut MockDpfOperations) {
+    mock.expect_reconcile_bmc_credential()
+        .returning(|_| Ok(true));
+}
+
 // Reads the host's committed state straight from the database rather than through the RPC
 // surface, which is what these suites assert transitions against.
 async fn get_host_state(env: &TestEnv, mh: &TestManagedHost) -> ManagedHostState {

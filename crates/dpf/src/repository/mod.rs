@@ -28,3 +28,5 @@ pub use traits::*;
 
 pub use self::kube::KubeRepository;
 pub use self::service_vpc::ServiceVpcClusterReader;
+
+pub(crate) const BMC_CREDENTIAL_DEVICE_LABEL: &str = "carbide.nvidia.com/bmc-credential-device";

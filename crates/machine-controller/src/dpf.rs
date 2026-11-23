@@ -43,6 +43,7 @@ use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
 use tokio::task::JoinSet;
 
+mod bmc_credentials;
 pub(crate) mod deployment;
 pub use deployment::validate_reprovision_compatibility;
 
@@ -78,6 +79,12 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         expected_machine: Option<ExpectedMachine>,
         deployment_type: DpuDeploymentType,
     ) -> Result<(), DpfError>;
+
+    /// Publish the device's persisted BMC credential and reconcile its DPF reference.
+    /// Returns true only after DPF acknowledges the reference with healthy credentials.
+    /// Obsolete owned Secret revisions are removed after acknowledgment.
+    /// Failed or pending synchronization must be retried before lifecycle work continues.
+    async fn reconcile_bmc_credential(&self, device_id: &str) -> Result<bool, DpfError>;
 
     /// Register a DPU node.
     async fn register_dpu_node(&self, info: DpuNodeInfo) -> Result<(), DpfError>;
@@ -644,6 +651,7 @@ pub struct DpfSdkOps {
     sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
     _watcher: DpuWatcher,
     astra_route_prefixes: AstraRoutePrefixes,
+    credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
 }
 
 impl DpfSdkOps {
@@ -652,6 +660,7 @@ impl DpfSdkOps {
         sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
         astra_route_prefixes: AstraRoutePrefixes,
         db_pool: PgPool,
+        credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
         join_set: &mut JoinSet<()>,
     ) -> std::io::Result<Self> {
         let watcher = sdk
@@ -738,7 +747,17 @@ impl DpfSdkOps {
             sdk,
             _watcher: watcher,
             astra_route_prefixes,
+            credential_reader,
         })
+    }
+
+    async fn ensure_device_bmc_credential(&self, device_id: &str) -> Result<String, DpfError> {
+        bmc_credentials::ensure_device_bmc_credential(
+            self.sdk.as_ref(),
+            self.credential_reader.as_ref(),
+            device_id,
+        )
+        .await
     }
 }
 
@@ -849,6 +868,37 @@ impl std::fmt::Debug for DpfSdkOps {
     }
 }
 
+fn check_bmc_credential_revision(
+    observation: &carbide_dpf::BmcCredentialObservation,
+    secret_name: &str,
+) -> Result<(), DpfError> {
+    let prefix = format!("{}-v", observation.device_id);
+    let revision = |name: &str| {
+        name.strip_prefix(&prefix)
+            .and_then(|v| v.parse::<u32>().ok())
+    };
+    let requested = revision(secret_name).ok_or_else(|| {
+        DpfError::InvalidState("DPU BMC credential Secret has no revision".to_string())
+    })?;
+    // Another reconciliation may have published a newer credential since this
+    // attempt selected its Secret. Do not overwrite that newer reference.
+    if [
+        observation.desired_secret_name.as_deref(),
+        observation.active_secret_name.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(revision)
+    .any(|existing| existing > requested)
+    {
+        return Err(DpfError::BmcPasswordSourceUnavailable(
+            "DPF has a newer DPU BMC credential publication; retry with the stored credential"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Delegates everything to the underlying DPF SDK.
 #[async_trait]
 impl DpfOperations for DpfSdkOps {
@@ -864,9 +914,69 @@ impl DpfOperations for DpfSdkOps {
             .as_ref()
             .filter(|_| deployment_type == DpuDeploymentType::Bf4Astra)
             .map(|machine| (machine, self.astra_route_prefixes));
+        let secret_name = self.ensure_device_bmc_credential(&info.device_id).await?;
+        match self.sdk.observe_bmc_credential(&info.device_id).await {
+            Ok(observation) => {
+                check_bmc_credential_revision(&observation, &secret_name)?;
+                if observation.desired_secret_name.as_deref() != Some(secret_name.as_str()) {
+                    self.sdk
+                        .set_bmc_credential_reference(&observation, &secret_name)
+                        .await
+                        .map_err(|error| {
+                            if error.is_already_exists_or_conflict() || error.is_not_found() {
+                                DpfError::BmcCredentialPublicationRetry(Box::new(error))
+                            } else {
+                                error
+                            }
+                        })?;
+                }
+            }
+            Err(DpfError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
         self.sdk
-            .register_dpu_device(info, astra_provisioning_inputs)
+            .register_dpu_device_with_credential(info, astra_provisioning_inputs, &secret_name)
             .await
+            .map_err(|error| {
+                if matches!(
+                    &error,
+                    DpfError::NotFound {
+                        kind: "DPUDevice",
+                        ..
+                    }
+                ) {
+                    DpfError::BmcCredentialPublicationRetry(Box::new(error))
+                } else {
+                    error
+                }
+            })
+    }
+
+    async fn reconcile_bmc_credential(&self, device_id: &str) -> Result<bool, DpfError> {
+        let secret_name = self.ensure_device_bmc_credential(device_id).await?;
+        let observation = self.sdk.observe_bmc_credential(device_id).await?;
+        check_bmc_credential_revision(&observation, &secret_name)?;
+        if observation.desired_secret_name.as_deref() != Some(secret_name.as_str()) {
+            self.sdk
+                .set_bmc_credential_reference(&observation, &secret_name)
+                .await?;
+        }
+        if let carbide_dpf::BmcCredentialHealth::Failed(reason) = &observation.health {
+            tracing::warn!(
+                device_id,
+                ?reason,
+                "DPF has not accepted the BMC credential"
+            );
+        }
+        if !observation.is_adopted(&secret_name) {
+            return Ok(false);
+        }
+        // DPF reads the old Secret during adoption. Enumerating older owned
+        // revisions only after acknowledgment also recovers cleanup after a restart.
+        self.sdk
+            .delete_obsolete_bmc_credential_secrets(device_id, &secret_name)
+            .await?;
+        Ok(true)
     }
 
     async fn register_dpu_node(&self, info: DpuNodeInfo) -> Result<(), DpfError> {
@@ -1234,8 +1344,37 @@ impl DpfOperations for DpfSdkOps {
 mod bmc_password_tests {
     use carbide_secrets::MemoryCredentialStore;
     use carbide_secrets::credentials::{CredentialKey, CredentialWriter, Credentials};
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[test]
+    fn credential_references_cannot_move_backwards() {
+        let check = |(desired, active, requested): (&str, &str, &str)| {
+            let observation = carbide_dpf::BmcCredentialObservation {
+                device_id: "device".to_string(),
+                device_uid: "uid".to_string(),
+                resource_version: "1".to_string(),
+                desired_secret_name: Some(desired.to_string()),
+                active_secret_name: Some(active.to_string()),
+                health: carbide_dpf::BmcCredentialHealth::Pending,
+            };
+            check_bmc_credential_revision(&observation, requested).map_err(drop)
+        };
+        scenarios!(run = check;
+            "shared credentials can adopt the retained device revision" {
+                ("bmc-shared-password", "bmc-shared-password", "device-v0") => Yields(()),
+            }
+            "device credentials can advance" {
+                ("device-v0", "device-v0", "device-v1") => Yields(()),
+            }
+            "a newer desired or active revision prevents rollback" {
+                ("device-v1", "device-v0", "device-v0") => Fails,
+                ("device-v0", "device-v1", "device-v0") => Fails,
+            }
+        );
+    }
 
     #[test]
     fn empty_password_preserves_local_v0_source_policy() {

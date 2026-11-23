@@ -40,6 +40,7 @@ use crate::tests::common::api_fixtures::{
 
 fn default_mock(deployment_type: DpuDeploymentType) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));

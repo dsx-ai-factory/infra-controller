@@ -1173,6 +1173,7 @@ async fn dpf_force_delete_test_env(pool: sqlx::PgPool, mut mock: MockDpfOperatio
             url: "https://example.com/test-service".to_string(),
         }])
     });
+    crate::tests::dpf::expect_dpf_credential_reconciliation(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
