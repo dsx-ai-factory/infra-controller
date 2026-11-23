@@ -64,8 +64,9 @@
 //! The per-device secret is persisted before the policy step, so a policy
 //! failure (for example, Lenovo refusing IPMI access) quarantines the device
 //! with a stored secret the BMC accepts. When the per-device secret already
-//! holds the rotate-TO password, an earlier attempt changed and stored it, so
-//! step 3 is skipped and only the policy is applied.
+//! holds the rotate-TO password, an earlier attempt changed and stored it: once
+//! [`bmc_accounts::probe_bmc_credentials`] confirms the BMC accepts it, step 3
+//! is skipped and only the policy is applied; a rejected probe quarantines.
 //!
 //! # Entry gate ([`RotationGate`])
 //!
@@ -1271,12 +1272,27 @@ async fn converge_bmc_password(
     };
 
     // A per-device secret already at the rotate-to password was stored by an
-    // earlier attempt after the BMC accepted it; only its policy step remains.
+    // earlier attempt; once the BMC confirms it, only its policy step remains.
     let convergence = if current_password == new_password {
-        CredentialConvergence::Recovered {
-            change_error: "password change skipped: the per-device secret already holds the \
-                           rotate-to password"
-                .to_string(),
+        let access = bmc.access_info();
+        match probe_bmc_credentials(connector, &access, report, rotate_to.clone(), false).await {
+            Ok(true) => CredentialConvergence::Recovered {
+                change_error: "password change skipped: the per-device secret already holds the \
+                               rotate-to password"
+                    .to_string(),
+            },
+            Ok(false) => {
+                return Err(ConvergeError::DeviceFault(
+                    "the per-device secret holds the rotate-to password, but the BMC rejects it"
+                        .to_string(),
+                ));
+            }
+            Err(e) => {
+                return Err(ConvergeError::DeviceFault(redact(
+                    format!("probe the stored rotate-to password: {e}"),
+                    &[&new_password],
+                )));
+            }
         }
     } else {
         let convergence = change_or_recover(connector, bmc, report, rotate_from, rotate_to.clone())
@@ -1975,6 +1991,38 @@ mod tests {
                 "{scenario}: the retry must not log in with a stale password"
             );
         }
+    }
+
+    /// A per-device secret already at the rotate-to password skips the change
+    /// only when the BMC accepts it: one changed out of band is a device fault,
+    /// not a recovery, and the stored secret is left as it was.
+    #[tokio::test]
+    async fn stored_rotate_to_password_the_bmc_rejects_is_a_device_fault() {
+        let sim = bmc_on_password("changed-out-of-band");
+        let cm = TestCredentialManager::default();
+        cm.set_credentials(&per_device_key(), &creds("root", "new"))
+            .await
+            .unwrap();
+        cm.set_credentials(&rotate_to_key(1), &creds("root", "new"))
+            .await
+            .unwrap();
+
+        let error = converge_bmc_password(&cm, &sim_connector(&sim), &target(), None, 1)
+            .await
+            .expect_err("the BMC rejects the stored password");
+
+        assert!(
+            matches!(&error, ConvergeError::DeviceFault(reason) if reason.contains("rejects it")),
+            "{error:?}"
+        );
+        assert_eq!(
+            cm.get_credentials(&per_device_key()).await.unwrap(),
+            Some(creds("root", "new"))
+        );
+        assert_eq!(
+            sim.user_password("root").as_deref(),
+            Some("changed-out-of-band")
+        );
     }
 
     #[tokio::test]
