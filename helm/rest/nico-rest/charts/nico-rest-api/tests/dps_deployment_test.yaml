@@ -3,6 +3,7 @@
 
 suite: REST API direct DPS secret mount
 templates:
+  - configmap.yaml
   - deployment.yaml
 set:
   global.image.repository: example.test
@@ -15,6 +16,7 @@ set:
       issuer: https://idp.example.test
 tests:
   - it: does not mount DPS credentials when DPS is disabled
+    template: deployment.yaml
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].volumeMounts
@@ -26,6 +28,7 @@ tests:
             name: dps-creds
 
   - it: mounts DPS credentials when DPS is enabled
+    template: deployment.yaml
     set:
       config.powerProvisioning.dps.enabled: true
       config.powerProvisioning.dps.endpoint: dps.example.test:443
