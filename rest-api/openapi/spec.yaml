@@ -27367,7 +27367,29 @@ components:
           type:
             - array
             - 'null'
-          description: 'Update NVLink Interfaces of the Instance. A subset of GPUs may be specified. Each item references a GPU index (`deviceInstance`) and an NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions.Omission or null leaves attachments unchanged; an explicit list replaces them entirely. Updating is not allowed if the Instance''s VPC has the `nvLinkLogicalPartitionId` attribute set and the Instance already has NVLink interfaces that are not in deleting state, though existing assignments may be repeated as a no-op. A GPU may still belong to its previous partition after its `Deleting` interface disappears.'
+          description: >-
+            Omit this field or send `null` to keep the current GPU assignments.
+            A supplied list specifies the complete set of desired assignments.
+            Omit a GPU from the list to remove its assignment. Send `[]` to
+            remove all assignments where permitted by the VPC rules.
+
+            Each entry maps a GPU index (`deviceInstance`) to an NVLink Logical
+            Partition (`nvLinkLogicalPartitionId`). GPU indexes must be unique
+            and in the range supported by the Instance, from 0 through 3.
+            Use a partition in the Instance's Site that the tenant owns and
+            that is `Ready`. Different GPUs can use different NVLink Logical
+            Partitions.
+
+            If the VPC has `nvLinkLogicalPartitionId` set and the Instance has
+            any NVLink Interfaces outside `Deleting`, a supplied list must match
+            all of those GPU-to-partition assignments in any order. Changes
+            return HTTP 400. Exact matches still undergo NVLink validation, and
+            an accepted repeat sets the Instance status to `Configuring` while
+            preserving the assignments. If no interfaces remain outside
+            `Deleting`, the Instance can accept new assignments.
+
+            A GPU can remain in its previous physical partition after the REST
+            API stops returning its `Deleting` interface.
           items:
             $ref: '#/components/schemas/NVLinkInterfaceCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
