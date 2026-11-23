@@ -981,7 +981,10 @@ fn system_resource_to_model(
         model: system.model,
         serial_number: system.serial_number.map(|value| value.trim().to_string()),
         sku: system.sku,
-        power_state: system.power_state.into_model(),
+        power_state: system
+            .power_state
+            .map(IntoModel::into_model)
+            .unwrap_or_default(),
         bios_version: system
             .bios_version
             .map(|value| value.trim().to_string())
@@ -1285,7 +1288,10 @@ async fn fetch_system(
             },
             pcie_devices,
             base_mac,
-            power_state: system.power_state.into_model(),
+            power_state: system
+                .power_state
+                .map(IntoModel::into_model)
+                .unwrap_or_default(),
             sku: system.sku,
             boot_order,
             bios_version,
