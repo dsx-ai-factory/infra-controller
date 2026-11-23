@@ -801,16 +801,22 @@ func TestManager_FirmwareControl(t *testing.T) {
 
 func TestManager_GetFirmwareStatusWithCredentials(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		rpcErr error
+		name        string
+		rpcErr      error
+		responseMAC string
 	}{
-		{"RPC code", status.Error(codes.FailedPrecondition, "synthetic-upstream-secret")},
-		{"component rejection", nil},
+		{name: "RPC code", rpcErr: status.Error(codes.FailedPrecondition, "synthetic-upstream-secret")},
+		{name: "component rejection"},
+		{name: "mixed-case MAC preserves redacted failure", responseMAC: "AA:BB:CC:DD:EE:01"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			id := "aa:bb:cc:dd:ee:01"
+			responseMAC := tc.responseMAC
+			if responseMAC == "" {
+				responseMAC = id
+			}
 			client := &testFirmwareDiagnosticClient{Client: nicoapi.NewMockClient(), rpcErr: tc.rpcErr, result: &corev1.ComponentResult{
-				MacAddress: &id, Status: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_UNAVAILABLE, Error: "synthetic-upstream-secret",
+				MacAddress: &responseMAC, Status: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_UNAVAILABLE, Error: "synthetic-upstream-secret",
 			}}
 			m := New(client, nil)
 			target := common.Target{Type: devicetypes.ComponentTypeCompute, IdentifierType: common.IdentifierTypeMACAddress, Identifiers: []string{id}}
@@ -823,8 +829,10 @@ func TestManager_GetFirmwareStatusWithCredentials(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			require.Len(t, got, 1)
+			require.Equal(t, id, got[id].ComponentID)
 			require.Equal(t, operations.FirmwareUpdateStateFailed, got[id].State)
-			require.Contains(t, got[id].Error, id)
+			require.Contains(t, got[id].Error, responseMAC)
 			require.Contains(t, got[id].Error, "UNAVAILABLE")
 			require.NotContains(t, got[id].Error, "synthetic-upstream-secret")
 			require.NotContains(t, got[id].Error, "synthetic-device-secret")
