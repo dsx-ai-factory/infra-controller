@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+mod host_serial;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::IpAddr;
@@ -1994,14 +1996,14 @@ where
 }
 
 impl ComputerSystem {
-    pub fn check_serial_number(&self, expected_serial_number: &String) -> bool {
+    pub fn check_serial_number(&self, expected_serial_number: &str) -> bool {
         match self.serial_number {
             Some(ref serial_number) => serial_number == expected_serial_number,
             None => false,
         }
     }
 
-    pub fn check_sku(&self, expected_sku: &String) -> bool {
+    pub fn check_sku(&self, expected_sku: &str) -> bool {
         match self.sku {
             Some(ref sku) => sku == expected_sku,
             None => false,

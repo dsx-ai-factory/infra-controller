@@ -27,3 +27,6 @@ pub const COMPUTE_TRAY_CHASSIS_ID: &str = "Chassis_0";
 ///
 /// [GB200 Entity Manager configuration]: https://github.com/NVIDIA/openbmc/blob/4f37649dda3d7ad2ec0e4ab65e671f30d52974c3/meta-nvidia/meta-prime/meta-graceblackwell/meta-gb200nvl/meta-bmc/recipes-phosphor/configuration/entity-manager/files/Chassis_1RU.json#L1737-L1747
 pub const GB200_PDB_CHASSIS_ASSEMBLY_MODEL: &str = "GB200 NVL";
+
+/// Chassis FRU assembly Name in the same GB200 Entity Manager configuration.
+pub const PDB_CHASSIS_FRU_NAME: &str = "PDB Chassis FRU Assembly0";

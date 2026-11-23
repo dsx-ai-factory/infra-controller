@@ -117,6 +117,11 @@ pub fn fully_populated() -> CarbideConfig {
         "product": "bluefield3_dpu"
     }]))
     .expect("valid host BlueField rule");
+    config.site_explorer.host_serial_rules = serde_json::from_value(serde_json::json!([{
+        "id": "site-enclosure",
+        "source": {"kind": "chassis", "chassis_id": {"exact": "Enclosure"}}
+    }]))
+    .expect("valid host serial rule");
     CarbideConfig {
         auth: Some(AuthConfig {
             permissive_mode: true,

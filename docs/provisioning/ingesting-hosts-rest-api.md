@@ -220,6 +220,11 @@ Both flows assume hardware ingestion is complete -- which this page covers.
 
 ## Troubleshooting
 
+For a `SerialNumberMismatch` health alert, compare `chassisSerialNumber` from
+ExpectedMachine with the serial selected from the saved Redfish report. A site
+rule can select the tray Assembly serial when the chassis reports a board serial.
+See [Select the host inventory serial number](ingesting-hosts.md#select-the-host-inventory-serial-number).
+
 ### Inspecting Machine State
 
 When a machine is not being created or is stuck in a pre-`Ready` state, start with the Machine REST endpoint:
