@@ -10,6 +10,7 @@ use model::nvlink_domain::NvLinkDomain;
 
 use super::*;
 use crate::TransactionVending as _;
+use crate::db_read::PgPoolReader;
 
 fn machine(seed: u8, kind: MachineType) -> MachineId {
     MachineId::new(MachineIdSource::Tpm, [seed; 32], kind)
@@ -91,8 +92,10 @@ async fn fixture(pool: &sqlx::PgPool) -> NvLinkDomain {
 #[crate::sqlx_test]
 async fn resolves_actual_inventory_preserving_missing_positions(pool: sqlx::PgPool) {
     let domain = fixture(&pool).await;
-    let mut txn = pool.txn_begin().await.unwrap();
-    let resolved = resolve_domain_members(&mut txn, domain.id).await.unwrap();
+    let mut reader = PgPoolReader::from(pool);
+    let resolved = resolve_domain_members(&mut reader, domain.id)
+        .await
+        .unwrap();
     assert_eq!(
         resolved
             .iter()
@@ -142,7 +145,7 @@ async fn resolves_actual_inventory_preserving_missing_positions(pool: sqlx::PgPo
         ),
     ] {
         assert_eq!(
-            find_tray(&mut txn, &rack, kind, slot)
+            find_tray(&mut reader, &rack, kind, slot)
                 .await
                 .unwrap()
                 .is_some(),
@@ -150,7 +153,6 @@ async fn resolves_actual_inventory_preserving_missing_positions(pool: sqlx::PgPo
             "{name}"
         );
     }
-    txn.rollback().await.unwrap();
 }
 
 #[crate::sqlx_test]

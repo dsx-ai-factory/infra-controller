@@ -14,10 +14,10 @@ use config_version::{ConfigVersion, Versioned};
 use model::machine::ManagedHostState;
 use model::nvlink_domain::{NvLinkDomainMember, NvLinkDomainMemberType};
 use model::switch::SwitchControllerState;
-use sqlx::PgConnection;
 use sqlx::types::Json;
 use uuid::Uuid;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// An actual discovered tray and its observed, versioned lifecycle state.
@@ -103,10 +103,10 @@ fn insert(
     Ok(())
 }
 
-async fn load_inventory(
-    txn: &mut PgConnection,
-    members: &[TrayPosition],
-) -> DatabaseResult<Inventory> {
+async fn load_inventory<DB>(db: &mut DB, members: &[TrayPosition]) -> DatabaseResult<Inventory>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut inventory = Inventory::default();
     let (rack_ids, slots) = positions(members, NvLinkDomainMemberType::Compute);
     if !rack_ids.is_empty() {
@@ -123,7 +123,7 @@ async fn load_inventory(
         )> = sqlx::query_as(query)
             .bind(rack_ids)
             .bind(slots)
-            .fetch_all(&mut *txn)
+            .fetch_all(&mut *db)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
         for (id, rack_id, slot_number, state, version) in rows {
@@ -159,7 +159,7 @@ async fn load_inventory(
         )> = sqlx::query_as(query)
             .bind(rack_ids)
             .bind(slots)
-            .fetch_all(txn)
+            .fetch_all(db)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
         for (switch_id, rack_id, slot_number, state, version) in rows {
@@ -180,19 +180,22 @@ async fn load_inventory(
 /// Resolve every Domain member, using RackGroup only to map rack index to rack ID.
 /// Device identity and state come from actual inventory, matched by slot_number (SlotID).
 /// Missing trays remain None; invalid rack indexes and ambiguous inventory are errors.
-/// Compute and switch inventory are each read in one batch in the caller's transaction.
-pub async fn resolve_domain_members(
-    txn: &mut PgConnection,
+/// Each device type is read in one batch through the supplied reader.
+pub async fn resolve_domain_members<DB>(
+    db: &mut DB,
     domain_id: Uuid,
-) -> DatabaseResult<Vec<ResolvedNvLinkDomainMember>> {
-    let domain = super::find_by_ids(&mut *txn, &[domain_id])
+) -> DatabaseResult<Vec<ResolvedNvLinkDomainMember>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let domain = super::find_by_ids(&mut *db, &[domain_id])
         .await?
         .pop()
         .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "nvlink_domain",
             id: domain_id.to_string(),
         })?;
-    let group = crate::expected_rack_group::find_by_rack_group_id(&mut *txn, &domain.rack_group_id)
+    let group = crate::expected_rack_group::find_by_rack_group_id(&mut *db, &domain.rack_group_id)
         .await?
         .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "expected_rack_group",
@@ -226,7 +229,7 @@ pub async fn resolve_domain_members(
             slot_index: member.member.slot_index,
         })
         .collect();
-    let inventory = load_inventory(txn, &positions).await?;
+    let inventory = load_inventory(db, &positions).await?;
     for (member, position) in members.iter_mut().zip(&positions) {
         member.tray = inventory.get(position);
     }
@@ -235,18 +238,21 @@ pub async fn resolve_domain_members(
 
 /// Find an actual tray by rack, component type, and slot_number (SlotID).
 /// Returns None if undiscovered; rejects multiple active matches.
-pub async fn find_tray(
-    txn: &mut PgConnection,
+pub async fn find_tray<DB>(
+    db: &mut DB,
     rack_id: &RackId,
     component_type: NvLinkDomainMemberType,
     slot_index: u32,
-) -> DatabaseResult<Option<NvLinkDomainTray>> {
+) -> DatabaseResult<Option<NvLinkDomainTray>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let position = TrayPosition {
         rack_id: rack_id.clone(),
         slot_index,
         component_type,
     };
-    let inventory = load_inventory(txn, std::slice::from_ref(&position)).await?;
+    let inventory = load_inventory(db, std::slice::from_ref(&position)).await?;
     Ok(inventory.get(&position))
 }
 
