@@ -447,8 +447,8 @@ ownership checks itself; Kubernetes RBAC grants access throughout the namespace.
 With DPF 26.8.0 or later (excluding prereleases of 26.8.0), NICo registers each
 new DPUDevice with its own immutable, version-labeled BMC credential Secret
 containing the DPU's established ingestion password, including retained
-credentials. NICo preserves existing DPUDevice credential references. Older DPF
-versions continue to use the shared BMC password.
+credentials. Registration preserves existing DPUDevice credential references.
+Older DPF versions continue to use the shared BMC password.
 
 Reset, forced deletion, and decommissioning wait for the host's DPUNode,
 DPUDevices, and DPUs to drain before deleting its credential Secrets. Forced
@@ -461,9 +461,15 @@ and immutability match and it is not being deleted. A conflicting Secret blocks
 registration until you reset or force-delete the host and let credential Secret
 cleanup finish.
 
-NICo skips DPU BMC root and `service` account rotation in this mode, including
-forced requests, because coordinated updates to DPF's immutable credential
-references are not supported. Host BMC rotation remains available.
+NICo uses DPF to adopt and rotate BMC root credentials for DPUs on DPF-ingested
+hosts. The DPU `service` account is excluded from this flow. The host BMC
+continues to use Redfish. If DPF is disabled, those hosts wait for DPF before
+starting or resuming BMC rotation.
+
+Keep the published shared password valid until existing shared DPUDevices
+finish adopting per-device credentials. Force deletion can interrupt a
+rotation. When DPF might have changed the password, NICo preserves the
+recovery credentials and verifies the active password before re-ingestion.
 </Note>
 
 <Note>
