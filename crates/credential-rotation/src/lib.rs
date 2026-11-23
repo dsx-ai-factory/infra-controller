@@ -47,8 +47,9 @@
 //!    reject under a password-reuse policy, and costs at most one extra failed
 //!    login so it stays clear of BMC lockout.
 //! 4. On success (or an already-at-target verify): persist the per-device secret
-//!    at the new password, flush cached BMC Redfish sessions, and
-//!    [`promote_rotating_to_current`].
+//!    at the new password, then apply the platform's default account policy
+//!    ([`bmc_accounts::apply_bmc_root_policy`]) as it, flush cached BMC Redfish
+//!    sessions, and [`promote_rotating_to_current`].
 //! 5. On failure: [`increment_rotate_attempt`] with a redacted error and an
 //!    exponential [`backoff_until`] window, and report
 //!    [`RotateOutcome::Quarantined`].
@@ -60,10 +61,11 @@
 //! meantime is superseded automatically: step 2 re-marks to the *live* target
 //! every tick.
 //!
-//! The recovery path re-applies the platform's default account policy
-//! ([`bmc_accounts::apply_bmc_root_policy`]) as the rotate-TO password: the
-//! interrupted attempt may have changed the password and crashed before
-//! applying it (for example, before re-enabling Lenovo IPMI access).
+//! The per-device secret is persisted before the policy step, so a policy
+//! failure (for example, Lenovo refusing IPMI access) quarantines the device
+//! with a stored secret the BMC accepts. When the per-device secret already
+//! holds the rotate-TO password, an earlier attempt changed and stored it, so
+//! step 3 is skipped and only the policy is applied.
 //!
 //! # Entry gate ([`RotationGate`])
 //!
@@ -958,9 +960,19 @@ pub async fn rotate_bmc(
             }
             Ok(RotateOutcome::Converged)
         }
-        Err(ConvergeError::DeviceFault(redacted)) => {
+        Err(error @ (ConvergeError::DeviceFault(_) | ConvergeError::PolicyFailed(_))) => {
             let until = backoff_until(status.rotate_attempts, Utc::now());
             let mut conn = db_pool.acquire().await?;
+            let redacted = match error {
+                ConvergeError::PolicyFailed(redacted) => {
+                    // The per-device secret already moved to the rotate-to
+                    // password, so sessions opened under the old one are stale.
+                    db::bmc_redfish_session::delete_by_mac(&mut conn, mac).await?;
+                    redacted
+                }
+                ConvergeError::DeviceFault(redacted)
+                | ConvergeError::CredentialStoreWriteFailed(redacted) => redacted,
+            };
             increment_rotate_attempt(&mut conn, mac, BMC, &redacted, until).await?;
             instrumentation.emit(BmcCredentialRotationQuarantined::new(
                 mac,
@@ -1163,10 +1175,10 @@ enum CredentialConvergence {
 }
 
 /// Where a convergence attempt failed, so the caller can tell a *device* fault
-/// (quarantine + backoff; the stored secret still authenticates the BMC) from a
-/// credential-store *persist* failure that lands after the hardware already
-/// changed (hardware AHEAD of the store; hold and reconcile rather than
-/// quarantine). Both carry an already-redacted reason.
+/// or a failed policy step (quarantine + backoff; the stored secret still
+/// authenticates the BMC) from a credential-store *persist* failure that lands
+/// after the hardware already changed (hardware AHEAD of the store; hold and
+/// reconcile rather than quarantine). All carry an already-redacted reason.
 #[derive(Debug)]
 enum ConvergeError {
     /// The attempt failed before (or at) the hardware change: the stored
@@ -1177,6 +1189,10 @@ enum ConvergeError {
     /// per-device secret to the credential store failed: the BMC is on the new
     /// password while the store still serves the old one.
     CredentialStoreWriteFailed(String),
+    /// The hardware and the stored per-device secret both reached the
+    /// rotate-to password, but the default account policy failed to apply. The
+    /// next attempt applies only the policy.
+    PolicyFailed(String),
 }
 
 /// Every pre-persist failure in [`converge_bmc_password`] is a device fault: the
@@ -1203,10 +1219,10 @@ impl CredentialConvergence {
 }
 
 /// Resolve the credentials, converge the device to the rotate-to password
-/// (change-then-verify recovery via [`change_or_recover`]), and persist the
-/// per-device secret. Returns `Err` with an already-redacted reason on any
-/// device-level failure, so the caller can record it and quarantine. Never
-/// returns a secret-bearing string.
+/// (change-then-verify recovery via [`change_or_recover`]), persist the
+/// per-device secret, then apply the default account policy as it. Returns
+/// `Err` with an already-redacted reason on any failure, so the caller can
+/// record it and quarantine or hold. Never returns a secret-bearing string.
 async fn converge_bmc_password(
     credential_manager: &dyn CredentialManager,
     connector: &BmcConnector,
@@ -1250,32 +1266,48 @@ async fn converge_bmc_password(
         password: current_password.clone(),
     };
     let rotate_to = Credentials::UsernamePassword {
-        username: username.clone(),
-        password: new_password.clone(),
-    };
-
-    let convergence = change_or_recover(connector, bmc, report, rotate_from, rotate_to)
-        .await
-        .map_err(|e| redact(e, &[&current_password, &new_password]))?
-        .redacted(&[&current_password, &new_password]);
-
-    // Persist the per-device secret at the new password so future logins -- and
-    // the next rotation's "current" -- use it. The username is unchanged.
-    let updated = Credentials::UsernamePassword {
         username,
         password: new_password.clone(),
     };
-    credential_manager
-        .set_credentials(&per_device_key, &updated)
+
+    // A per-device secret already at the rotate-to password was stored by an
+    // earlier attempt after the BMC accepted it; only its policy step remains.
+    let convergence = if current_password == new_password {
+        CredentialConvergence::Recovered {
+            change_error: "password change skipped: the per-device secret already holds the \
+                           rotate-to password"
+                .to_string(),
+        }
+    } else {
+        let convergence = change_or_recover(connector, bmc, report, rotate_from, rotate_to.clone())
+            .await
+            .map_err(|e| redact(e, &[&current_password, &new_password]))?
+            .redacted(&[&current_password, &new_password]);
+
+        // Persist the per-device secret at the new password so future logins --
+        // and the next rotation's "current" -- use it. The username is unchanged.
+        credential_manager
+            .set_credentials(&per_device_key, &rotate_to)
+            .await
+            .map_err(|e| {
+                // This is the one failure that leaves the hardware ahead of the
+                // store: the password change already succeeded above, so a failed
+                // persist means the BMC is on the new password while the store
+                // still serves the old one. Surface it distinctly so the caller
+                // holds and reconciles instead of quarantining.
+                ConvergeError::CredentialStoreWriteFailed(redact(
+                    format!("persist per-device BMC secret: {e}"),
+                    &[&current_password, &new_password],
+                ))
+            })?;
+        convergence
+    };
+
+    apply_bmc_root_policy(connector, &bmc.access_info(), report, rotate_to)
         .await
         .map_err(|e| {
-            // This is the one failure that leaves the hardware ahead of the
-            // store: the password change already succeeded above, so a failed
-            // persist means the BMC is on the new password while the store still
-            // serves the old one. Surface it distinctly so the caller holds and
-            // reconciles instead of quarantining.
-            ConvergeError::CredentialStoreWriteFailed(redact(
-                format!("persist per-device BMC secret: {e}"),
+            ConvergeError::PolicyFailed(redact(
+                format!("apply default account policy: {e}"),
                 &[&current_password, &new_password],
             ))
         })?;
@@ -1289,10 +1321,9 @@ async fn converge_bmc_password(
 /// secret) and changes the password to `rotate_to`. When that fails, the
 /// hardware may already be at `rotate_to` because a prior attempt changed it and
 /// crashed before recording success; [`probe_bmc_credentials`] confirms that
-/// without re-issuing a same-value (`new -> new`) change some BMCs reject, and
-/// the interrupted attempt's default account policy is re-applied. Only when
-/// the rotate-TO value does *not* already authenticate is the change treated as
-/// a genuine failure.
+/// without re-issuing a same-value (`new -> new`) change some BMCs reject. Only
+/// when the rotate-TO value does *not* already authenticate is the change
+/// treated as a genuine failure.
 ///
 /// Returns an already-`to_string`-ed error (still to be redacted by the caller)
 /// on a genuine device-level failure. Bounded to at most one failed login on the
@@ -1317,15 +1348,10 @@ async fn change_or_recover(
             Err(e) => e.to_string(),
         };
 
-    match probe_bmc_credentials(connector, &access, report, rotate_to.clone(), false).await {
-        Ok(true) => {
-            apply_bmc_root_policy(connector, &access, report, rotate_to)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(CredentialConvergence::Recovered {
-                change_error: change_err,
-            })
-        }
+    match probe_bmc_credentials(connector, &access, report, rotate_to, false).await {
+        Ok(true) => Ok(CredentialConvergence::Recovered {
+            change_error: change_err,
+        }),
         Ok(false) => Err(change_err),
         Err(verify_err) => Err(format!(
             "{change_err}; rotate-to credential probe also failed: {verify_err}"
@@ -1374,10 +1400,10 @@ mod tests {
 
     use super::{
         BMC, BmcCredentialRotationConverged, BmcCredentialRotationQuarantined,
-        BmcCredentialRotationRecovered, BmcEndpoint, ConditionalWrite, CredentialConvergence,
-        DPU_BMC_SERVICE, RotateOutcome, RotationGate, change_or_recover, needs_rotation,
-        probe_bmc_credentials, promote_rotating_to_current, redact, rotate_bmc,
-        rotate_dpu_bmc_service,
+        BmcCredentialRotationRecovered, BmcEndpoint, ConditionalWrite, ConvergeError,
+        CredentialConvergence, DPU_BMC_SERVICE, RotateOutcome, RotationGate, change_or_recover,
+        converge_bmc_password, needs_rotation, probe_bmc_credentials, promote_rotating_to_current,
+        redact, rotate_bmc, rotate_dpu_bmc_service,
     };
 
     const BMC_ROTATION_RESULTS_METRIC: &str = "carbide_bmc_credential_rotation_results_total";
@@ -1893,38 +1919,61 @@ mod tests {
         );
     }
 
+    /// A failed policy step (Lenovo refusing IPMI access) must not leave the
+    /// per-device secret behind the BMC, whether this attempt or an interrupted
+    /// earlier one changed the password: the rotate-to password is stored before
+    /// the policy fails, and the next attempt applies only the policy, logging in
+    /// with the stored password.
     #[tokio::test]
-    async fn recovered_lenovo_credentials_retry_ipmi_repair_before_converging() {
-        let sim = Arc::new(RedfishSim::default());
-        sim.set_service_root_vendor(Some("Lenovo".to_string()));
-        sim.set_enforce_auth(true);
-        sim.set_reject_password_reuse(true);
-        sim.seed_user("1", "new");
-        sim.fail_next_ipmi_access("transient IPMI repair failure");
+    async fn policy_failure_stores_the_rotate_to_password_then_retries_only_the_policy() {
+        for (scenario, bmc_password) in [
+            ("this attempt changes the password", "old"),
+            ("an earlier attempt changed the password", "new"),
+        ] {
+            let sim = Arc::new(RedfishSim::default());
+            sim.set_service_root_vendor(Some("Lenovo".to_string()));
+            sim.set_enforce_auth(true);
+            sim.set_reject_password_reuse(true);
+            sim.seed_user("1", bmc_password);
+            sim.fail_next_ipmi_access("IPMI access refused");
+            let cm = TestCredentialManager::default();
+            cm.set_credentials(&per_device_key(), &creds("1", "old"))
+                .await
+                .unwrap();
+            cm.set_credentials(&rotate_to_key(1), &creds("1", "new"))
+                .await
+                .unwrap();
+            let connector = sim_connector(&sim);
 
-        for succeeds in [false, true] {
-            let result = change_or_recover(
-                &sim_connector(&sim),
-                &target(),
-                None,
-                creds("1", "old"),
-                creds("1", "new"),
-            )
-            .await;
-            if succeeds {
-                assert!(matches!(
-                    result,
-                    Ok(CredentialConvergence::Recovered { .. })
-                ));
-            } else {
-                assert!(
-                    result
-                        .unwrap_err()
-                        .contains("transient IPMI repair failure")
-                );
-            }
-            assert_eq!(sim.ipmi_account_access_enabled("1"), succeeds);
-            assert_eq!(sim.user_password("1").as_deref(), Some("new"));
+            let error = converge_bmc_password(&cm, &connector, &target(), None, 1)
+                .await
+                .expect_err("the policy step fails");
+            assert!(
+                matches!(&error, ConvergeError::PolicyFailed(reason) if reason.contains("IPMI access refused")),
+                "{scenario}: {error:?}"
+            );
+            assert_eq!(
+                cm.get_credentials(&per_device_key()).await.unwrap(),
+                Some(creds("1", "new")),
+                "{scenario}"
+            );
+            assert!(!sim.ipmi_account_access_enabled("1"), "{scenario}");
+
+            let logins_before_retry = sim.auth_attempts().len();
+            let convergence = converge_bmc_password(&cm, &connector, &target(), None, 1)
+                .await
+                .expect("the retried policy step succeeds");
+            assert!(
+                matches!(&convergence, CredentialConvergence::Recovered { change_error } if change_error.contains("password change skipped")),
+                "{scenario}: {convergence:?}"
+            );
+            assert!(sim.ipmi_account_access_enabled("1"), "{scenario}");
+            assert!(
+                sim.auth_attempts()[logins_before_retry..]
+                    .iter()
+                    .all(|attempt| attempt.authorized),
+                "{scenario}: the retry must not log in with a stale password"
+            );
         }
     }
 
@@ -3098,11 +3147,11 @@ mod tests {
     }
 
     /// On the drivers backend, crash recovery against a BMC already on the
-    /// rotate-to password: the stale `rotate_from` is refused, the rotate-to
-    /// probe authenticates, and the default account policy is applied without
-    /// repeating the password change.
+    /// rotate-to password: the stale per-device secret is refused, the rotate-to
+    /// probe authenticates, the rotate-to password is stored, and the default
+    /// account policy is applied without repeating the password change.
     #[tokio::test]
-    async fn drivers_backend_change_or_recover_recovers_already_rotated_bmc() {
+    async fn drivers_backend_converge_recovers_already_rotated_bmc() {
         let (router, state) = host_router_with_auth(HardwareType::WiwynnGB200Nvl);
         state
             .account_service_state
@@ -3139,20 +3188,26 @@ mod tests {
             ..Default::default()
         };
 
-        let convergence = change_or_recover(
-            &connector,
-            &endpoint,
-            Some(&report),
-            creds("root", "old-secret"),
-            creds("root", "new-secret"),
-        )
-        .await
-        .expect("drivers backend recovers an already-rotated BMC");
+        let cm = TestCredentialManager::default();
+        cm.set_credentials(&per_device_key(), &creds("root", "old-secret"))
+            .await
+            .unwrap();
+        cm.set_credentials(&rotate_to_key(1), &creds("root", "new-secret"))
+            .await
+            .unwrap();
+
+        let convergence = converge_bmc_password(&cm, &connector, &endpoint, Some(&report), 1)
+            .await
+            .expect("drivers backend recovers an already-rotated BMC");
 
         assert!(matches!(
             convergence,
             CredentialConvergence::Recovered { .. }
         ));
+        assert_eq!(
+            cm.get_credentials(&per_device_key()).await.unwrap(),
+            Some(creds("root", "new-secret"))
+        );
         let accepted: Vec<_> = writes
             .lock()
             .unwrap()

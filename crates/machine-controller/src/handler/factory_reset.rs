@@ -75,7 +75,9 @@
 //!   rather than silently attempting a speculative unlock.
 
 use bmc_platform::PlatformError;
-use carbide_credential_rotation::bmc_accounts::{change_bmc_root_password, probe_bmc_credentials};
+use carbide_credential_rotation::bmc_accounts::{
+    apply_bmc_root_policy, change_bmc_root_password, probe_bmc_credentials,
+};
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
@@ -640,15 +642,18 @@ async fn restore_credentials(
         ..
     } = per_device.clone();
 
-    match change_bmc_root_password(
-        &connector,
-        &access,
-        report.as_ref(),
-        factory_creds,
-        &per_device_password,
-    )
-    .await
-    {
+    let restored = async {
+        change_bmc_root_password(
+            &connector,
+            &access,
+            report.as_ref(),
+            factory_creds,
+            &per_device_password,
+        )
+        .await?;
+        apply_bmc_root_policy(&connector, &access, report.as_ref(), per_device.clone()).await
+    };
+    match restored.await {
         Ok(()) => {
             flush_bmc_session(ctx, host_bmc_mac).await?;
             tracing::info!(

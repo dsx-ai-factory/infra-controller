@@ -373,6 +373,8 @@ impl RedfishClient {
         .map_err(map_redfish_client_creation_error)
     }
 
+    /// Changes the root password, then applies the default account policy as
+    /// the new password.
     pub(super) async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
@@ -381,12 +383,51 @@ impl RedfishClient {
         current_bmc_root_credentials: Credentials,
         new_password: String,
     ) -> Result<(), EndpointExplorationError> {
+        let Credentials::UsernamePassword { username, .. } = &current_bmc_root_credentials;
+        let new_credentials = Credentials::new(username.as_str(), new_password.as_str());
+        self.change_bmc_root_password(
+            bmc_ip_address,
+            bmc_mac_address,
+            report,
+            current_bmc_root_credentials,
+            &new_password,
+        )
+        .await?;
+        self.apply_bmc_root_policy(bmc_ip_address, bmc_mac_address, report, new_credentials)
+            .await
+    }
+
+    pub(super) async fn change_bmc_root_password(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
+        current_bmc_root_credentials: Credentials,
+        new_password: &str,
+    ) -> Result<(), EndpointExplorationError> {
         bmc_accounts::change_bmc_root_password(
             &self.bmc_connector(),
             &bmc_access(bmc_ip_address, bmc_mac_address),
             report,
             current_bmc_root_credentials,
-            &new_password,
+            new_password,
+        )
+        .await
+        .map_err(map_platform_error)
+    }
+
+    pub(super) async fn apply_bmc_root_policy(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
+        credentials: Credentials,
+    ) -> Result<(), EndpointExplorationError> {
+        bmc_accounts::apply_bmc_root_policy(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            report,
+            credentials,
         )
         .await
         .map_err(map_platform_error)

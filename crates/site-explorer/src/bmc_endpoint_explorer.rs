@@ -1702,26 +1702,30 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                 );
             })?;
 
-        let new_credentials = self
-            .set_bmc_root_password(
+        let Credentials::UsernamePassword { username, .. } = &current_credentials;
+        let new_credentials = Credentials::new(username.as_str(), new_password);
+        self.redfish_client
+            .change_bmc_root_password(
                 bmc_ip_address,
                 bmc_mac_address,
                 report,
                 current_credentials,
-                new_password.to_string(),
+                new_password,
             )
             .await?;
 
-        // Persist the new per-device credential so NICo can still reach the BMC.
-        // Deliberately does NOT record rotation convergence (unlike
-        // `set_bmc_root_credentials`): this is an out-of-band set, so the
-        // credential-rotation engine will reassert the site-wide password on
-        // its next pass rather than treating this device as converged.
+        // Persist the new per-device credential so NICo can still reach the BMC,
+        // before the policy step can fail. Deliberately does NOT record rotation
+        // convergence (unlike `set_bmc_root_credentials`): this is an out-of-band
+        // set, so the credential-rotation engine will reassert the site-wide
+        // password on its next pass rather than treating this device as converged.
         self.credential_client
             .set_bmc_root_credentials(bmc_mac_address, &new_credentials)
             .await?;
 
-        Ok(())
+        self.redfish_client
+            .apply_bmc_root_policy(bmc_ip_address, bmc_mac_address, report, new_credentials)
+            .await
     }
 
     async fn probe_bmc_vendor(
@@ -2676,6 +2680,54 @@ mod tests {
                 .await
                 .unwrap(),
             Some(Credentials::new("1", SITEWIDE_PASSWORD))
+        );
+    }
+
+    /// An admin-set BMC root password is stored before the policy step, so a
+    /// failed policy (Lenovo refusing IPMI access) cannot leave the stored
+    /// credential on the password the BMC no longer accepts.
+    #[tokio::test]
+    async fn admin_set_root_password_is_stored_when_the_policy_fails() {
+        let sim = Arc::new(RedfishSim::default());
+        sim.set_service_root_vendor(Some("Lenovo".to_string()));
+        sim.set_enforce_auth(true);
+        sim.seed_user("1", "current");
+        sim.fail_next_ipmi_access("IPMI access refused");
+        let credential_manager = Arc::new(TestCredentialManager::default());
+        let interface =
+            MachineInterfaceSnapshot::mock_with_mac("02:00:00:00:00:02".parse().unwrap());
+        let per_bmc_credential_key = get_bmc_root_credential_key(interface.mac_address);
+        credential_manager
+            .set_credentials(&per_bmc_credential_key, &Credentials::new("1", "current"))
+            .await
+            .unwrap();
+        let client = AuthenticatedBmcClient::new(
+            sim.clone(),
+            Arc::new(NvRedfishClientPool::new(Arc::new(ArcSwap::new(Arc::new(
+                None,
+            ))))),
+            None,
+            carbide_ipmi::test_support(),
+            credential_manager.clone(),
+        );
+
+        let result = AuthenticatedBmc::set_bmc_root_password(
+            &client,
+            "127.0.0.1:443".parse().unwrap(),
+            &interface,
+            None,
+            "admin-set",
+        )
+        .await;
+
+        assert!(result.is_err(), "the policy step fails");
+        assert_eq!(sim.user_password("1").as_deref(), Some("admin-set"));
+        assert_eq!(
+            credential_manager
+                .get_credentials(&per_bmc_credential_key)
+                .await
+                .unwrap(),
+            Some(Credentials::new("1", "admin-set"))
         );
     }
 

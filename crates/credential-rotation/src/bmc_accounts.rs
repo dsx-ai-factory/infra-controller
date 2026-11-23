@@ -96,8 +96,10 @@ fn classify_probe_error(
 }
 
 /// Changes the root account's password from `current_credentials` to
-/// `new_password`, then applies the default account policy as the new password
-/// ([`apply_bmc_root_policy`]).
+/// `new_password`. Callers then apply the default account policy as the new
+/// password ([`apply_bmc_root_policy`]); a caller with a stored credential for
+/// the BMC stores the new password first, so a failed policy step cannot leave
+/// the store behind the BMC.
 pub async fn change_bmc_root_password(
     connector: &BmcConnector,
     access: &BmcAccessInfo,
@@ -106,14 +108,14 @@ pub async fn change_bmc_root_password(
     new_password: &str,
 ) -> Result<(), PlatformError> {
     let Credentials::UsernamePassword { username, .. } = &current_credentials;
-    let new_credentials = Credentials::new(username.as_str(), new_password);
-    connect_accounts(connector, access, report, current_credentials.clone())
+    let username = username.clone();
+    connect_accounts(connector, access, report, current_credentials)
         .await?
         .accounts()?
-        .change_password(username, new_password)
+        .change_password(&username, new_password)
         .await?;
     invalidate_bmc(connector, access);
-    apply_bmc_root_policy(connector, access, report, new_credentials).await
+    Ok(())
 }
 
 /// Applies the platform's default account policy (including Lenovo IPMI
