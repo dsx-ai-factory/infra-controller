@@ -63,7 +63,7 @@ type ExpectedMachineUpdateRequest struct {
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting.
 	IsDpfEnabled NullableBool `json:"isDpfEnabled,omitempty"`
-	// Per-host DPU policy. Inherit uses the site-wide DPU policy; Nic operates installed DPUs as plain NICs; Ignore does not configure or attach DPU hardware. Set to an empty string to clear the policy back to Inherit; omission or null leaves it unchanged.
+	// Per-host DPU policy. Inherit uses the site-wide DPU policy; Nic operates installed DPUs as plain NICs; Ignore does not configure or attach DPU hardware. Set Inherit to reset a host to the site-wide policy; omission or null leaves it unchanged.
 	DpuPolicy NullableString `json:"dpuPolicy,omitempty"`
 	// When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is. Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting. Site Explorer reads the setting the first time NICo stores credentials for the BMC; changing it later does not rotate or restore the BMC password. When BMC factory reset on instance termination is enabled, a later reset uses the current value, and true skips restoring the stored credentials. If NICo rotated the password before the value changed to true, NICo still holds the rotated password after the reset, so Site Explorer can no longer log in to the BMC and waits for an operator.
 	RetainBmcCredentials NullableBool `json:"retainBmcCredentials,omitempty"`

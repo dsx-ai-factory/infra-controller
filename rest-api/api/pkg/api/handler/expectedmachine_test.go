@@ -580,7 +580,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				DefaultBmcUsername:  cutil.GetPtr("admin"),
 				DefaultBmcPassword:  cutil.GetPtr("password"),
 				ChassisSerialNumber: "CHASSIS-DPU-IGNORE-001",
-				DpuPolicy:           cutil.GetPtr("Ignore"),
+				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -598,7 +598,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				DefaultBmcUsername:  cutil.GetPtr("admin"),
 				DefaultBmcPassword:  cutil.GetPtr("password"),
 				ChassisSerialNumber: "CHASSIS-DPU-EMPTY-001",
-				DpuPolicy:           cutil.GetPtr(""),
+				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy("")),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1916,7 +1916,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			name: "DPU policy Nic update reaches Core",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
-				DpuPolicy: cutil.GetPtr("Nic"),
+				DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1952,10 +1952,10 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "empty DPU policy clears to Inherit and sends unspecified to Core",
+			name: "Inherit DPU policy resets a stored policy",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
-				DpuPolicy: cutil.GetPtr(""),
+				DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyInherit),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1965,14 +1965,28 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			expectedStatus: http.StatusOK,
 			expectedPaths:  []string{"dpu_mode"},
 			checkResponseContent: func(t *testing.T, body []byte) {
-				checkDpuPolicy(t, body, cdbm.ExpectedMachineDpuPolicyInherit, corev1.DpuMode_DPU_MODE_UNSPECIFIED)
+				checkDpuPolicy(t, body, cdbm.ExpectedMachineDpuPolicyInherit, corev1.DpuMode_DPU_MODE)
 			},
+		},
+		{
+			name: "empty DPU policy is rejected on update",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy("")),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus:  http.StatusBadRequest,
+			rejectsMutation: true,
 		},
 		{
 			name: "unknown DPU policy is rejected on update",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
-				DpuPolicy: cutil.GetPtr("bogus"),
+				DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy("bogus")),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -3282,7 +3296,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 					}},
 					Labels:               map[string]string{"env": "test"},
 					RetainBmcCredentials: cutil.GetPtr(true),
-					DpuPolicy:            cutil.GetPtr("Ignore"),
+					DpuPolicy:            cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
 				},
 				{
 					SiteID:              site.ID.String(),
@@ -4038,8 +4052,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.RetainBmcCredentials = cutil.GetPtr(false) },
 		},
 		{
-			name:     "DPU policy",
-			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.DpuPolicy = cutil.GetPtr("Nic") },
+			name: "DPU policy",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) {
+				req.DpuPolicy = cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic)
+			},
 		},
 		{
 			name:     "empty labels",
@@ -4503,8 +4519,8 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		{
 			name: "batch DPU policy updates reach Core",
 			requestBody: []model.APIExpectedMachineUpdateRequest{
-				{ID: cutil.GetPtr(testEM1.ID.String()), DpuPolicy: cutil.GetPtr("Nic")},
-				{ID: cutil.GetPtr(testEM2.ID.String()), DpuPolicy: cutil.GetPtr("")},
+				{ID: cutil.GetPtr(testEM1.ID.String()), DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic)},
+				{ID: cutil.GetPtr(testEM2.ID.String()), DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyInherit)},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -4519,7 +4535,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 				}
 				wantMode := map[string]corev1.DpuMode{
 					testEM1.ID.String(): corev1.DpuMode_NIC_MODE,
-					testEM2.ID.String(): corev1.DpuMode_DPU_MODE_UNSPECIFIED,
+					testEM2.ID.String(): corev1.DpuMode_DPU_MODE,
 				}
 				require.NotNil(t, capturedRequest)
 				require.Len(t, capturedRequest.Patches, 2)

@@ -33431,12 +33431,11 @@ components:
             - Inherit
             - Nic
             - Ignore
-            - ''
             - null
           description: |-
             Per-host DPU policy. Inherit uses the site-wide DPU policy; Nic operates installed DPUs as plain NICs;
-            Ignore does not configure or attach DPU hardware. Set to an empty string to clear the policy back to
-            Inherit; omission or null leaves it unchanged.
+            Ignore does not configure or attach DPU hardware. Set Inherit to reset a host to the site-wide policy;
+            omission or null leaves it unchanged.
         retainBmcCredentials:
           type:
             - boolean

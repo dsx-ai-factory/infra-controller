@@ -143,6 +143,27 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+
+	dpuTests := []struct {
+		name   string
+		mode   *corev1.DpuMode
+		stored *ExpectedMachineDpuPolicy
+		want   *ExpectedMachineDpuPolicy
+	}{
+		{name: "omitted dpu mode is Inherit", stored: cutil.GetPtr(ExpectedMachineDpuPolicyIgnore), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
+		{name: "unspecified dpu mode is Inherit", mode: corev1.DpuMode_DPU_MODE_UNSPECIFIED.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
+		{name: "DPU mode is Inherit", mode: corev1.DpuMode_DPU_MODE.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
+		{name: "NIC mode is Nic", mode: corev1.DpuMode_NIC_MODE.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyNic)},
+		{name: "no DPU is Ignore", mode: corev1.DpuMode_NO_DPU.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyIgnore)},
+		{name: "unknown dpu mode clears stale state", mode: cutil.GetPtr(corev1.DpuMode(99)), stored: cutil.GetPtr(ExpectedMachineDpuPolicyNic), want: nil},
+	}
+	for _, tc := range dpuTests {
+		t.Run(tc.name, func(t *testing.T) {
+			em := &ExpectedMachine{DpuPolicy: tc.stored}
+			em.FromProto(&corev1.ExpectedMachine{Id: &corev1.UUID{Value: incomingID.String()}, DpuMode: tc.mode}, nil)
+			assert.Equal(t, tc.want, em.DpuPolicy)
+		})
+	}
 }
 
 func TestHostLifecycleProfile_ToProto(t *testing.T) {
@@ -321,6 +342,16 @@ func TestExpectedMachine_ToProto(t *testing.T) {
 		}
 		proto := em.ToProto(ExpectedMachineCredentials{})
 		assert.Nil(t, proto.ServerName)
+	})
+
+	t.Run("omits dpu_mode when no policy is stored", func(t *testing.T) {
+		em := &ExpectedMachine{ID: id}
+		assert.Nil(t, em.ToProto(ExpectedMachineCredentials{}).DpuMode)
+	})
+
+	t.Run("forwards a stored dpu policy", func(t *testing.T) {
+		em := &ExpectedMachine{ID: id, DpuPolicy: cutil.GetPtr(ExpectedMachineDpuPolicyNic)}
+		assert.Equal(t, corev1.DpuMode_NIC_MODE, em.ToProto(ExpectedMachineCredentials{}).GetDpuMode())
 	})
 }
 
@@ -2503,39 +2534,6 @@ func TestExpectedMachineDpuPolicy_ProtoConversions(t *testing.T) {
 		assert.Equal(t, ExpectedMachineDpuPolicy(""), got)
 		assert.Equal(t, corev1.DpuMode_DPU_MODE_UNSPECIFIED, ExpectedMachineDpuPolicy("bogus").ToProto())
 	})
-}
-
-func TestExpectedMachine_DpuPolicyProto(t *testing.T) {
-	t.Run("ToProto omits an unset policy", func(t *testing.T) {
-		em := &ExpectedMachine{ID: uuid.New()}
-		assert.Nil(t, em.ToProto(ExpectedMachineCredentials{}).DpuMode)
-	})
-
-	t.Run("ToProto sends a stored policy", func(t *testing.T) {
-		em := &ExpectedMachine{ID: uuid.New(), DpuPolicy: cutil.GetPtr(ExpectedMachineDpuPolicyNic)}
-		assert.Equal(t, corev1.DpuMode_NIC_MODE, em.ToProto(ExpectedMachineCredentials{}).GetDpuMode())
-	})
-
-	tests := []struct {
-		name   string
-		mode   *corev1.DpuMode
-		stored *ExpectedMachineDpuPolicy
-		want   *ExpectedMachineDpuPolicy
-	}{
-		{name: "omitted mode is Inherit", stored: cutil.GetPtr(ExpectedMachineDpuPolicyIgnore), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
-		{name: "unspecified mode is Inherit", mode: corev1.DpuMode_DPU_MODE_UNSPECIFIED.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
-		{name: "DPU mode is Inherit", mode: corev1.DpuMode_DPU_MODE.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
-		{name: "NIC mode is Nic", mode: corev1.DpuMode_NIC_MODE.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyNic)},
-		{name: "no DPU is Ignore", mode: corev1.DpuMode_NO_DPU.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyIgnore)},
-		{name: "unknown mode clears stale state", mode: cutil.GetPtr(corev1.DpuMode(99)), stored: cutil.GetPtr(ExpectedMachineDpuPolicyNic), want: nil},
-	}
-	for _, tc := range tests {
-		t.Run("FromProto "+tc.name, func(t *testing.T) {
-			em := &ExpectedMachine{DpuPolicy: tc.stored}
-			em.FromProto(&corev1.ExpectedMachine{Id: &corev1.UUID{Value: uuid.NewString()}, DpuMode: tc.mode}, nil)
-			assert.Equal(t, tc.want, em.DpuPolicy)
-		})
-	}
 }
 
 func TestExpectedMachineCreateInput_ToExpectedMachine(t *testing.T) {

@@ -141,9 +141,10 @@ update, batch and replace-all requests all accept it.
   through a plain NIC on HostInband.
 
 On create and replace-all, an omitted or `null` value stores `Inherit`. On
-update, omitting it or sending `null` keeps the stored value, and an empty
-string (`""`) clears it back to `Inherit`. Responses always return the effective
-value, so a host with no stored policy shows `Inherit`.
+update, omitting it or sending `null` keeps the stored value, and sending
+`Inherit` resets the host to the site-wide policy. An empty string is rejected.
+Responses always return the effective value, so a host with no stored policy
+shows `Inherit`.
 
 `dpuPolicy` is separate from `isDpfEnabled`, which only marks whether the host
 is eligible for DPF-based provisioning.

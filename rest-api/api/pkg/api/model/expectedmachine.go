@@ -31,9 +31,9 @@ const validationErrorExpectedMachineDpuPolicy = "must be Inherit, Nic, or Ignore
 
 // expectedMachineDpuPolicies lists the accepted dpuPolicy values for validation.
 var expectedMachineDpuPolicies = []any{
-	string(cdbm.ExpectedMachineDpuPolicyInherit),
-	string(cdbm.ExpectedMachineDpuPolicyNic),
-	string(cdbm.ExpectedMachineDpuPolicyIgnore),
+	cdbm.ExpectedMachineDpuPolicyInherit,
+	cdbm.ExpectedMachineDpuPolicyNic,
+	cdbm.ExpectedMachineDpuPolicyIgnore,
 }
 
 const validationErrorExpectedMachineInterfaceMAC = "must be a MAC address of six colon- or hyphen-separated octets"
@@ -386,18 +386,6 @@ func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecyclePr
 	}
 }
 
-// ExpectedMachineDpuPolicyToDB converts a validated request dpuPolicy.
-// An empty string clears the policy, which stores Inherit.
-func ExpectedMachineDpuPolicyToDB(policy *string) *cdbm.ExpectedMachineDpuPolicy {
-	if policy == nil {
-		return nil
-	}
-	if *policy == "" {
-		return cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyInherit)
-	}
-	return cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy(*policy))
-}
-
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
 type APIExpectedMachineCreateRequest struct {
 	// SiteID is the ID of the Site
@@ -444,7 +432,7 @@ type APIExpectedMachineCreateRequest struct {
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
 	// DpuPolicy selects how NICo treats DPU hardware for this host (Inherit, Nic, Ignore)
-	DpuPolicy *string `json:"dpuPolicy"`
+	DpuPolicy *cdbm.ExpectedMachineDpuPolicy `json:"dpuPolicy"`
 	// RetainBmcCredentials, when true, makes Site Explorer keep the BMC's
 	// factory-default credentials instead of rotating them. Omission or null
 	// stores false, the same as omitting --bmc-retain-credentials from nico-admin-cli.
@@ -566,7 +554,7 @@ type APIExpectedMachineUpdateRequest struct {
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
 	// DpuPolicy selects how NICo treats DPU hardware for this host (Inherit, Nic, Ignore)
-	DpuPolicy *string `json:"dpuPolicy"`
+	DpuPolicy *cdbm.ExpectedMachineDpuPolicy `json:"dpuPolicy"`
 	// RetainBmcCredentials, when non-nil, replaces whether Site Explorer keeps
 	// the BMC's factory-default credentials. Changing it does not rotate or
 	// restore stored credentials; a later BMC factory reset uses the new value.
@@ -638,6 +626,7 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
 		// An empty string clears the policy back to Inherit.
 		validation.Field(&emur.DpuPolicy,
+			validation.NilOrNotEmpty.Error(validationErrorExpectedMachineDpuPolicy),
 			validation.In(expectedMachineDpuPolicies...).Error(validationErrorExpectedMachineDpuPolicy)),
 	)
 
@@ -672,13 +661,8 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 	if emur.RetainBmcCredentials != nil {
 		resource.BmcRetainCredentials = emur.RetainBmcCredentials
 	}
-	// An empty string asks Core to clear the policy back to its default.
 	if emur.DpuPolicy != nil {
-		mode := corev1.DpuMode_DPU_MODE_UNSPECIFIED
-		if *emur.DpuPolicy != "" {
-			mode = cdbm.ExpectedMachineDpuPolicy(*emur.DpuPolicy).ToProto()
-		}
-		resource.DpuMode = &mode
+		resource.DpuMode = cutil.GetPtr(emur.DpuPolicy.ToProto())
 	}
 	if emur.Interfaces != nil {
 		resource.ReplaceDpuLoopbacks = emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks
