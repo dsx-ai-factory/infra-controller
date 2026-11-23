@@ -863,7 +863,7 @@ PostgreSQL exchange uses `verify-full`; it does not exercise the runtime pool's
 TLS policy. See [Tracing](../observability/tracing.md)
 for collector configuration and trace enablement.
 
-The repeatable [dependency network qualification](https://github.com/dsx-ai-factory/infra-controller/blob/983fc869b16f07fd26cda77c1a034775ec1ff2f4/dev/deployment/dependency-network/README.md) exercises real
+The repeatable [dependency network qualification](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/deployment/dependency-network/README.md) exercises real
 PostgreSQL, Vault, and collector exchanges through Core's production client
 helpers. It covers IPv6 literals, AAAA-only names, an IPv6-only client network,
 dual-stack names with either family refusing connections, and missing DNS. It
