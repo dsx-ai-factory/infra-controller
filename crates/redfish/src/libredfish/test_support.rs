@@ -2036,6 +2036,10 @@ impl Redfish for RedfishSimClient {
                 task_status: None,
                 task_monitor: None,
                 percent_complete: None,
+                start_time: None,
+                end_time: None,
+                payload: None,
+                hide_payload: None,
             })
         })
     }

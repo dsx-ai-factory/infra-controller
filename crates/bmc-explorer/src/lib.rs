@@ -73,8 +73,7 @@ use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
 use nv_redfish::core::ODataId;
 use nv_redfish::oem::ami::config_bmc::{
-    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState,
-    LockoutBiosVariableWriteMode, LockoutHostControlState,
+    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState, LockoutHostControlState,
 };
 use nv_redfish::oem::lenovo::computer_system::{FpMode, PortSwitchingTo};
 use nv_redfish::oem::lenovo::manager::KcsState;
@@ -302,6 +301,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             },
             hw::HwType::LenovoAmi => manager::Config {
                 need_oem_ami_config_bmc: true,
+                need_host_interfaces: true,
                 ..Default::default()
             },
             hw::HwType::LenovoGb300 => manager::Config {
@@ -720,51 +720,13 @@ fn lockdown_status<B: Bmc>(
                 .as_ref()
                 .ok_or_else(Error::bmc_not_provided("AMI Manager ConfigBMC"))?;
             let attrs = config_bmc.raw();
-            let descr = [
-                (
-                    "LockoutHostControl",
-                    attrs
-                        .lockout_host_control
-                        .map(|v| v == LockoutHostControlState::Enable),
-                ),
-                (
-                    "LockoutBiosVariableWriteMode",
-                    attrs
-                        .lockout_bios_variable_write_mode
-                        .map(|v| v == LockoutBiosVariableWriteMode::Enable),
-                ),
-                (
-                    "LockdownBiosSettingsChange",
-                    attrs
-                        .lockdown_bios_settings_change
-                        .map(|v| v == LockdownBiosSettingsChangeState::Enable),
-                ),
-                (
-                    "LockdownBiosUpgradeDowngrade",
-                    attrs
-                        .lockdown_bios_upgrade_downgrade
-                        .map(|v| v == LockdownBiosUpgradeDowngradeState::Enable),
-                ),
-            ];
-            let all_enabled = descr.iter().filter_map(|v| v.1).all(identity);
-            let all_disabled = descr.iter().filter_map(|v| v.1).all(|v| !v);
-            let status = if all_enabled {
-                InternalLockdownStatus::Enabled
-            } else if all_disabled {
-                InternalLockdownStatus::Disabled
-            } else {
-                InternalLockdownStatus::Partial
-            };
-            let message = descr
-                .iter()
-                .filter_map(|(name, enabled)| {
-                    enabled.map(|enabled| {
-                        format!("{name}={}", if enabled { "Enable" } else { "Disable" })
-                    })
-                })
-                .join(", ");
-
-            Ok(Some(LockdownStatus { status, message }))
+            let interface = explored_manager
+                .host_interfaces
+                .as_ref()
+                .ok_or_else(Error::bmc_not_provided("host interfaces"))?
+                .first()
+                .map(|interface| interface.interface_enabled().unwrap_or(true));
+            Ok(Some(lenovo_ami_lockdown_status(&attrs, interface)))
         }
 
         hw::HwType::Lenovo => {
@@ -864,7 +826,9 @@ fn lockdown_status<B: Bmc>(
             );
 
             let model = system.hardware_id().model.map(|v| v.into_inner());
-            let is_ars_121l_dnr = model == Some("ARS-121L-DNR");
+            let must_keep_host_interface_enabled = model.is_some_and(|model| {
+                model.contains("ARS-121L-DNR") || model.contains("ARS-221GL-FNB-NC24B")
+            });
             let (inband_locked, inband_unlocked) = if explored_chassis.is_mgx_c2() {
                 (
                     ipmi_host_interface_enabled.is_none_or(|enabled| !enabled),
@@ -877,8 +841,8 @@ fn lockdown_status<B: Bmc>(
                         || kcs_privilege == Some(SupermicroPrivilege::Administrator),
                 )
             };
-            // ARS-121L-DNR must keep HostInterface enabled to PXE boot.
-            let host_interface_locked = hi_enabled == is_ars_121l_dnr;
+            // ARS-121L-DNR and ARS-221GL-FNB-NC24B must keep HostInterface enabled to PXE boot.
+            let host_interface_locked = must_keep_host_interface_enabled || !hi_enabled;
 
             let status = if is_syslockdown && inband_locked && host_interface_locked {
                 InternalLockdownStatus::Enabled
@@ -915,6 +879,51 @@ fn lockdown_status<B: Bmc>(
 
         _ => Ok(None),
     }
+}
+
+fn lenovo_ami_lockdown_status(
+    attrs: &nv_redfish::oem::ami::schema::ami_manager::ConfigBmc,
+    interface: Option<bool>,
+) -> LockdownStatus {
+    let descr = [
+        (
+            "LockoutHostControl",
+            attrs
+                .lockout_host_control
+                .map(|v| v == LockoutHostControlState::Enable),
+        ),
+        (
+            "LockdownBiosSettingsChange",
+            attrs
+                .lockdown_bios_settings_change
+                .map(|v| v == LockdownBiosSettingsChangeState::Enable),
+        ),
+        (
+            "LockdownBiosUpgradeDowngrade",
+            attrs
+                .lockdown_bios_upgrade_downgrade
+                .map(|v| v == LockdownBiosUpgradeDowngradeState::Enable),
+        ),
+    ];
+    let all_enabled =
+        descr.iter().all(|(_, value)| *value == Some(true)) && interface == Some(false);
+    let all_disabled =
+        descr.iter().all(|(_, value)| *value == Some(false)) && interface == Some(true);
+    let status = if all_enabled {
+        InternalLockdownStatus::Enabled
+    } else if all_disabled {
+        InternalLockdownStatus::Disabled
+    } else {
+        InternalLockdownStatus::Partial
+    };
+    let message = descr
+        .iter()
+        .filter_map(|(name, enabled)| {
+            enabled.map(|enabled| format!("{name}={}", if enabled { "Enable" } else { "Disable" }))
+        })
+        .join(", ");
+    let message = format!("{message}, host_interface={interface:?}");
+    LockdownStatus { status, message }
 }
 
 fn machine_setup_status<B: Bmc>(
@@ -1359,9 +1368,37 @@ mod tests {
 
     use super::hw::HwType;
     use super::{
-        Product, is_bf4_product, should_fetch_bf4_chassis_except_irot_nic,
-        should_fetch_supplemental_network_adapter_ports, should_use_network_adapter_port_fallback,
+        InternalLockdownStatus, Product, is_bf4_product, lenovo_ami_lockdown_status,
+        should_fetch_bf4_chassis_except_irot_nic, should_fetch_supplemental_network_adapter_ports,
+        should_use_network_adapter_port_fallback,
     };
+
+    #[test]
+    fn lenovo_ami_lockdown_requires_config_and_host_interface_to_agree() {
+        for (value, interface, expected) in [
+            ("Enable", Some(false), InternalLockdownStatus::Enabled),
+            ("Disable", Some(true), InternalLockdownStatus::Disabled),
+            ("Enable", Some(true), InternalLockdownStatus::Partial),
+            ("Disable", Some(false), InternalLockdownStatus::Partial),
+            ("Disable", None, InternalLockdownStatus::Partial),
+        ] {
+            let attrs = serde_json::from_value(serde_json::json!({
+                "@odata.id": "/redfish/v1/Managers/Self/Oem/ConfigBMC",
+                "LockoutHostControl": value,
+                "LockoutBiosVariableWriteMode": if value == "Enable" { "Disable" } else { "Enable" },
+                "LockdownBiosSettingsChange": value,
+                "LockdownBiosUpgradeDowngrade": value,
+            }))
+            .unwrap();
+            let status = lenovo_ami_lockdown_status(&attrs, interface);
+            assert_eq!(status.status, expected, "{value}, {interface:?}");
+            assert!(
+                status
+                    .message
+                    .contains(&format!("host_interface={interface:?}"))
+            );
+        }
+    }
 
     #[test]
     fn is_bf4_product_matches_bf4_service_root_products() {
