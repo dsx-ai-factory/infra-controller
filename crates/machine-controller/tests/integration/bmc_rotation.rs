@@ -115,6 +115,159 @@ async fn stage_lagging_bmc(
     Ok(())
 }
 
+#[sqlx_test]
+async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use carbide_dpf::{BmcCredentialHealth, BmcCredentialObservation, DpfError};
+    use carbide_machine_controller::dpf::MockDpfOperations;
+    use model::machine::dpf_bmc_rotation::{DpfBmcRotationPhase, DpfDpuBmcRotationStep};
+
+    let patched = Arc::new(Mutex::new(None::<String>));
+    let adopted = Arc::new(AtomicBool::new(false));
+    let mut sdk = MockDpfOperations::new();
+    let observed = patched.clone();
+    let adoption_ready = adopted.clone();
+    sdk.expect_observe_bmc_credential().returning(move |id| {
+        let desired = observed.lock().unwrap().clone();
+        let active = if adoption_ready.load(Ordering::Relaxed) {
+            desired.clone()
+        } else {
+            Some("bmc-shared-password".to_string())
+        };
+        Ok(BmcCredentialObservation {
+            device_id: id.to_string(),
+            device_uid: "observed-device".to_string(),
+            resource_version: "10".to_string(),
+            desired_secret_name: desired,
+            active_secret_name: active,
+            health: BmcCredentialHealth::Ready,
+        })
+    });
+    sdk.expect_ensure_bmc_rotation_secret()
+        .times(1)
+        .returning(|id, version, password| {
+            assert_eq!((version, password), (0, "shared-password"));
+            Ok(carbide_dpf::bmc_credential_secret_name(id, Some(version)))
+        });
+    let updated = patched.clone();
+    sdk.expect_set_bmc_credential_reference()
+        .times(1)
+        .returning(move |observation, target| {
+            assert_eq!(observation.device_uid, "observed-device");
+            assert_eq!(observation.resource_version, "10");
+            *updated.lock().unwrap() = Some(target.to_string());
+            Err(DpfError::InvalidState(
+                "injected lost patch response".to_string(),
+            ))
+        });
+
+    let cm = Arc::new(TestCredentialManager::default());
+    let mut env = Env::builder(pool.clone())
+        .with_dpf_bmc_rotation(Arc::new(sdk))
+        .with_credential_manager(cm.clone())
+        .build()
+        .await;
+    let domain = env.test_harness.test_domain().await;
+    let networks = env.test_harness.network_controller();
+    let underlay = networks.create_underlay_segment(&domain).await;
+    networks.create_admin_segment(&domain).await;
+    let explorer = env.test_harness.default_test_site_explorer();
+    let mh = env
+        .test_harness
+        .managed_host_builder(&explorer, underlay)
+        .with_config(ManagedHostConfig::default())
+        .build()
+        .await
+        .0;
+    mh.advance_to_converged_ready().await;
+    let host = mh.host.machine().await;
+    let dpu_id = host.associated_dpu_machine_ids()[0];
+    let dpu_mac = db::machine::find_one(
+        &pool,
+        &dpu_id,
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .status
+    .bmc_info
+    .mac
+    .unwrap();
+    sqlx::query(
+        "UPDATE machines SET dpf = jsonb_set(dpf, '{used_for_ingestion}', 'true') WHERE id = $1",
+    )
+    .bind(host.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    cm.set_credentials(&per_device_key(dpu_mac), &creds("admin", "shared-password"))
+        .await
+        .unwrap();
+    cm.set_credentials(&rotate_to_key(0), &creds("", "shared-password"))
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    record_device_enrolled(&mut conn, dpu_mac, BMC, Some(0))
+        .await
+        .unwrap();
+    db::machine::set_bmc_credential_rotation_requested(&mut conn, &dpu_id.into())
+        .await
+        .unwrap();
+    drop(conn);
+
+    for _ in 0..16 {
+        env.run_single_iteration_without_requeue().await;
+        ack_all_site_explorer_suppressions(&pool).await;
+        if patched.lock().unwrap().is_some() {
+            break;
+        }
+    }
+    assert!(
+        patched.lock().unwrap().is_some(),
+        "rotation must reach the reference update"
+    );
+    let pending = db::dpf_bmc_rotation::get(&pool, dpu_mac)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pending.patch_pending);
+    env.run_single_iteration_without_requeue().await;
+    env.run_single_iteration_without_requeue().await;
+    assert!(matches!(
+        mh.host.machine().await.state.value,
+        ManagedHostState::RotatingBmc { dpf_rotation: Some(rotation), .. }
+            if matches!(&rotation.phase,
+                DpfBmcRotationPhase::RotateDpus { current: Some(current), .. }
+                    if current.step == DpfDpuBmcRotationStep::AwaitAdoption)
+    ));
+
+    adopted.store(true, Ordering::Relaxed);
+    for _ in 0..16 {
+        env.run_single_iteration_without_requeue().await;
+        if mh.host.machine().await.state.value == ManagedHostState::Ready {
+            break;
+        }
+    }
+    assert_eq!(mh.host.machine().await.state.value, ManagedHostState::Ready);
+    assert!(
+        db::dpf_bmc_rotation::get(&pool, dpu_mac)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        device_rotation_status(&pool, BMC, dpu_mac)
+            .await
+            .unwrap()
+            .unwrap()
+            .current_version,
+        Some(0),
+    );
+}
+
 /// When the BMC password change lands but persisting the new per-device secret
 /// to the store fails, the hardware is AHEAD of the store. The host must hold in
 /// `RotatingBmc` (staying non-allocatable and keeping the site-explorer
