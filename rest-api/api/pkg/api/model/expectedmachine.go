@@ -624,7 +624,6 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Model cannot be empty")),
 		validation.Field(&emur.Description,
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
-		// An empty string clears the policy back to Inherit.
 		validation.Field(&emur.DpuPolicy,
 			validation.NilOrNotEmpty.Error(validationErrorExpectedMachineDpuPolicy),
 			validation.In(expectedMachineDpuPolicies...).Error(validationErrorExpectedMachineDpuPolicy)),

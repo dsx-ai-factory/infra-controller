@@ -33031,9 +33031,9 @@ components:
             - Nic
             - Ignore
           description: |-
-            Effective per-host DPU policy. Inherit uses the site-wide DPU policy and is shown when no policy is set.
-            Nic operates installed DPUs as plain NICs. Ignore does not configure or attach DPU hardware.
-            Separate from isDpfEnabled, which controls DPF provisioning eligibility.
+            Effective per-host DPU policy. `Inherit` uses the site-wide DPU policy and is shown when no policy is set.
+            `Nic` operates installed DPUs as plain NICs. `Ignore` does not configure or attach DPU hardware.
+            Separate from `isDpfEnabled`, which controls DPF provisioning eligibility.
         retainBmcCredentials:
           type: boolean
           description: |-
@@ -33216,9 +33216,9 @@ components:
             - Ignore
             - null
           description: |-
-            Per-host DPU policy. Inherit uses the site-wide DPU policy; Nic operates installed DPUs as plain NICs;
-            Ignore does not configure or attach DPU hardware. Omission or null stores Inherit.
-            Separate from isDpfEnabled, which controls DPF provisioning eligibility.
+            Per-host DPU policy. `Inherit` uses the site-wide DPU policy. `Nic` operates installed DPUs as plain NICs.
+            `Ignore` does not configure or attach DPU hardware. Omission or `null` stores `Inherit`.
+            Separate from `isDpfEnabled`, which controls DPF provisioning eligibility.
         retainBmcCredentials:
           type:
             - boolean
@@ -33433,9 +33433,9 @@ components:
             - Ignore
             - null
           description: |-
-            Per-host DPU policy. Inherit uses the site-wide DPU policy; Nic operates installed DPUs as plain NICs;
-            Ignore does not configure or attach DPU hardware. Set Inherit to reset a host to the site-wide policy;
-            omission or null leaves it unchanged.
+            Per-host DPU policy. `Inherit` uses the site-wide DPU policy. `Nic` operates installed DPUs as plain NICs.
+            `Ignore` does not configure or attach DPU hardware. Set `Inherit` to reset a host to the site-wide policy.
+            Omission or `null` leaves it unchanged.
         retainBmcCredentials:
           type:
             - boolean

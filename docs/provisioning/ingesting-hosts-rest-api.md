@@ -73,7 +73,7 @@ them, so set the matching JSON fields in the body instead:
 | `--manufacturer`, `--model`, `--firmware-version`, `--name`, `--description` | Free-text hardware metadata |
 | `--slot-id`, `--tray-idx`, `--host-id` | Physical placement within a rack/tray |
 | `--retain-bmc-credentials` | `true` to keep the factory-default BMC credentials instead of rotating them; defaults to `false` |
-| `--dpu-policy` | `Inherit`, `Nic` or `Ignore`; see [DPU policy](#dpu-policy) below; defaults to `Inherit` |
+| `--dpu-policy` | `Inherit`, `Nic`, or `Ignore`. Defaults to `Inherit`. Refer to [DPU Policy](#dpu-policy). |
 
 The same fields, plus JSON-only fields, go in the stdin JSON object. Keep the
 password on stdin rather than writing it into the command:
@@ -127,18 +127,21 @@ rotated the password before the value changed to `true`, NICo still holds the
 rotated password after the reset, so Site Explorer can no longer log in to the
 BMC and waits for an operator.
 
-#### DPU policy
+#### DPU Policy
 
 `dpuPolicy` sets how NICo treats this host's DPU hardware. Single create,
-update, batch and replace-all requests all accept it.
+update, batch, and replace-all requests all accept it.
 
-- `Inherit`: use the site-wide DPU policy (see the
+- `Inherit`: use the site-wide DPU policy (refer to the
   [DPU-policy contract](boot-interfaces-and-dpu-modes.md#dpu_policy)). On a site
   set to manage DPUs, the host's DPUs are managed; on a site set to `nic` or
   `ignore`, the host follows that setting.
 - `Nic`: installed DPUs operate as plain NICs, and the host boots on HostInband.
 - `Ignore`: NICo does not configure or attach DPU hardware, and the host boots
   through a plain NIC on HostInband.
+
+For HostInband boot-interface selection, refer to
+[Expected Machine Interface Declarations](boot-interfaces-and-dpu-modes.md#expected-machine-interface-declarations).
 
 On create and replace-all, an omitted or `null` value stores `Inherit`. On
 update, omitting it or sending `null` keeps the stored value, and sending

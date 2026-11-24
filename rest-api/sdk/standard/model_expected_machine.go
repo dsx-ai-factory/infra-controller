@@ -65,7 +65,7 @@ type ExpectedMachine struct {
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Returns the effective setting: true when no value is configured. An explicitly configured false value is returned as false.
 	IsDpfEnabled *bool `json:"isDpfEnabled,omitempty"`
-	// Effective per-host DPU policy. Inherit uses the site-wide DPU policy and is shown when no policy is set. Nic operates installed DPUs as plain NICs. Ignore does not configure or attach DPU hardware. Separate from isDpfEnabled, which controls DPF provisioning eligibility.
+	// Effective per-host DPU policy. `Inherit` uses the site-wide DPU policy and is shown when no policy is set. `Nic` operates installed DPUs as plain NICs. `Ignore` does not configure or attach DPU hardware. Separate from `isDpfEnabled`, which controls DPF provisioning eligibility.
 	DpuPolicy *string `json:"dpuPolicy,omitempty"`
 	// Whether Site Explorer keeps this BMC's factory-default credentials instead of rotating them when it first stores credentials for the BMC. This is the stored setting, not the current credential state: if it changed to true after rotation, NICo still holds the rotated password. Returns false when no value is stored, as for Expected Machines created before this field existed.
 	RetainBmcCredentials *bool `json:"retainBmcCredentials,omitempty"`

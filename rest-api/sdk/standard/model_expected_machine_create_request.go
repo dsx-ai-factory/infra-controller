@@ -64,7 +64,7 @@ type ExpectedMachineCreateRequest struct {
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Optional. Omission or null uses an effective default of true. Set false explicitly to disable DPF-based provisioning.
 	IsDpfEnabled NullableBool `json:"isDpfEnabled,omitempty"`
-	// Per-host DPU policy. Inherit uses the site-wide DPU policy; Nic operates installed DPUs as plain NICs; Ignore does not configure or attach DPU hardware. Omission or null stores Inherit. Separate from isDpfEnabled, which controls DPF provisioning eligibility.
+	// Per-host DPU policy. `Inherit` uses the site-wide DPU policy. `Nic` operates installed DPUs as plain NICs. `Ignore` does not configure or attach DPU hardware. Omission or `null` stores `Inherit`. Separate from `isDpfEnabled`, which controls DPF provisioning eligibility.
 	DpuPolicy NullableString `json:"dpuPolicy,omitempty"`
 	// When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is. Optional. Omission or null stores false, which rotates BMC credentials.
 	RetainBmcCredentials NullableBool `json:"retainBmcCredentials,omitempty"`
