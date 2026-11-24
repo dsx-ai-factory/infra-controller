@@ -258,6 +258,7 @@ impl Kea6 {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| temp_base_directory.path().join("kea-leases6.csv"));
 
+        let reject_runtime_capability = config.reject_runtime_capability;
         let mut temp_conf_fd = File::create(&temp_conf_file)?;
         let mut configuration: serde_json::Value = serde_json::from_str(&Kea6::config(
             api_server_url,
@@ -299,7 +300,7 @@ impl Kea6 {
             lease_read: super::lease_io_fault::LeaseIoFault::new(
                 &temp_base_directory.path().join("lease-read-control"),
             )?,
-            reject_runtime_capability: config.reject_runtime_capability,
+            reject_runtime_capability,
             temp_conf_file,
             lease_file,
             temp_base_directory,
