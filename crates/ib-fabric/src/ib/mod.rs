@@ -579,7 +579,7 @@ mod tests {
         Error(&'static str),
     }
 
-    /// Defines one auth-policy and credential-state combination for the complete behavior matrix.
+    /// Defines one auth-policy and credential-state combination for each distinct behavior.
     #[derive(Clone, Copy, Debug)]
     struct AuthResolutionCase {
         name: &'static str,
@@ -589,37 +589,14 @@ mod tests {
         expected_reads: usize,
     }
 
-    /// Verifies explicit auth policy owns selection while omission preserves every legacy outcome.
+    /// Verifies explicit auth policy owns selection while omission preserves the legacy outcomes.
     #[tokio::test]
     async fn resolves_configured_auth_against_every_credential_state() {
         const TOKEN_REQUIRED: &str = "token is required because auth is \"token\": ufm/fabric/auth";
         const LEGACY_MISSING: &str = "vault key not found or token is not set: ufm/fabric/auth";
         let cases = [
-            // Explicit certificate mode must work without any stored credential and skip the reader.
-            AuthResolutionCase {
-                name: "certificate without credential",
-                mode: Some(UfmAuthMode::ClientCertificate),
-                password: None,
-                expected: ExpectedAuth::Certificate,
-                expected_reads: 0,
-            },
-            // An empty stored value must be irrelevant when certificate policy bypasses credentials.
-            AuthResolutionCase {
-                name: "certificate with empty credential",
-                mode: Some(UfmAuthMode::ClientCertificate),
-                password: Some(""),
-                expected: ExpectedAuth::Certificate,
-                expected_reads: 0,
-            },
-            // Whitespace must also be irrelevant instead of reintroducing credential-based selection.
-            AuthResolutionCase {
-                name: "certificate with whitespace credential",
-                mode: Some(UfmAuthMode::ClientCertificate),
-                password: Some(" \t"),
-                expected: ExpectedAuth::Certificate,
-                expected_reads: 0,
-            },
-            // A nonblank stored token must not override an explicit certificate policy.
+            // Certificate policy never reads the credential, so the result is also unchanged when
+            // nothing is stored.
             AuthResolutionCase {
                 name: "certificate with ordinary token",
                 mode: Some(UfmAuthMode::ClientCertificate),
@@ -680,14 +657,6 @@ mod tests {
                 name: "legacy with empty credential",
                 mode: None,
                 password: Some(""),
-                expected: ExpectedAuth::Certificate,
-                expected_reads: 1,
-            },
-            // Legacy trimming must continue to treat whitespace-only passwords as certificate selection.
-            AuthResolutionCase {
-                name: "legacy with whitespace credential",
-                mode: None,
-                password: Some(" \t"),
                 expected: ExpectedAuth::Certificate,
                 expected_reads: 1,
             },

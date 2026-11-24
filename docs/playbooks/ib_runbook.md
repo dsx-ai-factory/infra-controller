@@ -274,12 +274,22 @@ root:/# curl -s -k -XGET -u admin:password https://ufm:443/ufmRest/app/tokens | 
 ]
 ```
 
-Set `auth = "token"` in the fabric configuration. Restart Core for the changed
-`auth` value to take effect. Then create the credential for the UFM client:
+Store the token where NICo reads UFM credentials. When a backend supplies the
+credential, use:
 
 ```text
 root:/# nico-admin-cli credential add-ufm --url=https://<address:port> --token=<access_token>
 ```
+
+With `ufm_source = "local"`, store the token in the environment or watched file
+source because `credential add-ufm` is rejected. With `"local_first"`, update a
+local entry if it already supplies the credential. A token in the environment
+source takes effect when Core restarts. See
+[UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
+
+To select token authentication explicitly, set `auth = "token"` in the fabric
+configuration and restart Core. Without `auth`, a non-empty password already
+selects token authentication.
 
 ##### Client Authentication (mTLS)
 
@@ -325,8 +335,6 @@ Set the fabric to use the default SPIFFE client certificate:
 endpoints = ["https://ufm.example:443"]
 auth = "client_certificate"
 ```
-
-Restart Core for the changed `auth` value to take effect.
 
 No UFM credential is needed. NICo reads
 `/var/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` for client
@@ -414,6 +422,9 @@ client_cert_authentication = true
 ```bash
 /etc/init.d/ufmd restart
 ```
+
+After UFM accepts the client certificate, restart Core for the changed `auth`
+value to take effect.
 
 **Check functionality.**
 Existing nico certificates such as `/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` are used for verification.

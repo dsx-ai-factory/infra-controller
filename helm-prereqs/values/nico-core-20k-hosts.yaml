@@ -444,6 +444,7 @@ nico-api:
       # [ib_fabrics.default]
       # endpoints = ["https://192.0.2.10:443"]  # EXAMPLE - replace with your UFM endpoint
       # auth = "client_certificate" # OPTIONAL - values: "client_certificate" or "token"; changes require a Core restart
+      # Before restart, provision the token in its credential source or configure UFM to trust the client certificate.
       # pkeys = [{ start = "9000", end = "11000" }] # EXAMPLE - replace with your site PKey range
 
       # -----------------------------------------------------------------------

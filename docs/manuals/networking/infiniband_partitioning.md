@@ -162,7 +162,9 @@ P_Key ranges may be **extended in future restarts but never shrunk**:
 removing or narrowing a range under live tenants would orphan allocated
 partitions. Plan the pool with headroom.
 
-An `auth` change takes effect when Core restarts.
+An `auth` change takes effect when Core restarts. Before restarting, store the
+token in its configured credential source or configure UFM to trust the client
+certificate; see [UFM Credential](../../playbooks/ib_runbook.md#ufm-credential).
 
 ### `[ib_config]` — Fabric Toggles
 

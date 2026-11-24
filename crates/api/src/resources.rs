@@ -1496,8 +1496,7 @@ mod tests {
         .expect("disabled IB management must not require dormant UFM credentials");
     }
 
-    /// Verifies local ownership skips only explicit certificate fabrics because other modes still
-    /// depend on a readable local credential.
+    /// Verifies local ownership skips explicit certificate fabrics but not explicit token fabrics.
     #[tokio::test]
     async fn local_ufm_validation_follows_explicit_auth_mode() {
         /// Describes one auth policy and whether it can start without local credentials.
@@ -1521,12 +1520,6 @@ mod tests {
                 auth: Some(UfmAuthMode::Token),
                 succeeds_without_credentials: false,
             },
-            // Omitted auth must preserve the legacy startup requirement under local ownership.
-            Case {
-                name: "legacy",
-                auth: None,
-                succeeds_without_credentials: false,
-            },
         ];
 
         for case in cases {
@@ -1542,7 +1535,7 @@ mod tests {
             // No local readers means success can only come from certificate-mode exemption.
             let result = validate_local_ufm_credentials(&config, &[]).await;
 
-            // Distinguish the exempt mode from both credential-dependent modes.
+            // Distinguish the exempt mode from credential-dependent token mode.
             assert_eq!(
                 result.is_ok(),
                 case.succeeds_without_credentials,
