@@ -242,6 +242,7 @@ built-in rules identify the chassis field-replaceable unit (FRU) in
 from board and product FRUs even when their models are identical.
 
 <Note>
+
 During the audit, Site Explorer checks stored host reports that match an
 Expected Machine, including when `create_machines = false`. A mismatch
 increments the site-wide mismatch metric. If the BMC maps to a Machine, Site
