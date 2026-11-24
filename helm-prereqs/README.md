@@ -192,7 +192,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
 | `NICO_DPF_NICO_NGC_API_KEY` | No | NGC API key with access to the NICo DPUService images (`nico-pull-secret`). Defaults to `NICO_DPF_NGC_API_KEY`. |
 | `NICO_DPF_K8S_API_VIP` / `NICO_DPF_K8S_API_PORT` | No | Host-cluster API server address/port that DPUs must reach. Defaults are derived from the `kubernetes` Endpoints — override when the derived address is not routable from the DPUs. |
-| `NICO_DPF_COREDNS_UPSTREAM` | With `--skip-core` | Space-separated resolvers that the DPU cluster CoreDNS forwards to. They must serve the `.forge` zone. Defaults to `nico-dhcp.config.kea.hookParameters.nameservers` from the core values, with commas replaced by spaces. Preflight fails when neither is set. |
+| `NICO_DPF_COREDNS_UPSTREAM` | No (DPF only) | Override for the resolvers that the DPU cluster CoreDNS forwards to: IP addresses separated by spaces or commas. Defaults to `nico-dhcp.config.kea.hookParameters.nameservers` from the core values file, which `setup.sh` reads in every DPF run, including with `--skip-core`. Reading the file needs `python3` with PyYAML. CoreDNS spreads queries across all listed resolvers, so each one must serve the `.forge` zone. Unless `--skip-dpf`, preflight reports an error when neither source has a value. |
 | `NICO_DPF_DPU_INTERFACE` | Unless `--skip-dpf` | Controller interface on which keepalived advertises the DPU cluster VIP. |
 | `NICO_DPF_DPU_CLUSTER_VIP` | Unless `--skip-dpf` | Floating IP the DPUs use to reach their (Kamaji) control plane. |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password used to seed `nico-system/nico-bmc-v0-credentials` after Core deployment is accepted and before Core starts. setup.sh stores username `admin`, mounts the Secret as the authoritative version-0 credential source, and unsets the variable before invoking child tools. A DPF-enabled rerun reuses the Secret and rejects a different value rather than changing a credential managed hardware may use. Declining Core deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. Using the variable with `--skip-core` or `--skip-dpf` is an error. Not needed when `siteCredentials` renders the credential file, and not usable with it: setup fails when the Core values already name a different `existingSecret`. Refer to [Site Credentials Secret](#site-credentials-secret). |
@@ -803,7 +803,9 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
 4. **Operator CRs** — `DPFOperatorConfig`, `DPUCluster` (keepalived VIP from
    `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP`), and, when
    `NICO_DPF_METALLB_POOL` is set, the VIP LoadBalancer Service that makes the
-   DPU cluster VIP routable.
+   DPU cluster VIP routable. The `DPFOperatorConfig` carries the CoreDNS
+   upstream: the Kea `nameservers` value unless `NICO_DPF_COREDNS_UPSTREAM` is
+   set.
 5. **carbide-api enablement (phase 6)** — Core starts with `[dpf]` enabled and
    initializes the BFB, DPUFlavor, and DPUDeployment during that deployment.
    The `nico-api-dpf` Role is created via `nico-api.dpf.rbacCreate=true`. The API
@@ -814,8 +816,11 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    startup when v0 is current or the current target cannot be resolved.
 
 Requirements (unless `--skip-dpf`): `envsubst` on the machine running setup,
-an NGC API key, and `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP` for
-the DPU cluster VIP. The BMC root is optional at install time in `local_first`
+an NGC API key, `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP` for
+the DPU cluster VIP, and a resolver for the DPU cluster CoreDNS: the Kea
+`nameservers` value in the core values file, or `NICO_DPF_COREDNS_UPSTREAM`.
+`setup.sh` writes that resolver into the `DPFOperatorConfig`, so run it again
+after changing the resolver. The BMC root is optional at install time in `local_first`
 or `backend` mode but required before DPU provisioning. The DPF and RMS phases
 each also need `git` and a record of their pinned commit: a git checkout of
 this repository that records the submodule (`helm-prereqs/doca-platform` for
