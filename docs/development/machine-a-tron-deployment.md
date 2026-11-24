@@ -1034,8 +1034,9 @@ The next run then exhausts the pools. Two paths exist.
 
 The product path removes each machine with its DPF objects and per-BMC
 credential, then the remaining rows. `force-delete` is per machine, and
-`site-explorer delete` refuses an endpoint whose machine still exists, so run
-it after the machines are gone. Deleting interfaces records an invalidation
+`site-explorer delete` refuses an endpoint that still belongs to an ingested
+machine, switch, or power shelf, so remove the owning inventory before deleting
+its endpoint. Deleting interfaces records an invalidation
 that makes the `nico-dhcp` Kea pod restart on its next discovery, so the freed
 leases are served again without a manual restart:
 

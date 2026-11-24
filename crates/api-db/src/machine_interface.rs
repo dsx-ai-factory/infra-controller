@@ -581,6 +581,23 @@ pub async fn find_by_mac_addresses(
     .await
 }
 
+/// Whether a BMC/PMC address belongs to an ingested host, DPU, switch, or power shelf.
+/// Interface ownership survives deletion of the explored endpoint record.
+pub async fn is_bmc_ingested(db: impl DbReader<'_>, address: IpAddr) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS (
+        SELECT 1 FROM machine_interfaces mi
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE mi.interface_type = 'Bmc'
+          AND (mi.machine_id IS NOT NULL OR mi.switch_id IS NOT NULL OR mi.power_shelf_id IS NOT NULL)
+          AND mia.address = $1::inet
+    )";
+    sqlx::query_scalar(query)
+        .bind(address.to_string())
+        .fetch_one(db)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// Whether this DPU owns the OS/admin MAC. If any real interfaces are assigned,
 /// all must belong to this DPU and at least one must be a data interface.
 /// Read both tables in one snapshot: first DHCP can replace a prediction with

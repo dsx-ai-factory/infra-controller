@@ -942,9 +942,7 @@ async fn test_delete_explored_endpoint(pool: PgPool) -> Result<(), Box<dyn std::
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         error.message(),
-        format!(
-            "cannot delete endpoint {host_ip} because a machine exists for it. did you mean to force-delete the machine?"
-        )
+        format!("cannot delete endpoint {host_ip} because an ingested device owns it")
     );
 
     // Try to delete the DPU endpoint - should also fail
@@ -959,9 +957,7 @@ async fn test_delete_explored_endpoint(pool: PgPool) -> Result<(), Box<dyn std::
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         error.message(),
-        format!(
-            "cannot delete endpoint {dpu_ip} because a machine exists for it. did you mean to force-delete the machine?"
-        )
+        format!("cannot delete endpoint {dpu_ip} because an ingested device owns it")
     );
 
     // Verify both endpoints still exist

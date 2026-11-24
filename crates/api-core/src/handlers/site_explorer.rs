@@ -507,15 +507,9 @@ pub(crate) async fn delete_explored_endpoint(
         }));
     }
 
-    // Check if a machine exists for this endpoint
-    let in_managed_host =
-        carbide_site_explorer::is_endpoint_in_managed_host(bmc_ip, txn.as_pgconn())
-            .await
-            .map_err(|e| CarbideError::internal(e.to_string()))?;
-
-    if in_managed_host {
+    if db::machine_interface::is_bmc_ingested(txn.as_mut(), bmc_ip).await? {
         return Err(CarbideError::InvalidArgument(format!(
-            "cannot delete endpoint {bmc_ip} because a machine exists for it. did you mean to force-delete the machine?"
+            "cannot delete endpoint {bmc_ip} because an ingested device owns it"
         ))
         .into());
     }

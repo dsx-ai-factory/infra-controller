@@ -19,17 +19,19 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use carbide_instrument::testing::capture_logs_async;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_site_explorer::test_support::{MockEndpointExplorer, TestSiteExplorer};
 use carbide_site_explorer::{EndpointExplorationService, SiteExplorer};
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::expected_switch::{ExpectedNvosInterface, ExpectedSwitch};
 use model::metadata::Metadata;
 use model::site_explorer::{
-    Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, EthernetInterface,
-    ExploredManagedSwitch,
+    Chassis, ComputerSystem, EndpointExplorationError, EndpointExplorationReport, EndpointType,
+    EthernetInterface, ExploredManagedSwitch, PreingestionState,
 };
 
 /// Keep this shared env to the setup common to most site-explorer tests.
@@ -63,6 +65,117 @@ impl Env {
         explorer_config: SiteExplorerConfig,
     ) -> TestSiteExplorer {
         test_site_explorer(&self.test_harness, explorer_config)
+    }
+
+    /// Exercise endpoint protection after the caller has ingested a switch or shelf.
+    pub(super) async fn check_ingested_endpoint_rediscovery(
+        &self,
+        explorer: &TestSiteExplorer,
+        address: IpAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let error = self
+            .api()
+            .delete_explored_endpoint(tonic::Request::new(
+                rpc::forge::DeleteExploredEndpointRequest {
+                    ip_address: address.to_string(),
+                },
+            ))
+            .await
+            .expect_err("an ingested device's endpoint must not be deleted");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            error.message(),
+            format!("cannot delete endpoint {address} because an ingested device owns it")
+        );
+        let endpoints = db::explored_endpoints::find_all_by_ip(address, &self.pool).await?;
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "rejected deletion must retain the endpoint"
+        );
+
+        let mut txn = self.pool.txn_begin().await?;
+        db::explored_endpoints::delete(&mut txn, address).await?;
+        txn.commit().await?;
+        explorer.run_single_iteration().await?;
+
+        let endpoints = db::explored_endpoints::find_all_by_ip(address, &self.pool).await?;
+        assert_eq!(endpoints.len(), 1, "explorer must recreate the endpoint");
+        assert_eq!(endpoints[0].preingestion_state, PreingestionState::Complete);
+        assert!(
+            !db::explored_endpoints::find_preingest_not_waiting_not_error(&self.pool)
+                .await?
+                .iter()
+                .any(|endpoint| endpoint.address == address),
+            "the recreated endpoint must not enter the preingestion work queue"
+        );
+        Ok(())
+    }
+
+    /// An ingested device's failed exploration is recorded without resetting it.
+    pub(super) async fn check_ingested_endpoint_remediation(
+        &self,
+        explorer: &TestSiteExplorer,
+        address: IpAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let before = db::explored_endpoints::find_all_by_ip(address, &self.pool)
+            .await?
+            .pop()
+            .expect("the ingested endpoint must exist");
+        let error = EndpointExplorationError::RedfishError {
+            details: "transient failure on an ingested device".to_string(),
+            response_body: None,
+            response_code: Some(500),
+        };
+        explorer.insert_endpoint_result(address, Err(error.clone()));
+
+        let (result, logs) = capture_logs_async(explorer.run_single_iteration()).await;
+        result?;
+        let address_text = address.to_string();
+        let guard_log = logs
+            .iter()
+            .find(|log| {
+                log.message
+                    == "Site explorer will not remediate error because this endpoint belongs to an ingested device"
+                    && log.field("endpoint") == Some(address_text.as_str())
+            })
+            .expect("the ingested-device guard must skip remediation for this endpoint");
+        assert_eq!(guard_log.field("error"), Some(error.to_string().as_str()));
+
+        let after = db::explored_endpoints::find_all_by_ip(address, &self.pool)
+            .await?
+            .pop()
+            .expect("the failed exploration must retain the ingested endpoint");
+        assert_eq!(after.report.last_exploration_error, Some(error));
+        assert_eq!(
+            after.report_version.version_nr(),
+            before.report_version.version_nr() + 1
+        );
+        assert_eq!(
+            (
+                after.last_redfish_bmc_reset,
+                after.last_ipmitool_bmc_reset,
+                after.last_redfish_reboot,
+                after.last_redfish_powercycle,
+            ),
+            (
+                before.last_redfish_bmc_reset,
+                before.last_ipmitool_bmc_reset,
+                before.last_redfish_reboot,
+                before.last_redfish_powercycle,
+            ),
+            "skipping remediation must preserve all reset timestamps"
+        );
+        assert!(
+            explorer
+                .endpoint_explorer()
+                .redfish_power_control_calls
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "an ingested device must not receive a power-control request"
+        );
+        Ok(())
     }
 }
 

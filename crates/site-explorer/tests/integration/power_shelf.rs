@@ -206,6 +206,21 @@ async fn test_site_explorer_power_shelf_discovery(
         "1"
     );
 
+    let shelf = db::power_shelf::find_by_bmc_mac_address(&env.pool, power_shelf.bmc_mac_address)
+        .await?
+        .expect("the shelf must be ingested");
+    env.check_ingested_endpoint_rediscovery(&explorer, power_shelf.ip.parse()?)
+        .await?;
+    assert_eq!(
+        db::power_shelf::find_by_bmc_mac_address(&env.pool, power_shelf.bmc_mac_address)
+            .await?
+            .expect("rediscovery must preserve the ingested shelf")
+            .id,
+        shelf.id
+    );
+    env.check_ingested_endpoint_remediation(&explorer, power_shelf.ip.parse()?)
+        .await?;
+
     Ok(())
 }
 

@@ -226,6 +226,16 @@ async fn test_site_explorer_switch_discovery(
         "exploration must preserve the expected-switch NVOS interfaces"
     );
 
+    env.check_ingested_endpoint_rediscovery(&explorer, switch_ip.parse()?)
+        .await?;
+    assert_eq!(
+        db::switch::find_ids(&env.pool, SwitchSearchFilter::default()).await?,
+        switches,
+        "rediscovery must preserve the ingested switch"
+    );
+    env.check_ingested_endpoint_remediation(&explorer, switch_ip.parse()?)
+        .await?;
+
     Ok(())
 }
 

@@ -2975,10 +2975,8 @@ impl PreingestionManagerStatic {
     /// Returns true if this endpoint's BMC IP already maps to an ingested/paired
     /// fleet machine.
     ///
-    /// This reuses the same managed-host predicate site-explorer uses to refuse
-    /// remediation on ingested hosts (see
-    /// `site_explorer::managed_host::is_endpoint_in_managed_host`); both resolve
-    /// to `db::machine_topology::find_machine_id_by_bmc_ip`. We intentionally do
+    /// This checks persisted machine ownership of the BMC interface/address,
+    /// the machine-specific part of site-explorer's ingested-device check. We intentionally do
     /// NOT use `endpoint.report.machine_id`, which is derived from DMI during
     /// exploration and is present even for fresh, un-ingested hosts.
     ///

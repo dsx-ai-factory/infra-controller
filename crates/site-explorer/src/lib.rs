@@ -2609,10 +2609,10 @@ impl SiteExplorer {
                         .is_some_and(|v| matches!(v, ExpectedEntity::PowerShelf(_)));
 
                     if power_shelf_manual_ingestion
-                        || is_endpoint_in_managed_host(address, txn.as_pgconn()).await?
+                        || db::machine_interface::is_bmc_ingested(txn.as_pgconn(), address).await?
                     {
-                        // Power shelves use manual setup, and managed BMCs must not
-                        // repeat preingestion for another address. Keep this in the
+                        // Power shelves use manual setup, and ingested devices must not
+                        // repeat preingestion when an endpoint is rediscovered. Keep this in the
                         // insert branch so refreshes preserve explicit preingestion retries.
                         db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?
                     }
@@ -2737,16 +2737,13 @@ impl SiteExplorer {
             return;
         }
 
-        match self
-            .is_managed_host_created_for_endpoint(endpoint.address)
-            .await
-        {
-            Ok(managed_host_exists) => {
-                if managed_host_exists {
+        match self.is_endpoint_ingested(endpoint.address).await {
+            Ok(is_ingested) => {
+                if is_ingested {
                     tracing::info!(
                         %endpoint,
                         %error,
-                        "Site explorer will not remediate error because a managed host has already been created for this endpoint"
+                        "Site explorer will not remediate error because this endpoint belongs to an ingested device"
                     );
                     return;
                 }
@@ -2755,7 +2752,7 @@ impl SiteExplorer {
                 tracing::error!(
                     %endpoint,
                     error = %e,
-                    "Failed to determine whether managed host was created"
+                    "Failed to determine whether endpoint belongs to an ingested device"
                 );
                 return;
             }
@@ -3076,11 +3073,11 @@ impl SiteExplorer {
         self.redfish_power(endpoint, ResetType::ForceRestart).await
     }
 
-    async fn is_managed_host_created_for_endpoint(
-        &self,
-        bmc_ip_address: IpAddr,
-    ) -> SiteExplorerResult<bool> {
-        Ok(is_endpoint_in_managed_host(bmc_ip_address, &self.database_connection).await?)
+    async fn is_endpoint_ingested(&self, bmc_ip_address: IpAddr) -> SiteExplorerResult<bool> {
+        Ok(
+            db::machine_interface::is_bmc_ingested(&self.database_connection, bmc_ip_address)
+                .await?,
+        )
     }
 
     /// can_ingest_dpu_endpoint returns a boolean indicating whether the site explorer should continue ingesting a DPU endpoint.
