@@ -163,6 +163,8 @@ information alongside other sources.
    HTTP 400. Missing report fields or malformed JSON fail request validation.
    With Basic authentication, missing or invalid credentials return HTTP 401.
    With OAuth2, a missing or expired session redirects you to sign in.
+   In automation, continue only if `curl` exits successfully and reports HTTP
+   200. A sign-in redirect can leave `curl` with exit status zero.
 
 1. Verify that your source and selected mode appear in the CLI output:
 
