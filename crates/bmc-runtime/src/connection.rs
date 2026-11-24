@@ -363,6 +363,19 @@ impl DriverConnector {
         ))
     }
 
+    /// Whether the BMC at `access` serves its service root to an anonymous
+    /// request on the direct pool: a readiness probe that spends no login
+    /// attempt, so it works against a BMC still on its factory password.
+    pub async fn serves_service_root_anonymously(&self, access: &BmcAccessInfo) -> bool {
+        let Some(ip) = parse_uri_host_ip(&access.host) else {
+            return false;
+        };
+        self.direct_pool
+            .anonymous_service_root(SocketAddr::new(ip, access.port.unwrap_or(443)))
+            .await
+            .is_ok()
+    }
+
     /// Connects to an unexplored BMC at `access` with explicit `credentials`
     /// (for pre-exploration paths such as initial factory takeover). Selects
     /// drivers from the live `ServiceRoot`, falling back to `Chassis`
@@ -769,6 +782,28 @@ mod tests {
             &bmc_drivers::CapabilitySelection::Driver(bmc_drivers::Driver::LenovoXccAccounts)
         );
         assert!(bmc.authenticated_only_as("operator", "secret"));
+    }
+
+    /// The readiness probe reads the service root without credentials, so it
+    /// spends no login attempt, and reports an address that does not answer as
+    /// not serving.
+    #[tokio::test]
+    async fn service_root_probe_is_anonymous() {
+        let bmc = ExploredMock::serve();
+        let connector = connector(direct_pool(), &stored_root());
+
+        assert!(connector.serves_service_root_anonymously(&bmc.access).await);
+        assert!(bmc.authorizations.lock().unwrap().is_empty());
+
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = silent.local_addr().unwrap().port();
+        drop(silent);
+        let unanswered = BmcAccessInfo {
+            host: bmc.access.host.clone(),
+            port: Some(port),
+            mac_address: bmc.access.mac_address,
+        };
+        assert!(!connector.serves_service_root_anonymously(&unanswered).await);
     }
 
     /// Without an exploration report, a power shelf (whose `ServiceRoot` omits

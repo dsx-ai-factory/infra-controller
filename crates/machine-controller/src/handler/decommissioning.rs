@@ -17,7 +17,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bmc_platform::{LockdownDesiredState, LockdownScope, OperationStatus, PowerState, ResetType};
+use bmc_platform::{
+    LockdownDesiredState, LockdownScope, OperationStatus, PlatformError, PowerState, ResetType,
+};
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
@@ -415,11 +417,9 @@ pub(super) async fn handle_deconfiguring_host(
             )
         }
         DeconfiguringHostState::ResetUefiSettings => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            redfish_client.reset_bios().await.map_err(|error| {
+            let bmc = ctx.services.connect_bmc(machine).await?;
+            let reset = async { bmc.bios()?.reset().await };
+            reset.await.map_err(|error: PlatformError| {
                 StateHandlerError::GenericError(eyre::eyre!(
                     "failed to reset host UEFI settings: {error}"
                 ))

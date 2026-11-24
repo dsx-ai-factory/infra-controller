@@ -79,13 +79,11 @@ use carbide_credential_rotation::bmc_accounts::{
     apply_bmc_root_policy, change_bmc_root_password, probe_bmc_credentials,
 };
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
-use carbide_redfish::libredfish::RedfishAuth;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use db::TransactionVending as _;
 use eyre::eyre;
-use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::machine::{
     FactoryResetBmcState, HostPlatformConfigurationState, InstanceState, ManagedHostState,
@@ -488,25 +486,20 @@ async fn wait_for_bmc(
     }
 
     let (host, port) = bmc_host_port(mh_snapshot)?;
-
-    // Readiness = a successful anonymous service-root read. The `Unknown` path
-    // does no I/O at client creation and works against a just-reset BMC on its
-    // factory password without consuming an authenticated login attempt.
-    let ready = match ctx
-        .services
-        .direct_redfish_pool
-        .pool()
-        .create_client(
-            &host,
-            port,
-            RedfishAuth::Anonymous,
-            Some(RedfishVendor::Unknown),
-        )
-        .await
-    {
-        Ok(client) => client.get_service_root().await.is_ok(),
-        Err(_) => false,
+    let access = BmcAccessInfo {
+        host,
+        port,
+        mac_address: host_bmc_mac,
     };
+
+    // Readiness = a successful anonymous service-root read, which works against
+    // a just-reset BMC on its factory password without consuming an
+    // authenticated login attempt.
+    let ready = ctx
+        .services
+        .bmc_connector
+        .serves_service_root_anonymously(&access)
+        .await;
 
     if ready {
         tracing::info!(

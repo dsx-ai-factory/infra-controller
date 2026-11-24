@@ -230,6 +230,7 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError>;
 
     async fn create_bmc_user(

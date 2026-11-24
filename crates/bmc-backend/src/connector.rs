@@ -25,6 +25,7 @@ use carbide_redfish::libredfish::{
 };
 use carbide_secrets::credentials::Credentials;
 use carbide_utils::redfish::BmcAccessInfo;
+use libredfish::model::service_root::RedfishVendor;
 use model::site_explorer::EndpointExplorationReport;
 
 use crate::BackendBmc;
@@ -183,6 +184,30 @@ impl BmcConnector {
                 .await
                 .map(|bmc| BackendAccountBmc::Drivers(Box::new(bmc)))
                 .map_err(BmcConnectError::Drivers),
+        }
+    }
+
+    /// Whether the BMC at `access` serves its service root to an anonymous
+    /// request, through the same pool as [`Self::connect_with_credentials`]: a
+    /// readiness probe that spends no login attempt, so it works against a BMC
+    /// still on its factory password.
+    pub async fn serves_service_root_anonymously(&self, access: &BmcAccessInfo) -> bool {
+        match self {
+            Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
+                match pool
+                    .create_client(
+                        &access.host,
+                        access.port,
+                        RedfishAuth::Anonymous,
+                        Some(RedfishVendor::Unknown),
+                    )
+                    .await
+                {
+                    Ok(client) => client.get_service_root().await.is_ok(),
+                    Err(_) => false,
+                }
+            }
+            Self::Drivers(drivers) => drivers.serves_service_root_anonymously(access).await,
         }
     }
 
