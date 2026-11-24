@@ -154,6 +154,28 @@ impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
         Ok(bmc_credential_secret_name(device_id, version))
     }
 
+    /// Retain the shared password in a Secret exclusive to this DPUDevice.
+    pub async fn ensure_bmc_adoption_secret(&self, device_id: &str) -> Result<String, DpfError> {
+        let shared = BmcCredentialRepository::get_bmc_credential_secret(
+            &*self.repo,
+            SECRET_NAME,
+            &self.namespace,
+        )
+        .await?
+        .ok_or_else(|| DpfError::not_found("Secret", SECRET_NAME))?;
+        let password = shared
+            .data
+            .as_ref()
+            .and_then(|data| data.get("password"))
+            .and_then(|password| std::str::from_utf8(&password.0).ok())
+            .filter(|password| !password.is_empty())
+            .ok_or_else(|| {
+                DpfError::InvalidState("invalid shared BMC Secret password".to_string())
+            })?;
+        self.ensure_bmc_credential_secret(device_id, None, password)
+            .await
+    }
+
     /// Create an immutable per-device Secret or verify the identical result of an earlier attempt.
     /// `version` is the confirmed credential version; `None` identifies retained initial credentials.
     /// A collision, mutable Secret, or Secret being deleted is an error; nothing is overwritten.

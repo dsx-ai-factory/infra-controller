@@ -515,10 +515,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
         hw_sku_device_type: Some("compute".to_string()),
         update_complete: true,
         nvlink_info: None,
-        dpf: Dpf {
-            enabled: false,
-            used_for_ingestion: false,
-        },
+        dpf: Dpf::default(),
         host_profile: HostProfile::default(),
         rack_fw_details: None,
         slot_number: Some(3),

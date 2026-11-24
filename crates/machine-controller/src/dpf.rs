@@ -85,6 +85,8 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         password: &str,
     ) -> Result<String, DpfError>;
 
+    async fn ensure_bmc_adoption_secret(&self, device_id: &str) -> Result<String, DpfError>;
+
     async fn set_bmc_credential_reference(
         &self,
         observation: &BmcCredentialObservation,
@@ -973,6 +975,10 @@ impl DpfOperations for DpfSdkOps {
         self.sdk
             .ensure_bmc_credential_secret(device_id, Some(version), password)
             .await
+    }
+
+    async fn ensure_bmc_adoption_secret(&self, device_id: &str) -> Result<String, DpfError> {
+        self.sdk.ensure_bmc_adoption_secret(device_id).await
     }
 
     async fn set_bmc_credential_reference(

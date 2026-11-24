@@ -2764,7 +2764,7 @@ pub async fn create(
         .bind(sku_id)
         .bind(sqlx::types::Json(Dpf {
             enabled: dpf_enabled,
-            used_for_ingestion: false,
+            ..Default::default()
         }))
         .bind(sqlx::types::Json(&host_profile))
         .bind(spx_multiplane.as_ref().map(sqlx::types::Json))
@@ -4793,6 +4793,21 @@ pub async fn mark_machine_ingestion_done_with_dpf(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
+    Ok(())
+}
+
+pub async fn set_per_dpu_bmc_secret_confirmed(
+    txn: &mut PgConnection,
+    dpu_id: DpuMachineId,
+    confirmed: bool,
+) -> Result<(), DatabaseError> {
+    let query = "UPDATE machines SET dpf = jsonb_set(dpf, '{per_dpu_bmc_secret_confirmed}', to_jsonb($1::bool)) WHERE id = $2";
+    sqlx::query(query)
+        .bind(confirmed)
+        .bind(dpu_id.as_machine_id())
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
     Ok(())
 }
 

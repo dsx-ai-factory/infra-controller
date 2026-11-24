@@ -1067,6 +1067,11 @@ async fn handle_dpf_reprovisioning(
             .map_err(StateHandlerError::from_transaction)?;
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &state.host_snapshot.id)
             .await?;
+        for dpu in &state.dpu_snapshots {
+            if dpu.config.dpf.per_dpu_bmc_secret_confirmed {
+                db::machine::set_per_dpu_bmc_secret_confirmed(&mut txn, dpu.id, false).await?;
+            }
+        }
         return Ok(outcome.with_txn(txn));
     }
 

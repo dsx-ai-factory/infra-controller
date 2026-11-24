@@ -38,7 +38,7 @@ fn fixture() -> (DpfSdk<KubeRepository>, ApiHandle) {
             labeler: NoLabels,
             operator_version: semver::Version::new(26, 8, 0),
             shared_bmc_password_ready: Arc::new(AtomicBool::new(false)),
-            _bmc_refresh_guard: None,
+            _bmc_bootstrap_guard: None,
         },
         handle,
     )

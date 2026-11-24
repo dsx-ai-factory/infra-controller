@@ -280,6 +280,9 @@ async fn start_host_reingestion(
         // A stale request would win the reprovision hinge once the reset stops firing.
         db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu.id, false).await?;
         db::machine_topology::set_topology_update_needed(&mut txn, &dpu.id, true).await?;
+        if dpu.config.dpf.per_dpu_bmc_secret_confirmed {
+            db::machine::set_per_dpu_bmc_secret_confirmed(&mut txn, dpu.id, false).await?;
+        }
 
         dpu_states.insert(dpu.id, DpuDiscoveringState::Initializing);
     }

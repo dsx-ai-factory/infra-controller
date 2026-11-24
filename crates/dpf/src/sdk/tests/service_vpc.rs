@@ -103,7 +103,7 @@ fn fixture() -> (DpfSdk<SdkMock>, SdkMock) {
             labeler: NoLabels,
             operator_version: semver::Version::new(26, 10, 0),
             shared_bmc_password_ready: Arc::new(AtomicBool::new(false)),
-            _bmc_refresh_guard: None,
+            _bmc_bootstrap_guard: None,
         },
         repo,
     )

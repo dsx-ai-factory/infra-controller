@@ -200,7 +200,7 @@ impl K8sConfigRepository for OutdatedDpuMock {
     ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError> {
         Ok(None)
     }
-    async fn apply_secret(
+    async fn create_secret_if_absent(
         &self,
         _: &str,
         _: &str,

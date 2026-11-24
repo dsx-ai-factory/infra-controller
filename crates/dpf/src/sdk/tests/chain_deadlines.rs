@@ -44,7 +44,7 @@ async fn stalled_chain_requests_fail_at_their_deadline_without_retrying() {
             labeler: NoLabels,
             operator_version: semver::Version::new(26, 10, 0),
             shared_bmc_password_ready: Arc::new(AtomicBool::new(false)),
-            _bmc_refresh_guard: None,
+            _bmc_bootstrap_guard: None,
         };
         let mut created_chain =
             detached_dpu_service_chain_to_resource(&definition).expect("valid chain");

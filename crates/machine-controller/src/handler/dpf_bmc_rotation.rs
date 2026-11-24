@@ -63,6 +63,128 @@ pub(super) fn start(mh: &ManagedHostStateSnapshot) -> DpfBmcRotation {
     }
 }
 
+/// Move Ready devices off the shared Secret while retaining their BMC root password.
+pub(super) async fn adopt_shared_credentials(
+    mh: &ManagedHostStateSnapshot,
+    services: &MachineStateHandlerServices,
+    sdk: Option<&dyn DpfOperations>,
+) -> Result<Option<Outcome>, StateHandlerError> {
+    let Some(sdk) =
+        sdk.filter(|_| services.site_config.dpf_enabled && rotation::uses_dpf(services, mh))
+    else {
+        return Ok(None);
+    };
+    let devices: Vec<_> = mh
+        .dpu_snapshots
+        .iter()
+        .filter(|dpu| !dpu.config.dpf.per_dpu_bmc_secret_confirmed)
+        .filter_map(|dpu| dpu.dpf_id().map(|device_id| (dpu.id, device_id)))
+        .collect();
+    if devices.is_empty() {
+        return Ok(None);
+    }
+
+    let host = &mh.host_snapshot;
+    // Share the existing lifecycle lease so force-delete cannot remove Secrets
+    // while this sweep is publishing a reference. Release it after each sweep.
+    let manager = services
+        .dpf_rotation_locks
+        .as_ref()
+        .ok_or_else(|| retry("DPF BMC rotation work lock manager is unavailable"))?;
+    let lease = match manager.try_acquire_lock(recovery::work_key(host.id)).await {
+        Ok(lease) => lease,
+        Err(AcquireLockError::WorkAlreadyLocked(_)) => return Ok(None),
+        Err(error) => return Err(StateHandlerError::GenericError(error.into())),
+    };
+    if !db::machine::find_one(&services.db_pool, &host.id, MachineSearchConfig::default())
+        .await?
+        .is_some_and(|live| live.state.version == host.state.version)
+    {
+        return Ok(Some(Outcome::do_nothing()));
+    }
+
+    let mut confirmed = Vec::new();
+    let deadline = tokio::time::Instant::now() + REFERENCE_UPDATE_TIMEOUT;
+    for (dpu_id, device_id) in devices {
+        match tokio::time::timeout_at(deadline, adopt_shared_credential(sdk, &device_id)).await {
+            Ok(Ok(true)) => confirmed.push(dpu_id),
+            Ok(Ok(false)) => {}
+            Ok(Err(_)) => tracing::warn!(
+                dpu_machine_id = %dpu_id,
+                "Could not adopt the per-DPU BMC credential Secret; will retry while Ready"
+            ),
+            Err(_) => {
+                tracing::warn!(dpu_machine_id = %dpu_id, "Timed out checking DPF BMC credential adoption");
+                break;
+            }
+        }
+    }
+    if confirmed.is_empty() {
+        return Ok(None);
+    }
+
+    let mut txn = services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
+    lease.fence_transaction(&mut txn).await?;
+    if !db::machine::find_one(
+        &mut txn,
+        &host.id,
+        MachineSearchConfig {
+            for_update: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .is_some_and(|live| live.state.version == host.state.version)
+    {
+        txn.rollback()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
+        return Ok(Some(Outcome::do_nothing()));
+    }
+    for dpu_id in confirmed {
+        db::machine::set_per_dpu_bmc_secret_confirmed(&mut txn, dpu_id, true).await?;
+    }
+    Ok(Some(Outcome::do_nothing().with_txn(txn)))
+}
+
+async fn adopt_shared_credential(
+    sdk: &dyn DpfOperations,
+    device_id: &str,
+) -> Result<bool, carbide_dpf::DpfError> {
+    let observed = sdk.observe_bmc_credential(device_id).await?;
+    if observed
+        .desired_secret_name
+        .as_deref()
+        .is_some_and(|name| name != SHARED_SECRET && observed.is_adopted(name))
+    {
+        return Ok(true);
+    }
+    if observed.active_secret_name.as_deref() != Some(SHARED_SECRET) {
+        return Ok(false);
+    }
+
+    match (observed.desired_secret_name.as_deref(), &observed.health) {
+        (None | Some(SHARED_SECRET), BmcCredentialHealth::Ready) => {
+            // The target has the same password as the frozen shared Secret, so
+            // either reference works if lifecycle cleanup interrupts adoption.
+            let target = sdk.ensure_bmc_adoption_secret(device_id).await?;
+            sdk.set_bmc_credential_reference(&observed, &target).await?;
+        }
+        (
+            Some(name),
+            BmcCredentialHealth::Failed(BmcCredentialFailureReason::CredentialsSecretNotFound),
+        ) if name == carbide_dpf::bmc_credential_secret_name(device_id, None) => {
+            sdk.ensure_bmc_adoption_secret(device_id).await?;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
 pub(super) async fn handle(
     mh: &ManagedHostStateSnapshot,
     services: &MachineStateHandlerServices,
