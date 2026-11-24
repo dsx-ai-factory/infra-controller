@@ -574,7 +574,7 @@ async fn rotate_dpu(
             }
         }
         Step::ReconcileCredential => {
-            let target = read_credential(store, &key(Target)).await?;
+            let target = read_recovery_credential(store, &key(Target)).await?;
             store
                 .set_credentials(&root_key, &target)
                 .await
@@ -647,7 +647,7 @@ async fn ensure_target(
     current: &DpfDpuBmcRotation,
     device_id: &str,
 ) -> Result<(), StateHandlerError> {
-    let Credentials::UsernamePassword { password, .. } = read_credential(
+    let Credentials::UsernamePassword { password, .. } = read_recovery_credential(
         store,
         &recovery_key(current.operation_id, DpfBmcRotationCandidate::Target),
     )
@@ -684,6 +684,17 @@ async fn read_credential(
         .await
         .map_err(|_| retry("read the DPU BMC credential"))?
         .ok_or_else(|| retry("DPU BMC credential is missing"))
+}
+
+async fn read_recovery_credential(
+    store: &dyn CredentialManager,
+    key: &CredentialKey,
+) -> Result<Credentials, StateHandlerError> {
+    store
+        .get_credentials_from_writer(key)
+        .await
+        .map_err(|_| retry("read the saved DPU BMC credential"))?
+        .ok_or_else(|| retry("saved DPU BMC credential is missing"))
 }
 
 fn device_id(mac: mac_address::MacAddress) -> String {
