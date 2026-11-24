@@ -15,10 +15,15 @@ use crate::NvLinkDomainStateHandlerContext;
 
 pub(crate) fn handle_created(
     _txn: &mut PgConnection,
-    _state: &mut NvLinkDomainSnapshot,
+    state: &mut NvLinkDomainSnapshot,
     _ctx: &mut StateHandlerContext<'_, NvLinkDomainStateHandlerContext>,
 ) -> Ready<Result<StateHandlerOutcome<NvLinkDomainState>, StateHandlerError>> {
-    ready(Ok(StateHandlerOutcome::wait(
-        "waiting for domain ingestion".into(),
+    if state.domain.members.is_empty() {
+        return ready(Ok(StateHandlerOutcome::wait(
+            "waiting for declared domain members".into(),
+        )));
+    }
+    ready(Ok(StateHandlerOutcome::transition(
+        NvLinkDomainState::Discovering,
     )))
 }
