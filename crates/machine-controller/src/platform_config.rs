@@ -20,6 +20,7 @@
 //! boot off, and its boot interface first in the boot order, and the ones its
 //! DPUs need. Each platform's drivers decide what those mean on it.
 
+use bmc_backend::BackendBmc;
 use bmc_platform::{
     BiosSettings, BiosStatus, BootInterfaceSelector, ConsoleState, DriverOutcome, ManagerSettings,
     OperationReference, PlatformError, RshimState, SecureBootStatus, VendorJobId,
@@ -239,19 +240,16 @@ impl From<&BiosStatus> for DpuSettings {
 /// access off, and one UEFI HTTP boot. The BIOS settings take effect on the
 /// next DPU restart.
 pub(crate) async fn apply_dpu(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     site_config: &MachineStateHandlerSiteConfig,
 ) -> Result<(), PlatformError> {
     let bmc = match bmc {
-        PlatformBmc::Libredfish {
-            client,
-            expected_dpu_count,
-        } => {
-            return legacy::apply(*client, site_config, None, *expected_dpu_count)
+        BackendBmc::Libredfish(client) => {
+            return legacy::apply(client.as_ref(), site_config, None, 1)
                 .await
                 .map(drop);
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        BackendBmc::Drivers(bmc) => bmc,
     };
     let apply_bios = async { bmc.bios()?.apply(&BiosSettings::default(), None).await };
     let disable_host_rshim = async { bmc.dpu()?.set_host_rshim(RshimState::Disabled).await };
@@ -262,10 +260,10 @@ pub(crate) async fn apply_dpu(
 }
 
 /// Boots the DPU behind `bmc` from UEFI HTTP once, on its next restart.
-pub(crate) async fn boot_http_once(bmc: &PlatformBmc<'_>) -> Result<(), PlatformError> {
+pub(crate) async fn boot_http_once(bmc: &BackendBmc) -> Result<(), PlatformError> {
     match bmc {
-        PlatformBmc::Libredfish { client, .. } => legacy::boot_http_once(*client).await,
-        PlatformBmc::Drivers(bmc) => set_http_boot_once(bmc).await.map(drop),
+        BackendBmc::Libredfish(client) => legacy::boot_http_once(client.as_ref()).await,
+        BackendBmc::Drivers(bmc) => set_http_boot_once(bmc).await.map(drop),
     }
 }
 
@@ -283,10 +281,10 @@ async fn set_http_boot_once(
 }
 
 /// What the DPU behind `bmc` reports of its platform settings.
-pub(crate) async fn dpu_settings(bmc: &PlatformBmc<'_>) -> Result<DpuSettings, PlatformError> {
+pub(crate) async fn dpu_settings(bmc: &BackendBmc) -> Result<DpuSettings, PlatformError> {
     let bmc = match bmc {
-        PlatformBmc::Libredfish { client, .. } => return legacy::dpu_settings(*client).await,
-        PlatformBmc::Drivers(bmc) => bmc,
+        BackendBmc::Libredfish(client) => return legacy::dpu_settings(client.as_ref()).await,
+        BackendBmc::Drivers(bmc) => bmc,
     };
     let status = async {
         bmc.bios()?

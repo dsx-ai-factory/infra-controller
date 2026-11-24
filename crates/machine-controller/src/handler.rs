@@ -3948,20 +3948,6 @@ async fn handle_bfb_install_state(
     next_state_resolver: &impl NextState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let dpu_machine_id = &dpu_snapshot.id;
-    let dpu_redfish_client_result = ctx
-        .services
-        .create_redfish_client_from_machine(dpu_snapshot)
-        .await;
-
-    let dpu_redfish_client = match dpu_redfish_client_result {
-        Ok(redfish_client) => redfish_client,
-        Err(e) => {
-            return Ok(StateHandlerOutcome::wait(format!(
-                "Waiting for RedFish to become available: {:?}",
-                e
-            )));
-        }
-    };
     match substate {
         InstallDpuOsState::Completed => Ok(StateHandlerOutcome::transition(
             next_state_resolver.next_bfb_install_state(
@@ -3973,6 +3959,10 @@ async fn handle_bfb_install_state(
         InstallDpuOsState::InstallationError { .. } => Ok(StateHandlerOutcome::do_nothing()),
 
         InstallDpuOsState::InstallingBFB => {
+            let dpu_redfish_client = match dpu_redfish_client(ctx.services, dpu_snapshot).await {
+                Ok(client) => client,
+                Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
+            };
             let task = dpu_redfish_client
                 .update_firmware_simple_update(
                     "carbide-pxe.forge//public/blobs/internal/aarch64/forge.bfb",
@@ -3999,6 +3989,10 @@ async fn handle_bfb_install_state(
         }
 
         InstallDpuOsState::WaitForInstallComplete { task_id, .. } => {
+            let dpu_redfish_client = match dpu_redfish_client(ctx.services, dpu_snapshot).await {
+                Ok(client) => client,
+                Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
+            };
             let task = dpu_redfish_client
                 .get_task(task_id.as_str())
                 .await
@@ -5311,6 +5305,17 @@ async fn dpu_redfish_client(
         .map_err(|e| format!("Waiting for RedFish to become available: {e:?}"))
 }
 
+/// The DPU's BMC through the site's `bmc_backend`, or the reason to wait for it.
+async fn connect_dpu_bmc(
+    services: &MachineStateHandlerServices,
+    dpu_snapshot: &DpuMachine,
+) -> Result<BackendBmc, String> {
+    services
+        .connect_bmc(dpu_snapshot)
+        .await
+        .map_err(|e| format!("Waiting for RedFish to become available: {e:?}"))
+}
+
 impl DpuMachineStateHandler {
     pub fn new(
         dpu_nic_firmware_initial_update_enabled: bool,
@@ -5362,13 +5367,9 @@ impl DpuMachineStateHandler {
                 Ok(StateHandlerOutcome::transition(next_state))
             }
             DpuDiscoveringState::EnableRshim => {
-                let bmc = match ctx.services.connect_bmc(dpu_snapshot).await {
+                let bmc = match connect_dpu_bmc(ctx.services, dpu_snapshot).await {
                     Ok(bmc) => bmc,
-                    Err(e) => {
-                        return Ok(StateHandlerOutcome::wait(format!(
-                            "Waiting for RedFish to become available: {e:?}"
-                        )));
-                    }
+                    Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
                 };
                 async { bmc.dpu()?.enable_bmc_rshim().await }
                     .await
@@ -5444,17 +5445,10 @@ impl DpuMachineStateHandler {
                 // guaranteed to have POSTed), it will loop through all the interfaces between
                 // IPv4, IPv6 so it may take a while.
                 //
-                let dpu_redfish_client = match dpu_redfish_client(ctx.services, dpu_snapshot).await
-                {
-                    Ok(client) => client,
+                let bmc = match connect_dpu_bmc(ctx.services, dpu_snapshot).await {
+                    Ok(bmc) => bmc,
                     Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
                 };
-                let bmc = PlatformBmc::connect_dpu(
-                    ctx.services,
-                    dpu_snapshot,
-                    dpu_redfish_client.as_ref(),
-                )
-                .await?;
                 platform_config::boot_http_once(&bmc)
                     .await
                     .map_err(|e| platform_error("boot_once", e))?;
@@ -5640,19 +5634,15 @@ impl DpuMachineStateHandler {
 
                 let dpf_used_for_ingestion = state.host_snapshot.config.dpf.used_for_ingestion;
 
-                let dpu_redfish_client = match ctx
-                    .services
-                    .create_redfish_client_from_machine(dpu_snapshot)
-                    .await
-                {
-                    Ok(v) => v,
+                let bmc = match ctx.services.connect_bmc(dpu_snapshot).await {
+                    Ok(bmc) => bmc,
                     Err(e) => {
                         let msg = format!(
-                            "failed to create redfish client for DPU {}, potentially because we turned the host off as part of error handling in this state. err: {}",
+                            "failed to connect to the BMC of DPU {}, potentially because we turned the host off as part of error handling in this state. err: {}",
                             dpu_snapshot.id, e
                         );
                         tracing::warn!(msg);
-                        // If we cannot create a redfish client for the DPU, this function call will never result in an actual DPU reboot.
+                        // If we cannot connect to the DPU's BMC, this function call will never result in an actual DPU reboot.
                         // The only side effect is turning the DPU's host back on if we turned it off earlier.
                         let reboot_status = trigger_reboot_if_needed(
                             dpu_snapshot,
@@ -5687,7 +5677,6 @@ impl DpuMachineStateHandler {
                 // management is available.
                 if !dpf_used_for_ingestion {
                     if self.enable_secure_boot {
-                        let bmc = ctx.services.connect_bmc(dpu_snapshot).await?;
                         let dpu = bmc.dpu().map_err(|e| platform_error("dpu", e.into()))?;
                         dpu.set_host_rshim(RshimState::Disabled)
                             .await
@@ -5695,38 +5684,30 @@ impl DpuMachineStateHandler {
                         dpu.set_host_privilege_level(HostPrivilegeLevel::Restricted)
                             .await
                             .map_err(|e| platform_error("set_host_privilege_level", e))?;
-                    } else {
-                        let bmc = PlatformBmc::connect_dpu(
-                            ctx.services,
+                    } else if let Err(e) =
+                        platform_config::apply_dpu(&bmc, &ctx.services.site_config).await
+                    {
+                        // TODO(chet): I don't know if this is still a thing, but I'm pretty sure
+                        // it hasn't been fixed/addressed yet, and it appears to be logged all over
+                        // the place now.
+                        let msg = format!(
+                            "applying the platform settings failed for DPU {}, potentially due to known race condition between UEFI POST and BMC. issuing a force-restart. err: {}",
+                            dpu_snapshot.id, e
+                        );
+                        tracing::warn!(msg);
+                        let reboot_status = trigger_reboot_if_needed(
                             dpu_snapshot,
-                            dpu_redfish_client.as_ref(),
+                            state,
+                            None,
+                            &self.reachability_params,
+                            ctx,
                         )
                         .await?;
-                        if let Err(e) =
-                            platform_config::apply_dpu(&bmc, &ctx.services.site_config).await
-                        {
-                            // TODO(chet): I don't know if this is still a thing, but I'm pretty sure
-                            // it hasn't been fixed/addressed yet, and it appears to be logged all over
-                            // the place now.
-                            let msg = format!(
-                                "applying the platform settings failed for DPU {}, potentially due to known race condition between UEFI POST and BMC. issuing a force-restart. err: {}",
-                                dpu_snapshot.id, e
-                            );
-                            tracing::warn!(msg);
-                            let reboot_status = trigger_reboot_if_needed(
-                                dpu_snapshot,
-                                state,
-                                None,
-                                &self.reachability_params,
-                                ctx,
-                            )
-                            .await?;
 
-                            return Ok(StateHandlerOutcome::wait(format!(
-                                "{msg};\nWaiting for DPU {} to reboot: {reboot_status:#?}",
-                                dpu_snapshot.id
-                            )));
-                        }
+                        return Ok(StateHandlerOutcome::wait(format!(
+                            "{msg};\nWaiting for DPU {} to reboot: {reboot_status:#?}",
+                            dpu_snapshot.id
+                        )));
                     }
                 }
 
@@ -5744,16 +5725,12 @@ impl DpuMachineStateHandler {
                     dpu_uefi_version,
                 )
                 .await?;
-                let staged = async {
-                    let bmc = ctx.services.connect_bmc(dpu_snapshot).await?;
-                    set_dpu_uefi_password(
-                        &bmc,
-                        ctx.services.credential_manager.as_ref(),
-                        &dpu_uefi_password,
-                        &ctx.services.instrumentation,
-                    )
-                    .await
-                }
+                let staged = set_dpu_uefi_password(
+                    &bmc,
+                    ctx.services.credential_manager.as_ref(),
+                    &dpu_uefi_password,
+                    &ctx.services.instrumentation,
+                )
                 .await;
                 let credentials_updated = match staged {
                     Err(e) => {
@@ -5877,28 +5854,7 @@ impl DpuMachineStateHandler {
                     return Ok(StateHandlerOutcome::transition(next_state));
                 }
 
-                let dpu_redfish_client = match ctx
-                    .services
-                    .create_redfish_client_from_machine(dpu_snapshot)
-                    .await
-                {
-                    Ok(client) => client,
-                    Err(e) => {
-                        return Err(redfish_error(
-                            "create_client_from_machine",
-                            RedfishError::GenericError {
-                                error: e.to_string(),
-                            },
-                        ));
-                    }
-                };
-
-                let bmc = PlatformBmc::connect_dpu(
-                    ctx.services,
-                    dpu_snapshot,
-                    dpu_redfish_client.as_ref(),
-                )
-                .await?;
+                let bmc = ctx.services.connect_bmc(dpu_snapshot).await?;
                 match platform_config::dpu_settings(&bmc).await {
                     Ok(DpuSettings::InEffect) => {
                         tracing::info!(
@@ -6030,13 +5986,9 @@ impl DpuMachineStateHandler {
         let time_since_state_change: chrono::TimeDelta =
             state.host_snapshot.state.version.since_state_change();
 
-        let bmc = match services.connect_bmc(dpu_snapshot).await {
+        let bmc = match connect_dpu_bmc(services, dpu_snapshot).await {
             Ok(bmc) => bmc,
-            Err(e) => {
-                return Ok(StateHandlerOutcome::wait(format!(
-                    "Waiting for RedFish to become available: {e:?}"
-                )));
-            }
+            Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
         };
         let wait_for_dpu_to_come_up = if time_since_state_change.num_minutes() > 5 {
             false
@@ -14492,7 +14444,7 @@ async fn restart_dpu(
     services: &MachineStateHandlerServices,
     dpf_used_for_ingestion: bool,
 ) -> Result<(), StateHandlerError> {
-    let dpu_redfish_client = services.create_redfish_client_from_machine(machine).await?;
+    let bmc = services.connect_bmc(machine).await?;
 
     // We have seen the boot order be reset on DPUs in some edge cases (for example, after upgrading the BMC and CEC on BF3s)
     // This should take care of handling such cases. It is a no-op most of the time.
@@ -14501,17 +14453,9 @@ async fn restart_dpu(
         && services.site_config.dpu_enable_secure_boot;
 
     if !redfish_install && !dpf_used_for_ingestion {
-        let boot_http_once = async {
-            let bmc = PlatformBmc::connect_dpu(services, machine, dpu_redfish_client.as_ref())
-                .await
-                .map_err(|e| e.to_string())?;
-            platform_config::boot_http_once(&bmc)
-                .await
-                .map_err(|e| e.to_string())
-        };
         // We use a Dell to mock our BMC responses in the integration tests. UefiHttp boot is not implemented
         // for Dells, so this call is failing in our tests. Regardless, it is ok to not make this call blocking.
-        if let Err(error) = boot_http_once.await {
+        if let Err(error) = platform_config::boot_http_once(&bmc).await {
             tracing::error!(
                 machine_id = %machine.id,
                 %error,
@@ -14520,7 +14464,6 @@ async fn restart_dpu(
         }
     }
 
-    let bmc = services.connect_bmc(machine).await?;
     let power_state = power_state(&bmc)
         .await
         .map_err(|e| platform_error("get_power_state", e))?;
