@@ -289,7 +289,7 @@ The required `source` table selects one serial-bearing field.
 |---|---|---|
 | `system_serial` | Primary ComputerSystem's `SerialNumber` | None |
 | `system_sku` | Primary ComputerSystem's `SKU` | None |
-| `chassis` | Matching chassis's `SerialNumber` | Required `chassis_id` pattern |
+| `chassis` | Matching chassis's stored `SerialNumber` | Required `chassis_id` pattern |
 | `chassis_assembly` | Matching Assembly member's `SerialNumber` | Required `chassis_id` pattern and at least one of `name`, `model`, or `member_id` |
 
 Each pattern table contains exactly one of `exact`, `prefix`, or `contains`.
