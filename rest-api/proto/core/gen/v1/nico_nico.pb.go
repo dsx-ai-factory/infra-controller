@@ -30562,6 +30562,9 @@ type ManagedHostNetworkConfigResponse struct {
 	// field by default, preserving the DHCPv6 protocol preference of zero. An
 	// explicitly configured zero remains present.
 	Dhcpv6ServerPreference *uint32 `protobuf:"varint,25,opt,name=dhcpv6_server_preference,json=dhcpv6ServerPreference,proto3,oneof" json:"dhcpv6_server_preference,omitempty"`
+	// Optional site-wide PXE service URL for the agent's DHCP configuration.
+	// Omission supplies no URL. Preserve configured strings, including empty values.
+	NicoPxeServiceUrl *string `protobuf:"bytes,26,opt,name=nico_pxe_service_url,json=nicoPxeServiceUrl,proto3,oneof" json:"nico_pxe_service_url,omitempty"`
 	// Enable nico DHCP on HBN.
 	// Deprecated: It is always enabled now.
 	EnableDhcp bool `protobuf:"varint,100,opt,name=enable_dhcp,json=enableDhcp,proto3" json:"enable_dhcp,omitempty"`
@@ -30843,6 +30846,13 @@ func (x *ManagedHostNetworkConfigResponse) GetDhcpv6ServerPreference() uint32 {
 		return *x.Dhcpv6ServerPreference
 	}
 	return 0
+}
+
+func (x *ManagedHostNetworkConfigResponse) GetNicoPxeServiceUrl() string {
+	if x != nil && x.NicoPxeServiceUrl != nil {
+		return *x.NicoPxeServiceUrl
+	}
+	return ""
 }
 
 func (x *ManagedHostNetworkConfigResponse) GetEnableDhcp() bool {
@@ -85732,7 +85742,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x13MachineHardwareInfo\x12*\n" +
 	"\x04gpus\x18\x01 \x03(\v2\x16.machine_discovery.GpuR\x04gpus\"Z\n" +
 	"\x1fManagedHostNetworkConfigRequest\x127\n" +
-	"\x0edpu_machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\fdpuMachineId\"\xc0\x19\n" +
+	"\x0edpu_machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\fdpuMachineId\"\x8f\x1a\n" +
 	" ManagedHostNetworkConfigResponse\x12\x10\n" +
 	"\x03asn\x18\x02 \x01(\rR\x03asn\x12!\n" +
 	"\fdhcp_servers\x18\x03 \x03(\tR\vdhcpServers\x12\x1d\n" +
@@ -85761,37 +85771,39 @@ const file_nico_nico_proto_rawDesc = "" +
 	"ntpServers\x12=\n" +
 	"\x1bvpc_peer_vnis_authoritative\x18\x17 \x01(\bR\x18vpcPeerVnisAuthoritative\x12N\n" +
 	"\x17site_fabric_null_routes\x18\x18 \x01(\v2\x12.common.StringListH\x04R\x14siteFabricNullRoutes\x88\x01\x01\x12=\n" +
-	"\x18dhcpv6_server_preference\x18\x19 \x01(\rH\x05R\x16dhcpv6ServerPreference\x88\x01\x01\x12\x1f\n" +
+	"\x18dhcpv6_server_preference\x18\x19 \x01(\rH\x05R\x16dhcpv6ServerPreference\x88\x01\x01\x124\n" +
+	"\x14nico_pxe_service_url\x18\x1a \x01(\tH\x06R\x11nicoPxeServiceUrl\x88\x01\x01\x12\x1f\n" +
 	"\venable_dhcp\x18d \x01(\bR\n" +
 	"enableDhcp\x12/\n" +
-	"\x11host_interface_id\x18f \x01(\tH\x06R\x0fhostInterfaceId\x88\x01\x01\x12>\n" +
-	"\x19min_dpu_functioning_links\x18g \x01(\rH\aR\x16minDpuFunctioningLinks\x88\x01\x01\x12$\n" +
+	"\x11host_interface_id\x18f \x01(\tH\aR\x0fhostInterfaceId\x88\x01\x01\x12>\n" +
+	"\x19min_dpu_functioning_links\x18g \x01(\rH\bR\x16minDpuFunctioningLinks\x88\x01\x01\x12$\n" +
 	"\x0eis_primary_dpu\x18h \x01(\bR\fisPrimaryDpu\x12+\n" +
-	"\x0finternet_l3_vni\x18j \x01(\rH\bR\rinternetL3Vni\x88\x01\x01\x120\n" +
-	"\binstance\x18k \x01(\v2\x0f.forge.InstanceH\tR\binstance\x88\x01\x01\x12%\n" +
+	"\x0finternet_l3_vni\x18j \x01(\rH\tR\rinternetL3Vni\x88\x01\x01\x120\n" +
+	"\binstance\x18k \x01(\v2\x0f.forge.InstanceH\n" +
+	"R\binstance\x88\x01\x01\x12%\n" +
 	"\x0edatacenter_asn\x18l \x01(\rR\rdatacenterAsn\x12Y\n" +
-	"\x1ccommon_internal_route_target\x18m \x01(\v2\x13.common.RouteTargetH\n" +
-	"R\x19commonInternalRouteTarget\x88\x01\x01\x12Z\n" +
+	"\x1ccommon_internal_route_target\x18m \x01(\v2\x13.common.RouteTargetH\vR\x19commonInternalRouteTarget\x88\x01\x01\x12Z\n" +
 	"\x1fadditional_route_target_imports\x18n \x03(\v2\x13.common.RouteTargetR\x1cadditionalRouteTargetImports\x12r\n" +
 	"!network_security_policy_overrides\x18o \x03(\v2'.forge.ResolvedNetworkSecurityGroupRuleR\x1enetworkSecurityPolicyOverrides\x12a\n" +
 	"\x16dpu_extension_services\x18p \x03(\v2+.forge.ManagedHostDpuExtensionServiceConfigR\x14dpuExtensionServices\x12C\n" +
-	"\x0frouting_profile\x18r \x01(\v2\x15.forge.RoutingProfileH\vR\x0eroutingProfile\x88\x01\x01\x122\n" +
+	"\x0frouting_profile\x18r \x01(\v2\x15.forge.RoutingProfileH\fR\x0eroutingProfile\x88\x01\x01\x122\n" +
 	"\x15anycast_site_prefixes\x18s \x03(\tR\x13anycastSitePrefixes\x12+\n" +
-	"\x0ftenant_host_asn\x18t \x01(\rH\fR\rtenantHostAsn\x88\x01\x01\x122\n" +
-	"\x13site_global_vpc_vni\x18u \x01(\rH\rR\x10siteGlobalVpcVni\x88\x01\x01\x12>\n" +
-	"\x19bgp_leaf_session_password\x18v \x01(\tH\x0eR\x16bgpLeafSessionPassword\x88\x01\x01\x12:\n" +
-	"\fastra_config\x18w \x01(\v2\x12.forge.AstraConfigH\x0fR\vastraConfig\x88\x01\x01\x12>\n" +
-	"\x19use_admin_network_changed\x18x \x01(\bH\x10R\x16useAdminNetworkChanged\x88\x01\x01\x12W\n" +
+	"\x0ftenant_host_asn\x18t \x01(\rH\rR\rtenantHostAsn\x88\x01\x01\x122\n" +
+	"\x13site_global_vpc_vni\x18u \x01(\rH\x0eR\x10siteGlobalVpcVni\x88\x01\x01\x12>\n" +
+	"\x19bgp_leaf_session_password\x18v \x01(\tH\x0fR\x16bgpLeafSessionPassword\x88\x01\x01\x12:\n" +
+	"\fastra_config\x18w \x01(\v2\x12.forge.AstraConfigH\x10R\vastraConfig\x88\x01\x01\x12>\n" +
+	"\x19use_admin_network_changed\x18x \x01(\bH\x11R\x16useAdminNetworkChanged\x88\x01\x01\x12W\n" +
 	"\x12service_interfaces\x18y \x03(\v2(.forge.ManagedHostServiceInterfaceConfigR\x11serviceInterfaces\x12`\n" +
-	"\x1aservice_vpc_slot_inventory\x18z \x01(\v2\x1e.forge.ServiceVpcSlotInventoryH\x11R\x17serviceVpcSlotInventory\x88\x01\x01\x12P\n" +
-	"\"accepted_lldp_snapshot_fingerprint\x18{ \x01(\fH\x12R\x1facceptedLldpSnapshotFingerprint\x88\x01\x01B\x0e\n" +
+	"\x1aservice_vpc_slot_inventory\x18z \x01(\v2\x1e.forge.ServiceVpcSlotInventoryH\x12R\x17serviceVpcSlotInventory\x88\x01\x01\x12P\n" +
+	"\"accepted_lldp_snapshot_fingerprint\x18{ \x01(\fH\x13R\x1facceptedLldpSnapshotFingerprint\x88\x01\x01B\x0e\n" +
 	"\f_instance_idB\x1e\n" +
 	"\x1c_network_virtualization_typeB\n" +
 	"\n" +
 	"\b_vpc_vniB\x1a\n" +
 	"\x18_dpu_network_pinger_typeB\x1a\n" +
 	"\x18_site_fabric_null_routesB\x1b\n" +
-	"\x19_dhcpv6_server_preferenceB\x14\n" +
+	"\x19_dhcpv6_server_preferenceB\x17\n" +
+	"\x15_nico_pxe_service_urlB\x14\n" +
 	"\x12_host_interface_idB\x1c\n" +
 	"\x1a_min_dpu_functioning_linksB\x12\n" +
 	"\x10_internet_l3_vniB\v\n" +

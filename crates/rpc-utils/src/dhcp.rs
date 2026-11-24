@@ -81,6 +81,11 @@ pub struct DhcpConfig {
     /// into omission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dhcpv6_server_preference: Option<u8>,
+    /// Optional NICo PXE service URL carried in the agent's DHCP configuration.
+    /// Omission means unconfigured; supplied strings, including empty strings,
+    /// are preserved unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nico_pxe_service_url: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -133,6 +138,7 @@ impl Default for DhcpConfig {
             dhcpv6_preferred_lifetime_secs: 0,
             dhcpv6_valid_lifetime_secs: 0,
             dhcpv6_server_preference: None,
+            nico_pxe_service_url: None,
         }
     }
 }
@@ -1599,6 +1605,30 @@ mod tests {
         assert_eq!(old_config.dhcpv6_preferred_lifetime_secs, 0);
         assert_eq!(old_config.dhcpv6_valid_lifetime_secs, 0);
         assert_eq!(old_config.dhcpv6_server_preference, None);
+    }
+
+    #[test]
+    fn dhcp_config_nico_pxe_service_url_preserves_omission_and_exact_values() {
+        value_scenarios!(run = |url: Option<&str>| {
+                let config = DhcpConfig {
+                    nico_pxe_service_url: url.map(str::to_string),
+                    ..Default::default()
+                };
+                let wire = serde_json::to_value(&config).expect("DHCP config serializes");
+                let url_is_present = wire.get("nico_pxe_service_url").is_some();
+                let recovered: DhcpConfig =
+                    serde_json::from_value(wire).expect("DHCP config deserializes");
+                assert_eq!(recovered.nico_pxe_service_url.as_deref(), url);
+                url_is_present
+            };
+            "unconfigured URL is omitted" {
+                None => false,
+            }
+            "configured strings round-trip unchanged" {
+                Some("http://PXE.Example:8080/discovery?site=foo%2Fbar") => true,
+                Some("") => true,
+            }
+        );
     }
 
     #[test]

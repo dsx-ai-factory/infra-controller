@@ -214,6 +214,29 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
     }
 }
 
+#[tokio::test]
+async fn network_config_displays_pxe_service_url() {
+    for (url, expected) in [
+        (
+            Some("http://pxe.example.com:8080/"),
+            "http://pxe.example.com:8080/",
+        ),
+        (None, ""),
+    ] {
+        let output = network_config_output(ManagedHostNetworkConfigResponse {
+            nico_pxe_service_url: url.map(str::to_string),
+            ..Default::default()
+        })
+        .await;
+        let row = output
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('|')?.strip_suffix('|'))
+            .map(|line| line.split('|').map(str::trim).collect::<Vec<_>>())
+            .find(|row| row.first() == Some(&"PXE Service URL"));
+        assert_eq!(row, Some(vec!["PXE Service URL", expected]), "{output}");
+    }
+}
+
 async fn network_config_output(config: ManagedHostNetworkConfigResponse) -> String {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

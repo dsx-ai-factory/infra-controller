@@ -1315,6 +1315,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
     // The default fixture omits `lo-ip-v6`, which must preserve the existing IPv4-only response.
     let mut config = api_fixtures::get_config();
     config.dhcpv6_server_preference = Some(0);
+    config.nico_pxe_service_url = Some("http://Boot.Example:8080/".to_string());
     let env =
         api_fixtures::create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config))
             .await;
@@ -1346,6 +1347,10 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
         "sites without lo-ip-v6 must remain IPv4-only"
     );
     assert_eq!(response.dhcpv6_server_preference, Some(0));
+    assert_eq!(
+        response.nico_pxe_service_url.as_deref(),
+        Some("http://Boot.Example:8080/")
+    );
 
     let admin_interface = response.admin_interface.expect("admin interface");
     assert!(admin_interface.ipv6_interface_config.is_none());
@@ -1434,6 +1439,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         .unwrap()
         .into_inner();
     let admin_interface = response.admin_interface.expect("admin interface");
+    assert_eq!(response.nico_pxe_service_url, None);
     let ipv4 = persisted_ipv4.to_string();
     let ipv6 = persisted_ipv6.to_string();
     let ipv4_host_route = format!("{ipv4}/32");

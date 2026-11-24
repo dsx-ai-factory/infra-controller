@@ -1270,6 +1270,7 @@ fn build_dhcp_server_config(
     dhcp_config.dhcpv6_preferred_lifetime_secs = dhcp::DHCPV6_PREFERRED_LIFETIME_SECS;
     dhcp_config.dhcpv6_valid_lifetime_secs = dhcp::DHCPV6_VALID_LIFETIME_SECS;
     dhcp_config.dhcpv6_server_preference = dhcpv6_server_preference(network_config)?;
+    dhcp_config.nico_pxe_service_url = network_config.nico_pxe_service_url.clone();
     if loopback_ip.is_none() {
         dhcp_config.dhcpv6_server_id =
             Some(DhcpV6ServerId::from_remote_id(&network_config.remote_id)?);
@@ -7760,6 +7761,7 @@ esac
             dhcp_servers: vec!["10.217.5.197".to_string(), "10.217.5.197".to_string()],
             ntp_servers: vec![],
             dhcpv6_server_preference: Some(255),
+            nico_pxe_service_url: None,
             vni_device: "vxlan48".to_string(),
 
             managed_host_config: Some(netconf),
@@ -8344,6 +8346,7 @@ esac
             received.dhcpv6_server_preference,
             expected.dhcpv6_server_preference
         );
+        assert_eq!(received.nico_pxe_service_url, expected.nico_pxe_service_url);
     }
 
     fn validate_host_config(received: HostConfig, expected: HostConfig) {
@@ -8526,6 +8529,7 @@ esac
             dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
             dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
             dhcpv6_server_preference: Some(0),
+            nico_pxe_service_url: Some("http://pxe.example:8080".to_string()),
             ..Default::default()
         };
 
@@ -8574,6 +8578,7 @@ esac
             dhcp_servers: vec!["10.217.5.197".to_string(), "10.217.5.197".to_string()],
             ntp_servers: vec![],
             dhcpv6_server_preference: Some(0),
+            nico_pxe_service_url: Some("http://pxe.example:8080".to_string()),
             vni_device: "vxlan48".to_string(),
 
             managed_host_config: Some(netconf),
@@ -8760,6 +8765,7 @@ esac
             dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
             carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
             dhcpv6_server_preference: Some(0),
+            nico_pxe_service_url: Some("http://pxe.example:8080".to_string()),
             ..Default::default()
         };
         let dhcp_contents = super::read_limited(g.path(), MAX_DHCP_ACL_SIZE)?;
@@ -8829,6 +8835,7 @@ esac
             dhcp_servers: vec![],
             ntp_servers: vec![],
             dhcpv6_server_preference: Some(255),
+            nico_pxe_service_url: None,
             vni_device: "vxlan48".to_string(),
             managed_host_config: Some(netconf),
             managed_host_config_version: "V1-T1".to_string(),

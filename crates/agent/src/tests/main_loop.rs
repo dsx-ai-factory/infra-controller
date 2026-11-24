@@ -2074,6 +2074,7 @@ enum NonHbnInputChange {
     DeprecatedDenyPrefixes,
     NtpServers,
     Dhcpv6ServerPreference,
+    NicoPxeServiceUrl,
     HostInterfaceId,
     ExtensionServices,
     AstraConfig,
@@ -2096,6 +2097,9 @@ impl NonHbnInputChange {
                 .push("192.0.2.0/24".to_string()),
             Self::NtpServers => config.ntp_servers.push("10.40.0.3".to_string()),
             Self::Dhcpv6ServerPreference => config.dhcpv6_server_preference = Some(0),
+            Self::NicoPxeServiceUrl => {
+                config.nico_pxe_service_url = Some("http://pxe.example:8080".to_string());
+            }
             Self::HostInterfaceId => {
                 config.host_interface_id = Some("7340b4f5-1721-4dd3-8fc3-9f91a4c29f61".to_string());
             }
@@ -2150,6 +2154,7 @@ fn current_network_version_ignores_non_hbn_inputs() {
             NonHbnInputChange::NtpServers => true,
             // DHCP is reconciled independently before the HBN skip decision.
             NonHbnInputChange::Dhcpv6ServerPreference => true,
+            NonHbnInputChange::NicoPxeServiceUrl => true,
             NonHbnInputChange::DeprecatedDenyPrefixes => true,
             NonHbnInputChange::DeprecatedDhcpFlag => true,
         }

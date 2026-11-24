@@ -800,6 +800,7 @@ impl CurrentNetworkVersion {
         // DHCP is reconciled before this HBN skip decision on every iteration.
         config.ntp_servers.clear();
         config.dhcpv6_server_preference = None;
+        config.nico_pxe_service_url = None;
 
         // `host_interface_id` helps resolve the host machine ID when the agent
         // starts, but a later change does not affect HBN rendering.

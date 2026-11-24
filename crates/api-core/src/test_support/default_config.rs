@@ -383,6 +383,7 @@ pub fn get() -> CarbideConfig {
         x86_pxe_boot_url_override: None,
         arm_pxe_boot_url_override: None,
         pxe_public_base_url: default_pxe_public_base_url(),
+        nico_pxe_service_url: None,
         set_http_boot_uri_for_vendors: vec![],
         external_api_url: None,
         external_pxe_url: None,

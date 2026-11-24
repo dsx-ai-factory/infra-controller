@@ -921,9 +921,16 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub arm_pxe_boot_url_override: Option<String>,
 
-    /// Canonical PXE base URL
+    /// Scout firmware-download base, used when `nico_pxe_service_url` is absent or empty.
     #[serde(default = "default_pxe_public_base_url")]
     pub pxe_public_base_url: String,
+
+    /// Optional site-wide PXE service URL for Scout firmware downloads and DPU DHCP configuration.
+    /// A nonempty value takes precedence over `pxe_public_base_url` for firmware downloads.
+    /// Omitted by default; supplied strings, including empty values, are preserved.
+    /// Core reads this setting at startup, so changes require a restart.
+    #[serde(default)]
+    pub nico_pxe_service_url: Option<String>,
 
     /// Vendors for which the state controller should pin the UEFI HTTP boot
     /// URL on the BMC (via Redfish `HttpBootUri`) in addition to the existing
@@ -1562,7 +1569,12 @@ impl CarbideConfig {
 
     pub fn machine_state_handler_site_config(&self) -> MachineStateHandlerSiteConfig {
         MachineStateHandlerSiteConfig {
-            pxe_public_base_url: self.pxe_public_base_url.clone(),
+            pxe_public_base_url: self
+                .nico_pxe_service_url
+                .as_ref()
+                .filter(|url| !url.is_empty())
+                .unwrap_or(&self.pxe_public_base_url)
+                .clone(),
             firmware_global: self.firmware_global.clone(),
             machine_state_controller: self.machine_state_controller.clone(),
             host_health: self.host_health,
@@ -7742,6 +7754,59 @@ path = "credentials.yaml"
                     .extract()
                     .unwrap();
                 config.allow_insecure_discovery
+            },
+        );
+    }
+
+    #[test]
+    fn nico_pxe_service_url_preserves_value_and_selects_firmware_base() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: "",
+                    expect: (None, default_pxe_public_base_url()),
+                },
+                Check {
+                    scenario: "legacy URL without discovery",
+                    input: r#"pxe_public_base_url = "http://legacy.example:8080""#,
+                    expect: (None, "http://legacy.example:8080".to_string()),
+                },
+                Check {
+                    scenario: "empty discovery retains legacy URL",
+                    input: "nico_pxe_service_url = \"\"\npxe_public_base_url = \"http://legacy.example:8080\"",
+                    expect: (
+                        Some(String::new()),
+                        "http://legacy.example:8080".to_string(),
+                    ),
+                },
+                Check {
+                    scenario: "unchanged URL",
+                    input: r#"nico_pxe_service_url = "http://Boot.Example:8080/""#,
+                    expect: (
+                        Some("http://Boot.Example:8080/".to_string()),
+                        "http://Boot.Example:8080/".to_string(),
+                    ),
+                },
+                Check {
+                    scenario: "discovery URL overrides legacy URL",
+                    input: "nico_pxe_service_url = \"http://Boot.Example:8080/\"\npxe_public_base_url = \"http://legacy.example:8080\"",
+                    expect: (
+                        Some("http://Boot.Example:8080/".to_string()),
+                        "http://Boot.Example:8080/".to_string(),
+                    ),
+                },
+            ],
+            |patch| {
+                let config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .merge(Toml::string(patch))
+                    .extract()
+                    .unwrap();
+                let firmware_base = config
+                    .machine_state_handler_site_config()
+                    .pxe_public_base_url;
+                (config.nico_pxe_service_url, firmware_base)
             },
         );
     }

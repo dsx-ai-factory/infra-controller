@@ -91,6 +91,7 @@ async fn show_dpu_network_config(
             ]);
             table.add_row(row!["Config Version", config.managed_host_config_version]);
             table.add_row(row!["Use Admin Network", config.use_admin_network]);
+            table.add_row(row!["PXE Service URL", config.nico_pxe_service_url()]);
             table.add_row(row![
                 "Instance Config Version",
                 config.instance_network_config_version
