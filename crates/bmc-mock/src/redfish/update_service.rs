@@ -112,6 +112,7 @@ use serde_json::json;
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
 use crate::redfish::ModelExt;
+use crate::redfish::task_service::TASKS_PATH;
 use crate::{Callbacks, http, redfish};
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
@@ -274,6 +275,7 @@ pub(crate) struct FirmwareTask {
     /// reset for the BMC, the host's next power-on for the rest) and names
     /// that event in the task message.
     pub(crate) component: FirmwareComponent,
+    simple_update_body: Option<String>,
 }
 
 /// The host firmware component a task targets.
@@ -291,7 +293,7 @@ pub(crate) enum FirmwareComponent {
 
 impl FirmwareTask {
     pub(crate) fn odata_id(&self) -> String {
-        format!("/redfish/v1/TaskService/Tasks/{}", self.id)
+        format!("{TASKS_PATH}/{}", self.id)
     }
 
     pub(crate) fn to_json(&self) -> serde_json::Value {
@@ -300,7 +302,7 @@ impl FirmwareTask {
             TaskState::Completed => (100, "OK"),
             TaskState::Exception(_) => (100, "Critical"),
         };
-        json!({
+        let mut task = json!({
             "@odata.id": self.odata_id(),
             "@odata.type": "#Task.v1_4_3.Task",
             "Id": self.id,
@@ -330,7 +332,16 @@ impl FirmwareTask {
                 },
                 "Severity": status
             }]
-        })
+        });
+        if let Some(body) = &self.simple_update_body {
+            task["HidePayload"] = json!(false);
+            task["Payload"] = json!({
+                "HttpOperation": "POST",
+                "TargetUri": simple_update_target(),
+                "JsonBody": body,
+            });
+        }
+        task
     }
 }
 
@@ -469,7 +480,7 @@ impl DpuOs {
 }
 
 /// DPU-only task and disk state captured under tasks -> dpu_os -> finished.
-/// Firmware upload payloads and callback error text are deliberately excluded.
+/// Firmware upload bytes, request headers and callback error text are excluded.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PersistedDpuUpdate {
     epoch: u32,
@@ -482,6 +493,8 @@ pub(crate) struct PersistedDpuUpdate {
 struct PersistedDpuTask {
     id: String,
     state: BmcTaskState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    simple_update_body: Option<String>,
 }
 
 /// Payload-free Redfish task states used by effect observations and snapshots.
@@ -711,6 +724,19 @@ impl UpdateServiceState {
             .map(FirmwareTask::to_json)
     }
 
+    pub(super) fn task_uris(&self) -> Vec<String> {
+        // Use the retirement lock order to list live and finished tasks together.
+        let tasks = self.tasks.read().unwrap();
+        let finished = self.finished.read().unwrap();
+        let mut uris = tasks
+            .values()
+            .chain(finished.iter())
+            .map(FirmwareTask::odata_id)
+            .collect::<Vec<_>>();
+        uris.sort_unstable();
+        uris
+    }
+
     pub(crate) fn task_states(&self) -> HashMap<String, BmcTaskState> {
         // Match the retirement lock order so live and retained tasks are one observation.
         let tasks = self.tasks.read().unwrap();
@@ -764,6 +790,7 @@ impl UpdateServiceState {
             target_version: target_version.clone(),
             state: TaskState::Running,
             component: self.component_kind(component_id),
+            simple_update_body: None,
         };
         let odata_id = task.odata_id();
         let running_json = task.to_json();
@@ -975,6 +1002,7 @@ impl UpdateServiceState {
                 .filter(|task| task.component == FirmwareComponent::DpuOs)
                 .map(|task| PersistedDpuTask {
                     id: task.id.clone(),
+                    simple_update_body: task.simple_update_body.clone(),
                     state: match task.state {
                         TaskState::Running => BmcTaskState::Running,
                         TaskState::Completed => BmcTaskState::Completed,
@@ -1049,6 +1077,7 @@ impl UpdateServiceState {
                     component_id: DPU_OS_INVENTORY_ID.to_owned(),
                     target_version: String::new(),
                     component: FirmwareComponent::DpuOs,
+                    simple_update_body: saved.simple_update_body.clone(),
                     state: match saved.state {
                         BmcTaskState::Running => TaskState::Running,
                         BmcTaskState::Completed => TaskState::Completed,
@@ -1144,6 +1173,7 @@ impl UpdateServiceState {
     fn start_bfb_install<C: Callbacks>(
         self: &std::sync::Arc<Self>,
         image: DpuOsImage,
+        simple_update_body: Option<String>,
         callbacks: Option<std::sync::Arc<C>>,
         power: Option<std::sync::Weak<crate::redfish::computer_system::SystemState<C>>>,
     ) -> Result<(String, serde_json::Value), BfbInstallRefused> {
@@ -1155,6 +1185,7 @@ impl UpdateServiceState {
             target_version: String::new(),
             state: TaskState::Running,
             component: FirmwareComponent::DpuOs,
+            simple_update_body,
         };
         let response = (task.odata_id(), task.to_json());
         {
@@ -1381,12 +1412,14 @@ async fn discard_body(body: Body) {
     while body.frame().await.is_some() {}
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 struct SimpleUpdateRequest {
     #[serde(rename = "ImageURI")]
     image_uri: Option<String>,
     #[serde(rename = "Targets", default)]
     targets: Vec<String>,
+    #[serde(rename = "TransferProtocol", skip_serializing_if = "Option::is_none")]
+    transfer_protocol: Option<serde_json::Value>,
 }
 
 /// Advertise only the push URI(s) that this platform's BMC actually supports.
@@ -1411,22 +1444,24 @@ async fn update_firmware_simple_update<C: Callbacks>(
     State(state): State<BmcState<C>>,
     body: Option<axum::Json<SimpleUpdateRequest>>,
 ) -> Response {
-    let SimpleUpdateRequest { image_uri, targets } = body.map(|b| b.0).unwrap_or_default();
+    let request = body.map(|b| b.0).unwrap_or_default();
 
     // Infer component from the first Redfish target path.
     // e.g. `/redfish/v1/UpdateService/FirmwareInventory/HostBMC_0` → `HostBMC_0`
-    let (component_id, target_version) = if let Some(id) = targets
+    let (component_id, target_version) = if let Some(id) = request
+        .targets
         .first()
         .and_then(|t| t.rsplit('/').next())
         .map(str::to_owned)
     {
         if id == DPU_OS_INVENTORY_ID {
-            let Some(image_uri) = image_uri else {
+            let Some(image_uri) = request.image_uri.as_deref() else {
                 return http::bad_request("ImageURI is required to install a BFB");
             };
-            let image = DpuOsImage::from_image_uri(&image_uri);
+            let image = DpuOsImage::from_image_uri(image_uri);
             return match state.update_service_state.start_bfb_install(
                 image,
+                Some(json!(request).to_string()),
                 state.callbacks.clone(),
                 Some(std::sync::Arc::downgrade(&state.system_state)),
             ) {
@@ -2323,6 +2358,7 @@ mod tests {
                 DpuOsImage::PreIngestion,
                 None,
                 None,
+                None,
             )
             .unwrap();
         tokio::task::yield_now().await;
@@ -2345,6 +2381,7 @@ mod tests {
         let (task_path, _) = state
             .start_bfb_install::<crate::test_support::TestCallbacks>(
                 DpuOsImage::PreIngestion,
+                None,
                 None,
                 None,
             )
@@ -2373,11 +2410,13 @@ mod tests {
                 DpuOsImage::PreIngestion,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let (second, _) = state
             .start_bfb_install::<crate::test_support::TestCallbacks>(
                 DpuOsImage::Managed,
+                None,
                 None,
                 None,
             )
@@ -2438,14 +2477,14 @@ mod tests {
         let state = dpu_os_state(Duration::ZERO);
         let power = Arc::new(GatedRestart::default());
         let (first, _) = state
-            .start_bfb_install(DpuOsImage::PreIngestion, Some(power.clone()), None)
+            .start_bfb_install(DpuOsImage::PreIngestion, None, Some(power.clone()), None)
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), power.entered.notified())
             .await
             .expect("restart dispatch started");
 
         assert_eq!(
-            state.start_bfb_install(DpuOsImage::Managed, Some(power.clone()), None),
+            state.start_bfb_install(DpuOsImage::Managed, None, Some(power.clone()), None),
             Err(BfbInstallRefused::RestartInProgress)
         );
         power.release.notify_one();
@@ -2473,7 +2512,7 @@ mod tests {
         // The landed install no longer owns the DPU.
         assert!(
             state
-                .start_bfb_install(DpuOsImage::Managed, Some(power.clone()), None)
+                .start_bfb_install(DpuOsImage::Managed, None, Some(power.clone()), None)
                 .is_ok()
         );
         assert_eq!(power.restarts.load(Ordering::SeqCst), 1);
@@ -2748,6 +2787,7 @@ mod tests {
                     DpuOsImage::PreIngestion,
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
             if admitted {
@@ -2846,6 +2886,7 @@ mod tests {
             let (path, _) = old
                 .start_bfb_install::<crate::test_support::TestCallbacks>(
                     DpuOsImage::PreIngestion,
+                    None,
                     None,
                     None,
                 )
@@ -2949,6 +2990,7 @@ mod tests {
                 DpuOsImage::Managed,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let saved = state.persisted_dpu_update().unwrap();
@@ -3009,6 +3051,7 @@ mod tests {
                 DpuOsImage::Managed,
                 None,
                 None,
+                None,
             )
             .unwrap();
         assert!(state.begin_bfb_reboot(path.rsplit('/').next().unwrap()));
@@ -3044,7 +3087,7 @@ mod tests {
         let power = Arc::new(GatedRestart::default());
         let source = state.dpu_os_status_source();
         state
-            .start_bfb_install(DpuOsImage::Managed, Some(power.clone()), None)
+            .start_bfb_install(DpuOsImage::Managed, None, Some(power.clone()), None)
             .unwrap();
         drop(state);
         assert_eq!(source.status(), None);
@@ -3066,6 +3109,7 @@ mod tests {
             .map(|n| PersistedDpuTask {
                 id: format!("{:08x}-{n}", saved.epoch),
                 state: BmcTaskState::Completed,
+                simple_update_body: None,
             })
             .collect();
         assert!(saved.validate().is_err());

@@ -15,20 +15,42 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
+
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::get;
+use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
+use crate::redfish::Collection;
 use crate::{Callbacks, http};
 
+pub(super) const TASKS_PATH: &str = "/redfish/v1/TaskService/Tasks";
+
 pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
-    r.route(
+    r.route(TASKS_PATH, get(get_tasks::<C>)).route(
         "/redfish/v1/TaskService/Tasks/{task_id}",
         get(get_task::<C>),
     )
+}
+
+async fn get_tasks<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
+    let members = state
+        .update_service_state
+        .task_uris()
+        .into_iter()
+        .map(|uri| json!({ "@odata.id": uri }))
+        .collect::<Vec<_>>();
+    Collection {
+        odata_id: Cow::Borrowed(TASKS_PATH),
+        odata_type: Cow::Borrowed("#TaskCollection.TaskCollection"),
+        name: Cow::Borrowed("Task Collection"),
+    }
+    .with_members(&members)
+    .into_ok_response()
 }
 
 /// Return a task by ID: a live task or one from the BMC's bounded history of
