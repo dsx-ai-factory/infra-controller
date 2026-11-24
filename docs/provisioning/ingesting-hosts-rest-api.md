@@ -220,10 +220,12 @@ Both flows assume hardware ingestion is complete -- which this page covers.
 
 ## Troubleshooting
 
-For a `SerialNumberMismatch` health alert, compare `chassisSerialNumber` from
-ExpectedMachine with the serial selected from the saved Redfish report. A site
-rule can select the tray Assembly serial when the chassis reports a board serial.
-See [Select the host inventory serial number](ingesting-hosts.md#select-the-host-inventory-serial-number).
+### Serial number mismatch
+
+For a `SerialNumberMismatch` health alert, compare the Expected Machine's
+`chassisSerialNumber` with the value selected from the saved Redfish report.
+If no rule yields a serial, check the primary system serial, primary system
+SKU, and chassis serials. See [Select the host inventory serial number](ingesting-hosts.md#select-the-host-inventory-serial-number).
 
 ### Inspecting Machine State
 
