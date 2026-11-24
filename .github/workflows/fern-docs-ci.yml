@@ -29,7 +29,7 @@ permissions:
 jobs:
   check:
     name: Fern Check
-    runs-on: linux-amd64-cpu4
+    runs-on: linux-amd64-cpu8
     timeout-minutes: 60
     container: rust:1.100.0-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37
     defaults:
