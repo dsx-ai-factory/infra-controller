@@ -222,11 +222,14 @@ Output formatting and pagination flags live on individual commands, not on the r
 | Flag | Where | Description |
 |------|-------|-------------|
 | `--output` | every command | Output format: `json`, `yaml`, or `table`. Defaults to `json`. `vpc-peering list` defaults to `table`. |
-| `--all` | list commands | Fetch every page instead of just the first |
+| `--all` | numbered list commands | Fetch every page instead of just the first |
+| `--page-token`, `--page-size` | cursor list commands | Fetch one page; see below |
 | `--data` | create/update commands | Request body as inline JSON |
 | `--data-file` | create/update commands | Path to a JSON file (use `-` for stdin) |
 
 Run `nicocli <command> --help` for the full per-command flag list, including spec-derived query parameters and body fields.
+
+Cursor-paged list commands, such as `attestation job list` and `attestation status list`, have no `--all` flag. Each invocation prints one response page, including its `nextPageToken`. To read the next page, pass that value as `--page-token` and keep every other flag unchanged; an empty `nextPageToken` marks the last page.
 
 `nicocli vpc-peering list` defaults to a table with the peering ID and both VPC names and IDs. Use `--output json` or `--output yaml` for structured output.
 

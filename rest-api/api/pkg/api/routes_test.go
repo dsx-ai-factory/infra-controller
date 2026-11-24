@@ -41,6 +41,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"metadata":                  1,
 		"credential":                4,
 		"measured-boot":             6,
+		"attestation":               11,
 		"site-explorer":             2,
 		"service-account":           1,
 		"infrastructure-provider":   4,
@@ -64,7 +65,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"expected-rack-group":       8,
 		"expected-switch":           7,
 		"instance-type":             5,
-		"machine":                   23,
+		"machine":                   25,
 		"allocation":                6,
 		"subnet":                    5,
 		"machine-instance-type":     3,
@@ -241,6 +242,27 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodPost, measuredBootPath+"/trusted-profile")
 			assertRouteExists(t, got, http.MethodGet, measuredBootPath+"/trusted-profile")
 			assertRouteExists(t, got, http.MethodDelete, measuredBootPath+"/trusted-profile/:id")
+			attestationPath := "/org/:orgName/" + cfg.GetAPIName()
+			for _, route := range []struct {
+				method string
+				path   string
+			}{
+				{http.MethodPost, "/attestation-profile"},
+				{http.MethodGet, "/attestation-profile"},
+				{http.MethodGet, "/attestation-profile/:hardwareClass"},
+				{http.MethodPatch, "/attestation-profile/:hardwareClass"},
+				{http.MethodDelete, "/attestation-profile/:hardwareClass"},
+				{http.MethodGet, "/attestation-coverage"},
+				{http.MethodGet, "/attestation-job"},
+				{http.MethodGet, "/attestation-job/:jobId"},
+				{http.MethodPost, "/attestation-job/:jobId/waive"},
+				{http.MethodPost, "/attestation-job/:jobId/fail"},
+				{http.MethodGet, "/attestation-status"},
+				{http.MethodPost, "/machine/:id/attestation"},
+				{http.MethodGet, "/machine/:id/attestation/status"},
+			} {
+				assertRouteExists(t, got, route.method, attestationPath+route.path)
+			}
 			credentialRotationPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/rotation"
 			assertRouteExists(t, got, http.MethodPost, credentialRotationPath)
 			assertRouteExists(t, got, http.MethodGet, credentialRotationPath)

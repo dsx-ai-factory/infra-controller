@@ -146,6 +146,9 @@ tags:
   - name: Credential Rotation
     description: |-
       Credential Rotation endpoints stage a site-wide credential rotation and report per-Site or per-device convergence
+  - name: Attestation
+    description: |-
+      Attestation endpoints manage a Site's SPDM attestation profiles, report which profile covers each recorded hardware class, and list retained attestation jobs and predicted per-Machine attestation status. Triggering attestation of one Machine and assessing it live are Machine endpoints.
   - name: Site Explorer
     description: |-
       Site Explorer discovers BMC endpoints on a Site and tracks their exploration state.
@@ -1774,6 +1777,853 @@ paths:
         `nico-admin-cli credential rotation-status`.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
+  '/v2/org/{org}/nico/attestation-profile':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    post:
+      summary: Create Attestation Profile
+      tags:
+        - Attestation
+      operationId: create-attestation-profile
+      description: |-
+        Create the SPDM attestation profile for a hardware class recorded on the Site, or the reserved `any` fallback profile, which applies to every hardware class without a profile of its own.
+
+        The request body must be `application/json` (otherwise 415) and within the server's size limit (otherwise 413). It is a closed JSON object: an unknown, repeated, or differently cased member name returns 400 at every nesting level, as does any input after the object. Strings must be valid UTF-8, and every `\u` escape must denote a Unicode scalar value, so surrogate escapes must be paired. The endpoint accepts no query parameters; any query parameter returns 400.
+
+        A 429, 500, 502, 503, or 504 response, or a lost reply, can follow a change the Site committed. Read the profile with the [Retrieve Attestation Profile endpoint](#tag/Attestation/operation/get-attestation-profile) before retrying.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttestationProfileCreateRequest'
+      responses:
+        '201':
+          description: Attestation profile was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationProfile'
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'The org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: 'An attestation profile already exists for this hardware class.'
+          $ref: '#/components/responses/ConflictError'
+        '413':
+          description: 'The request body exceeds the server''s size limit.'
+          $ref: '#/components/responses/GenericHttpError'
+        '415':
+          description: 'The request body is not `application/json`.'
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: 'The Site is limiting requests. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+    get:
+      summary: Retrieve All Attestation Profiles
+      tags:
+        - Attestation
+      operationId: get-all-attestation-profile
+      description: |-
+        Retrieve the Site's SPDM attestation profiles ordered by hardware class. Pagination metadata is returned in the `X-Pagination` response header.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+          name: pageNumber
+          in: query
+          required: false
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          name: pageSize
+          in: query
+          required: false
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - HARDWARE_CLASS_ASC
+            default: HARDWARE_CLASS_ASC
+          name: orderBy
+          in: query
+          required: false
+          description: Ordering for pagination query. Only `HARDWARE_CLASS_ASC` is supported.
+      responses:
+        '200':
+          description: Attestation profiles for the Site
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AttestationProfile'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":3,"orderBy":"HARDWARE_CLASS_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'The org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          description: 'The Site is limiting requests.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/attestation-profile/{hardwareClass}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          pattern: '^(any|[a-z0-9-]+_[a-z0-9-]+)$'
+          example: nvidia_gb200
+        name: hardwareClass
+        in: path
+        required: true
+        description: Hardware class in `<manufacturer>_<model>` form, each part made of lowercase letters, digits, and `-`, or `any` for the fallback profile.
+    get:
+      summary: Retrieve Attestation Profile
+      tags:
+        - Attestation
+      operationId: get-attestation-profile
+      description: |-
+        Retrieve the SPDM attestation profile for a hardware class, including the `version` to pass as `ifVersionMatch` when updating or deleting it.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+      responses:
+        '200':
+          description: Attestation profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationProfile'
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'No attestation profile exists for this hardware class, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          description: 'The Site is limiting requests.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+    patch:
+      summary: Update Attestation Profile
+      tags:
+        - Attestation
+      operationId: update-attestation-profile
+      description: |-
+        Replace an attestation profile's selection when `ifVersionMatch` equals its current `version`. Setting the `any` profile's mode to `None` disables attestation for every hardware class without its own profile, so it requires `acknowledgeFallbackImpact` to be `true`.
+
+        The request body must be `application/json` (otherwise 415) and within the server's size limit (otherwise 413). It is a closed JSON object: an unknown, repeated, or differently cased member name returns 400 at every nesting level, as does any input after the object. Strings must be valid UTF-8, and every `\u` escape must denote a Unicode scalar value, so surrogate escapes must be paired. The endpoint accepts no query parameters; any query parameter returns 400.
+
+        A 429, 500, 502, 503, or 504 response, or a lost reply, can follow a change the Site committed. Read the profile with the [Retrieve Attestation Profile endpoint](#tag/Attestation/operation/get-attestation-profile) before retrying.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttestationProfileUpdateRequest'
+      responses:
+        '200':
+          description: Attestation profile was updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationProfile'
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'No attestation profile exists for this hardware class, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: '`ifVersionMatch` does not match the profile''s current version. Read the profile again before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '413':
+          description: 'The request body exceeds the server''s size limit.'
+          $ref: '#/components/responses/GenericHttpError'
+        '415':
+          description: 'The request body is not `application/json`.'
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: 'The Site is limiting requests. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+    delete:
+      summary: Delete Attestation Profile
+      tags:
+        - Attestation
+      operationId: delete-attestation-profile
+      description: |-
+        Delete an attestation profile when `ifVersionMatch` equals its current `version`. Deleting the `any` profile removes the fallback for every hardware class without its own profile, so it requires `acknowledgeFallbackImpact=true`. The request body must be empty; any body byte returns 400.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        A 429, 500, 502, 503, or 504 response, or a lost reply, can follow a change the Site committed. Read the profile with the [Retrieve Attestation Profile endpoint](#tag/Attestation/operation/get-attestation-profile) before retrying.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+        - schema:
+            type: string
+            minLength: 1
+            example: 3f6b2c1e-8d4a-4b7e-9c2f-5a1d0e7b6c43
+          name: ifVersionMatch
+          in: query
+          required: true
+          description: Opaque `version` of the profile as last read. Must not contain U+0000. Forwarded to the Site verbatim.
+        - schema:
+            type: boolean
+            default: false
+          name: acknowledgeFallbackImpact
+          in: query
+          required: false
+          description: Must be `true` to delete the `any` profile.
+      responses:
+        '204':
+          description: Attestation profile was deleted
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'No attestation profile exists for this hardware class, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: '`ifVersionMatch` does not match the profile''s current version. Read the profile again before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '413':
+          description: 'The request body exceeds the server''s size limit.'
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: 'The Site is limiting requests. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/attestation-coverage':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve Attestation Coverage
+      tags:
+        - Attestation
+      operationId: get-attestation-coverage
+      description: |-
+        Report, for every hardware class recorded on the Site's explored endpoints, which attestation profile would decide attestation and which attester sets the class has reported.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+      responses:
+        '200':
+          description: Attestation coverage for the Site
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationCoverage'
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'The org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          description: 'The Site is limiting requests.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/attestation-job':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve All Attestation Jobs
+      tags:
+        - Attestation
+      operationId: get-all-attestation-job
+      description: |-
+        Retrieve one page of the Site's retained attestation jobs with the given aggregate status, ordered by job ID. The response is a single page; it has no `X-Pagination` header.
+
+        Page tokens are opaque and bound to the filters that produced them. Pass `nextPageToken` as `pageToken`, keeping every other query parameter unchanged, to read the next page; an empty `nextPageToken` marks the last page.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+        - schema:
+            type: string
+            enum:
+              - InProgress
+              - Waived
+              - Passed
+              - Failed
+            default: InProgress
+          name: status
+          in: query
+          required: false
+          description: Aggregate job status to list. `InProgress` when omitted.
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 50
+          name: pageSize
+          in: query
+          required: false
+          description: Maximum number of jobs in the page, 1-100. When omitted, the Site's page limit applies.
+        - schema:
+            type: string
+            example: eyJhZnRlciI6IjE4ZjRjMmE2In0
+          name: pageToken
+          in: query
+          required: false
+          description: Opaque `nextPageToken` from the previous page. Omit for the first page and keep every other query parameter unchanged between pages.
+        - schema:
+            type: string
+            enum:
+              - JOB_ID_ASC
+            default: JOB_ID_ASC
+          name: orderBy
+          in: query
+          required: false
+          description: Ordering of the listing. Only `JOB_ID_ASC` is supported.
+      responses:
+        '200':
+          description: One page of attestation jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationJobList'
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'The org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          description: 'The Site is limiting requests.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/attestation-job/{jobId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: jobId
+        in: path
+        required: true
+        description: ID of the attestation job
+    get:
+      summary: Retrieve Attestation Job
+      tags:
+        - Attestation
+      operationId: get-attestation-job
+      description: |-
+        Retrieve the device rows of one retained attestation job.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+      responses:
+        '200':
+          description: Attestation job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationJob'
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'No retained attestation job has this ID, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          description: 'The Site is limiting requests.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract, for example by returning a job without devices.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/attestation-job/{jobId}/waive':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: jobId
+        in: path
+        required: true
+        description: ID of the attestation job
+    post:
+      summary: Waive Attestation Job
+      tags:
+        - Attestation
+      operationId: waive-attestation-job
+      description: |-
+        Request that every retained device row of the job, across every Machine the job covers, end as `Waived`. Unfinished devices finish after BMC cleanup. Completed devices keep their historical `phase`, while the latest waive or fail request decides the effective result; the request is recorded in each device's `cancellationTarget` and `cancellationRequestedAt`.
+
+        The request body must be `application/json` (otherwise 415) and within the server's size limit (otherwise 413). It is a closed JSON object: an unknown, repeated, or differently cased member name returns 400, as does any input after the object. Strings must be valid UTF-8, and every `\u` escape must denote a Unicode scalar value, so surrogate escapes must be paired. The endpoint accepts no query parameters; any query parameter returns 400.
+
+        A 429, 500, 502, 503, or 504 response, or a lost reply, can follow a request the Site committed. Read the job with the [Retrieve Attestation Job endpoint](#tag/Attestation/operation/get-attestation-job) and check each device's `cancellationTarget` and `cancellationRequestedAt` before retrying.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttestationJobActionRequest'
+      responses:
+        '202':
+          description: The waive request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Attestation Job Waive request was accepted
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'No retained attestation job has this ID, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '413':
+          description: 'The request body exceeds the server''s size limit.'
+          $ref: '#/components/responses/GenericHttpError'
+        '415':
+          description: 'The request body is not `application/json`.'
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: 'The Site is limiting requests. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or violated this endpoint''s contract. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/attestation-job/{jobId}/fail':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: jobId
+        in: path
+        required: true
+        description: ID of the attestation job
+    post:
+      summary: Fail Attestation Job
+      tags:
+        - Attestation
+      operationId: fail-attestation-job
+      description: |-
+        Request that every retained device row of the job, across every Machine the job covers, end as `Failed`. Unfinished devices finish after BMC cleanup. Completed devices keep their historical `phase`, while the latest waive or fail request decides the effective result; the request is recorded in each device's `cancellationTarget` and `cancellationRequestedAt`.
+
+        The request body must be `application/json` (otherwise 415) and within the server's size limit (otherwise 413). It is a closed JSON object: an unknown, repeated, or differently cased member name returns 400, as does any input after the object. Strings must be valid UTF-8, and every `\u` escape must denote a Unicode scalar value, so surrogate escapes must be paired. The endpoint accepts no query parameters; any query parameter returns 400.
+
+        A 429, 500, 502, 503, or 504 response, or a lost reply, can follow a request the Site committed. Read the job with the [Retrieve Attestation Job endpoint](#tag/Attestation/operation/get-attestation-job) and check each device's `cancellationTarget` and `cancellationRequestedAt` before retrying.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttestationJobActionRequest'
+      responses:
+        '202':
+          description: The fail request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Attestation Job Fail request was accepted
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'No retained attestation job has this ID, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '413':
+          description: 'The request body exceeds the server''s size limit.'
+          $ref: '#/components/responses/GenericHttpError'
+        '415':
+          description: 'The request body is not `application/json`.'
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: 'The Site is limiting requests. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or violated this endpoint''s contract. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget. The request may have been applied; read the job back before retrying.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/attestation-status':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve All Machine Attestation Statuses
+      tags:
+        - Attestation
+      operationId: get-all-machine-attestation-status
+      description: |-
+        Retrieve one page of per-Machine attestation status for the Site, ordered by Machine ID. Each status is predicted from the Machine's latest retained controller job rather than assessed live, so `attesterSelectionStatus` is always null. The response is a single page; it has no `X-Pagination` header.
+
+        Page tokens are opaque and bound to the filters that produced them. Pass `nextPageToken` as `pageToken`, keeping every other query parameter unchanged, to read the next page; an empty `nextPageToken` marks the last page.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+        - schema:
+            type: string
+            enum:
+              - InProgress
+              - Waived
+              - Passed
+              - Failed
+          name: status
+          in: query
+          required: false
+          description: Keep Machines whose latest controller job has this aggregate status. Every Machine when omitted.
+        - schema:
+            type: string
+            enum:
+              - Host
+              - Dpu
+          name: machineType
+          in: query
+          required: false
+          description: Keep hosts or DPUs only. Every Machine type when omitted.
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 50
+          name: pageSize
+          in: query
+          required: false
+          description: Maximum number of Machines in the page, 1-100. When omitted, the Site's page limit applies.
+        - schema:
+            type: string
+            example: eyJhZnRlciI6IjE4ZjRjMmE2In0
+          name: pageToken
+          in: query
+          required: false
+          description: Opaque `nextPageToken` from the previous page. Omit for the first page and keep every other query parameter unchanged between pages.
+        - schema:
+            type: string
+            enum:
+              - MACHINE_ID_ASC
+            default: MACHINE_ID_ASC
+          name: orderBy
+          in: query
+          required: false
+          description: Ordering of the listing. Only `MACHINE_ID_ASC` is supported.
+      responses:
+        '200':
+          description: One page of Machine attestation statuses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationFleetPage'
+        '400':
+          description: 'The request failed validation, the Site is not Registered or not owned by the org''s Infrastructure Provider, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'The org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          description: 'The Site is limiting requests.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget.'
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/site-explorer/endpoint':
     parameters:
       - schema:
@@ -12994,6 +13844,158 @@ paths:
         For Infrastructure Providers: Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled and Tenant Account with Machine's Provider. User must have authorization role with `TENANT_ADMIN` suffix.
+  '/v2/org/{org}/nico/machine/{machineId}/attestation':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          minLength: 1
+          example: fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine. After one percent-decoding it must be nonempty printable ASCII (0x20-0x7E), otherwise the request returns 400. An unknown Machine, or one the org's Infrastructure Provider does not own, returns 404.
+    post:
+      summary: Trigger Machine Attestation
+      tags:
+        - Machine
+      operationId: trigger-machine-attestation
+      x-fern-sdk-group-name:
+        - machine
+        - attestation
+      description: |-
+        Schedule SPDM attestation of the devices that the Machine's attestation profile selects. The receipt reports the scheduled job, or the `outcome` explaining why nothing was scheduled. A Machine assigned to an Instance returns 400.
+
+        The request body must be `application/json` (otherwise 415) and within the server's size limit (otherwise 413). It is a closed JSON object: an unknown, repeated, or differently cased member name returns 400 at every nesting level, as does any input after the object. Strings must be valid UTF-8, and every `\u` escape must denote a Unicode scalar value, so surrogate escapes must be paired. The endpoint accepts no query parameters; any query parameter returns 400.
+
+        A 429, 500, 502, 503, or 504 response, or a lost reply, can follow a change the Site committed. List the Site's jobs with the [Retrieve All Attestation Jobs endpoint](#tag/Attestation/operation/get-all-attestation-job) before retrying. A 503 can also mean SPDM attestation is disabled on the Site.
+
+        Org must have an Infrastructure Provider entity that owns the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineAttestationTriggerRequest'
+      responses:
+        '200':
+          description: Scheduling receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineAttestationTrigger'
+        '400':
+          description: 'The request failed validation, the Machine is missing on its Site, the Site is not Registered, or the Site rejected the request. Also returned when the Machine is assigned to an Instance.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'The Machine does not exist or is not owned by the org''s Infrastructure Provider, the Site could not find it, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '413':
+          description: 'The request body exceeds the server''s size limit.'
+          $ref: '#/components/responses/GenericHttpError'
+        '415':
+          description: 'The request body is not `application/json`.'
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: 'The Site is limiting requests. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable, or SPDM attestation is disabled on the Site. The trigger may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget. The change may have been applied; read back before retrying.'
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/machine/{machineId}/attestation/status':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          minLength: 1
+          example: fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine. After one percent-decoding it must be nonempty printable ASCII (0x20-0x7E), otherwise the request returns 400. An unknown Machine, or one the org's Infrastructure Provider does not own, returns 404.
+    get:
+      summary: Retrieve Machine Attestation Status
+      tags:
+        - Machine
+      operationId: get-machine-attestation-status
+      x-fern-sdk-group-name:
+        - machine
+        - attestation
+      description: |-
+        Assess the Machine's attestation live from its current attestation profile and BMC component inventory. The assessment is read-only and does not schedule attestation.
+
+        Each query parameter may appear at most once, every name and value must be valid UTF-8 after one percent-decoding, and an unknown query parameter returns 400.
+
+        Org must have an Infrastructure Provider entity that owns the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 35
+            example: 30
+          name: redfishTimeoutSecs
+          in: query
+          required: false
+          description: Bound, in seconds, on the whole assessment, 1-35. The Site uses 30 when omitted.
+      responses:
+        '200':
+          description: Live Machine attestation status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineAttestationStatus'
+        '400':
+          description: 'The request failed validation, the Machine is missing on its Site, the Site is not Registered, or the Site rejected the request.'
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: 'The user is not a Provider Admin of the org, or the Site denied the request.'
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: 'The Machine does not exist or is not owned by the org''s Infrastructure Provider, the Site could not find it, or the org has no Infrastructure Provider.'
+          $ref: '#/components/responses/NotFoundError'
+        '429':
+          description: 'The Site is limiting requests.'
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: 'Unexpected failure.'
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: 'The Site does not support this attestation operation.'
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: 'The Site''s reply could not be represented: it carried an unknown field or enum value, or violated this endpoint''s contract.'
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: 'The Site or its Core service is unavailable.'
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: 'The Site did not reply within the request budget.'
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/machine/{machineId}/power':
     parameters:
       - schema:
@@ -19922,6 +20924,651 @@ components:
       minimum: 1
       maximum: 21474836
       description: One-indexed page number.
+    AttesterSelectionMode:
+      title: AttesterSelectionMode
+      type: string
+      description: |-
+        Which of a Machine's SPDM attesters a profile requires. `None` disables
+        attestation for the hardware class, `All` selects every attester,
+        `Allowlist` selects attesters matching any `componentIds` entry, and
+        `Denylist` selects attesters matching none.
+      enum:
+        - None
+        - All
+        - Allowlist
+        - Denylist
+      example: Allowlist
+    ComponentIdMatchRequest:
+      title: ComponentIdMatchRequest
+      type: object
+      additionalProperties: false
+      description: |-
+        Matches ComponentIntegrity IDs case-sensitively, in full (`exact`) or by
+        prefix (`prefix`). Exactly one of the two must be a nonempty string; the
+        other must be omitted or null. Neither may contain U+0000.
+      properties:
+        exact:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: ComponentIntegrity ID to match in full.
+        prefix:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Prefix that matching ComponentIntegrity IDs start with.
+      example:
+        prefix: HGX_IRoT_GPU_
+    ComponentIdMatch:
+      title: ComponentIdMatch
+      type: object
+      description: |-
+        Matches ComponentIntegrity IDs case-sensitively, in full or by prefix.
+        Exactly one of `exact` and `prefix` is a nonempty string; the other is null.
+      required:
+        - exact
+        - prefix
+      properties:
+        exact:
+          type:
+            - string
+            - 'null'
+          description: ComponentIntegrity ID matched in full, or null when `prefix` is set.
+        prefix:
+          type:
+            - string
+            - 'null'
+          description: Prefix of matching ComponentIntegrity IDs, or null when `exact` is set.
+      example:
+        exact: null
+        prefix: HGX_IRoT_GPU_
+    AttesterSelectionRequest:
+      title: AttesterSelectionRequest
+      type: object
+      additionalProperties: false
+      description: Attester policy to store for a hardware class.
+      required:
+        - mode
+      properties:
+        mode:
+          $ref: '#/components/schemas/AttesterSelectionMode'
+        componentIds:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentIdMatchRequest'
+          description: |-
+            Matchers for `Allowlist` and `Denylist`, which require at least one.
+            Must be omitted or empty for `All` and `None`. Must not be null.
+      example:
+        mode: Allowlist
+        componentIds:
+          - prefix: HGX_IRoT_GPU_
+    AttesterSelection:
+      title: AttesterSelection
+      type: object
+      description: Attester policy stored for a hardware class.
+      required:
+        - mode
+        - componentIds
+      properties:
+        mode:
+          $ref: '#/components/schemas/AttesterSelectionMode'
+        componentIds:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComponentIdMatch'
+          description: Matchers for `Allowlist` and `Denylist`, which have at least one; empty for `All` and `None`.
+      example:
+        mode: Allowlist
+        componentIds:
+          - exact: null
+            prefix: HGX_IRoT_GPU_
+    AttestationProfileCreateRequest:
+      title: AttestationProfileCreateRequest
+      type: object
+      additionalProperties: false
+      description: Request to create the attestation profile for a hardware class.
+      required:
+        - siteId
+        - hardwareClass
+        - selection
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site to create the profile on.
+        hardwareClass:
+          type: string
+          pattern: '^(any|[a-z0-9-]+_[a-z0-9-]+)$'
+          description: Hardware class in `<manufacturer>_<model>` form, each part made of lowercase letters, digits, and `-`, or `any` for the fallback profile.
+        selection:
+          $ref: '#/components/schemas/AttesterSelectionRequest'
+      example:
+        siteId: 72c4a1f9-0b3e-4f5d-8a6e-2d9c7b1e4f30
+        hardwareClass: nvidia_gb200
+        selection:
+          mode: Allowlist
+          componentIds:
+            - prefix: HGX_IRoT_GPU_
+    AttestationProfileUpdateRequest:
+      title: AttestationProfileUpdateRequest
+      type: object
+      additionalProperties: false
+      description: Request to replace an attestation profile's selection when its version still matches.
+      required:
+        - siteId
+        - selection
+        - ifVersionMatch
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site holding the profile.
+        selection:
+          $ref: '#/components/schemas/AttesterSelectionRequest'
+        ifVersionMatch:
+          type: string
+          minLength: 1
+          description: Opaque `version` of the profile as last read. Must not contain U+0000. Forwarded to the Site verbatim.
+        acknowledgeFallbackImpact:
+          type: boolean
+          default: false
+          description: Must be `true` to set the `any` profile's mode to `None`. Must not be null.
+      example:
+        siteId: 72c4a1f9-0b3e-4f5d-8a6e-2d9c7b1e4f30
+        selection:
+          mode: All
+        ifVersionMatch: 3f6b2c1e-8d4a-4b7e-9c2f-5a1d0e7b6c43
+        acknowledgeFallbackImpact: false
+    AttestationProfile:
+      title: AttestationProfile
+      type: object
+      description: SPDM attestation profile stored for one hardware class.
+      required:
+        - hardwareClass
+        - version
+        - selection
+        - updatedAt
+        - updatedBy
+      properties:
+        hardwareClass:
+          type: string
+          description: Hardware class the profile applies to, or `any` for the fallback profile.
+        version:
+          type: string
+          description: Opaque identifier of this revision. Pass it as `ifVersionMatch` to update or delete the profile.
+        selection:
+          $ref: '#/components/schemas/AttesterSelection'
+        updatedAt:
+          type: string
+          format: date-time
+          description: Time this revision was written.
+        updatedBy:
+          type: string
+          description: Principal the Site recorded for this revision. Can be empty.
+      example:
+        hardwareClass: nvidia_gb200
+        version: 3f6b2c1e-8d4a-4b7e-9c2f-5a1d0e7b6c43
+        selection:
+          mode: Allowlist
+          componentIds:
+            - exact: null
+              prefix: HGX_IRoT_GPU_
+        updatedAt: '2026-11-20T18:04:12Z'
+        updatedBy: admin@example.com
+    AttestationCoverageReason:
+      title: AttestationCoverageReason
+      type: string
+      description: |-
+        Which profile would supply a hardware class's policy, or why none would.
+        `OwnProfile` means the class has its own profile, `AnyFallback` means the
+        `any` profile applies, `NoProfile` means neither exists, and
+        `ClassNotRecorded` means the endpoints carry no recorded hardware class.
+      enum:
+        - OwnProfile
+        - AnyFallback
+        - NoProfile
+        - ClassNotRecorded
+      example: OwnProfile
+    AttesterSet:
+      title: AttesterSet
+      type: object
+      description: One distinct set of SPDM attesters recorded for a hardware class.
+      required:
+        - digest
+        - reportingEndpoints
+        - attesters
+      properties:
+        digest:
+          type: string
+          description: Identifier of the set's membership.
+        reportingEndpoints:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Number of explored endpoints of the class last reporting this set.
+        attesters:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Number of attesters in the set.
+      example:
+        digest: 9b1f3c0d7e2a4b58c6d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5
+        reportingEndpoints: 18
+        attesters: 9
+    AttestationCoverageEntry:
+      title: AttestationCoverageEntry
+      type: object
+      description: Attestation coverage of one recorded hardware class.
+      required:
+        - hardwareClass
+        - exploredEndpoints
+        - coverage
+        - mode
+        - attesterSets
+      properties:
+        hardwareClass:
+          type: string
+          description: Hardware class, or an empty string for explored endpoints with no recorded class.
+        exploredEndpoints:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Number of explored endpoints carrying the class.
+        coverage:
+          $ref: '#/components/schemas/AttestationCoverageReason'
+        mode:
+          oneOf:
+            - $ref: '#/components/schemas/AttesterSelectionMode'
+            - type: 'null'
+          description: 'Mode of the profile that would apply, or null when no profile would apply.'
+        attesterSets:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttesterSet'
+          description: Distinct attester sets recorded for the class, ordered by digest.
+      example:
+        hardwareClass: nvidia_gb200
+        exploredEndpoints: 18
+        coverage: OwnProfile
+        mode: Allowlist
+        attesterSets:
+          - digest: 9b1f3c0d7e2a4b58c6d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5
+            reportingEndpoints: 18
+            attesters: 9
+    AttestationCoverage:
+      title: AttestationCoverage
+      type: object
+      description: Per hardware class, which attestation profile would decide attestation on the Site.
+      required:
+        - entries
+        - anyProfileMode
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttestationCoverageEntry'
+          description: Coverage entries ordered by hardware class, with endpoints carrying no class last.
+        anyProfileMode:
+          oneOf:
+            - $ref: '#/components/schemas/AttesterSelectionMode'
+            - type: 'null'
+          description: 'Mode of the `any` profile, or null when the Site has no `any` profile.'
+      example:
+        entries:
+          - hardwareClass: nvidia_gb200
+            exploredEndpoints: 18
+            coverage: OwnProfile
+            mode: Allowlist
+            attesterSets:
+              - digest: 9b1f3c0d7e2a4b58c6d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5
+                reportingEndpoints: 18
+                attesters: 9
+          - hardwareClass: ''
+            exploredEndpoints: 2
+            coverage: ClassNotRecorded
+            mode: null
+            attesterSets: []
+        anyProfileMode: All
+    MachineAttestationTriggerRequest:
+      title: MachineAttestationTriggerRequest
+      type: object
+      additionalProperties: false
+      description: Request to schedule profile-based attestation of one Machine's devices.
+      required:
+        - redfishTimeoutSecs
+      properties:
+        redfishTimeoutSecs:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Bound, in seconds, on each Redfish wait while discovering attesters, 1-10.
+      example:
+        redfishTimeoutSecs: 10
+    AttestationSchedulingOutcome:
+      title: AttestationSchedulingOutcome
+      type: string
+      description: |-
+        Why a trigger scheduled what it did. `Scheduled` and `PartiallySatisfied`
+        schedule a job; every other outcome schedules nothing.
+        `ClassNotRecorded` and `NoProfile` have no deciding profile.
+      enum:
+        - Scheduled
+        - AttestationDisabled
+        - NoAttestersFound
+        - PolicyMatchedNothing
+        - ClassNotRecorded
+        - NoProfile
+        - PartiallySatisfied
+      example: Scheduled
+    MachineAttestationTrigger:
+      title: MachineAttestationTrigger
+      type: object
+      description: Scheduling receipt for one attestation trigger.
+      required:
+        - machineId
+        - outcome
+        - resolvedHardwareClass
+        - usedAnyFallback
+        - profileVersion
+        - devicesUnderAttestation
+        - jobId
+        - startedAt
+        - attesterIds
+      properties:
+        machineId:
+          type: string
+          description: ID of the Machine the receipt describes.
+        outcome:
+          $ref: '#/components/schemas/AttestationSchedulingOutcome'
+        resolvedHardwareClass:
+          type: string
+          description: Hardware class recorded for the Machine's BMC, or an empty string when none is recorded.
+        usedAnyFallback:
+          type: boolean
+          description: True when the `any` profile supplied the policy.
+        profileVersion:
+          type:
+            - string
+            - 'null'
+          description: Version of the profile that decided the trigger, or null for `ClassNotRecorded` and `NoProfile`.
+        devicesUnderAttestation:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Number of devices scheduled; equals the length of `attesterIds`, and is 0 when nothing was scheduled.
+        jobId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the scheduled job, or null when nothing was scheduled.
+        startedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Time the scheduled devices were written, or null when nothing was scheduled.
+        attesterIds:
+          type: array
+          items:
+            type: string
+          description: Scheduled attester IDs in ascending order; empty when nothing was scheduled.
+      example:
+        machineId: fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+        outcome: Scheduled
+        resolvedHardwareClass: nvidia_gb200
+        usedAnyFallback: false
+        profileVersion: 3f6b2c1e-8d4a-4b7e-9c2f-5a1d0e7b6c43
+        devicesUnderAttestation: 2
+        jobId: 0d5e9a7c-3b1f-4e62-9a8d-c47f2b6e1a95
+        startedAt: '2026-11-20T18:05:40Z'
+        attesterIds:
+          - HGX_IRoT_GPU_0
+          - HGX_IRoT_GPU_1
+    AttestationStatus:
+      title: AttestationStatus
+      type: string
+      description: |-
+        Aggregate attestation result of a set of devices. An unfinished device
+        takes precedence over a failed one, and a failed one over a waived one;
+        `Passed` means every device passed.
+      enum:
+        - InProgress
+        - Waived
+        - Passed
+        - Failed
+      example: Passed
+    AttesterSelectionStatus:
+      title: AttesterSelectionStatus
+      type: string
+      description: Why current policy and inventory select the attesters a live assessment covers.
+      enum:
+        - Selected
+        - PartiallySatisfied
+        - Disabled
+        - NoAttestersFound
+        - PolicyMatchedNothing
+        - ClassNotRecorded
+        - NoProfile
+      example: Selected
+    MachineAttestationStatus:
+      title: MachineAttestationStatus
+      type: object
+      description: Attestation status of one Machine.
+      required:
+        - machineId
+        - attestationStatus
+        - attesterSelectionStatus
+      properties:
+        machineId:
+          type: string
+          description: ID of the Machine the status describes.
+        attestationStatus:
+          oneOf:
+            - $ref: '#/components/schemas/AttestationStatus'
+            - type: 'null'
+          description: 'Aggregate status of the covered devices, or null when unknown or when no attester is selected.'
+        attesterSelectionStatus:
+          oneOf:
+            - $ref: '#/components/schemas/AttesterSelectionStatus'
+            - type: 'null'
+          description: 'Why the live assessment covers the attesters it does. Always set for a live single-Machine assessment and always null in the Site-wide listing.'
+      example:
+        machineId: fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+        attestationStatus: Passed
+        attesterSelectionStatus: Selected
+    AttestationFleetPage:
+      title: AttestationFleetPage
+      type: object
+      description: One cursor page of per-Machine attestation statuses predicted from retained controller jobs.
+      required:
+        - statuses
+        - nextPageToken
+      properties:
+        statuses:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineAttestationStatus'
+          description: Statuses ordered by ascending Machine ID. Can be empty.
+        nextPageToken:
+          type: string
+          description: Opaque token for the next page, or an empty string on the last page.
+      example:
+        statuses:
+          - machineId: fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+            attestationStatus: Passed
+            attesterSelectionStatus: null
+        nextPageToken: ''
+    AttestationJobSummary:
+      title: AttestationJobSummary
+      type: object
+      description: Aggregate status of one retained attestation job.
+      required:
+        - jobId
+        - machineIds
+        - attestationStatus
+      properties:
+        jobId:
+          type: string
+          format: uuid
+          description: ID of the job.
+        machineIds:
+          type: array
+          items:
+            type: string
+          description: Distinct Machines the job affects.
+        attestationStatus:
+          $ref: '#/components/schemas/AttestationStatus'
+      example:
+        jobId: 0d5e9a7c-3b1f-4e62-9a8d-c47f2b6e1a95
+        machineIds:
+          - fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+        attestationStatus: InProgress
+    AttestationJobList:
+      title: AttestationJobList
+      type: object
+      description: One cursor page of retained attestation jobs.
+      required:
+        - jobs
+        - nextPageToken
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttestationJobSummary'
+          description: Jobs ordered by ascending job ID. Can be empty.
+        nextPageToken:
+          type: string
+          description: Opaque token for the next page, or an empty string on the last page.
+      example:
+        jobs:
+          - jobId: 0d5e9a7c-3b1f-4e62-9a8d-c47f2b6e1a95
+            machineIds:
+              - fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+            attestationStatus: InProgress
+        nextPageToken: ''
+    AttestationJobActionRequest:
+      title: AttestationJobActionRequest
+      type: object
+      additionalProperties: false
+      description: Request to waive or fail every retained device of an attestation job.
+      required:
+        - siteId
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site holding the job.
+      example:
+        siteId: 72c4a1f9-0b3e-4f5d-8a6e-2d9c7b1e4f30
+    AttestationDevicePhase:
+      title: AttestationDevicePhase
+      type: string
+      description: |-
+        A device's attestation progress or result. `Unknown` covers progress
+        states this API does not recognize.
+      enum:
+        - FetchMetadata
+        - FetchCertificate
+        - TriggerEvidenceCollection
+        - PollEvidenceCollection
+        - WaitForTaskCancellation
+        - NrasVerification
+        - ApplyAppraisalPolicy
+        - Passed
+        - Failed
+        - Waived
+        - Unknown
+      example: PollEvidenceCollection
+    AttestationCancellationTarget:
+      title: AttestationCancellationTarget
+      type: string
+      description: Outcome requested by the latest operator waive or fail request for a device.
+      enum:
+        - Waive
+        - Fail
+      example: Waive
+    AttestationDevice:
+      title: AttestationDevice
+      type: object
+      description: One device row of a retained attestation job.
+      required:
+        - machineId
+        - deviceId
+        - phase
+        - startedAt
+        - completedAt
+        - cancellationRequestedAt
+        - cancellationTarget
+      properties:
+        machineId:
+          type: string
+          description: ID of the Machine the device belongs to.
+        deviceId:
+          type: string
+          description: ComponentIntegrity ID of the device.
+        phase:
+          $ref: '#/components/schemas/AttestationDevicePhase'
+        startedAt:
+          type: string
+          format: date-time
+          description: Time the device was scheduled.
+        completedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Time the device finished, or null while it is unfinished.
+        cancellationRequestedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Time of the latest waive or fail request, or null when none was made.
+        cancellationTarget:
+          oneOf:
+            - $ref: '#/components/schemas/AttestationCancellationTarget'
+            - type: 'null'
+          description: 'Target of the latest waive or fail request, or null when none was made.'
+      example:
+        machineId: fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+        deviceId: HGX_IRoT_GPU_0
+        phase: PollEvidenceCollection
+        startedAt: '2026-11-20T18:05:40Z'
+        completedAt: null
+        cancellationRequestedAt: null
+        cancellationTarget: null
+    AttestationJob:
+      title: AttestationJob
+      type: object
+      description: Device rows of one retained attestation job.
+      required:
+        - jobId
+        - devices
+      properties:
+        jobId:
+          type: string
+          format: uuid
+          description: ID of the job, as requested.
+        devices:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AttestationDevice'
+          description: Device rows of the job, in no particular order.
+      example:
+        jobId: 0d5e9a7c-3b1f-4e62-9a8d-c47f2b6e1a95
+        devices:
+          - machineId: fm100htjtiaehv1n5vh67tbmqq4eabcjdmabc2sbrhuqcmo7gjmxgqfbab0
+            deviceId: HGX_IRoT_GPU_0
+            phase: Passed
+            startedAt: '2026-11-20T18:05:40Z'
+            completedAt: '2026-11-20T18:07:02Z'
+            cancellationRequestedAt: null
+            cancellationTarget: null
     MeasuredBootTrustedMachineCreateRequest:
       type: object
       title: MeasuredBootTrustedMachineCreateRequest

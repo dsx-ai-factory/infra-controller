@@ -430,3 +430,66 @@ func TestExecuteFlowGRPC(t *testing.T) {
 		assert.Equal(t, "Flow proxy request timed out", err.Message)
 	})
 }
+
+// newRepliedProxyClient returns a Temporal client whose workflow succeeds with
+// responseJSON as the proxied reply.
+func newRepliedProxyClient(responseJSON []byte) *tmocks.Client {
+	run := &tmocks.WorkflowRun{}
+	run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
+	}).Return(nil)
+	temporalClient := &tmocks.Client{}
+	temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(run, nil)
+	return temporalClient
+}
+
+func TestExecuteCoreGRPCStrictResponse(t *testing.T) {
+	cases := []struct {
+		name         string
+		responseJSON string
+		wantCode     int
+		wantClass    string
+	}{
+		{name: "known fields", responseJSON: `{"hardwareClass":"nvidia_gb200","version":"V1"}`, wantClass: "nvidia_gb200"},
+		{name: "empty object", responseJSON: ` {} `},
+		{name: "deprecated enum alias", responseJSON: `{"selection":{"mode":"ATTESTER_SELECTION_MODE_ALL"}}`},
+		{name: "absent reply", responseJSON: ``, wantCode: http.StatusBadGateway},
+		{name: "null reply", responseJSON: `null`, wantCode: http.StatusBadGateway},
+		{name: "array reply", responseJSON: `[]`, wantCode: http.StatusBadGateway},
+		{name: "malformed reply", responseJSON: `{"hardwareClass":`, wantCode: http.StatusBadGateway},
+		{name: "unknown field from a newer Site", responseJSON: `{"hardwareClass":"a_b","newField":1}`, wantCode: http.StatusBadGateway},
+		{name: "unknown enum name from a newer Site", responseJSON: `{"selection":{"mode":"ATTESTER_SELECTION_MODE_SOME"}}`, wantCode: http.StatusBadGateway},
+		{name: "wrong field type", responseJSON: `{"hardwareClass":1}`, wantCode: http.StatusBadGateway},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &corev1.AttestationProfile{}
+			apiErr := ExecuteCoreGRPCStrictResponse(context.Background(), newRepliedProxyClient([]byte(tc.responseJSON)), corev1.Forge_GetAttestationProfile_FullMethodName, &corev1.GetAttestationProfileRequest{}, resp, "")
+			if tc.wantCode == 0 {
+				require.Nil(t, apiErr)
+				assert.Equal(t, tc.wantClass, resp.GetHardwareClass())
+				return
+			}
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.wantCode, apiErr.Code)
+			assert.Equal(t, "Received an invalid Core proxy response", apiErr.Message)
+			assert.Nil(t, apiErr.Data)
+			assert.Error(t, apiErr.Diagnosis())
+		})
+	}
+
+	t.Run("requires a response message", func(t *testing.T) {
+		temporalClient := &tmocks.Client{}
+		apiErr := ExecuteCoreGRPCStrictResponse(context.Background(), temporalClient, "/forge.Forge/Test", &emptypb.Empty{}, nil, "")
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+		temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("permissive decoding is unchanged", func(t *testing.T) {
+		resp := &corev1.AttestationProfile{}
+		apiErr := ExecuteCoreGRPC(context.Background(), newRepliedProxyClient([]byte(`{"hardwareClass":"a_b","newField":1}`)), "/forge.Forge/Test", &emptypb.Empty{}, resp, "")
+		require.Nil(t, apiErr)
+		assert.Equal(t, "a_b", resp.GetHardwareClass())
+	})
+}

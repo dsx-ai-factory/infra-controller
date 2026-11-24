@@ -217,8 +217,21 @@ var commandPathAliases = map[string][]string{
 // commandPathReplacements moves operations to reviewed resource paths without
 // retaining the generated path. Use this when an operation changes tag so its
 // old top-level resource and the synthetic path under the new tag both need to
-// disappear.
+// disappear, or when a new operation's generated path is not usable.
 var commandPathReplacements = map[string][]string{
+	"create-attestation-profile":         {"attestation", "profile", "create"},
+	"delete-attestation-profile":         {"attestation", "profile", "delete"},
+	"fail-attestation-job":               {"attestation", "job", "fail"},
+	"get-all-attestation-job":            {"attestation", "job", "list"},
+	"get-all-attestation-profile":        {"attestation", "profile", "list"},
+	"get-all-machine-attestation-status": {"attestation", "status", "list"},
+	"get-attestation-coverage":           {"attestation", "coverage", "get"},
+	"get-attestation-job":                {"attestation", "job", "get"},
+	"get-attestation-profile":            {"attestation", "profile", "get"},
+	"get-machine-attestation-status":     {"machine", "attestation", "status"},
+	"trigger-machine-attestation":        {"machine", "attestation", "trigger"},
+	"update-attestation-profile":         {"attestation", "profile", "update"},
+	"waive-attestation-job":              {"attestation", "job", "waive"},
 	"factory-reset-tray":                 {"tray", "factory-reset"},
 	"factory-reset-nvlink-domain":        {"domain", "nvlink", "factory-reset"},
 	"get-all-machine-validation-results": {"machine", "validation", "results", "list"},
@@ -678,6 +691,11 @@ func isListAction(action string) bool {
 	return action == "list" || strings.HasPrefix(action, "list-")
 }
 
+// isPageTokenParameter identifies the query parameter of a cursor-paged list.
+func isPageTokenParameter(p Parameter) bool {
+	return p.In == "query" && p.Name == "pageToken"
+}
+
 var defaultTableRelationsByOperation = map[string][]string{
 	vpcPeeringListOperationID: {"Vpc1", "Vpc2"},
 }
@@ -704,8 +722,13 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 		},
 	}
 
+	allParams := ro.parameters()
+
+	// --all walks numbered pages; a cursor-paged list (one declaring
+	// pageToken) is paged manually with --page-token and --page-size instead.
 	isList := isListAction(ro.action)
-	if isList {
+	fetchAll := isList && !slices.ContainsFunc(allParams, isPageTokenParameter)
+	if fetchAll {
 		flags = append(flags, &cli.BoolFlag{
 			Name:  "all",
 			Usage: "Fetch all pages of results",
@@ -714,8 +737,6 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 
 	var argParams []string
 	var queryParameters []GeneratedCommandQueryParameter
-
-	allParams := ro.parameters()
 
 	for _, p := range allParams {
 		if p.Name == "org" {
@@ -900,7 +921,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				}
 			}
 
-			if isList && c.Bool("all") {
+			if fetchAll && c.Bool("all") {
 				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"), ro.op.OperationID)
 			}
 

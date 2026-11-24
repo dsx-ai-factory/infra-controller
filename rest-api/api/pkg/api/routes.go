@@ -104,6 +104,64 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetCredentialRotationStatusHandler(dbSession, scp),
 		},
+		// SPDM attestation profiles, coverage, jobs and fleet status (Provider
+		// Admin), proxied to Core; equivalent to the admin CLI
+		// `attestation spdm` commands.
+		{
+			Path:    apiPathPrefix + "/attestation-profile",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateAttestationProfileHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-profile",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllAttestationProfileHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-profile/:hardwareClass",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAttestationProfileHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-profile/:hardwareClass",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateAttestationProfileHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-profile/:hardwareClass",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteAttestationProfileHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-coverage",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAttestationCoverageHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-job",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllAttestationJobHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-job/:jobId",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAttestationJobHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-job/:jobId/waive",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewWaiveAttestationJobHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-job/:jobId/fail",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewFailAttestationJobHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/attestation-status",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllMachineAttestationStatusHandler(dbSession, scp),
+		},
 		// User endpoint
 		{
 			Path:    apiPathPrefix + "/user/current",
@@ -802,6 +860,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/machine/:id/chassis/:chassisId/reset",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewResetMachineChassisHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/attestation",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewTriggerMachineAttestationHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/attestation/status",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetMachineAttestationStatusHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/machine/:id/spectrumx-multiplane",
