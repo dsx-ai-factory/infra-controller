@@ -694,7 +694,7 @@ To upgrade only the NICo Core release without running the prerequisite phases, u
 helm upgrade --install nico ./helm \
     -n nico-system \
     -f helm-prereqs/values/nico-core.yaml \
-    --set-string global.image.repository="${NICO_IMAGE_REGISTRY}/nvmetal-carbide" \
+    --set-string global.image.repository="${NICO_IMAGE_REGISTRY}/${NICO_CORE_IMAGE_NAME:-nico}" \
     --set-string global.image.tag="${NICO_CORE_IMAGE_TAG}" \
     --timeout 600s --wait
 ```

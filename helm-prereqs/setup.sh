@@ -35,6 +35,10 @@
 #                         NICo REST tag. Example: v1.0.4
 #
 # Optional environment:
+#   NICO_CORE_IMAGE_NAME   NICo Core image name under NICO_IMAGE_REGISTRY.
+#                          Default: nico (the image built by `make images`).
+#                          Set to nvmetal-carbide for CI and NGC registries
+#                          that still use the legacy name.
 #   REGISTRY_PULL_SECRET   Registry password/API key. If unset, setup does not
 #                          create image pull secrets; images must be public,
 #                          preloaded, or use existing imagePullSecrets.
@@ -456,6 +460,8 @@ _reject_bundled_flow_manager_upgrade() {
 }
 
 _reject_bundled_flow_manager_upgrade
+
+NICO_CORE_IMAGE_NAME="${NICO_CORE_IMAGE_NAME:-nico}"
 
 # shellcheck source=preflight.sh
 source "${SCRIPT_DIR}/preflight.sh"
@@ -2199,7 +2205,7 @@ else
         helm upgrade --install nico ./helm
         --namespace nico-system
         -f "${_CORE_VALUES_ARG}"
-        --set-string "global.image.repository=${NICO_IMAGE_REGISTRY}/nvmetal-carbide"
+        --set-string "global.image.repository=${NICO_IMAGE_REGISTRY}/${NICO_CORE_IMAGE_NAME}"
         --set-string "global.image.tag=${NICO_CORE_IMAGE_TAG}"
         --timeout 600s --wait
     )
@@ -2283,7 +2289,7 @@ else
     echo "    ${_CORE_VALUES_FILE}"
     echo ""
     echo "  Key fields:"
-    echo "    global.image.repository   — ${NICO_IMAGE_REGISTRY}/nvmetal-carbide"
+    echo "    global.image.repository   — ${NICO_IMAGE_REGISTRY}/${NICO_CORE_IMAGE_NAME}"
     echo "    global.image.tag          — ${NICO_CORE_IMAGE_TAG}"
     echo "    nico-api.hostname      — your site hostname"
     echo "    nico-api.siteConfig    — site-specific network/pool/IB config"

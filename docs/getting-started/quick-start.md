@@ -115,7 +115,7 @@ export NICO_RMS_IMAGE_TAG=v0.10.0-rc2             # your rms-api image tag (git 
 # export NICO_RMS_IMAGE_REPO=<registry>/rms-api   # only for a mirror/self-built image
 ```
 
-`NICO_IMAGE_REGISTRY` is used for both NICo Core (`<registry>/nvmetal-carbide`) and NICo REST (`<registry>/nico-rest-*`). Push all images to this registry before running setup. DPF operator/DOCA images pull anonymously from public NGC by default; to mirror or self-build them into your registry, see [helm-prereqs → DPF images and registries](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries).
+`NICO_IMAGE_REGISTRY` is used for both NICo Core (`<registry>/nico`, the image `make images` builds) and NICo REST (`<registry>/nico-rest-*`). To pull Core from a registry that still uses the legacy `nvmetal-carbide` name, set `NICO_CORE_IMAGE_NAME=nvmetal-carbide`. Push all images to this registry before running setup. DPF operator/DOCA images pull anonymously from public NGC by default; to mirror or self-build them into your registry, see [helm-prereqs → DPF images and registries](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries).
 
 For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.nvidia.com) → **API Keys** → **Generate Personal Key**. You do not need to set `REGISTRY_PULL_SECRET` when images are public, preloaded, or an existing pull secret is configured in the values files.
 
@@ -123,7 +123,8 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 |----------|----------|-------------|
 | `REGISTRY_PULL_SECRET` | No | Raw registry password or API key used to create image pull secrets. |
 | `REGISTRY_PULL_USERNAME` | No | Username for generated pull secrets. Defaults to `$oauthtoken`. |
-| `NICO_IMAGE_REGISTRY` | Unless `--skip-core --skip-rest` | Base image registry for all NICo images (e.g. `my-registry.example.com/nico`). Used for NICo Core (`<registry>/nvmetal-carbide`) and NICo REST (`<registry>/nico-rest-*`). |
+| `NICO_IMAGE_REGISTRY` | Unless `--skip-core --skip-rest` | Base image registry for all NICo images (e.g. `my-registry.example.com/nico`). Used for NICo Core (`<registry>/${NICO_CORE_IMAGE_NAME}`) and NICo REST (`<registry>/nico-rest-*`). |
+| `NICO_CORE_IMAGE_NAME` | No | NICo Core image name under `NICO_IMAGE_REGISTRY`. Defaults to `nico`, matching `make images`. Set to `nvmetal-carbide` for CI and NGC registries that use the legacy name. |
 | `NICO_CORE_IMAGE_TAG` | Unless `--skip-core` | NICo Core image tag (e.g. `v2.0.0`). |
 | `NICO_REST_IMAGE_TAG` | Unless `--skip-rest` | NICo REST image tag (e.g. `v2.0.0`). |
 | `KUBECONFIG` | No | Path to the target cluster kubeconfig. Omit when the current `kubectl` context is already correct. |

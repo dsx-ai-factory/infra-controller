@@ -429,7 +429,7 @@ _validate_nico_core_image_access() {
         return
     fi
 
-    _core_image_ref="${NICO_IMAGE_REGISTRY%/}/nvmetal-carbide:${NICO_CORE_IMAGE_TAG}"
+    _core_image_ref="${NICO_IMAGE_REGISTRY%/}/${NICO_CORE_IMAGE_NAME:-nico}:${NICO_CORE_IMAGE_TAG}"
     _validate_image_manifest_access "${_core_image_ref}" "Rendered NICo Core image"
 
     if [[ -f "${_CORE_VALUES_CFG}" ]]; then
