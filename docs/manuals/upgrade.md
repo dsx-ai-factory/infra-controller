@@ -194,9 +194,17 @@ export NICO_DPF_DPU_CLUSTER_VIP=<VIP for the DPU cluster control plane>
 
 Set them to the same values used at initial install (they are not persisted by `setup.sh`).
 
+`setup.sh` also needs a resolver for the DPU cluster CoreDNS. It reads `nico-dhcp.config.kea.hookParameters.nameservers` from the core values file in every DPF run, including with `--skip-core`. Reading the file needs `python3` with PyYAML. A site that passed `--core-values` at initial install passes the same file again. Export `NICO_DPF_COREDNS_UPSTREAM` only to use other resolvers or when that file is not available. Preflight reports an error when neither gives a value.
+
 With DPF enabled, NICo 2.4's `setup.sh` installs the v30.0.0 operator and sets
 `spec.deploymentMode: zero-trust` in the `DPFOperatorConfig` for Redfish
-provisioning. Review the [DPF v30.0.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/release-notes/v30.0.0.md#upgrade-notes)
+provisioning. It also sets `spec.coreDNS.upstreamNameservers` to that resolver.
+Since DPF v26.8.0, the CoreDNS that serves the DPU cluster runs in the host
+cluster and forwards names outside the cluster domain, such as the `.forge`
+names, to the resolvers in this field. A site installed without the field gets
+it when `setup.sh` runs phase 5b again. Upgrades performed outside `setup.sh`
+must set the field. Refer to [DPFOperatorConfig](dpf.md#32-dpfoperatorconfig).
+Review the [DPF v30.0.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/release-notes/v30.0.0.md#upgrade-notes)
 before upgrading from v26.8.0.
 
 Review any site overrides for the BF3 BFB URL and the HBN and DTS versions before
