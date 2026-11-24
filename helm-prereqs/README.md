@@ -1637,9 +1637,9 @@ higher precedence, `bmc_site_wide_root` is authoritative over the same
 unversioned entry in Vault or Postgres. API add/delete operations for version 0
 are rejected in this mode, and a Vault import excludes that path. Use
 coordinated BMC rotation to advance to version 1 or later in the persistent
-backend. Do not stage that rotation while DPF manages any DPU: the shared DPF
-Secret cannot authenticate devices split between old and new passwords during
-convergence; see [#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
+backend. On DPF sites, follow the
+[shared credential cutover](../docs/manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
+before staging a new target.
 The file schema has no versioned BMC root key. Use a Secret, not a ConfigMap,
 for this credential. See
 [Credential Sources](../docs/configuration/credential-sources.md) for precedence

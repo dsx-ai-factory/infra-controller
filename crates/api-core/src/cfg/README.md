@@ -2196,11 +2196,8 @@ prevents a rolling update from activating local ownership while an older
 replica can still register a DPU that uses the shared credential. On a transient
 rotation-target read failure, a present local v0 permits startup and retry. After
 accepting local v0, NICo retains that last shared value and logs an error if the
-entry disappears. To recover, restore the local value unchanged. The default pinned DPF
-v26.4.0 does not support BMC credential rotation, so NICo retains the shared
-Secret. Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
-BMC rotation targets follow the same retention rule when absent from their
+entry disappears. To recover, restore the local value unchanged. Other BMC
+rotation targets follow the same retention rule when absent from their
 authoritative source. During background refresh, a transient source-read
 failure retains the last published Secret and is retried.
 The setting does not affect versioned site-wide BMC roots,
@@ -2210,10 +2207,10 @@ Treat a local version 0 value as bootstrap and ingestion input. Watched reload
 may add or correct it before any managed device begins using version 0. After
 ingestion starts, keep it unchanged: changing only the read source does not
 update BMC hardware or credential-convergence records. Use coordinated BMC
-credential rotation to advance to a backend-managed version instead. On DPF
-sites, do not rotate while DPF manages any DPU: the shared BMC Secret cannot
-authenticate a fleet split between old and new passwords; see
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
+credential rotation to advance to a backend-managed version. On DPF sites,
+follow the
+[shared credential cutover](../../../../docs/manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
+before staging a new target.
 
 #### Environment credential source
 

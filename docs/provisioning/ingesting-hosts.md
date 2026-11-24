@@ -152,10 +152,9 @@ default `local_first` mode without a local override. In `local` mode, supply
 source or, when it is absent there, the watched Kubernetes Secret; the API
 rejects the backend write with HTTP `412 Precondition Failed`. After ingestion
 starts, keep local version 0 unchanged and use coordinated BMC rotation for
-password changes. Do not stage that rotation while DPF manages any DPU: its
-single shared BMC Secret cannot authenticate a fleet split between old and new
-passwords during convergence. Per-device DPF credentials are tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
+password changes. On DPF sites, follow the
+[shared credential cutover](../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
+before staging a new target.
 
 ```bash
 read -r -s -p 'Site-wide BMC password: ' NICO_PASSWORD

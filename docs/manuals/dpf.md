@@ -1417,10 +1417,16 @@ shared `bmc-shared-password` Secret. The shared Secret follows the site-wide
 target before devices finish rotating, so it would no longer authenticate those
 DPUs. This includes sites on the default DPF 26.4.0 pin.
 
-With DPF 26.8.0 or later (excluding prereleases of 26.8.0), request forced BMC
-credential convergence at the current target for existing shared DPUs. Wait for
-every DPF-managed DPU to adopt its per-device Secret before staging a new
-site-wide target.
+Upgrade to DPF 26.8.0 or later (excluding prereleases of 26.8.0), then restart
+all NICo API replicas so they detect the new operator version. Keep the current
+site-wide target and request convergence for each existing shared DPU with
+`nico-admin-cli credential force-bmc set --bmc-mac <dpu-bmc-mac>`.
+
+For each DPUDevice, confirm that
+`spec.bmcCredentialSecretName` and `status.bmcCredentialSecretName` name the same
+per-device Secret and that `BMCCredentialsReady` is `True` for the current
+generation. Stage a new site-wide target after every DPF-managed DPU meets those
+checks.
 </Warning>
 
 Configure it through a watched Kubernetes Secret, through the API, or by seeding

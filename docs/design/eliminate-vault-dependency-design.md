@@ -711,11 +711,10 @@ lands before a dependency owned by another epic.
 | Certificate-provider separation boundary | [#2880](https://github.com/dsx-ai-factory/infra-controller/issues/2880) separates certificate vending from credential storage, but the production certificate-provider implementations remain Vault-backed. | [#7283](https://github.com/dsx-ai-factory/infra-controller/pull/7283), closing [#5956](https://github.com/dsx-ai-factory/infra-controller/issues/5956), added cert-manager as a selectable provider for node and UFM issuance; the chart already issues the service-transport and optional NVSwitch certificates through cert-manager, and the optional DPU OTLP gateway issuer was already direct. Reference sites use the same `site-root` CA and key on both paths, so selection preserves existing trust, certificates, keys, Secrets, and mounts. A custom site whose CA or key does not match remains on Vault PKI. |
 | Production KMS before encryption convergence | After [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253), the PostgreSQL envelope and the machine-identity encryption-key credential can both use either Transit or a qualified KMIP server, but machine-identity signing keys still use a separate encryption primitive. | [#3255](https://github.com/dsx-ai-factory/infra-controller/issues/3255) converges machine-identity encryption on the shared KMS envelope without requiring a change of KMS provider. |
 
-Until [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147)
-is qualified, the DPF rotation restriction is operator guidance rather than an
-API guard. Operators must not stage BMC rotation while DPF manages any DPU;
-see [DPF BMC bootstrap](../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
-and [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
+See the [DPF shared credential cutover](../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
+for version requirements and the order for staging a new target. See
+[Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy)
+for version 0 ownership.
 
 ### 8.2 Work-Item Status
 
