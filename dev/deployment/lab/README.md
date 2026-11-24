@@ -531,7 +531,7 @@ first available address or reuse the explicit fixture's `::10` address. Validate
 both peer directions, reboot, lease renewals and release with live Scout.
 
 The lease-handoff behavior is tracked independently in
-[PR #7934](https://github.com/dsx-ai-factory/infra-controller/pull/7934).
+[PR #9107](https://github.com/dsx-ai-factory/infra-controller/pull/9107).
 Record the DHCP image's source revision when validating transitions between
 firmware, Scout, imager and installed-OS identities. Enabling the deployment
 alone does not prove that those transitions work.
