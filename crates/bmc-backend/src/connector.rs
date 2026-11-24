@@ -19,6 +19,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bmc_platform::PlatformError;
 use bmc_runtime::{DriverConnector, ExploredConnectError};
 use carbide_redfish::libredfish::{
     DirectRedfishPool, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
@@ -29,7 +30,8 @@ use libredfish::model::service_root::RedfishVendor;
 use model::site_explorer::EndpointExplorationReport;
 
 use crate::BackendBmc;
-use crate::accounts::{BackendAccountBmc, LibredfishAccounts};
+use crate::accounts::{BackendAccountBmc, LibredfishAccounts, client_creation_error};
+use crate::convert::platform_error;
 
 /// Connects to BMCs with their stored credentials on the configured backend.
 #[derive(Clone)]
@@ -187,27 +189,29 @@ impl BmcConnector {
         }
     }
 
-    /// Whether the BMC at `access` serves its service root to an anonymous
-    /// request, through the same pool as [`Self::connect_with_credentials`]: a
+    /// Reads the service root of the BMC at `address` with no credentials,
+    /// through the same pool as [`Self::connect_with_credentials`]: a
     /// readiness probe that spends no login attempt, so it works against a BMC
     /// still on its factory password.
-    pub async fn serves_service_root_anonymously(&self, access: &BmcAccessInfo) -> bool {
+    pub async fn anonymous_service_root(&self, address: SocketAddr) -> Result<(), PlatformError> {
         match self {
             Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
-                match pool
+                let client = pool
                     .create_client(
-                        &access.host,
-                        access.port,
+                        &address.ip().to_string(),
+                        Some(address.port()),
                         RedfishAuth::Anonymous,
                         Some(RedfishVendor::Unknown),
                     )
                     .await
-                {
-                    Ok(client) => client.get_service_root().await.is_ok(),
-                    Err(_) => false,
-                }
+                    .map_err(client_creation_error)?;
+                client
+                    .get_service_root()
+                    .await
+                    .map(drop)
+                    .map_err(platform_error)
             }
-            Self::Drivers(drivers) => drivers.serves_service_root_anonymously(access).await,
+            Self::Drivers(drivers) => drivers.anonymous_service_root(address).await.map(drop),
         }
     }
 

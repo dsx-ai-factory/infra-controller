@@ -74,6 +74,8 @@
 //!   non-`NotSupported` error and the instance parks for operator attention
 //!   rather than silently attempting a speculative unlock.
 
+use std::net::SocketAddr;
+
 use bmc_platform::PlatformError;
 use carbide_credential_rotation::bmc_accounts::{
     apply_bmc_root_policy, change_bmc_root_password, probe_bmc_credentials,
@@ -199,17 +201,20 @@ fn require_bmc_mac(
 }
 
 /// The BMC host string and port for the low-level `RedfishClientPool` calls.
+fn bmc_addr(mh_snapshot: &ManagedHostStateSnapshot) -> Result<SocketAddr, StateHandlerError> {
+    mh_snapshot
+        .host_snapshot
+        .bmc_addr()
+        .ok_or_else(|| StateHandlerError::MissingData {
+            object_id: mh_snapshot.host_snapshot.id.to_string(),
+            missing: "BMC Endpoint Information (bmc_info.ip)",
+        })
+}
+
 fn bmc_host_port(
     mh_snapshot: &ManagedHostStateSnapshot,
 ) -> Result<(String, Option<u16>), StateHandlerError> {
-    let addr =
-        mh_snapshot
-            .host_snapshot
-            .bmc_addr()
-            .ok_or_else(|| StateHandlerError::MissingData {
-                object_id: mh_snapshot.host_snapshot.id.to_string(),
-                missing: "BMC Endpoint Information (bmc_info.ip)",
-            })?;
+    let addr = bmc_addr(mh_snapshot)?;
     Ok((addr.ip().to_string(), Some(addr.port())))
 }
 
@@ -485,40 +490,34 @@ async fn wait_for_bmc(
         )));
     }
 
-    let (host, port) = bmc_host_port(mh_snapshot)?;
-    let access = BmcAccessInfo {
-        host,
-        port,
-        mac_address: host_bmc_mac,
-    };
-
     // Readiness = a successful anonymous service-root read, which works against
     // a just-reset BMC on its factory password without consuming an
     // authenticated login attempt.
-    let ready = ctx
+    let probe = ctx
         .services
         .bmc_connector
-        .serves_service_root_anonymously(&access)
+        .anonymous_service_root(bmc_addr(mh_snapshot)?)
         .await;
 
-    if ready {
-        tracing::info!(
-            %host_bmc_mac,
-            "host BMC returned after factory reset; restoring credentials"
-        );
-        return Ok(transition_to_factory_reset_bmc(
-            FactoryResetBmcState::RestoreCredentials { retry_count: 0 },
-        ));
+    // Any failure means the BMC is not back yet. The anonymous probe consumes
+    // no auth attempt, so there is no lockout risk and nothing to back off -
+    // just keep waiting. The controller re-dispatches on its normal cadence,
+    // and a BMC that never returns is surfaced by the
+    // `HostPlatformConfiguration` time-in-state SLA rather than parked here
+    // (this flow already blocks termination until it proceeds).
+    if let Err(error) = probe {
+        return Ok(StateHandlerOutcome::wait(format!(
+            "waiting for BMC {host_bmc_mac} to return after factory reset: {error}"
+        )));
     }
 
-    // Not back yet. The anonymous probe consumes no auth attempt, so there is no
-    // lockout risk and nothing to back off - just keep waiting. The controller
-    // re-dispatches on its normal cadence, and a BMC that never returns is
-    // surfaced by the `HostPlatformConfiguration` time-in-state SLA rather than
-    // parked here (this flow already blocks termination until it proceeds).
-    Ok(StateHandlerOutcome::wait(format!(
-        "waiting for BMC {host_bmc_mac} to return after factory reset"
-    )))
+    tracing::info!(
+        %host_bmc_mac,
+        "host BMC returned after factory reset; restoring credentials"
+    );
+    Ok(transition_to_factory_reset_bmc(
+        FactoryResetBmcState::RestoreCredentials { retry_count: 0 },
+    ))
 }
 
 /// Verify the factory credentials, then change the BMC root password from the
