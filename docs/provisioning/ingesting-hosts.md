@@ -331,8 +331,10 @@ chassis contributes members after a successful exploration saves them.
 
 For diagnosis, inspect the stored `explored_endpoints.exploration_report` JSON,
 including `HardwareClass`, `Systems`, `Chassis[].Id`, and
-`Chassis[].Assemblies[]`. Compare assembly `Name`, `Model`, `MemberId`, and
-`SerialNumber` with the BMC's `/redfish/v1/Chassis/{id}/Assembly` response.
+`Chassis[].Assemblies[]`. Compare Assembly member `Name`, `Model`, `MemberId`,
+and `SerialNumber` with the BMC's data. Inspect the chassis resource's expanded
+`Assembly` property or follow its advertised `@odata.id` when it contains
+a reference.
 The endpoint report command uses the RPC view, which exposes the compatibility
 chassis serial projection and omits Assembly members and `HardwareClass`.
 Use the stored report or direct Redfish response to choose assembly selectors.
