@@ -31,6 +31,7 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials, DpfBmcRotationCandidate,
 };
 use db::TransactionVending as _;
+use db::work_lock_manager::WorkLockManagerHandle;
 use futures_util::future::BoxFuture;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
@@ -136,7 +137,7 @@ pub struct BmcEndpointExplorer {
     /// Whether nv-redfish reports include drive firmware inventory entries.
     explore_drive_firmware: bool,
     dpf_per_dpu_bmc_credentials: AtomicBool,
-    dpf_recovery_drain_check: OnceLock<Box<DpfBmcRecoveryDrainCheck>>,
+    dpf_recovery: OnceLock<(WorkLockManagerHandle, Box<DpfBmcRecoveryDrainCheck>)>,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -160,7 +161,7 @@ impl BmcEndpointExplorer {
             rotate_switch_nvos_credentials,
             explore_drive_firmware: false,
             dpf_per_dpu_bmc_credentials: AtomicBool::new(false),
-            dpf_recovery_drain_check: OnceLock::new(),
+            dpf_recovery: OnceLock::new(),
             database_connection,
         }
     }
@@ -180,10 +181,17 @@ impl BmcEndpointExplorer {
     }
 
     /// Set before exploration starts. Needed when force-delete did not drain DPF.
-    pub fn set_dpf_recovery_drain_check(&self, check: Box<DpfBmcRecoveryDrainCheck>) {
-        self.dpf_recovery_drain_check.get_or_init(|| check);
+    pub fn set_dpf_recovery(
+        &self,
+        lock_manager: WorkLockManagerHandle,
+        check: Box<DpfBmcRecoveryDrainCheck>,
+    ) {
+        self.dpf_recovery.get_or_init(|| (lock_manager, check));
     }
 
+    /// Restore the credential of a force-deleted DPU before normal exploration.
+    /// The deletion transaction detaches the row by BMC MAC. Wait for old DPF
+    /// resources to drain because they could still change the hardware password.
     async fn reconcile_detached_dpf_bmc(
         &self,
         address: SocketAddr,
@@ -205,14 +213,21 @@ impl BmcEndpointExplorer {
         else {
             return Ok(());
         };
-        let mut txn = pool
-            .txn_begin()
+        if !pending.detached {
+            return Err(error(
+                "waiting for DPF credential rotation or teardown to finish",
+            ));
+        }
+        let Some((manager, check)) = self.dpf_recovery.get() else {
+            return Err(error(
+                "waiting for DPF to confirm that the old resources have drained",
+            ));
+        };
+        let lease = manager
+            .try_acquire_lock(recovery::work_key(&pending.host_machine_id))
             .await
-            .map_err(|_| error("could not start recovery transaction"))?;
-        recovery::lock_host(&mut txn, &pending.host_machine_id)
-            .await
-            .map_err(|_| error("could not lock the old host"))?;
-        let Some(current) = recovery::get(&mut *txn, mac)
+            .map_err(|_| error("waiting to acquire the recovery work lock"))?;
+        let Some(current) = recovery::get(pool, mac)
             .await
             .map_err(|_| error("could not read recovery record"))?
         else {
@@ -224,11 +239,6 @@ impl BmcEndpointExplorer {
             ));
         }
         let device_id = mac.to_string().to_lowercase().replace(':', "-");
-        let Some(check) = self.dpf_recovery_drain_check.get() else {
-            return Err(error(
-                "waiting for DPF to confirm that the old resources have drained",
-            ));
-        };
         if !check(current.host_dpf_id.clone(), device_id)
             .await
             .map_err(|detail| error(&detail))?
@@ -281,6 +291,14 @@ impl BmcEndpointExplorer {
                 .set_credentials(&get_bmc_root_credential_key(mac), &credential)
                 .await
                 .map_err(|_| error("could not save the verified credential"))?;
+            let mut txn = pool
+                .txn_begin()
+                .await
+                .map_err(|_| error("could not start recovery transaction"))?;
+            lease
+                .fence_transaction(&mut txn)
+                .await
+                .map_err(|_| error("lost the recovery work lock"))?;
             db::bmc_redfish_session::delete_by_mac(&mut txn, mac)
                 .await
                 .map_err(|_| error("could not invalidate old BMC sessions"))?;
@@ -297,12 +315,21 @@ impl BmcEndpointExplorer {
                 "verified the credential; waiting to finish recovery cleanup",
             ));
         }
+        // Delete the saved copies only after the verified credential is durable.
         for candidate in [Previous, Target] {
             store
                 .delete_credentials(&key(candidate))
                 .await
                 .map_err(|_| error("could not remove the saved recovery credential"))?;
         }
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .map_err(|_| error("could not start recovery cleanup transaction"))?;
+        lease
+            .fence_transaction(&mut txn)
+            .await
+            .map_err(|_| error("lost the recovery work lock"))?;
         recovery::remove(&mut txn, mac, current.operation_id)
             .await
             .map_err(|_| error("could not remove the recovery record"))?;
@@ -1843,10 +1870,22 @@ mod tests {
         explorer.database_connection = Some(pool.clone());
         let drained = Arc::new(AtomicBool::new(false));
         let observed_drain = drained.clone();
-        explorer.set_dpf_recovery_drain_check(Box::new(move |_, _| {
-            let observed_drain = observed_drain.clone();
-            Box::pin(async move { Ok(observed_drain.load(Ordering::Relaxed)) })
-        }));
+        let mut tasks = tokio::task::JoinSet::new();
+        let locks = db::work_lock_manager::start(
+            &mut tasks,
+            pool.clone(),
+            Default::default(),
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        )
+        .await
+        .unwrap();
+        explorer.set_dpf_recovery(
+            locks,
+            Box::new(move |_, _| {
+                let observed_drain = observed_drain.clone();
+                Box::pin(async move { Ok(observed_drain.load(Ordering::Relaxed)) })
+            }),
+        );
         let store = explorer.bmc_client.credential_client.manager();
 
         for (mac, hardware_password, expected_version) in [

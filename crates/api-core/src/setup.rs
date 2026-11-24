@@ -788,14 +788,17 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     );
     if let Some(sdk) = &dpf_sdk {
         let sdk = sdk.clone();
-        bmc_explorer.set_dpf_recovery_drain_check(Box::new(move |node_id, device_id| {
-            let sdk = sdk.clone();
-            Box::pin(async move {
-                sdk.bmc_credential_resources_gone(&node_id, &device_id)
-                    .await
-                    .map_err(|_| "could not verify DPF resource drain".to_string())
-            })
-        }));
+        bmc_explorer.set_dpf_recovery(
+            work_lock_manager_handle.clone(),
+            Box::new(move |node_id, device_id| {
+                let sdk = sdk.clone();
+                Box::pin(async move {
+                    sdk.bmc_credential_resources_gone(&node_id, &device_id)
+                        .await
+                        .map_err(|_| "could not verify DPF resource drain".to_string())
+                })
+            }),
+        );
     }
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {

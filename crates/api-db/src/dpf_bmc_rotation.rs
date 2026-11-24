@@ -22,15 +22,9 @@ pub struct Recovery {
     pub detached: bool,
 }
 
-/// Serialize rotation and force deletion for this host across API replicas.
-pub async fn lock_host(conn: &mut PgConnection, host_id: &str) -> DatabaseResult<()> {
-    let query = "SELECT pg_advisory_xact_lock(hashtextextended('dpf-bmc-rotation:' || $1, 0))";
-    sqlx::query(query)
-        .bind(host_id)
-        .execute(conn)
-        .await
-        .map_err(|error| DatabaseError::query(query, error))?;
-    Ok(())
+/// The rotation, force-delete, and recovery paths share this work lease.
+pub fn work_key(host_id: impl std::fmt::Display) -> String {
+    format!("dpf-bmc-rotation:{host_id}")
 }
 
 pub async fn get(
