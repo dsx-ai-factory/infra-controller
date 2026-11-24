@@ -313,7 +313,9 @@ matches the expected value.
 If no rule yields a serial, the audit accepts a matching primary-system serial,
 primary-system SKU, or chassis serial. The system and SKU fallback comparisons
 use the stored values directly, and the chassis fallback trims its serial.
-Older reports can use the tray serial already stored on the chassis.
+An older report can contain a tray serial in the chassis `SerialNumber` field.
+A `chassis` rule or the chassis fallback uses the stored value until a
+successful exploration replaces the report.
 
 During exploration, Site Explorer collects Assembly inventory for every chassis
 whose ID matches any configured or built-in `chassis_assembly` rule. Collection
