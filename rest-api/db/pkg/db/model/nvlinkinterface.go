@@ -33,11 +33,11 @@ const (
 	// NVLinkInterfaceRelationName is the relation name for the NVLinkInterface model
 	NVLinkInterfaceRelationName = "NVLinkInterface"
 
-	// NVLinkInterfaceOrderByStatus field to be used for ordering when none specified
+	// NVLinkInterfaceOrderByStatus sorts interfaces by status.
 	NVLinkInterfaceOrderByStatus = "status"
-	// NVLinkInterfaceOrderByCreated field to be used for ordering when none specified
+	// NVLinkInterfaceOrderByCreated sorts interfaces by creation time.
 	NVLinkInterfaceOrderByCreated = "created"
-	// NVLinkInterfaceOrderByUpdated field to be used for ordering when none specified
+	// NVLinkInterfaceOrderByUpdated sorts interfaces by update time.
 	NVLinkInterfaceOrderByUpdated = "updated"
 
 	// NVLinkInterfaceOrderByDefault default field to be used for ordering when none specified
@@ -45,7 +45,7 @@ const (
 )
 
 var (
-	// NVLinkInterfaceOrderByFields is a list of valid order by fields for the Subnet model
+	// NVLinkInterfaceOrderByFields lists the supported sort fields for NVLink interfaces.
 	NVLinkInterfaceOrderByFields = []string{"status", "created", "updated"}
 	// NVLinkInterfaceRelatedEntities is a list of valid relation by fields for the NVLinkInterface model
 	NVLinkInterfaceRelatedEntities = map[string]bool{
@@ -154,7 +154,6 @@ func (ibi *NVLinkInterface) BeforeCreateTable(ctx context.Context, query *bun.Cr
 
 // NVLinkInterfaceDAO is an interface for interacting with the NVLinkInterface model
 type NVLinkInterfaceDAO interface {
-	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*NVLinkInterface, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter NVLinkInterfaceFilterInput, page paginator.PageInput, includeRelations []string) ([]NVLinkInterface, int, error)
@@ -208,7 +207,7 @@ func (nvlisd NVLinkInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id u
 // GetAll returns all NVLinkInterfaces for a tenant or site
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
-// if orderBy is nil, then records are ordered by column specified in NVLinkInterfaceOrderByDefault in ascending order
+// GetAll defaults to ascending creation time. Rows with equal sort values have unspecified relative order.
 func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkInterfaceFilterInput, page paginator.PageInput, includeRelations []string) (_ []NVLinkInterface, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.GetAll")
@@ -256,7 +255,6 @@ func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filte
 		query = query.Relation(relation)
 	}
 
-	// if no order is passed, set default to make sure objects return always in the same order and pagination works properly
 	if page.OrderBy == nil {
 		page.OrderBy = paginator.NewDefaultOrderBy(NVLinkInterfaceOrderByDefault)
 	}
