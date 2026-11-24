@@ -37,9 +37,9 @@ Reverse resolution mirrors the forward records that matter to humans:
 - An overlay instance address answers PTR with its instance name.
 - The `adm` and `bmc` machine-id forms are forward-only.
 
-Reverse zones are derived, not managed. When a network segment is created, NICo derives the matching `in-addr.arpa` / `ip6.arpa` zone from each of its prefixes (for example, `192.0.2.0/24` becomes `2.0.192.in-addr.arpa`) and removes it again when the segment is deleted. Only octet-aligned IPv4 prefixes (/8, /16, /24, /32) and nibble-aligned IPv6 prefixes get a zone; anything else is skipped, since RFC 2317 classless delegation is out of scope. PTR answers themselves are matched by address, so alignment never blocks an answer; the derived zone rows define which reverse zones you delegate.
+NICo derives reverse zones when it creates a segment or [adds a prefix to an existing underlay](../provisioning/dhcpv6-deployment.md#add-ipv6-to-an-existing-bmc-underlay). Startup also repairs missing zones for the persisted prefixes of site-configured networks. For example, `192.0.2.0/24` produces `2.0.192.in-addr.arpa`. NICo creates zones only for octet-aligned IPv4 prefixes (/8, /16, /24, /32) and nonzero IPv6 prefix lengths divisible by four. It removes the zone when the last segment prefix using it is deleted. PTR answers come from assigned addresses, not zone rows: an unaligned prefix does not prevent a PTR answer when the query reaches NICo.
 
-Like the forward zone, reverse zones must be delegated from your upstream DNS - or forwarded by your recursive resolver - to the `nico-dns` service address. NICo creates the zones but cannot delegate them for you.
+Configure your recursive resolver to forward reverse lookups for NICo-managed addresses to `nico-dns`. Do not delegate the reverse zone to NICo: even when the zone exists in the database, `nico-dns` returns `REFUSED` for reverse SOA queries and for PTR queries without a published record.
 
 ## Server Behavior Worth Knowing
 

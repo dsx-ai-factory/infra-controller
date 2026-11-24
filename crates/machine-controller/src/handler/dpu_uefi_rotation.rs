@@ -41,7 +41,6 @@
 //! [`RotationGate::rotation_needed`]: carbide_credential_rotation::RotationGate::rotation_needed
 
 use bmc_vendor::DpuModel;
-use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_uuid::machine::DpuMachineId;
 use db::TransactionVending as _;
@@ -52,6 +51,7 @@ use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
+use super::host_uefi_rotation::rotate_uefi_password_candidates;
 use super::{current_site_uefi_target, handler_restart_dpu, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 
@@ -249,7 +249,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
     // password before touching the device; scope the credential reader so it is
     // not held across the mutable-context DPU restart below.
     let (candidates, new_password) = {
-        let reader = ctx.services.bmc_credential_ops.credential_reader();
+        let reader = ctx.services.credential_manager.as_ref();
         let candidates = dpu_uefi_current_candidates(reader, current_version, target).await?;
         let Credentials::UsernamePassword {
             password: new_password,
@@ -274,16 +274,13 @@ pub(crate) async fn handle_rotating_dpu_uefi(
         })?;
     }
 
-    let access = ctx.services.bmc_access_info_for_machine(dpu).await?;
-    match ctx
-        .services
-        .bmc_credential_ops
-        .rotate_uefi_password(&access, &candidates, new_password)
-        .await
-    {
-        // The DPU stages the change through Bios/Settings and schedules no job
-        // (`job_id` is always `None`); the restart below commits it.
-        Ok(_job_id) => {
+    // Connection failures return Err so the state framework retries; quarantine
+    // is reserved for the password-change operation itself failing on the device.
+    let bmc = ctx.services.connect_bmc(dpu).await?;
+    match rotate_uefi_password_candidates(&bmc, &candidates, &new_password).await {
+        // The DPU stages the change through Bios/Settings and schedules no job;
+        // the restart below commits it.
+        Ok(_outcome) => {
             handler_restart_dpu(dpu, ctx, dpf_used_for_ingestion).await?;
 
             let mut txn = db_pool
@@ -323,15 +320,11 @@ pub(crate) async fn handle_rotating_dpu_uefi(
             }
             Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
         }
-        // Client creation failed (credential store, TCP, or the vendor
-        // probe): return Err so the state framework retries; quarantine is
-        // reserved for the operation itself failing on the device.
-        Err(CredentialOpError::ClientCreation(e)) => Err(e.into()),
-        Err(CredentialOpError::Operation(e)) => {
+        Err(e) => {
             // Device-level failure (all current-password candidates rejected, or
-            // the DPU refused the change). The pool already redacted the password
-            // out of the error. Quarantine with backoff and return to Ready so
-            // the host never wedges in this state.
+            // the DPU refused the change). Passwords are already redacted out of
+            // the error. Quarantine with backoff and return to Ready so the host
+            // never wedges in this state.
             let redacted = e.to_string();
             let quarantined_until =
                 db::credential_rotation::backoff_until(prior_attempts, chrono::Utc::now());

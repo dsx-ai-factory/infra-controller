@@ -40,7 +40,7 @@ use carbide_site_health_probe_api::{
     Family, Filter, MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo,
     TenantAllocation, Unit, UnitType, UnitsQuery, UnitsResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -51,6 +51,12 @@ use crate::readers::rest_inventory::{RestTotalsData, SiteMatchData};
 use crate::snapshot::AnySnapshot;
 use crate::state::store::SnapshotStore;
 use crate::state_metrics::{Series, data_of, family_series, units_of, unix_seconds};
+
+/// `at` at the precision of the published sweep times, so a client gets the
+/// stored value back from the API time.
+fn api_time(at: SystemTime) -> DateTime<Utc> {
+    DateTime::<Utc>::from(at).trunc_subsecs(3)
+}
 
 /// Units per page unless the client asks for fewer.
 const DEFAULT_LIMIT: u32 = 100;
@@ -198,8 +204,8 @@ impl ApiState {
             last_attempt_error: attempt.and_then(|a| a.failure).map(|(_, e)| e),
             snapshot_id: meta.snapshot_id(),
             family,
-            sweep_start: DateTime::<Utc>::from(meta.start),
-            read_at: DateTime::<Utc>::from(meta.end),
+            sweep_start: api_time(meta.start),
+            read_at: api_time(meta.end),
             sweep_age_seconds: age_seconds(meta.end),
             sweep_interval_seconds: self.interval_seconds(family),
         }
@@ -208,8 +214,8 @@ impl ApiState {
     fn read_info(&self, family: Family, snap: &dyn AnySnapshot) -> ReadInfo {
         let meta = snap.meta();
         ReadInfo {
-            read_start: DateTime::<Utc>::from(meta.start),
-            read_at: DateTime::<Utc>::from(meta.end),
+            read_start: api_time(meta.start),
+            read_at: api_time(meta.end),
             read_age_seconds: age_seconds(meta.end),
             read_interval_seconds: self.interval_seconds(family),
             last_attempt_error: self

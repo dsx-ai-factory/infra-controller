@@ -17,13 +17,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bmc_platform::{LockdownDesiredState, LockdownScope, PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, LockdownScope, OperationStatus, PowerState, ResetType};
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
+};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use db::TransactionVending as _;
 use itertools::Itertools;
-use libredfish::JobState;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
@@ -42,7 +43,7 @@ use state_controller::state_handler::{
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
 use crate::redfish::{
-    did_dpu_finish_booting, host_power_control, power_state, power_state_name,
+    did_dpu_finish_booting, host_power_control, poll_idrac_job, power_state, power_state_name,
     reset_bmc_to_factory_defaults,
 };
 
@@ -171,8 +172,6 @@ pub(super) async fn handle_deconfiguring_host(
                 ));
             }
 
-            let bmc_access_info = ctx.services.bmc_access_info_for_machine(machine).await?;
-
             let bmc_mac =
                 machine
                     .status
@@ -205,10 +204,12 @@ pub(super) async fn handle_deconfiguring_host(
             })?;
 
             let key = CredentialKey::host_uefi_site_default(version);
-            let credentials = ctx
+            let Credentials::UsernamePassword {
+                password: current_password,
+                ..
+            } = ctx
                 .services
-                .bmc_credential_ops
-                .credential_reader()
+                .credential_manager
                 .get_credentials(&key)
                 .await
                 .map_err(|error| {
@@ -222,20 +223,18 @@ pub(super) async fn handle_deconfiguring_host(
                     ))
                 })?;
 
-            let job_id = ctx
-                .services
-                .bmc_credential_ops
-                .clear_host_uefi_password(&bmc_access_info, credentials)
+            let bmc = ctx.services.connect_bmc(machine).await?;
+            let outcome = bmc
+                .bios()
+                .map_err(|error| platform_error("bios", error.into()))?
+                .clear_uefi_password(&current_password)
                 .await
-                .map_err(|error| match error {
-                    // Client creation failed (credential store, TCP, or the
-                    // vendor probe): propagate as-is so the framework
-                    // retries normally.
-                    carbide_redfish::libredfish::CredentialOpError::ClientCreation(e) => e.into(),
-                    error => StateHandlerError::GenericError(eyre::eyre!(
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
                         "failed to clear host UEFI password: {error}"
-                    )),
+                    ))
                 })?;
+            let job_id = crate::platform_config::vendor_job_id(&outcome).map(|id| id.to_string());
 
             let next = match job_id {
                 Some(job_id) => DeconfiguringHostState::WaitForUefiPasswordJobScheduled { job_id },
@@ -254,29 +253,20 @@ pub(super) async fn handle_deconfiguring_host(
             ))
         }
         DeconfiguringHostState::WaitForUefiPasswordJobScheduled { job_id } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            let job_state = redfish_client
-                .get_job_state(job_id)
-                .await
-                .map_err(|error| {
-                    StateHandlerError::GenericError(eyre::eyre!(
-                        "failed to read UEFI password job {job_id}: {error}"
-                    ))
-                })?;
-            let next = match job_state {
-                JobState::Scheduled => DeconfiguringHostState::RebootAfterUefiPassword {
+            let status = poll_idrac_job(ctx.services, machine, job_id).await?;
+            let next = match status {
+                OperationStatus::AwaitingReset => DeconfiguringHostState::RebootAfterUefiPassword {
                     job_id: job_id.clone(),
                 },
                 // Some platforms skip Scheduled.
-                JobState::Completed => DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
-                    job_id: job_id.clone(),
-                },
+                OperationStatus::Completed => {
+                    DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
+                        job_id: job_id.clone(),
+                    }
+                }
                 _ => {
                     return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for UEFI password job {job_id} to be scheduled or completed; current state: {job_state:?}"
+                        "waiting for UEFI password job {job_id} to be scheduled or completed; current state: {status:?}"
                     )));
                 }
             };
@@ -309,21 +299,10 @@ pub(super) async fn handle_deconfiguring_host(
             ))
         }
         DeconfiguringHostState::WaitForUefiPasswordJobCompletion { job_id } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            let job_state = redfish_client
-                .get_job_state(job_id)
-                .await
-                .map_err(|error| {
-                    StateHandlerError::GenericError(eyre::eyre!(
-                        "failed to read UEFI password job {job_id}: {error}"
-                    ))
-                })?;
-            if !matches!(job_state, JobState::Completed) {
+            let status = poll_idrac_job(ctx.services, machine, job_id).await?;
+            if !matches!(status, OperationStatus::Completed) {
                 return Ok(StateHandlerOutcome::wait(format!(
-                    "waiting for UEFI password job {job_id} to complete; current state: {job_state:?}"
+                    "waiting for UEFI password job {job_id} to complete; current state: {status:?}"
                 )));
             }
             let mut txn = ctx

@@ -240,12 +240,16 @@ pub(crate) async fn clear_host_uefi_password(
     // The BMC still holds the password for its converged credential version.
     let clear_key = host_uefi_clear_credential_key(api.pg_pool(), bmc_mac).await?;
 
-    let clear_credentials =
-        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &clear_key).await?;
+    let Credentials::UsernamePassword {
+        password: current_password,
+        ..
+    } = read_uefi_credentials(api.credential_manager.as_ref(), &clear_key).await?;
 
-    let job_id: Option<String> = api
-        .bmc_credential_ops
-        .clear_host_uefi_password(&bmc_access_info, clear_credentials)
+    let bmc = api.connect_bmc(&bmc_access_info).await?;
+    let outcome = bmc
+        .bios()
+        .map_err(|e| CarbideError::internal(format!("failed to select bios driver: {e}")))?
+        .clear_uefi_password(&current_password)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run clear_host_uefi_password call");
@@ -253,6 +257,10 @@ pub(crate) async fn clear_host_uefi_password(
                 "failed redfish clear_host_uefi_password subtask: {e}"
             ))
         })?;
+    let job_id = outcome.references().find_map(|reference| match reference {
+        bmc_platform::OperationReference::VendorJob { job_id, .. } => Some(job_id.to_string()),
+        bmc_platform::OperationReference::RedfishTask { .. } => None,
+    });
 
     Ok(Response::new(rpc::ClearHostUefiPasswordResponse { job_id }))
 }

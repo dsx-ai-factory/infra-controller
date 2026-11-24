@@ -211,6 +211,7 @@ pub enum FirmwareComponentType {
     CombinedBmcUefi,
     Gpu,
     Cx7,
+    Cx8,
     /// The firmware of one drive model, named `drive-<model>`. `model` is the
     /// drive's Redfish `Model` exactly as the BMC reports it, such as
     /// `KCD8DPUG15T3` or `Dell Ent NVMe CM6 RI 1.92TB`: non-empty, without
@@ -282,6 +283,7 @@ impl fmt::Display for FirmwareComponentType {
             FirmwareComponentType::Gpu => write!(f, "GPU"),
             FirmwareComponentType::HGXBmc => write!(f, "HGX BMC"),
             FirmwareComponentType::Cx7 => write!(f, "CX7"),
+            FirmwareComponentType::Cx8 => write!(f, "CX8"),
             // Scout passes this to drive scripts as COMPONENT_TYPE.
             FirmwareComponentType::Drive { model } => write!(f, "{DRIVE_PREFIX}{model}"),
             FirmwareComponentType::Unknown => write!(f, "Unknown"),
@@ -338,6 +340,7 @@ impl FirmwareComponentType {
             "combinedbmcuefi" => FirmwareComponentType::CombinedBmcUefi,
             "gpu" => FirmwareComponentType::Gpu,
             "cx7" => FirmwareComponentType::Cx7,
+            "cx8" => FirmwareComponentType::Cx8,
             _ => name
                 .strip_prefix(DRIVE_PREFIX)
                 .and_then(|model| DriveModel::new(model).ok())
@@ -361,6 +364,7 @@ impl FirmwareComponentType {
             FirmwareComponentType::CombinedBmcUefi => "combinedbmcuefi",
             FirmwareComponentType::Gpu => "gpu",
             FirmwareComponentType::Cx7 => "cx7",
+            FirmwareComponentType::Cx8 => "cx8",
             FirmwareComponentType::Drive { .. } => "drive",
             FirmwareComponentType::Unknown => "unknown",
         }
@@ -861,6 +865,7 @@ mod tests {
                 ),
                 "gpu" => (FirmwareComponentType::Gpu, "gpu".into(), "GPU".to_string()),
                 "cx7" => (FirmwareComponentType::Cx7, "cx7".into(), "CX7".to_string()),
+                "cx8" => (FirmwareComponentType::Cx8, "cx8".into(), "CX8".to_string()),
                 "unknown" => unknown(),
             }
 

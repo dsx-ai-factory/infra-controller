@@ -1792,6 +1792,7 @@ async fn create_test_env_with_overrides_inner(
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: api.ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
+                resource_pool_registry: Arc::new(api.resource_pool_registry.clone()),
             }
             .into(),
         )
@@ -1949,6 +1950,7 @@ async fn create_test_env_with_overrides_inner(
             create_switches: Arc::new(true.into()),
             switches_created_per_run: 1,
             rotate_switch_nvos_credentials: Arc::new(false.into()),
+            host_bluefield_rules: Default::default(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             deprecated_explore_mode: None,

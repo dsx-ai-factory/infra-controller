@@ -19,48 +19,71 @@ use carbide_uuid::machine::MachineId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, CommandFactory, Parser};
-use rpc::forge::{InstanceOperatingSystemConfig, InstanceSpxConfig};
+use rpc::forge::{
+    InstanceDpuExtensionServiceConfig, InstanceOperatingSystemConfig, InstanceSpxConfig,
+};
+
+use super::super::parse_extension_service;
 
 #[derive(Parser, Debug)]
 #[clap(group(ArgGroup::new("selector").required(true).multiple(true).args(&["subnet", "vpc_prefix_id", "flat_vpc_id"])))]
+#[command(
+    override_usage = "nico-admin-cli --cloud-unsafe-op <USERNAME> instance allocate [OPTIONS] --prefix-name <PREFIX_NAME> <--subnet <SUBNET>|--vpc-prefix-id <VPC_PREFIX_ID>|--flat-vpc-id <FLAT_VPC_ID>>",
+    long_about = "Allocate instances. Supply --cloud-unsafe-op <USERNAME> before instance for every allocation mode."
+)]
 #[command(after_long_help = "\
 EXAMPLES:
 
 Allocate one instance onto a VPC prefix:
-    $ nico-admin-cli instance allocate --prefix-name eth0 \
-    --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli --cloud-unsafe-op test-operator instance allocate --prefix-name eth0 \
+    --tenant-org fds34511233a --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567 \
+    --os '{\"phone_home_enabled\":false,\"run_provisioning_instructions_on_every_boot\":false,\"variant\":{\"Ipxe\":{\"ipxe_script\":\"#!ipxe\\nchain https://boot.example.com/install.ipxe\\n\"}}}'
 
-Allocate one instance onto a subnet:
-    $ nico-admin-cli instance allocate --prefix-name eth0 --subnet 192.0.2.0/24
+Allocate one instance onto an existing subnet by network segment name:
+    $ nico-admin-cli --cloud-unsafe-op test-operator instance allocate --prefix-name eth0 --tenant-org fds34511233a --subnet tenant-segment \
+    --os '{\"phone_home_enabled\":false,\"run_provisioning_instructions_on_every_boot\":false,\"variant\":{\"Ipxe\":{\"ipxe_script\":\"#!ipxe\\nchain https://boot.example.com/install.ipxe\\n\"}}}'
 
 Allocate several instances at once:
-    $ nico-admin-cli instance allocate --number 4 --prefix-name eth0 \
-    --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli --cloud-unsafe-op test-operator instance allocate --number 4 --prefix-name eth0 \
+    --tenant-org fds34511233a --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567 \
+    --os '{\"phone_home_enabled\":false,\"run_provisioning_instructions_on_every_boot\":false,\"variant\":{\"Ipxe\":{\"ipxe_script\":\"#!ipxe\\nchain https://boot.example.com/install.ipxe\\n\"}}}'
 
 Allocate transactionally (all-or-nothing for --number > 1):
-    $ nico-admin-cli instance allocate --number 4 --prefix-name eth0 \
-    --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567 --transactional
+    $ nico-admin-cli --cloud-unsafe-op test-operator instance allocate --number 4 --prefix-name eth0 --transactional \
+    --tenant-org fds34511233a --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567 \
+    --os '{\"phone_home_enabled\":false,\"run_provisioning_instructions_on_every_boot\":false,\"variant\":{\"Ipxe\":{\"ipxe_script\":\"#!ipxe\\nchain https://boot.example.com/install.ipxe\\n\"}}}'
 
-Allocate onto specific machines:
-    $ nico-admin-cli instance allocate --prefix-name eth0 \
-    --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567 \
-    --machine-id 12345678-1234-5678-90ab-cdef01234567
-
-Allocate with an expected instance type and a network security group:
-    $ nico-admin-cli instance allocate --prefix-name eth0 \
-    --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567 \
+Allocate on a specific machine with an expected instance type and a network security group:
+    $ nico-admin-cli --cloud-unsafe-op test-operator instance allocate --prefix-name eth0 \
+    --tenant-org fds34511233a --vpc-prefix-id 12345678-1234-5678-90ab-cdef01234567 \
+    --machine-id fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0 \
     --instance-type-id abcdef01-2345-6789-abcd-ef0123456789 \
-    --network-security-group-id 12345678-1234-5678-90ab-cdef01234567
+    --network-security-group-id 12345678-1234-5678-90ab-cdef01234567 \
+    --os '{\"phone_home_enabled\":false,\"run_provisioning_instructions_on_every_boot\":false,\"variant\":{\"Ipxe\":{\"ipxe_script\":\"#!ipxe\\nchain https://boot.example.com/install.ipxe\\n\"}}}'
+
+Request a Helm extension service and its service VPC (requires activation support in Core):
+    $ nico-admin-cli --cloud-unsafe-op test-operator instance allocate --prefix-name eth0 \
+    --tenant-org fds34511233a --vpc-prefix-id 23072a44-0eb6-4867-9c2d-c65130b7134c \
+    --extension-service '{\"service_id\":\"12345678-1234-5678-90ab-cdef01234567\",\"version\":\"V1-T1720000000000000\",\"service_vpc_ids\":[\"abcdef01-2345-6789-abcd-ef0123456789\"]}' \
+    --os '{\"phone_home_enabled\":false,\"run_provisioning_instructions_on_every_boot\":false,\"variant\":{\"Ipxe\":{\"ipxe_script\":\"#!ipxe\\nchain https://boot.example.com/install.ipxe\\n\"}}}'
 
 ")]
 pub(crate) struct Args {
     #[clap(short, long)]
     pub(super) number: Option<u16>,
 
-    #[clap(short, long, help = "The subnet to assign to a PF")]
+    #[clap(
+        short,
+        long,
+        help = "The name of the network segment to assign to a PF"
+    )]
     pub(crate) subnet: Vec<String>,
 
-    #[clap(short, long)]
+    #[clap(
+        short,
+        long,
+        help = "Tenant organization ID. Required when allocating by VPC prefix"
+    )]
     // This will not be needed after vpc_prefix implementation.
     // Code can query to carbide and fetch it from db using vpc_prefix_id.
     pub(crate) tenant_org: Option<String>,
@@ -86,7 +109,11 @@ pub(crate) struct Args {
     )]
     pub(crate) instance_type_id: Option<String>,
 
-    #[clap(long, help = "OS definition in JSON format", value_name = "OS_JSON")]
+    #[clap(
+        long,
+        help = "OS definition in JSON format. Core requires this for allocation",
+        value_name = "OS_JSON"
+    )]
     pub(crate) os: Option<InstanceOperatingSystemConfig>,
 
     #[clap(
@@ -157,6 +184,15 @@ pub(crate) struct Args {
         help = "Use batch API for all-or-nothing allocation (requires --number > 1)"
     )]
     pub(super) transactional: bool,
+
+    #[arg(
+        long = "extension-service",
+        value_name = "SERVICE_JSON",
+        value_parser = parse_extension_service,
+        help = "Extension service attachment as JSON. Repeat for different services",
+        long_help = "Request an extension service on each instance. Pass a JSON object with service_id, version, and optional service_vpc_ids. Repeat with a different service ID for each selection. Use the exact version from extension-service show (stable V1 for DPF Helm). Supply one VPC UUID in service_vpc_ids for a service with a registered interface. For other services, omit service_vpc_ids or supply an empty array. Core may return FAILED_PRECONDITION if service networking is unavailable. Sequential allocation can create some instances before the command exits with an error. Check which instances were created before retrying."
+    )]
+    pub(crate) extension_services: Vec<InstanceDpuExtensionServiceConfig>,
 }
 
 impl Args {

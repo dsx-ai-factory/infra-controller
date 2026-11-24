@@ -733,7 +733,7 @@ impl ApiEndpointSource {
                 match self.extract_machine_endpoint(&machine) {
                     Ok(endpoint) => endpoints.push(endpoint),
                     Err(error) => tracing::warn!(
-                        ?machine,
+                        machine_id = machine.id.as_ref().map(tracing::field::display),
                         ?error,
                         rack_id = machine.rack_id.as_ref().map(tracing::field::display),
                         "Could not add machine endpoint due to error"

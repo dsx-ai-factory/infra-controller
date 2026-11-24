@@ -531,6 +531,18 @@ fn firmware_and_model_resolve_to_their_quirks() {
             identity: ars121l(),
             expect: vec![SupermicroHostInterfaceRequired],
         },
+        Case {
+            scenario: "Supermicro ARS-221GL-FNB-NC24B",
+            identity: with_system(
+                identity("Supermicro", Some("Super Server")),
+                SystemIdentity {
+                    id: "1".to_string(),
+                    model: Some("ARS-221GL-FNB-NC24B".to_string()),
+                    ..SystemIdentity::default()
+                },
+            ),
+            expect: vec![SupermicroHostInterfaceRequired],
+        },
     ];
 
     for case in cases {

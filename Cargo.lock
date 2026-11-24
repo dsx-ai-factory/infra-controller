@@ -2500,6 +2500,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-hw-identification"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
 name = "carbide-ib-fabric"
 version = "0.0.1"
 dependencies = [
@@ -2552,6 +2560,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ib-fabric",
  "carbide-instrument",
+ "carbide-resource-pool",
  "carbide-test-support",
  "carbide-uuid",
  "config-version",
@@ -2823,6 +2832,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bmc-backend",
+ "bmc-drivers",
  "bmc-mock",
  "bmc-platform",
  "bmc-runtime",
@@ -3509,6 +3519,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "serial_test",
  "sha2 0.11.0",
  "sqlx",
  "tempfile",
@@ -3710,6 +3721,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-firmware",
  "carbide-health-report",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-metrics-utils",
@@ -3729,6 +3741,7 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
+ "figment",
  "futures-util",
  "http",
  "itertools 0.14.0",
@@ -7458,7 +7471,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.30#cb7ce6ca7f260d71bf5b891fce6f9e8e90e88f67"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.31#246db2d7962b7a271094fd4c31ebb9b1edfd6238"
 dependencies = [
  "chrono",
  "clap",

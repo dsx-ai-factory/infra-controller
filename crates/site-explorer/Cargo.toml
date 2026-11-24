@@ -28,6 +28,7 @@ carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-firmware = { path = "../firmware" }
 carbide-health-report = { path = "../health-report" }
+carbide-hw-identification = { path = "../hw-identification" }
 carbide-instrument = { path = "../instrument" }
 carbide-ipmi = { path = "../ipmi" }
 carbide-metrics-utils = { path = "../metrics-utils" }
@@ -71,6 +72,7 @@ thiserror = { workspace = true }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+figment = { workspace = true, features = ["toml"] }
 axum = { workspace = true }
 bmc-drivers = { path = "../bmc-drivers" }
 bmc-explorer = { path = "../bmc-explorer", features = ["test-support"] }

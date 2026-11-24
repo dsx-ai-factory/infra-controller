@@ -752,6 +752,7 @@ to keep the previous behavior.
 | `power_shelves_created_per_run` | `u64` | `1` | Max power shelves created per run. `0` creates none. |
 | `create_switches` | `bool` | `true` | Auto-create Switch state machines for explored switches with a matching `expected_switches` record. |
 | `switches_created_per_run` | `u64` | `9` | Max switches created per run. `0` creates none. |
+| `host_bluefield_rules` | `HostBlueFieldRules` (array of rule tables) | `[]` | `nico-api` loads these part-number rules at startup and checks them before built-in rules. See [OEM part numbers for host–DPU pairing](../../../../docs/provisioning/boot-interfaces-and-dpu-modes.md#oem-part-numbers-for-hostdpu-pairing). |
 | `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. |
 | `dpu_policy` | `Option<HostDpuPolicy>` | — (effective: `manage`) | Site-wide policy for DPU hardware: `manage`, `nic`, or `ignore`. Per-host `nic` and `ignore` override it; per-host `manage` inherits it for backward compatibility. When omitted, the site default is `manage`. The previous `use_as_nic` value and the legacy `dpu_mode` field with `dpu_mode` / `nic_mode` / `no_dpu` values remain accepted during deserialization. |
 
@@ -1035,11 +1036,13 @@ restart. Base configuration is overridden by site configuration, then
 `CARBIDE_API_` environment configuration.
 
 See the [firmware download operational guide](../../../../docs/operations/firmware-updates/configuration.md#firmware-downloads)
-for affected workflows, deployment guidance, and failure handling.
+for affected workflows, deployment guidance, and failure handling. For NIC site-cache requests, see
+[request admission, reader limits and retry responses](../../../../docs/operations/firmware-updates/configuration.md#scout-nic-firmware-delivery).
+The request and reader limits are independent of `max_concurrent_downloads`.
 
 | Field | Type | Default | Accepted range and behavior |
 | ------- | ------ | --------- | ------------- |
-| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` cache-verification/download workers per Core process, shared by NIC artifact checks, legacy firmware updates, and preingestion. A slot remains occupied through filesystem work and cleanup after cancellation. Saturation defers the next check, even for a cached artifact, without queuing work or consuming a recorded failure; NIC HTTP callers receive `202` with `Retry-After: 5`. Established NIC response readers have a separate 32-reader limit. |
+| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` workers per Core process, shared by NIC artifact checks, legacy firmware updates and pre-ingestion. A busy pool queues no download waiter. The caller polls again, even for cached content. A worker stays occupied through filesystem work and cleanup after cancellation. |
 | `max_download_bytes` | `u64` | `4294967296` (4 GiB) | `1`–`17179869184` (16 GiB) bytes per HTTP response body, counted while streaming regardless of `Content-Length`. Each active NIC transfer reserves this many cache bytes, so `nic_firmware_cache_capacity_bytes` must cover at least one maximum transfer. |
 | `connect_timeout_seconds` | `u64` | `30` | `1`–`300` seconds to connect. |
 | `read_timeout_seconds` | `u64` | `60` | `1`–`600` seconds from starting the request through receiving final response headers, including connection establishment; then an idle timer that resets after each body read. |

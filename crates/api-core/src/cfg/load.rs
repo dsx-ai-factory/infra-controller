@@ -1004,6 +1004,51 @@ selections = { power = "standard" }"#
         })
     }
 
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bluefield_patterns_require_one_operator_at_startup() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("base.toml", include_str!("test_data/min_config.toml"))?;
+            let load = |patterns: &str, strict: bool| {
+                let site = format!(
+                    r#"
+                    deny_unknown_fields = {strict}
+                    [[site_explorer.host_bluefield_rules]]
+                    id = "site-oem"
+                    sources = ["system_pcie_device"]
+                    product = "bluefield3_dpu"
+                    part_numbers = [{patterns}]
+                    "#
+                );
+                jail.create_file("site.toml", &site).unwrap();
+                parse_carbide_config(Path::new("base.toml"), Some(Path::new("site.toml"))).map(
+                    |config| {
+                        !config
+                            .site_explorer
+                            .host_bluefield_rules
+                            .uses_only_defaults()
+                    },
+                )
+            };
+
+            let alternatives =
+                r#"{ exact = "OEM-A" }, { prefix = "OEM-B" }, { contains = "OEM-C" }"#;
+            assert!(load(alternatives, true).unwrap());
+            for strict in [false, true] {
+                let ambiguous = r#"{ exact = "OEM-A", contains = "OEM-" }"#;
+                let error =
+                    load(ambiguous, strict).expect_err("ambiguous pattern must fail startup");
+                let message = format!("{error:#}");
+                assert!(message.contains("exactly one operator"), "{message}");
+                assert!(
+                    message.contains("\"exact\"") && message.contains("\"contains\""),
+                    "{message}"
+                );
+            }
+            Ok(())
+        });
+    }
+
     /// Existing configurations keep libredfish, and only the two clients parse.
     #[test]
     #[allow(clippy::result_large_err)]
