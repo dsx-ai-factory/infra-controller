@@ -425,7 +425,10 @@ LOCAL_DOCKERFILE_DIR := docker/local
 # LOCAL_CORE_HOST must be reachable from inside the kind cluster nodes. On Docker
 # Desktop and colima, host.docker.internal resolves to both IPv6 and IPv4. Go's
 # dialer may prefer IPv6, which is unreachable from Kind pods, so the recipe
-# resolves it to IPv4 before patching the ConfigMap.
+# resolves it to IPv4 before patching the ConfigMap. Docker Engine on Linux does
+# not provide host.docker.internal; when it does not resolve, the recipe uses the
+# kind node's IPv4 Docker network gateway, which reaches nico-api on the host if
+# nico-api listens on all interfaces and the host firewall allows the traffic.
 LOCAL_CORE ?=
 LOCAL_CORE_HOST ?= host.docker.internal
 LOCAL_CORE_PORT ?= 1079
@@ -818,12 +821,20 @@ configure-local-core-site-agent:
 		--from-file=tls.key="$(LOCAL_CORE_CERTS_DIR)/client.key" \
 		--dry-run=client -o yaml | kubectl apply -f -
 	@CORE_HOST="$(LOCAL_CORE_HOST)" ; \
-	IPV4=$$(docker exec $$(docker ps -qf name=$(KIND_CLUSTER_NAME)-control-plane) \
+	NODE=$$(docker ps -qf name=$(KIND_CLUSTER_NAME)-control-plane) ; \
+	IPV4=$$(docker exec $$NODE \
 		getent ahosts "$$CORE_HOST" 2>/dev/null \
 		| awk '/STREAM/{print $$1}' | grep -v ':' | head -1) ; \
 	if [ -n "$$IPV4" ]; then \
 		echo "Resolved $$CORE_HOST -> $$IPV4 (using IPv4 to avoid Go IPv6-first dialer issue)" ; \
 		CORE_HOST="$$IPV4" ; \
+	elif [ "$$CORE_HOST" = "host.docker.internal" ]; then \
+		GATEWAY=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' $$NODE 2>/dev/null \
+			| tr ' ' '\n' | grep -m1 -E '^[0-9]+(\.[0-9]+){3}$$') ; \
+		if [ -n "$$GATEWAY" ]; then \
+			echo "host.docker.internal does not resolve in the kind node; using its Docker network gateway $$GATEWAY" ; \
+			CORE_HOST="$$GATEWAY" ; \
+		fi ; \
 	fi ; \
 	case "$$CORE_HOST" in \
 		\[*\]) ;; \
