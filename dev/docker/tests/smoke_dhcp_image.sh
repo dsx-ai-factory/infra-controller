@@ -30,8 +30,8 @@ curl --version
 
 if test "$EXPECT_KEA_DEB" = true; then
     test -f /tmp/expected-kea.deb
-    test "$(dpkg-deb -f /tmp/expected-kea.deb Package)" = kea-common
-    test "$(dpkg-deb -f /tmp/expected-kea.deb Version)" = "$(dpkg-query -W -f='${Version}' kea-common)"
+    test "$(dpkg-deb -f /tmp/expected-kea.deb Package)" = isc-kea-common
+    test "$(dpkg-deb -f /tmp/expected-kea.deb Version)" = "$(dpkg-query -W -f='${Version}' isc-kea-common)"
     test "$(dpkg-deb -f /tmp/expected-kea.deb Architecture)" = "$(dpkg --print-architecture)"
     mkdir /tmp/expected-kea
     dpkg-deb -x /tmp/expected-kea.deb /tmp/expected-kea
