@@ -1545,9 +1545,9 @@ jobs:
           package_dir=$(mktemp -d)
           trap 'rm -rf "$package_dir"' EXIT
           if docker run --rm --entrypoint sh "$compiler_image" -ec \
-            'if [ -e /opt/kea/kea-common.deb ]; then cat /opt/kea/kea-common.deb; else exit 3; fi' \
-            > "$package_dir/kea-common.deb"; then
-            bash dev/docker/tests/smoke_dhcp_image.sh "$service_image" "$package_dir/kea-common.deb"
+            'if [ -e /opt/kea/isc-kea-common.deb ]; then cat /opt/kea/isc-kea-common.deb; else exit 3; fi' \
+            > "$package_dir/isc-kea-common.deb"; then
+            bash dev/docker/tests/smoke_dhcp_image.sh "$service_image" "$package_dir/isc-kea-common.deb"
           else
             status=$?
             if [[ "$status" != 3 || -f dev/docker/build-kea.sh ]]; then

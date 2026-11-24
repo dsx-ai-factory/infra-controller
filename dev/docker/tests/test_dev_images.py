@@ -70,7 +70,7 @@ class DevImagesTest(unittest.TestCase):
                               'cp) exit 7;;\n'
                               'rm) test "$3" = test-container && : > "$DOCKER_TEST_REMOVED";;\nesac\n')
             docker.chmod(0o755)
-            package = directory / 'kea-common.deb'
+            package = directory / 'isc-kea-common.deb'
             package.touch()
             result = subprocess.run(['/bin/bash', str(ROOT / 'dev/docker/tests/smoke_dhcp_image.sh'),
                                      'test-image', str(package)], capture_output=True, text=True,
