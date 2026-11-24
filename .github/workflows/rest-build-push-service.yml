@@ -223,7 +223,7 @@ jobs:
       - name: Grype vulnerability scan
         if: matrix.arch == 'amd64' && github.ref == 'refs/heads/main'
         continue-on-error: true
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@29a2dd8dfd1d9ba54cc5ca756e0a708596fe61a6 # v1.31.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           image: ${{ steps.docker-tags.outputs.arch_tag }}
           fail-on: critical
@@ -274,7 +274,7 @@ jobs:
 
       - name: Upload binary artifact with semantic version
         if: inputs.push_enabled == true && inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
           display-name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
@@ -286,7 +286,7 @@ jobs:
 
       - name: Upload binary artifact with latest tag
         if: inputs.is_main_branch == 'true' && inputs.push_enabled == true && inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
           display-name: ${{ inputs.service_name }}-binary-${{ matrix.arch }}
@@ -394,7 +394,7 @@ jobs:
 
       - name: Upload Docker image artifact with semantic version
         if: inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           name: ${{ inputs.service_name }}-image
           display-name: ${{ inputs.service_name }}-image
@@ -406,7 +406,7 @@ jobs:
 
       - name: Upload Docker image artifact with latest tag
         if: inputs.is_main_branch == 'true' && inputs.ngc_path != ''
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/resource-push-ngc@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           name: ${{ inputs.service_name }}-image
           display-name: ${{ inputs.service_name }}-image

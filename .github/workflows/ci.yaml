@@ -1894,7 +1894,7 @@ jobs:
           fi
 
       - name: Run TruffleHog Scan
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@e314d3fa6d5a2c80ef79ccee3342016a9ce231de
         with:
           base: ${{ steps.scan-range.outputs.base }}
           head: ${{ steps.scan-range.outputs.head }}
@@ -2387,7 +2387,7 @@ jobs:
       # Same uv release the runtime image pins, so the lockfile resolves the
       # same way in both places.
       - name: Set up uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: "0.13.6"
           enable-cache: false
@@ -2585,7 +2585,7 @@ jobs:
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@e314d3fa6d5a2c80ef79ccee3342016a9ce231de
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -2635,7 +2635,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2665,7 +2665,7 @@ jobs:
           template: 'true'
 
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@e314d3fa6d5a2c80ef79ccee3342016a9ce231de
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -2768,7 +2768,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3079,7 +3079,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3092,7 +3092,7 @@ jobs:
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3105,7 +3105,7 @@ jobs:
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3118,7 +3118,7 @@ jobs:
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3131,7 +3131,7 @@ jobs:
 
       - name: Package and push nico-unbound-local chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           chart-path: bluefield/charts/nico-unbound-local
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3318,7 +3318,7 @@ jobs:
     needs:
       - prepare
       - build-release-container-x86_64
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}

@@ -145,7 +145,7 @@ jobs:
       - name: Grype vulnerability scan
         id: scan
         continue-on-error: true
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@29a2dd8dfd1d9ba54cc5ca756e0a708596fe61a6 # v1.31.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@e314d3fa6d5a2c80ef79ccee3342016a9ce231de # v1.35.3
         with:
           image: ${{ matrix.target.image }}
           fail-on: critical
