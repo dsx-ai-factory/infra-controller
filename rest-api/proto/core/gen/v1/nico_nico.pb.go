@@ -56478,8 +56478,12 @@ type AstraAttachmentStatus struct {
 	Status         *AstraStatus           `protobuf:"bytes,9,opt,name=status,proto3" json:"status,omitempty"`
 	AttachmentVf   *AstraAttachmentVf     `protobuf:"bytes,10,opt,name=attachment_vf,json=attachmentVf,proto3,oneof" json:"attachment_vf,omitempty"`
 	AttachmentOvs  *AstraAttachmentOvs    `protobuf:"bytes,11,opt,name=attachment_ovs,json=attachmentOvs,proto3,oneof" json:"attachment_ovs,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Host IPv4 address Weave assigned to this attachment, as reported by
+	// ListVirtualNetworkAttachments. Absent when Weave reported none, including
+	// an attachment whose virtual network carries an IPv6 subnet instead.
+	HostIpv4      *string `protobuf:"bytes,12,opt,name=host_ipv4,json=hostIpv4,proto3,oneof" json:"host_ipv4,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AstraAttachmentStatus) Reset() {
@@ -56573,6 +56577,13 @@ func (x *AstraAttachmentStatus) GetAttachmentOvs() *AstraAttachmentOvs {
 		return x.AttachmentOvs
 	}
 	return nil
+}
+
+func (x *AstraAttachmentStatus) GetHostIpv4() string {
+	if x != nil && x.HostIpv4 != nil {
+		return *x.HostIpv4
+	}
+	return ""
 }
 
 type AstraStatus struct {
@@ -87956,7 +87967,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"observedAtB\x13\n" +
 	"\x11_maintenance_modeB\t\n" +
 	"\a_netdevB\b\n" +
-	"\x06_error\"\x8f\x04\n" +
+	"\x06_error\"\xbf\x04\n" +
 	"\x15AstraAttachmentStatus\x12\x1f\n" +
 	"\vmac_address\x18\x01 \x01(\tR\n" +
 	"macAddress\x12\x10\n" +
@@ -87970,10 +87981,13 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x06status\x18\t \x01(\v2\x12.forge.AstraStatusR\x06status\x12B\n" +
 	"\rattachment_vf\x18\n" +
 	" \x01(\v2\x18.forge.AstraAttachmentVfH\x01R\fattachmentVf\x88\x01\x01\x12E\n" +
-	"\x0eattachment_ovs\x18\v \x01(\v2\x19.forge.AstraAttachmentOvsH\x02R\rattachmentOvs\x88\x01\x01B\x12\n" +
+	"\x0eattachment_ovs\x18\v \x01(\v2\x19.forge.AstraAttachmentOvsH\x02R\rattachmentOvs\x88\x01\x01\x12 \n" +
+	"\thost_ipv4\x18\f \x01(\tH\x03R\bhostIpv4\x88\x01\x01B\x12\n" +
 	"\x10_attachment_typeB\x10\n" +
 	"\x0e_attachment_vfB\x11\n" +
-	"\x0f_attachment_ovsJ\x04\b\x06\x10\aJ\x04\b\a\x10\bR\x13virtual_function_idR\fnetwork_name\"h\n" +
+	"\x0f_attachment_ovsB\f\n" +
+	"\n" +
+	"_host_ipv4J\x04\b\x06\x10\aJ\x04\b\a\x10\bR\x13virtual_function_idR\fnetwork_name\"h\n" +
 	"\vAstraStatus\x12'\n" +
 	"\x05phase\x18\x01 \x01(\x0e2\x11.forge.AstraPhaseR\x05phase\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x18\n" +

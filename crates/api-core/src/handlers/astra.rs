@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
 use ::rpc::forge::{
@@ -26,7 +28,7 @@ use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
 use mac_address::MacAddress;
-use model::dpa_interface::{DpaInterfaceType, DpaSearchConfig};
+use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaSearchConfig};
 use model::instance::config::spx::SpxAttachmentType;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine::spx::{MachineSpxAttachmentStatusObservation, MachineSpxStatusObservation};
@@ -319,6 +321,7 @@ pub(super) async fn process_astra_config_status(
     })?;
 
     let mut reported_observations = Vec::new();
+    let mut reported_host_addresses: HashMap<MacAddress, IpAddr> = HashMap::new();
 
     // Resolve reported VNIs before taking the host lock.
     for obs in astra_config_status.astra_attachments_status.iter() {
@@ -413,6 +416,23 @@ pub(super) async fn process_astra_config_status(
         };
 
         reported_observations.push(machine_observation);
+
+        // Weave assigns the address, so the agent reports it only once the
+        // attachment has one. Parsing here keeps an address Weave could not have
+        // produced from reaching the column.
+        if let Some(reported_host_ipv4) = obs.host_ipv4.as_deref() {
+            match Ipv4Addr::from_str(reported_host_ipv4) {
+                Ok(host_ipv4) => {
+                    reported_host_addresses.insert(obs_mac, IpAddr::from(host_ipv4));
+                }
+                Err(e) => tracing::error!(
+                    mac_address = %obs.mac_address,
+                    host_ipv4 = reported_host_ipv4,
+                    error = ?e,
+                    "Failed to parse host IPv4 from Astra observation, skipping",
+                ),
+            }
+        }
     }
 
     // Astra and SVPC share `spx_status_observation`. Read after taking the
@@ -431,6 +451,29 @@ pub(super) async fn process_astra_config_status(
         DpaSearchConfig::default(),
     )
     .await?;
+
+    // An Astra card holds Weave's host address in `overlay_ip`, the column DHCP
+    // fills for an SVPC card. It belongs to the tenancy, so only an assigned
+    // card carries one and `try_update_controller_state` clears it when that
+    // tenancy ends. Reports repeat an unchanged address every iteration, so
+    // write only what the row does not already carry.
+    for interface in dpa_interfaces.iter().filter(|interface| {
+        interface.interface_type == DpaInterfaceType::Astra
+            && matches!(
+                interface.controller_state.value,
+                DpaInterfaceControllerState::Assigned
+            )
+    }) {
+        let Some(&host_ipv4) = reported_host_addresses.get(&interface.mac_address) else {
+            continue;
+        };
+        if interface.overlay_ip == Some(host_ipv4) {
+            continue;
+        }
+
+        db::dpa_interface::update_astra_overlay_ip(txn.as_mut(), interface.id, host_ipv4).await?;
+    }
+
     let mut spx_attachment_observations = machine
         .status
         .spx_status_observation

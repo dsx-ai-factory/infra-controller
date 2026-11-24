@@ -10314,6 +10314,10 @@ message AstraAttachmentStatus {
   AstraStatus status = 9;
   optional AstraAttachmentVf attachment_vf = 10;
   optional AstraAttachmentOvs attachment_ovs = 11;
+  // Host IPv4 address Weave assigned to this attachment, as reported by
+  // ListVirtualNetworkAttachments. Absent when Weave reported none, including
+  // an attachment whose virtual network carries an IPv6 subnet instead.
+  optional string host_ipv4 = 12;
 }
 
 enum AstraPhase {

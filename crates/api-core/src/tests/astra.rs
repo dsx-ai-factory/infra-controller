@@ -15,12 +15,15 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use carbide_dpa::rpc::{DpaMetadata, Pfvni, SetVni};
 use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use db::ConditionalWrite;
-use model::dpa_interface::{DpaInterface, DpaInterfaceType, NewDpaInterface};
+use model::dpa_interface::{
+    DpaInterface, DpaInterfaceControllerState, DpaInterfaceType, NewDpaInterface,
+};
 use model::instance::config::spx::SpxAttachmentType;
 use model::machine::spx::{MachineSpxAttachmentStatusObservation, MachineSpxStatusObservation};
 use rpc::forge::forge_server::Forge;
@@ -170,6 +173,36 @@ async fn add_second_astra(fixture: &AstraStatusFixture) -> DpaInterface {
     .expect("create second Astra interface");
     txn.commit().await.unwrap();
     astra
+}
+
+/// `assign_astra` performs the transition the DPA controller makes when the card
+/// enters a tenancy, which is the only state that may hold a host address.
+async fn assign_astra(fixture: &AstraStatusFixture, astra: &DpaInterface) {
+    let mut txn = fixture.env.db_txn().await;
+    assert_eq!(
+        db::dpa_interface::try_update_controller_state(
+            &mut txn,
+            astra.id,
+            astra.controller_state.version,
+            astra.controller_state.version.increment(),
+            &DpaInterfaceControllerState::Assigned,
+        )
+        .await
+        .expect("assign Astra interface"),
+        ConditionalWrite::Applied(())
+    );
+    txn.commit().await.unwrap();
+}
+
+/// An Astra card keeps Weave's host address in the `overlay_ip` column that
+/// DHCP fills for an SVPC card.
+async fn stored_host_ipv4(fixture: &AstraStatusFixture, astra: &DpaInterface) -> Option<IpAddr> {
+    db::dpa_interface::find_by_ids(&fixture.env.pool, &[astra.id], false)
+        .await
+        .expect("load Astra interface")
+        .pop()
+        .expect("Astra interface exists")
+        .overlay_ip
 }
 
 // Delivered failures retract earlier readiness, while omission makes no new
@@ -809,4 +842,47 @@ async fn astra_report_rejects_interface_deleted_while_waiting_for_host(pool: sql
             .spx_attachments,
         vec![fixture.svpc_observation]
     );
+}
+
+// Weave owns the host address and the agent relays what it observed, so a
+// report from an assigned card records it. Absence from a later report is not a
+// retraction; only leaving the tenancy retires the address.
+#[crate::sqlx_test]
+async fn astra_report_records_the_host_ipv4_of_an_assigned_interface(pool: sqlx::PgPool) {
+    let fixture = create_astra_status_fixture(pool).await;
+    let assigned_address: IpAddr = "192.0.2.10".parse().unwrap();
+    assign_astra(&fixture, &fixture.astra).await;
+
+    let mut status = astra_status(&fixture.astra, AstraPhase::PhaseReady);
+    status.astra_attachments_status[0].host_ipv4 = Some(assigned_address.to_string());
+    record_astra_status(&fixture, Some(status)).await;
+    assert_eq!(
+        stored_host_ipv4(&fixture, &fixture.astra).await,
+        Some(assigned_address),
+        "the address the agent reported reaches the interface row"
+    );
+
+    record_astra_status(
+        &fixture,
+        Some(astra_status(&fixture.astra, AstraPhase::PhaseReady)),
+    )
+    .await;
+    assert_eq!(
+        stored_host_ipv4(&fixture, &fixture.astra).await,
+        Some(assigned_address),
+        "a report carrying no address makes no claim about the recorded one"
+    );
+}
+
+// An interface that never entered a tenancy has no address to hold, so the
+// report must not create one just because the agent relayed what Weave listed.
+#[crate::sqlx_test]
+async fn astra_report_withholds_host_ipv4_from_an_unassigned_interface(pool: sqlx::PgPool) {
+    let fixture = create_astra_status_fixture(pool).await;
+
+    let mut status = astra_status(&fixture.astra, AstraPhase::PhaseReady);
+    status.astra_attachments_status[0].host_ipv4 = Some("192.0.2.10".to_string());
+    record_astra_status(&fixture, Some(status)).await;
+
+    assert_eq!(stored_host_ipv4(&fixture, &fixture.astra).await, None);
 }
