@@ -242,11 +242,12 @@ and model. These rules distinguish the tray from board and product FRUs even
 when their models are identical.
 
 <Note>
-Rules apply to every matching host, including already-ingested hosts and
-sites with `create_machines = false`. After startup, the audit evaluates
-stored reports on each Site Explorer iteration. A mismatch raises a
-`SerialNumberMismatch` health alert classified as `PreventAllocations`.
-Check the selected source against ExpectedMachine before rolling out a rule.
+During the audit, Site Explorer checks stored host reports that match an
+Expected Machine, including when `create_machines = false`. A mismatch
+increments the site-wide mismatch metric. If the BMC maps to a Machine, Site
+Explorer records the `SerialNumberMismatch` health alert with the
+`PreventAllocations` classification.
+Check the selected source against the Expected Machine before rolling out a rule.
 </Note>
 
 This **site TOML** example selects the tray FRU under chassis with IDs such
