@@ -449,3 +449,109 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
     assert_eq!(dpu_not_under_reprov.len(), 0);
     Ok(())
 }
+
+#[crate::sqlx_test]
+async fn test_completed_dpu_updates_require_all_dpus_and_ready_host(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_machine_controller::health_report::create_host_update_health_report_dpufw;
+    use model::machine::{
+        FailureCause, FailureDetails, FailureSource, InstanceState, ManagedHostState,
+        ReprovisionState,
+    };
+
+    let env = create_test_env(pool).await;
+    let host = create_managed_host_multi_dpu(&env, 2).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let _instance = host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let unmarked = create_managed_host(&env).await;
+    let ready = ManagedHostState::Assigned {
+        instance_state: InstanceState::Ready,
+    };
+    let mut txn = env.pool.txn_begin().await?;
+    // A snapshot that this binary cannot decode must not block cleanup of a different host.
+    sqlx::query("UPDATE machines SET controller_state = '{}'::jsonb WHERE id = $1")
+        .bind(unmarked.id)
+        .execute(&mut *txn)
+        .await?;
+    db::machine::insert_health_report(
+        &mut txn,
+        &host.id,
+        health_report::HealthReportApplyMode::Merge,
+        &create_host_update_health_report_dpufw(),
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    for (scenario, state, pending_secondary, expected_count) in [
+        ("secondary DPU still requested", ready.clone(), true, 0),
+        (
+            "host still reprovisioning after requests cleared",
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::DPUReprovision {
+                    dpu_states: model::machine::DpuReprovisionStates {
+                        states: host
+                            .dpu_ids
+                            .iter()
+                            .map(|id| (*id, ReprovisionState::RebootHost))
+                            .collect(),
+                    },
+                },
+            },
+            false,
+            0,
+        ),
+        (
+            "host failed after requests cleared",
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::Failed {
+                    details: FailureDetails {
+                        cause: FailureCause::DpfProvisioning {
+                            err: "test update failed".to_string(),
+                        },
+                        failed_at: chrono::Utc::now(),
+                        source: FailureSource::NoError,
+                    },
+                    machine_id: host.dpu().id.into(),
+                },
+            },
+            false,
+            0,
+        ),
+        ("both DPUs complete", ready, false, 2),
+    ] {
+        let mut txn = env.pool.txn_begin().await?;
+        db::machine::update_state(&mut txn, &host.id, &state).await?;
+        db::machine::clear_dpu_reprovisioning_request(&mut txn, &host.dpu_n(1).id, false).await?;
+        if pending_secondary {
+            db::machine::trigger_dpu_reprovisioning_request(
+                &host.dpu_n(1).id,
+                &mut txn,
+                model::machine_update_module::AutomaticFirmwareUpdateReference::REF_NAME,
+                true,
+            )
+            .await?;
+        }
+        txn.commit().await?;
+
+        let updated = db::dpu_machine_update::get_updated_machines(
+            &mut env.db_reader(),
+            env.config.host_health,
+        )
+        .await?;
+        assert_eq!(updated.len(), expected_count, "{scenario}");
+        assert!(
+            updated
+                .iter()
+                .all(|dpu| dpu.host_machine_id == host.id.into()),
+            "{scenario}"
+        );
+    }
+
+    Ok(())
+}

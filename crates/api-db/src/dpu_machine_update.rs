@@ -15,7 +15,10 @@
  * limitations under the License.
  */
 use model::dpu_machine_update::DpuMachineUpdate;
-use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostState, ReprovisionRequest};
+use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine::{
+    HostHealthConfig, InstanceState, LoadSnapshotOptions, ManagedHostState, ReprovisionRequest,
+};
 use model::machine_update_module::{
     AutomaticFirmwareUpdateReference, DPU_FIRMWARE_UPDATE_TARGET, DpuReprovisionInitiator,
     HOST_UPDATE_HEALTH_PROBE_ID, HOST_UPDATE_HEALTH_REPORT_SOURCE,
@@ -130,7 +133,18 @@ pub async fn get_updated_machines<DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let machine_ids = crate::managed_host::load_host_ids(&mut *conn).await?;
+    let machine_ids = crate::machine::find_machine_ids(
+        &mut *conn,
+        MachineSearchConfig {
+            only_with_health_alert: Some(HOST_UPDATE_HEALTH_REPORT_SOURCE.to_owned()),
+            include_predicted_host: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    if machine_ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let snapshots = crate::managed_host::load_by_machine_ids(
         conn,
         &machine_ids,
@@ -161,7 +175,13 @@ where
                 return None;
             }
             // Skip any machines that are not done updating
-            if !matches!(managed_host.managed_state, ManagedHostState::Ready) {
+            if !matches!(
+                managed_host.managed_state,
+                ManagedHostState::Ready
+                    | ManagedHostState::Assigned {
+                        instance_state: InstanceState::Ready,
+                    }
+            ) {
                 return None;
             }
             // Check if all DPUs have the `reprovisioning_requested` flag cleared

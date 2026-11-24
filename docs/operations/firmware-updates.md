@@ -81,7 +81,8 @@ Machine Update Manager counts distinct hosts from these sources:
   host firmware module always participates in accounting.
 - Hosts with DPU reprovisioning requests from the automatic update initiator,
   while `dpu_config.dpu_nic_firmware_reprovision_update_enabled` is `true`.
-  Disabling this module also stops counting its outstanding automatic requests.
+  Disabling automatic DPU updates stops counting its outstanding automatic
+  requests; completion cleanup remains active.
 - Stable or predicted hosts whose current state is `NicFirmwareUpdating`.
   NIC accounting continues when new NIC admission is disabled.
 

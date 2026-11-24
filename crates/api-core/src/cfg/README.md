@@ -1187,7 +1187,7 @@ For a non-DPF host, instance admission follows HBN's representor selection even 
 | ------- | ------ | --------- | ------------- |
 | `bootstrap_ca_source` | `BootstrapCaSource` | `legacy_download` | How non-DPF DPUs obtain the API trust anchor: `legacy_download`, `embedded`, or `mounted`. Omitting the field preserves the historical PXE download. The field is not sent to host Scout boots. Non-network modes do not fall back to downloading. |
 | `dpu_nic_firmware_initial_update_enabled` | `bool` | `false` | Enable DPU NIC firmware updates on initial discovery. |
-| `dpu_nic_firmware_reprovision_update_enabled` | `bool` | `true` | Enable DPU NIC firmware updates on reprovisioning. |
+| `dpu_nic_firmware_reprovision_update_enabled` | `bool` | `true` | Controls automatic DPU update selection, scheduling, shared-capacity accounting, and gauges. Manual reprovisioning and completion cleanup remain available when `false`. |
 | `dpu_models` | `HashMap<String, Firmware>` | *(BF2+BF3 defaults)* | DPU model firmware definitions. |
 | `dpu_nic_firmware_update_versions` | `Vec<String>` | *(BF2+BF3 NIC versions)* | DPU NIC firmware version strings. |
 | `dpu_enable_secure_boot` | `bool` | `false` | Enable secure boot flow for DPU provisioning via Redfish. |
