@@ -249,6 +249,7 @@ increments the site-wide mismatch metric. If the BMC maps to a Machine, Site
 Explorer records the `SerialNumberMismatch` health alert with the
 `PreventAllocations` classification.
 Check the selected source against the Expected Machine before rolling out a rule.
+
 </Note>
 
 This **site TOML** example selects the tray FRU under chassis with IDs such
