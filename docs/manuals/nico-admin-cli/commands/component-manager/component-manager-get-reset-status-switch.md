@@ -15,7 +15,9 @@ nico-admin-cli component-manager get-reset-status --action <ACTION> switch [OPTI
 
 ## DESCRIPTION
 
-Get switch reset status by ID or BMC MAC
+Get switch reset status by ID or BMC MAC. BMC reset status is an
+untracked no-op returning COMPLETED; it does not verify controller
+recovery or require a prior submission.
 
 ## OPTIONS
 
@@ -42,9 +44,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 
