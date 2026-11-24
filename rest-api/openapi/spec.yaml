@@ -4278,7 +4278,7 @@ paths:
             type: string
           in: query
           name: query
-          description: Search for matches across all VPC Prefixes. Input will be matched against name and status fields
+          description: Search for matches across all VPC Prefixes. Input will be matched against name, status, and labels fields
         - schema:
             type: array
             items:
@@ -24149,6 +24149,9 @@ components:
       examples:
         - id: 0c03ba01-d86b-4a57-a41e-cc359b380a6f
           name: east-vpc-traffic-net
+          labels:
+            environment: production
+            owner: networking
           siteId: ea144def-d68f-44c3-9485-4b103fa2686f
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
           prefix: 192.168.1.0/24
@@ -24207,6 +24210,9 @@ components:
           minLength: 2
           maxLength: 256
           description: Name of the VPC Prefix
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing VPC Prefix labels
         siteId:
           type: string
           format: uuid
@@ -24272,6 +24278,9 @@ components:
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
           ipBlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
           prefixLength: 20
+          labels:
+            environment: production
+            owner: networking
         - name: application-network
           vpcId: 0b1c53a0-a27e-4714-98d7-0cd3bc579db2
           ipBlockId: 20d7dd4f-ae43-4245-a9d9-d093296009c4
@@ -24283,6 +24292,9 @@ components:
           minLength: 2
           maxLength: 256
           description: Human readable name for the VPC Prefix
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing VPC Prefix labels. Up to 10 key-value pairs can be specified
         vpcId:
           type: string
           format: uuid
@@ -24312,6 +24324,8 @@ components:
               type: string
               minLength: 2
               maxLength: 256
+            labels:
+              $ref: '#/components/schemas/Labels'
             vpcId:
               type: string
               format: uuid
@@ -24339,6 +24353,8 @@ components:
               type: string
               minLength: 2
               maxLength: 256
+            labels:
+              $ref: '#/components/schemas/Labels'
             vpcId:
               type: string
               format: uuid
@@ -24364,15 +24380,21 @@ components:
       type: object
       examples:
         - name: east-vpc-traffic-net
-      description: Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
+          labels:
+            environment: production
+            owner: networking
+      description: Request data for updating a VPC Prefix. Omitting `name` or passing `null` preserves the stored name. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
       properties:
         name:
-          type: string
-          description: 'Name of the VPCPrefix'
+          type:
+            - string
+            - 'null'
+          description: 'Name of the VPCPrefix. Omission or `null` preserves the stored name'
           minLength: 2
           maxLength: 256
-      required:
-        - name
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: Update labels of the VPC Prefix. The supplied map replaces all stored labels; an empty object clears them, while omission preserves them
     Subnet:
       title: Subnet
       type: object
@@ -26673,7 +26695,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/NVLinkInterface'
-          description: 'NVLinkInterfaces are list of the NVLinkInterface associated with the Instance'
+          description: 'Stored NVLink Interface records for the Instance. The list can include
+            interfaces in `Deleting` status and can contain both retiring and
+            replacement records for the same GPU.'
         dpuExtensionServiceDeployments:
           type: array
           description: DPU Extension Services deployed on DPUs of this Instance
@@ -27364,8 +27388,11 @@ components:
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
-          type: array
-          description: Update NVLink Interfaces of the Instance. A subset of GPUs may be specified. Each item references a GPU index (`deviceInstance`) and an NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions. Partial updates are not allowed; specified interfaces will delete or replace existing Interfaces. Updating is not allowed if the Instance's VPC has the `nvLinkLogicalPartitionId` attribute set.
+          type:
+            - array
+            - 'null'
+          description: >-
+            Update NVLink Interfaces of the Instance. Omission or `null` leaves interfaces unchanged; an explicit list replaces them entirely, detaching any not included. An empty list (`[]`) removes all existing interfaces. If the owning VPC has `nvLinkLogicalPartitionId` set, changes to an Instance that already has live interfaces will return 400.
           items:
             $ref: '#/components/schemas/NVLinkInterfaceCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:

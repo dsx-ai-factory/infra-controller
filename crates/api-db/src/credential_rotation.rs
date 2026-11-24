@@ -153,6 +153,36 @@ pub async fn record_device_enrolled(
         .map_err(|e| DatabaseError::query(insert, e))
 }
 
+/// Records the NVOS version confirmed during preingestion, before a switch exists.
+///
+/// Call only after the preingestion job succeeds and the per-device credential
+/// has been written and verified. An existing unconfirmed row must also receive
+/// the applied version. Clear superseded operation state while retaining attempt
+/// history; the preingestion job itself is stored on the explored endpoint.
+pub async fn record_nvos_preingestion_rotation_succeeded(
+    conn: &mut PgConnection,
+    device_mac: MacAddress,
+    applied_version: i32,
+) -> Result<(), DatabaseError> {
+    let query = "INSERT INTO device_credential_rotation \
+                     (device_mac, credential_type, current_version) \
+                 VALUES ($1, $2, $3) \
+                 ON CONFLICT (device_mac, credential_type) DO UPDATE SET \
+                     current_version = EXCLUDED.current_version, \
+                     rotating_to_version = NULL, \
+                     rotate_job_id = NULL, \
+                     rotate_quarantined_until = NULL, \
+                     rotate_last_error_redacted = NULL";
+    sqlx::query(query)
+        .bind(device_mac)
+        .bind(CredentialRotationType::Nvos)
+        .bind(applied_version)
+        .execute(conn)
+        .await
+        .map(|_| ())
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// Stages an in-flight rotation: records that `device_mac` is being moved to
 /// `rotating_to_version` of `credential_type`, without touching `current_version`.
 ///

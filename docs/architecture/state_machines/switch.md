@@ -4,6 +4,10 @@ This document describes the Finite State Machine (FSM) for Switches in NICo:
 lifecycle from creation through configuration, validation, ready, optional
 rack-level reprovisioning, operator maintenance, decommissioning, and deletion.
 
+Site Explorer creates the switch only after every allocated BMC address has an
+explored endpoint that has completed pre-ingestion, including
+[initial NVOS password handling](../../operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion).
+
 ## High-Level Overview
 
 The main flow shows the primary states and transitions:
@@ -87,7 +91,7 @@ stateDiagram-v2
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`RotateOsPassword`) | No `rack_id` or no component manager (skip certificate step) |
 | Configuring (`ConfigureCertificate` `WaitForComplete`) | Configuring (`RotateOsPassword`) | RMS job `Completed` |
 | Configuring (`ConfigureCertificate` `WaitForComplete`) | Error | RMS job `Failed` |
-| Configuring (`RotateOsPassword`) | FetchInfo | NVOS credentials stored or already in the credential store |
+| Configuring (`RotateOsPassword`) | FetchInfo | Captured rotation completes and its credential is verified; the confirmed version already meets the site target; or rotation is skipped because the component manager, supported backend, site target, or credential source is absent |
 | Configuring (`RotateOsPassword`) | Error | No expected switch or missing BMC MAC |
 | FetchInfo | Validating (`ValidationComplete`) | Slot/tray lookup attempted (always advances) |
 | Validating (`ValidationComplete`) | BomValidating (`BomValidationComplete`) | Validation complete |

@@ -639,6 +639,8 @@ pub struct HostPrimaryInterfaceSelection {
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum PreingestionState {
     Initial,
+    /// Check firmware prerequisites after initial NVOS password handling.
+    CheckFirmware,
     RecheckVersions,
     ScriptRunning,
     BfbRecoveryNeeded {
@@ -721,6 +723,11 @@ pub enum PreingestionState {
     RackFirmwareUpdateWait {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         backend_job_id: Option<String>,
+    },
+    /// Rotate the initial NVOS password before firmware work and switch ingestion.
+    NvosPasswordRotation {
+        /// Eligibility check or the captured password operation to resume.
+        rotation_state: NvosPasswordRotationState,
     },
     UpgradeFirmwareWait {
         task_id: String,
@@ -806,6 +813,23 @@ pub enum BfbPlatformPowercyclePhase {
     PowerOff,
     PowerOn,
     WaitingForDpuBmc,
+}
+
+/// Durable progress of the initial NVOS password operation before ingestion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NvosPasswordRotationState {
+    /// Check whether a confirmed NVOS credential version has been recorded.
+    Check,
+    /// Resume the captured target independently of managed-switch rotation.
+    /// `None` is persisted before dispatch and retries the same target.
+    Rotate {
+        /// Immutable site credential version captured before backend dispatch.
+        target_version: u32,
+        /// `None` precedes dispatch or retries an ambiguous outcome against the
+        /// same target; `Some` retains the backend job for status polling.
+        job_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

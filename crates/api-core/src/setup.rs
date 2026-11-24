@@ -51,6 +51,9 @@ use carbide_machine_controller::per_object::MachinePerObjectInfo;
 use carbide_network_segment_controller::context::NetworkSegmentStateHandlerServices;
 use carbide_network_segment_controller::handler::NetworkSegmentStateHandler;
 use carbide_network_segment_controller::io::NetworkSegmentStateControllerIO;
+use carbide_nvlink_domain_controller::{
+    NvLinkDomainStateControllerIO, NvLinkDomainStateHandler, NvLinkDomainStateHandlerServices,
+};
 use carbide_nvlink_manager::{NvLinkManager, NvLinkManagerArgs};
 use carbide_power_shelf_controller::context::PowerShelfStateHandlerServices;
 use carbide_power_shelf_controller::handler::PowerShelfStateHandler;
@@ -700,10 +703,6 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     );
     let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
         bmc_client.clone(),
-        carbide_config
-            .site_explorer
-            .rotate_switch_nvos_credentials
-            .clone(),
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
         instrumentation.clone(),
@@ -786,6 +785,20 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .as_ref()
             .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
     );
+    if let Some(sdk) = &dpf_sdk {
+        let sdk = sdk.clone();
+        bmc_explorer.set_dpf_recovery(
+            work_lock_manager_handle.clone(),
+            Box::new(move |node_id, device_id| {
+                let sdk = sdk.clone();
+                Box::pin(async move {
+                    sdk.bmc_credential_resources_gone(&node_id, &device_id)
+                        .await
+                        .map_err(|_| "could not verify DPF resource drain".to_string())
+                })
+            }),
+        );
+    }
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
@@ -2171,6 +2184,7 @@ async fn initialize_and_start_controllers<'a>(
         &carbide_config.extension_service_state_controller.controller,
         &carbide_config.spdm_state_controller.controller,
         &carbide_config.ib_partition_state_controller.controller,
+        &carbide_config.nvlink_domain_state_controller.controller,
     ];
 
     // Cross-controller registry feeding the per-object health and state
@@ -2193,7 +2207,7 @@ async fn initialize_and_start_controllers<'a>(
     per_object_metrics_registry.register(&meter);
 
     // Hold period for the per-object state/info gauges, which are fed by all
-    // eight controllers. An object's series is only refreshed after its
+    // state controllers. An object's series is only refreshed after its
     // handler finishes, so the worst-case refresh gap is roughly an iteration
     // interval (with slack) PLUS the longest allowed handler runtime. Note:
     // under fleet backlog the wall-clock iteration can exceed iteration_time;
@@ -2613,6 +2627,23 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build RackStateController");
 
+    StateController::<NvLinkDomainStateControllerIO>::builder()
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
+        .meter("carbide_nvlink_domains", meter.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(NvLinkDomainStateHandlerServices {
+            db_pool: db_pool.clone(),
+        }))
+        .per_object_state_metrics(per_object_state_recorder("nvlink_domain"))
+        .iteration_config((&carbide_config.nvlink_domain_state_controller.controller).into())
+        .state_handler(Arc::new(NvLinkDomainStateHandler))
+        .build_and_spawn(join_set, cancel_token.clone())
+        .expect("Unable to build NvLinkDomainStateController");
+
     StateController::<SwitchStateControllerIO>::builder()
         .database(
             db_pool.clone(),
@@ -2789,6 +2820,12 @@ async fn initialize_and_start_controllers<'a>(
         api_service.instrumentation.clone(),
     )
     .with_driver_connector(driver_connector.clone());
+
+    let preingestion_manager = match component_manager.as_ref() {
+        Some(manager) => preingestion_manager
+            .with_component_manager(Arc::new(manager.clone()), credential_manager.clone()),
+        None => preingestion_manager,
+    };
 
     let preingestion_manager = match component_manager.as_ref() {
         Some(manager)

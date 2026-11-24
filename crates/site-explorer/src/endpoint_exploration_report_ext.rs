@@ -17,13 +17,12 @@
 
 use std::collections::HashMap;
 
+use carbide_hw_identification::host_bluefield::{DpuProduct, HostBlueFieldRules, InventorySource};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::expected_machine::ExpectedMachineData;
-use model::site_explorer::{
-    Chassis, EndpointExplorationReport, PCIeDevice, is_bluefield_part_number,
-};
+use model::site_explorer::{Chassis, EndpointExplorationReport};
 
 /// Inventory operations used for host/DPU matching and interface ownership.
 pub(super) trait EndpointExplorationReportExt {
@@ -51,7 +50,8 @@ pub(super) trait EndpointExplorationReportExt {
     /// serial disagree, prefer the first record with a BlueField part number;
     /// otherwise keep the first record. PCIe records precede chassis records,
     /// so PCIe wins when both sources supply conflicting BlueField part numbers.
-    fn devices_with_unique_serials(&self) -> Vec<DeviceIdentifiers<'_>>;
+    fn devices_with_unique_serials(&self, rules: &HostBlueFieldRules)
+    -> Vec<DeviceIdentifiers<'_>>;
 }
 
 impl EndpointExplorationReportExt for EndpointExplorationReport {
@@ -146,13 +146,29 @@ impl EndpointExplorationReportExt for EndpointExplorationReport {
         })
     }
 
-    fn devices_with_unique_serials(&self) -> Vec<DeviceIdentifiers<'_>> {
+    fn devices_with_unique_serials(
+        &self,
+        rules: &HostBlueFieldRules,
+    ) -> Vec<DeviceIdentifiers<'_>> {
         let devices = self
             .systems
             .iter()
             .flat_map(|system| &system.pcie_devices)
-            .map(DeviceIdentifiers::from)
-            .chain(self.chassis.iter().flat_map(host_dpu_inventory_records));
+            .map(|device| {
+                let part_number = device.part_number.as_deref();
+                DeviceIdentifiers {
+                    part_number,
+                    serial_number: device.serial_number.as_deref(),
+                    bluefield_product: part_number.and_then(|part| {
+                        rules.classify_part_number(InventorySource::SystemPcieDevice, part)
+                    }),
+                }
+            })
+            .chain(
+                self.chassis
+                    .iter()
+                    .flat_map(|chassis| chassis_records_with_rules(chassis, rules)),
+            );
         deduplicate_devices_by_serial(devices)
     }
 }
@@ -161,6 +177,7 @@ impl EndpointExplorationReportExt for EndpointExplorationReport {
 #[derive(Clone, Copy)]
 pub(super) struct DeviceIdentifiers<'a> {
     pub(super) part_number: Option<&'a str>,
+    pub(super) bluefield_product: Option<DpuProduct>,
     pub(super) serial_number: Option<&'a str>,
 }
 
@@ -170,17 +187,9 @@ impl<'a> DeviceIdentifiers<'a> {
         self.serial_number.map(str::trim).none_if_empty()
     }
 
+    /// Whether a rule recognized the reported part number as a BlueField.
     pub(super) fn is_bluefield(&self) -> bool {
-        self.part_number.is_some_and(is_bluefield_part_number)
-    }
-}
-
-impl<'a> From<&'a PCIeDevice> for DeviceIdentifiers<'a> {
-    fn from(device: &'a PCIeDevice) -> Self {
-        Self {
-            part_number: device.part_number.as_deref(),
-            serial_number: device.serial_number.as_deref(),
-        }
+        self.bluefield_product.is_some()
     }
 }
 
@@ -210,9 +219,20 @@ fn deduplicate_devices_by_serial<'a>(
 /// otherwise reads its network adapters. Keep all occurrences so chassis-ID
 /// attribution can still detect conflicting parent chassis for one serial.
 pub(super) fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<DeviceIdentifiers<'_>> {
+    // Boot ordering uses built-in chassis identities independently of pairing overrides.
+    chassis_records_with_rules(chassis, &HostBlueFieldRules::default())
+}
+
+fn chassis_records_with_rules<'a>(
+    chassis: &'a Chassis,
+    rules: &HostBlueFieldRules,
+) -> Vec<DeviceIdentifiers<'a>> {
+    let part_number = chassis.part_number.as_deref();
     let device = DeviceIdentifiers {
-        part_number: chassis.part_number.as_deref(),
+        part_number,
         serial_number: chassis.serial_number.as_deref(),
+        bluefield_product: part_number
+            .and_then(|part| rules.classify_part_number(InventorySource::Chassis, part)),
     };
     if device.is_bluefield() && device.serial_number().is_some() {
         return vec![device];
@@ -221,9 +241,15 @@ pub(super) fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<DeviceIdentif
     chassis
         .network_adapters
         .iter()
-        .map(|adapter| DeviceIdentifiers {
-            part_number: adapter.part_number.as_deref(),
-            serial_number: adapter.serial_number.as_deref(),
+        .map(|adapter| {
+            let part_number = adapter.part_number.as_deref();
+            DeviceIdentifiers {
+                part_number,
+                serial_number: adapter.serial_number.as_deref(),
+                bluefield_product: part_number.and_then(|part| {
+                    rules.classify_part_number(InventorySource::ChassisNetworkAdapter, part)
+                }),
+            }
         })
         .collect()
 }
@@ -232,7 +258,7 @@ pub(super) fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<DeviceIdentif
 mod tests {
     use carbide_test_support::{Check, check_values};
     use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
-    use model::site_explorer::{ComputerSystem, EthernetInterface, NetworkAdapter};
+    use model::site_explorer::{ComputerSystem, EthernetInterface, NetworkAdapter, PCIeDevice};
 
     use super::*;
 
@@ -385,7 +411,7 @@ mod tests {
             let mut report = report(case.pcie_devices);
             report.chassis = case.chassis;
             let serials = report
-                .devices_with_unique_serials()
+                .devices_with_unique_serials(&HostBlueFieldRules::default())
                 .into_iter()
                 .map(|device| (device.serial_number().unwrap(), device.part_number))
                 .collect::<Vec<_>>();
@@ -440,7 +466,7 @@ mod tests {
         ] {
             let report = report(case.devices);
             let serials = report
-                .devices_with_unique_serials()
+                .devices_with_unique_serials(&HostBlueFieldRules::default())
                 .into_iter()
                 .map(|device| (device.serial_number().unwrap(), device.part_number))
                 .collect::<Vec<_>>();

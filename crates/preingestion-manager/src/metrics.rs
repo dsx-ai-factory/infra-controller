@@ -291,6 +291,7 @@ impl LabelValue for FirmwareComponentLabel {
             FirmwareComponentType::CombinedBmcUefi => "combined_bmc_uefi",
             FirmwareComponentType::Gpu => "gpu",
             FirmwareComponentType::Cx7 => "cx7",
+            FirmwareComponentType::Cx8 => "cx8",
             FirmwareComponentType::Drive { .. } => "drive",
             FirmwareComponentType::Unknown => "unknown",
         })

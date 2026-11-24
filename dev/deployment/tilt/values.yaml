@@ -485,6 +485,38 @@ tilt:
         enabled: true
       defaultRules:
         create: false
+      additionalPrometheusRulesMap:
+        tempo:
+          groups:
+            - name: tempo
+              rules:
+                - alert: TempoDown
+                  expr: up{job="tempo"} == 0 or absent(up{job="tempo"})
+                  for: 2m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Tempo metrics endpoint is unavailable
+                - alert: TempoDiscardingSpans
+                  expr: sum by (namespace, reason) (rate(tempo_discarded_spans_total[5m])) > 0
+                  for: 2m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Tempo is discarding spans
+                    description: 'Tempo in {{ $labels.namespace }} is discarding spans: {{ $labels.reason }}. Inspect ingestion limits and trace sizes.'
+                - alert: TempoLiveTraceLimitPressure
+                  expr: |
+                    max by (namespace, instance) (tempo_live_store_live_traces)
+                      / on (namespace, instance)
+                    max by (namespace, instance) (tempo_limits_defaults{limit_name="max_local_traces_per_user"} > 0)
+                      > 0.8
+                  for: 5m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: Tempo live traces exceed 80% of the local limit
+                    description: Review trace sampling and the live-trace limit before spans are discarded.
       alertmanager:
         enabled: false
       grafana:
@@ -566,6 +598,9 @@ tilt:
 
     tempo:
       fullnameOverride: tempo
+      serviceMonitor:
+        enabled: true
+        interval: 30s
       tempo:
         reportingEnabled: false
         retention: 24h

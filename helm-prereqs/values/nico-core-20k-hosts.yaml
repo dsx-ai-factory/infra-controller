@@ -618,7 +618,7 @@ nico-api:
       # see docs/manuals/dpf.md §3.5.
       #
       # [dpf.deployments.bf3]
-      # bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.2-125_26.02_ubuntu-24.04_64k_prod.bfb"
+      # bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.6.0-86_26.10_ubuntu-24.04_64k_prod.bfb"
       # flavor_name     = "carbide-dpu-flavor"
       # deployment_name = "nico-deployment-v2"
       # node_label_key  = "carbide.nvidia.com/controlled.node.v2"

@@ -19,6 +19,7 @@ mod bfb_rshim_copier;
 mod config;
 mod errors;
 mod metrics;
+mod nvos_password_rotation;
 mod rack_firmware;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -44,10 +45,11 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::libredfish::{RedfishClientCreationError, RedfishClientPool};
 use carbide_secrets::credentials::{
-    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
+    BmcCredentialType, CredentialKey, CredentialManager, CredentialReader, Credentials,
 };
 use carbide_utils::periodic_timer::PeriodicTimer;
 use chrono::{DateTime, Utc};
+use component_manager::component_manager::ComponentManager as BackendComponentManager;
 use component_manager::compute_tray_manager::ComputeTrayManager;
 pub use config::PreingestionManagerConfig;
 use db::ConditionalWrite::{Applied, NotApplied};
@@ -131,6 +133,7 @@ struct PreingestionManagerStatic {
     bfb_copy_limiter: Arc<Semaphore>,
     ntp_servers: Vec<Ipv4Addr>,
     rack_firmware: Option<RackFirmwareDependencies>,
+    component_manager: Option<ComponentManager>,
 
     // Bound individual requests; firmware jobs may outlive these deadlines.
     rack_firmware_submission_timeout: Duration,
@@ -142,6 +145,12 @@ struct RackFirmwareDependencies {
     rack_profiles: RackProfileConfig,
     compute_tray: Arc<dyn ComputeTrayManager>,
     firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
+}
+
+#[derive(Clone)]
+struct ComponentManager {
+    component_manager: Arc<BackendComponentManager>,
+    credential_manager: Arc<dyn CredentialManager>,
 }
 
 impl db::TransactionVending for PreingestionManagerStatic {
@@ -198,6 +207,7 @@ impl PreingestionManager {
                 bfb_copy_limiter: Arc::new(Semaphore::new(config.max_concurrent_bfb_copies)),
                 ntp_servers,
                 rack_firmware: None,
+                component_manager: None,
                 rack_firmware_submission_timeout: Duration::from_secs(60),
                 rack_firmware_status_timeout: Duration::from_secs(30),
                 config,
@@ -228,6 +238,19 @@ impl PreingestionManager {
             firmware_object_fetcher,
         });
 
+        self
+    }
+
+    /// Configure the component backend and credential store for preingestion work.
+    pub fn with_component_manager(
+        mut self,
+        component_manager: Arc<BackendComponentManager>,
+        credential_manager: Arc<dyn CredentialManager>,
+    ) -> Self {
+        Arc::make_mut(&mut self.static_info).component_manager = Some(ComponentManager {
+            component_manager,
+            credential_manager,
+        });
         self
     }
 
@@ -456,6 +479,11 @@ async fn one_endpoint(
                 .set_ntp_servers(endpoint, set_at.as_ref(), *attempts)
                 .await?
         }
+        PreingestionState::CheckFirmware => {
+            static_info
+                .check_firmware_versions_below_preingestion(endpoint, true)
+                .await?
+        }
         // The work list returns this endpoint again only once the explorer has
         // written the refreshed report it asked for: decide on that report.
         PreingestionState::FirmwareCheckRefreshWait => {
@@ -491,6 +519,12 @@ async fn one_endpoint(
         }
         PreingestionState::RackFirmwareUpdateWait { .. } => {
             static_info.wait_for_rack_firmware(endpoint).await?;
+            false
+        }
+        PreingestionState::NvosPasswordRotation { rotation_state } => {
+            static_info
+                .rotate_switch_nvos_password(endpoint, rotation_state)
+                .await?;
             false
         }
         PreingestionState::UpgradeFirmwareWait {
@@ -1729,8 +1763,8 @@ impl PreingestionManagerStatic {
     ) -> PreingestionManagerResult<bool> {
         match self.check_bmc_time_sync(endpoint).await {
             Ok(true) => {
-                // Time is in sync, proceed with firmware version check
-                self.check_firmware_versions_below_preingestion(endpoint, true)
+                // Time is in sync; handle NVOS credentials before firmware work.
+                self.handle_transition_from_bmc_time_sync(endpoint, true)
                     .await
             }
             Ok(false) => {
@@ -2590,13 +2624,13 @@ impl PreingestionManagerStatic {
 
                 match self.check_bmc_time_sync(endpoint).await {
                     Ok(true) => {
-                        // Time is now in sync, proceed with firmware check
+                        // Time is now in sync; handle NVOS credentials before firmware work.
                         tracing::info!(
                             bmc_ip_address = %endpoint.address,
                             "BMC time is now in sync after reset"
                         );
                         let delayed_upgrade = self
-                            .check_firmware_versions_below_preingestion(endpoint, true)
+                            .handle_transition_from_bmc_time_sync(endpoint, true)
                             .await?;
                         Ok(delayed_upgrade)
                     }

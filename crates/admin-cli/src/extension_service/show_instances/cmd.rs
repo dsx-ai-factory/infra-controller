@@ -45,6 +45,8 @@ pub(super) async fn handle_show_instances(
                     "service_id": i.service_id,
                     "version": i.version,
                     "removing": i.removed,
+                    "service_vpc_ids": i.service_vpc_ids,
+                    "attachment_id": i.attachment_id.as_ref().map(|id| id.value.as_str()),
                 })
             })
             .collect();
@@ -64,6 +66,8 @@ fn convert_instances_to_table(instances: &[InstanceDpuExtensionServiceInfo]) -> 
         "Service ID",
         "Version",
         "Config Status",
+        "Service VPC IDs",
+        "Attachment ID",
     ]);
 
     for instance in instances {
@@ -78,6 +82,17 @@ fn convert_instances_to_table(instances: &[InstanceDpuExtensionServiceInfo]) -> 
             instance.service_id,
             instance.version,
             status,
+            instance
+                .service_vpc_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            instance
+                .attachment_id
+                .as_ref()
+                .map(|id| id.value.as_str())
+                .unwrap_or_default(),
         ]);
     }
 

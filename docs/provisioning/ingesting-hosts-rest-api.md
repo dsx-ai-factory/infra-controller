@@ -257,7 +257,7 @@ The following are the conditions in which Site Explorer cannot complete pairing 
 | `dpu_pf0_mac_missing` | DPU is in DPU mode but its pf0 MAC address is not retrievable | Install a fresh DPU OS |
 | `manual_power_cycle_required` | DPU mode was changed but the host vendor does not support automated power cycling | Manually power-cycle the host at the data center level |
 | `host_system_report_missing` | Host BMC Redfish returned no valid system report; likely a BMC firmware issue or transient error | Check `nico-api` logs for the host BMC IP |
-| `no_dpu_reported_by_host` | Host BMC reports no BlueField PCIe devices | Check DPU seating and host BMC firmware version |
+| `no_dpu_reported_by_host` | Under `manage`, pairing completeness passed, but no DPU is available for management. | Check host inventory, reported card modes, and the effective `dpu_policy`. Use [`nic` for NIC-only hosts](boot-interfaces-and-dpu-modes.md#33-dpu-in-nic-mode) or [`ignore` for zero-DPU hosts](boot-interfaces-and-dpu-modes.md#32-zero-dpu-host-no-dpu-hardware). For an expected DPU in NIC mode, check its [part-number rule and target mode](boot-interfaces-and-dpu-modes.md#oem-part-numbers-for-hostdpu-pairing). If the card is missing from inventory, check seating and firmware. |
 | `boot_interface_mac_mismatch` | Host boot MAC does not match the pf0 MAC of any discovered DPU | Check exploration reports and `nico-api` logs for both host and DPU BMC IPs |
 | `viking_cpld_version_issue` | NVIDIA Viking (DGX): `CPLDMB_0` firmware below minimum required version (`0.2.1.9`) | Contact the data center team for a full DC power cycle |
 

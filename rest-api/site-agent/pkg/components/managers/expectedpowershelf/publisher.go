@@ -30,7 +30,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverExpectedPowerShelfInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("ExpectedPowerShelf: Successfully registered DiscoverExpectedPowerShelfInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

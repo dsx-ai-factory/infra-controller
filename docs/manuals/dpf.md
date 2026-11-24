@@ -919,7 +919,7 @@ Create it before enabling `[dpf.deployments.bf4_astra]`.
 ```toml
 # BF3 is present by default. Override only if any change is needed.
 [dpf.deployments.bf3]
-bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.2-125_26.02_ubuntu-24.04_64k_prod.bfb"
+bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.6.0-86_26.10_ubuntu-24.04_64k_prod.bfb"
 flavor_name     = "carbide-dpu-flavor"
 deployment_name = "nico-deployment-v2"
 node_label_key  = "carbide.nvidia.com/controlled.node.v2"
@@ -997,14 +997,14 @@ except `dts` and `doca_hbn`; it is a fallback rather than an override for
 resolved Astra extra services.
 
 ```toml
-# Pin a BF4-specific HBN chart/image while keeping the other services on defaults.
+# Pin HBN for this deployment while keeping the other services on defaults.
 [dpf.deployments.bf4_generic.services.doca_hbn]
 name                     = "doca-hbn"
 helm_repo_url            = "https://helm.ngc.nvidia.com/nvidia/doca"
 helm_chart               = "doca-hbn"
-helm_version             = "3.4.0"
+helm_version             = "3.6.0"
 docker_repo_url          = "nvcr.io/nvidia/doca/doca_hbn"
-docker_image_tag         = "3.4.0-doca3.4.0"
+docker_image_tag         = "3.6.0-doca3.6.0"
 ```
 
 BF4 Astra includes three built-in deployment-specific services. Configure their

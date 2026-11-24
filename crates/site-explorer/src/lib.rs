@@ -76,7 +76,9 @@ pub mod test_support;
 pub use metrics::{SiteExplorationMetrics, site_explorer_latency_histogram_view};
 mod bmc_endpoint_explorer;
 mod redfish;
-pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
+pub use bmc_endpoint_explorer::{
+    AuthenticatedBmcClient, BmcEndpointExplorer, DpfBmcRecoveryDrainCheck,
+};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools, lockdown_report};
 mod boot_interfaces;
 mod host_interfaces;
@@ -117,7 +119,6 @@ use model::network_segment::NetworkSegmentType;
 use model::rack::Rack;
 pub mod config;
 pub mod errors;
-use std::sync::atomic::AtomicBool;
 
 use errors::{SiteExplorerError, SiteExplorerResult};
 
@@ -160,19 +161,13 @@ fn should_scan_underlay_interface_for_redfish(
 /// while the explorer runs.
 pub fn new_bmc_explorer(
     bmc_client: Arc<AuthenticatedBmcClient>,
-    rotate_switch_nvos_credentials: Arc<AtomicBool>,
     explore_drive_firmware: bool,
     database_connection: PgPool,
     instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<BmcEndpointExplorer> {
-    BmcEndpointExplorer::new(
-        bmc_client,
-        rotate_switch_nvos_credentials,
-        Some(database_connection),
-        instrumentation,
-    )
-    .with_drive_firmware(explore_drive_firmware)
-    .into()
+    BmcEndpointExplorer::new(bmc_client, Some(database_connection), instrumentation)
+        .with_drive_firmware(explore_drive_firmware)
+        .into()
 }
 
 pub fn enrich_endpoint_exploration_report(
@@ -1260,6 +1255,7 @@ impl SiteExplorer {
                     &dpu_sn_to_endpoint,
                     expected_machine,
                     host_dpu_policy,
+                    &self.config.host_bluefield_rules,
                 )),
             };
             candidates.push(IngestionCandidate {
@@ -1783,8 +1779,26 @@ impl SiteExplorer {
             BmcSuppressionSubsystem::SiteExplorer,
         )
         .await?;
+        let rotation_macs = suppressions
+            .iter()
+            .filter(|suppression| {
+                suppression.source
+                    == model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation
+            })
+            .map(|suppression| suppression.bmc_mac_address)
+            .collect::<Vec<_>>();
+        let recovering = if rotation_macs.is_empty() {
+            Vec::new()
+        } else {
+            db::dpf_bmc_rotation::detached_macs(&self.database_connection, &rotation_macs).await?
+        };
         let suppressed_bmc_macs = suppressions
             .iter()
+            .filter(|suppression| {
+                suppression.source
+                    != model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation
+                    || !recovering.contains(&suppression.bmc_mac_address)
+            })
             .map(|suppression| suppression.bmc_mac_address)
             .collect();
 
@@ -2595,12 +2609,11 @@ impl SiteExplorer {
                         .expected
                         .is_some_and(|v| matches!(v, ExpectedEntity::PowerShelf(_)));
 
-                    if !self.config.create_machines.load(Ordering::Relaxed)
-                        || power_shelf_manual_ingestion
+                    if power_shelf_manual_ingestion
                         || is_endpoint_in_managed_host(address, txn.as_pgconn()).await?
                     {
-                        // Manual ingestion must not run automatic setup, and managed BMCs
-                        // must not repeat preingestion for another address. Keep this in the
+                        // Power shelves use manual setup, and managed BMCs must not
+                        // repeat preingestion for another address. Keep this in the
                         // insert branch so refreshes preserve explicit preingestion retries.
                         db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?
                     }

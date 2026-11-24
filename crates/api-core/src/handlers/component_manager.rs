@@ -18,14 +18,11 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ::rpc::common::SystemPowerControl;
 use ::rpc::forge::{self as rpc};
 use carbide_rack::firmware_object::rms_access_token_or_noauth;
-use carbide_secrets::credentials::{
-    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
-};
+use carbide_secrets::credentials::Credentials;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
@@ -37,13 +34,15 @@ use component_manager::compute_tray_manager::{
     Backend as ComputeTrayBackend, ComputeTrayEndpoint, ComputeTrayManager, ComputeTrayVendor,
 };
 use component_manager::core_compute_manager::CoreComputeTrayManager;
+use component_manager::credentials::resolve_credentials as resolve_component_credentials;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{NvSwitchManager, SwitchEndpoint};
 use component_manager::power_shelf_manager::{
     PowerShelfEndpoint, PowerShelfManager, PowerShelfVendor,
 };
+use component_manager::switch_endpoint::resolve_pre_ingestion_switch_endpoints;
 use component_manager::types::{ComponentCredentials, FirmwareUpdateOptions};
-use db::{self, DbSessionGuard, WithTransaction};
+use db::{self, WithTransaction};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
 use model::component_manager::{
@@ -73,11 +72,6 @@ pub(crate) mod power_details;
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
 const MACHINE_POWER_OVERRIDE_MESSAGE: &str = "Compute-Tray component power control in progress";
 const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this switch";
-
-// Cap each expected-inventory statement at five seconds, preserving a shorter
-// operator limit. This PostgreSQL cap applies after snapshot setup; it does not
-// bound connection acquisition, setup or the total helper duration.
-const EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The core compute-tray backend standalone hosts use. It authenticates with
 /// explicit per-endpoint credentials, which the proxied pool rejects by
@@ -124,23 +118,14 @@ async fn resolve_credentials(
     bmc_mac: MacAddress,
     overrides: Option<&ComponentCredentials>,
 ) -> Result<Credentials, ComponentManagerError> {
-    let credentials = overrides.and_then(|overrides| match component {
-        RackComponent::SwitchNvos => overrides.nvos.as_ref(),
-        RackComponent::ComputeBmc | RackComponent::SwitchBmc | RackComponent::PowerShelfPmc => {
-            overrides.bmc.as_ref()
-        }
-    });
-    match credentials {
-        Some(credentials) => {
-            tracing::info!(
-                rack_component = ?component,
-                management_mac_address = %bmc_mac,
-                "using client credential override for direct dispatch"
-            );
-            Ok(credentials.clone())
-        }
-        None => fetch_credentials(api, component, bmc_mac).await,
-    }
+    resolve_component_credentials(
+        api.pg_pool(),
+        api.credential_manager.as_ref(),
+        component,
+        bmc_mac,
+        overrides,
+    )
+    .await
 }
 
 fn require_component_manager(api: &Api) -> Result<&ComponentManager, Status> {
@@ -1854,113 +1839,12 @@ struct SwitchEndpoints {
     unresolved: Vec<UnresolvedDevice<SwitchId>>,
 }
 
-// Direct dispatch and passive component reads may fall back to expected
-// inventory. State-controller writers still require credentials in Vault from
-// ingestion/rotation; a successful passive read does not admit an update.
 async fn fetch_credentials(
     api: &Api,
     component: RackComponent,
     bmc_mac: MacAddress,
 ) -> Result<Credentials, ComponentManagerError> {
-    match fetch_vault_credentials(component, api.credential_manager.as_ref(), bmc_mac).await? {
-        Some(credentials) => Ok(credentials),
-        None => {
-            let credentials = fetch_expected_credentials(component, api.pg_pool(), bmc_mac).await?;
-            tracing::info!(
-                rack_component = ?component,
-                management_mac_address = %bmc_mac,
-                "using expected inventory credentials because Vault credentials are absent"
-            );
-            Ok(credentials)
-        }
-    }
-}
-
-async fn fetch_vault_credentials(
-    component: RackComponent,
-    credential_manager: &dyn CredentialReader,
-    bmc_mac: MacAddress,
-) -> Result<Option<Credentials>, ComponentManagerError> {
-    let key = match component {
-        RackComponent::SwitchNvos => CredentialKey::SwitchNvosAdmin {
-            bmc_mac_address: bmc_mac,
-        },
-        RackComponent::ComputeBmc | RackComponent::SwitchBmc | RackComponent::PowerShelfPmc => {
-            CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::BmcRoot {
-                    bmc_mac_address: bmc_mac,
-                },
-            }
-        }
-    };
-    credential_manager.get_credentials(&key).await.map_err(|e| {
-        ComponentManagerError::Internal(format!("failed to fetch credentials for {key:?}: {e}"))
-    })
-}
-
-/// `fetch_expected_credentials` shares the statement cap across passive and
-/// direct-dispatch callers. Passive readers wrap credential resolution in their
-/// own deadlines, including acquisition and setup. Legacy direct-dispatch callers
-/// rely on the pool's configured acquisition timeout for that wait; this helper
-/// adds no overall deadline.
-///
-/// Dropping the future discards its connection and releases local pool capacity.
-/// The abandoned PostgreSQL session can outlive that release: the statement cap
-/// and eventual server/socket cleanup are separate from local cancellation.
-async fn fetch_expected_credentials(
-    component: RackComponent,
-    pool: &sqlx::PgPool,
-    bmc_mac: MacAddress,
-) -> Result<Credentials, ComponentManagerError> {
-    let map_error = |e: db::DatabaseError| {
-        ComponentManagerError::Internal(format!(
-            "failed to fetch expected credentials for {component:?} at {bmc_mac}: {e}"
-        ))
-    };
-    let mut connection = DbSessionGuard::acquire(pool).await.map_err(map_error)?;
-    let mut txn = connection
-        .begin_read_only_snapshot(EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT)
-        .await
-        .map_err(map_error)?;
-    let credentials = match component {
-        RackComponent::ComputeBmc => {
-            db::expected_machine::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
-                .await
-                .map(|row| {
-                    row.map(|row| Credentials::new(row.data.bmc_username, row.data.bmc_password))
-                })
-        }
-        RackComponent::SwitchBmc => {
-            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
-                .await
-                .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
-        }
-        RackComponent::SwitchNvos => {
-            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
-                .await
-                .map(|row| {
-                    row.and_then(|row| {
-                        row.nvos_username
-                            .zip(row.nvos_password)
-                            .map(|(username, password)| Credentials::new(username, password))
-                    })
-                })
-        }
-        RackComponent::PowerShelfPmc => {
-            db::expected_power_shelf::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
-                .await
-                .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
-        }
-    };
-    let credentials = credentials.map_err(map_error)?;
-    txn.commit().await.map_err(map_error)?;
-    connection.return_to_pool();
-    // An absent row is a successful read and must also return its healthy session.
-    credentials.ok_or_else(|| {
-        ComponentManagerError::NotFound(format!(
-            "no credentials found for {component:?} at {bmc_mac}"
-        ))
-    })
+    resolve_credentials(api, component, bmc_mac, None).await
 }
 
 async fn resolve_switch_endpoints(
@@ -2651,71 +2535,26 @@ async fn build_pre_ingestion_switch_endpoints(
     macs: &[MacAddress],
     credentials: Option<&ComponentCredentials>,
 ) -> Result<(Vec<SwitchEndpoint>, Vec<rpc::ComponentResult>), Status> {
-    let rows = db::switch::find_switch_endpoints_by_bmc_macs(api.pg_pool(), macs)
-        .await
-        .map_err(|e| Status::internal(format!("db error resolving switch endpoints: {e}")))?;
-
-    let mut by_mac: HashMap<MacAddress, _> = rows.into_iter().map(|r| (r.bmc_mac, r)).collect();
-
+    let results = resolve_pre_ingestion_switch_endpoints(
+        api.pg_pool(),
+        api.credential_manager.as_ref(),
+        macs,
+        credentials,
+    )
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
     let mut endpoints = Vec::new();
     let mut errors = Vec::new();
-
-    for &mac in macs {
-        let Some(row) = by_mac.remove(&mac) else {
-            errors.push(mac_result(
-                &mac,
+    for result in results {
+        match result.endpoint {
+            Ok(endpoint) => endpoints.push(endpoint),
+            Err(error) => errors.push(mac_result(
+                &result.bmc_mac,
                 rpc::ComponentManagerStatusCode::NotFound,
-                Some("switch BMC MAC not found in expected inventory".to_owned()),
-            ));
-            continue;
-        };
-
-        let (Some(nvos_mac), Some(nvos_ip)) = (row.nvos_mac, row.nvos_ip) else {
-            errors.push(mac_result(
-                &mac,
-                rpc::ComponentManagerStatusCode::NotFound,
-                Some("NVOS MAC or IP not available".to_owned()),
-            ));
-            continue;
-        };
-
-        let bmc_credentials =
-            match resolve_credentials(api, RackComponent::SwitchBmc, mac, credentials).await {
-                Ok(c) => c,
-                Err(e) => {
-                    errors.push(mac_result(
-                        &mac,
-                        rpc::ComponentManagerStatusCode::NotFound,
-                        Some(format!("BMC credentials unavailable: {e}")),
-                    ));
-                    continue;
-                }
-            };
-
-        let nvos_credentials =
-            match resolve_credentials(api, RackComponent::SwitchNvos, mac, credentials).await {
-                Ok(c) => c,
-                Err(e) => {
-                    errors.push(mac_result(
-                        &mac,
-                        rpc::ComponentManagerStatusCode::NotFound,
-                        Some(format!("NVOS credentials unavailable: {e}")),
-                    ));
-                    continue;
-                }
-            };
-
-        endpoints.push(SwitchEndpoint {
-            bmc_ip: row.bmc_ip,
-            bmc_mac: mac,
-            nvos_ip,
-            nvos_mac,
-            bmc_credentials,
-            nvos_credentials,
-            nvos_host_name: row.nvos_hostname.none_if_empty(),
-        });
+                Some(error.to_string()),
+            )),
+        }
     }
-
     Ok((endpoints, errors))
 }
 

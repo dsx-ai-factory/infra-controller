@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use arc_swap::ArcSwap;
+use carbide_hw_identification::host_bluefield::HostBlueFieldRules;
 use carbide_utils::HostPortPair;
 use carbide_utils::config::{
     as_duration, as_std_duration, deserialize_arc_atomic_bool, serialize_arc_atomic_bool,
@@ -95,7 +96,9 @@ pub struct SiteExplorerConfig {
     )]
     pub exploration_timeouts_before_prevent_allocations: u32,
 
-    /// When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true
+    /// When false, SiteExplorer skips creating ManagedHost state machines; the
+    /// DPU agent (scout) must self-register via the DiscoverMachine gRPC endpoint
+    /// with create_machine=true. BMC preingestion is independent of this setting.
     #[serde(
         default = "SiteExplorerConfig::default_create_machines",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -153,7 +156,8 @@ pub struct SiteExplorerConfig {
     )]
     pub machine_creation_timeout: std::time::Duration,
 
-    /// Whether SiteExplorer should rotate/update Switch NVOS admin credentials
+    /// Deprecated and ignored. NVOS credentials are rotated during switch
+    /// pre-ingestion and by the switch controller after ingestion.
     #[serde(
         default = "SiteExplorerConfig::default_rotate_switch_nvos_credentials",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -234,6 +238,13 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_switches_created_per_run")]
     pub switches_created_per_run: u64,
 
+    /// Additional host inventory rules. The first matching site rule takes precedence over defaults.
+    #[serde(
+        default,
+        skip_serializing_if = "HostBlueFieldRules::uses_only_defaults"
+    )]
+    pub host_bluefield_rules: HostBlueFieldRules,
+
     /// Site-wide host DPU policy. Per-host `Nic` and `Ignore` policies
     /// override it; per-host `Manage` inherits it for backward compatibility.
     /// `None` falls back to [`HostDpuPolicy::Manage`].
@@ -309,6 +320,7 @@ impl Default for SiteExplorerConfig {
             create_switches: Self::default_create_switches(),
             switches_created_per_run: Self::default_switches_created_per_run(),
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
+            host_bluefield_rules: HostBlueFieldRules::default(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             deprecated_explore_mode: None,
@@ -345,6 +357,7 @@ impl PartialEq for SiteExplorerConfig {
             power_shelves_created_per_run,
             create_switches,
             switches_created_per_run,
+            host_bluefield_rules,
             dpu_policy,
             deprecated_force_dpu_nic_mode,
             deprecated_explore_mode,
@@ -384,6 +397,7 @@ impl PartialEq for SiteExplorerConfig {
             && create_switches.load(AtomicOrdering::Relaxed)
                 == other.create_switches.load(AtomicOrdering::Relaxed)
             && *switches_created_per_run == other.switches_created_per_run
+            && *host_bluefield_rules == other.host_bluefield_rules
             && *dpu_policy == other.dpu_policy
             && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
             && *deprecated_explore_mode == other.deprecated_explore_mode

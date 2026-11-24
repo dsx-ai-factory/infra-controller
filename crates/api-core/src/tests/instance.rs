@@ -9089,6 +9089,8 @@ async fn test_networked_detach_locks_address_table_before_persisted_address_read
 
 /// Verifies a terminating attachment that retains a service interface rejects same-version
 /// reactivation even when VPC selections are omitted, preventing cleanup from racing renewed use.
+/// The service-centric lookup retains the attachment ID and selected VPC during cleanup so
+/// operators can correlate the API rejection with the attachment still using the VPC.
 #[crate::sqlx_test]
 async fn test_update_instance_rejects_terminating_networked_reattachment(
     _: PgPoolOptions,
@@ -9143,8 +9145,33 @@ async fn test_update_instance_rejects_terminating_networked_reattachment(
     );
     assert_eq!(
         terminating.config.network.service_interfaces,
-        vec![endpoint]
+        vec![endpoint.clone()]
     );
+
+    // Look up instances for the extension service while cleanup still retains the service interface.
+    let listed = env
+        .api
+        .find_instances_by_dpu_extension_service(Request::new(
+            rpc::forge::FindInstancesByDpuExtensionServiceRequest {
+                service_id: service.service_id.clone(),
+                version: None,
+            },
+        ))
+        .await?
+        .into_inner();
+
+    // Verify the single row identifies this instance and includes the retained VPC,
+    // attachment UUID, and removal marker.
+    let [attachment] = listed.instances.as_slice() else {
+        panic!("one terminating attachment should remain visible");
+    };
+    assert_eq!(attachment.instance_id, instance.id.to_string());
+    assert_eq!(
+        attachment.attachment_id,
+        Some(endpoint.attachment_id.into())
+    );
+    assert_eq!(attachment.service_vpc_ids, vec![service_vpc_id]);
+    assert!(attachment.removed.is_some());
 
     // Re-add the exact tuple with the legacy empty selection and require the retained endpoint guard.
     let current = env.one_instance(instance.id).await.into_inner();
