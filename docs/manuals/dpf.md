@@ -461,10 +461,10 @@ and immutability match and it is not being deleted. A conflicting Secret blocks
 registration until you reset or force-delete the host and let credential Secret
 cleanup finish.
 
-NICo uses DPF to adopt and rotate BMC root credentials for DPUs on DPF-ingested
-hosts. The DPU `service` account is excluded from this flow. The host BMC
-continues to use Redfish. If DPF is disabled, those hosts wait for DPF before
-starting or resuming BMC rotation.
+With the same DPF version requirement, NICo uses DPF to adopt and rotate BMC
+root credentials for DPUs on DPF-ingested hosts. The DPU `service` account is
+excluded from this flow. The host BMC continues to use Redfish. If DPF is
+disabled, those hosts wait for DPF before starting or resuming BMC rotation.
 
 Keep the published shared password valid until existing shared DPUDevices
 finish adopting per-device credentials. Force deletion can interrupt a
@@ -1407,20 +1407,20 @@ without a restart. This refresh is not a safe rotation mechanism.
 If the current rotation target is absent from its authoritative credential
 source, a fresh site leaves the derived Secret unwritten. Once NICo has
 published a value, it retains that last value and logs an error until the
-credential returns. Restore the expected credential. The default pinned DPF
-v26.4.0 does not support BMC credential rotation, so NICo retains the shared
-Secret. Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). A transient
-source-read failure during background refresh likewise retains the last
-published Secret and retries the read.
+credential returns. Restore the expected credential. A transient source-read
+failure during background refresh also retains the last published Secret and
+retries the read.
 
 <Warning>
-Do not stage a site-wide BMC credential rotation while DPF manages any DPU. The
-shared `bmc-shared-password` Secret switches to the new site-wide target before
-asynchronous device convergence finishes, so it cannot authenticate DPU BMCs
-that still use the old password. Support is blocked on a DPF release with
-credential rotation and tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
+Keep the site-wide target unchanged while any DPF-managed DPU still uses the
+shared `bmc-shared-password` Secret. The shared Secret follows the site-wide
+target before devices finish rotating, so it would no longer authenticate those
+DPUs. This includes sites on the default DPF 26.4.0 pin.
+
+With DPF 26.8.0 or later (excluding prereleases of 26.8.0), request forced BMC
+credential convergence at the current target for existing shared DPUs. Wait for
+every DPF-managed DPU to adopt its per-device Secret before staging a new
+site-wide target.
 </Warning>
 
 Configure it through a watched Kubernetes Secret, through the API, or by seeding
@@ -1460,8 +1460,8 @@ and rejects API add/delete operations for v0 with instructions to update the
 local source. After any managed device begins using version 0, keep that local
 value unchanged: replacing it does not update BMC hardware or convergence
 records. Use coordinated BMC credential rotation to advance to version 1 or
-later. On DPF sites, do not stage that rotation while DPF manages any DPU; see
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
+later. On DPF sites, finish the shared-to-per-device cutover described above
+before advancing the target.
 The versioned credential then comes from the persistent backend; the file
 schema has no versioned BMC root key. See
 [Credential Sources](../configuration/credential-sources.md#precedence).
