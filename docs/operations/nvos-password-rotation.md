@@ -130,10 +130,10 @@ credential confirmation and recording the transition to firmware checks.
 After ingestion, the switch controller reuses the confirmed version. If it
 meets the current site target, the controller does not submit another password
 rotation. Otherwise, it handles the newer target. Switch creation rechecks all
-existing explored endpoints associated with the BMC interface under the same
-interface lock and waits until every endpoint is `Complete`. This includes
-aliases waiting for exploration or in an error state. An allocated address
-without an explored endpoint does not block creation. Finding an existing switch
+allocated addresses associated with the BMC interface under the same interface
+lock and waits until each has an explored endpoint in `Complete`. An unexplored
+address or an endpoint with unfinished or failed pre-ingestion blocks creation.
+Finding an existing switch
 entry during NVOS pre-ingestion returns an error and leaves its state,
 credentials, and password jobs unchanged.
 Before switch creation, restarting NICo retains any staged password job and

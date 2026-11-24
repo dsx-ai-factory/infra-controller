@@ -262,49 +262,52 @@ async fn switch_creation_waits_for_all_known_bmc_preingestion_endpoints(
         .id;
     db::machine_interface_address::insert(&mut txn, interface_id, ipv6, AllocationType::Dhcp)
         .await?;
-    for address in [ipv4, ipv6] {
-        db_explored_endpoints::insert(address, &explored_switch.report, false, &mut txn).await?;
-    }
+    db_explored_endpoints::insert(ipv4, &explored_switch.report, false, &mut txn).await?;
     db_explored_endpoints::set_preingestion_complete(ipv4, &mut txn).await?;
     txn.commit().await?;
 
     let switch_creator =
         SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
     let cases = [
+        ("allocated but unexplored address", None, false),
         (
             "NVOS job pending",
-            PreingestionState::NvosPasswordRotation {
+            Some(PreingestionState::NvosPasswordRotation {
                 rotation_state: NvosPasswordRotationState::Rotate {
                     target_version: 1,
                     job_id: Some("pending-job".to_string()),
                 },
-            },
+            }),
             false,
         ),
         (
             "failed preingestion",
-            PreingestionState::Failed {
+            Some(PreingestionState::Failed {
                 reason: "preingestion failed".to_string(),
-            },
+            }),
             false,
         ),
         (
             "waiting for explorer refresh",
-            PreingestionState::FirmwareCheckRefreshWait,
+            Some(PreingestionState::FirmwareCheckRefreshWait),
             true,
         ),
     ];
     for (scenario, state, waiting_for_refresh) in cases {
         let mut txn = env.pool.txn_begin().await?;
-        db_explored_endpoints::set_preingestion_for_addresses(&[ipv6], state.clone(), &mut txn)
-            .await?;
+        db_explored_endpoints::delete(&mut txn, ipv6).await?;
+        if let Some(state) = &state {
+            db_explored_endpoints::insert(ipv6, &explored_switch.report, false, &mut txn).await?;
+            db_explored_endpoints::set_preingestion_for_addresses(&[ipv6], state.clone(), &mut txn)
+                .await?;
+        }
         if waiting_for_refresh {
             db_explored_endpoints::set_waiting_for_explorer_refresh(ipv6, &mut txn).await?;
         }
         txn.commit().await?;
 
         // Exercise the creation transaction directly: a Complete IPv4 candidate
-        // must not bypass an unfinished IPv6 alias, even when it is not runnable.
+        // must not bypass an unexplored or unfinished IPv6 alias, even when it is not runnable.
         assert!(
             !switch_creator
                 .create_managed_switch(&explored_switch, &expected_switch, &env.pool)
@@ -318,14 +321,22 @@ async fn switch_creation_waits_for_all_known_bmc_preingestion_endpoints(
             "{scenario}"
         );
         let endpoints = db_explored_endpoints::find_by_ips(&env.pool, vec![ipv4, ipv6]).await?;
-        assert_eq!(endpoints.len(), 2, "{scenario}");
+        assert_eq!(
+            endpoints.len(),
+            1 + usize::from(state.is_some()),
+            "{scenario}"
+        );
         for endpoint in endpoints {
             let expected_state = if endpoint.address == ipv4 {
-                PreingestionState::Complete
+                Some(PreingestionState::Complete)
             } else {
                 state.clone()
             };
-            assert_eq!(endpoint.preingestion_state, expected_state, "{scenario}");
+            assert_eq!(
+                Some(endpoint.preingestion_state),
+                expected_state,
+                "{scenario}"
+            );
         }
     }
 
@@ -356,24 +367,29 @@ async fn switch_creation_preserves_operator_declared_nvos_interfaces(
     let declared_nvos_mac: MacAddress = "B8:3F:D2:90:97:E1".parse()?;
     let observed_nvos_mac: MacAddress = "B8:3F:D2:90:97:E2".parse()?;
     let expected_switch = expected_switch_fixture(bmc_mac, declared_nvos_mac, "SW-AUTHORITATIVE");
+    let explored_switch = explored_managed_switch_fixture(
+        "10.0.0.3".parse()?,
+        observed_nvos_mac,
+        Some("SW-AUTHORITATIVE"),
+    );
 
     let mut txn = env.pool.txn_begin().await?;
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
+    db_explored_endpoints::insert(
+        explored_switch.bmc_ip,
+        &explored_switch.report,
+        false,
+        &mut txn,
+    )
+    .await?;
+    db_explored_endpoints::set_preingestion_complete(explored_switch.bmc_ip, &mut txn).await?;
     txn.commit().await?;
 
     let switch_creator =
         SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
     assert!(
         switch_creator
-            .create_managed_switch(
-                &explored_managed_switch_fixture(
-                    "10.0.0.3".parse()?,
-                    observed_nvos_mac,
-                    Some("SW-AUTHORITATIVE"),
-                ),
-                &expected_switch,
-                &env.pool,
-            )
+            .create_managed_switch(&explored_switch, &expected_switch, &env.pool)
             .await?
     );
 
@@ -396,8 +412,18 @@ async fn switch_skips_creation_when_bmc_mac_already_used(
     let nvos_mac: MacAddress = "B8:3F:D2:90:97:D1".parse().unwrap();
 
     let expected_switch = expected_switch_fixture(bmc_mac, nvos_mac, "SW-DRIFT");
+    let explored_switch =
+        explored_managed_switch_fixture("10.0.0.1".parse()?, nvos_mac, Some("SW-DRIFT-v1"));
     let mut txn = env.pool.txn_begin().await?;
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
+    db_explored_endpoints::insert(
+        explored_switch.bmc_ip,
+        &explored_switch.report,
+        false,
+        &mut txn,
+    )
+    .await?;
+    db_explored_endpoints::set_preingestion_complete(explored_switch.bmc_ip, &mut txn).await?;
     txn.commit().await?;
 
     let switch_creator =
@@ -407,15 +433,7 @@ async fn switch_skips_creation_when_bmc_mac_already_used(
     // and inserts a switches row.
     assert!(
         switch_creator
-            .create_managed_switch(
-                &explored_managed_switch_fixture(
-                    "10.0.0.1".parse().unwrap(),
-                    nvos_mac,
-                    Some("SW-DRIFT-v1"),
-                ),
-                &expected_switch,
-                &env.pool,
-            )
+            .create_managed_switch(&explored_switch, &expected_switch, &env.pool)
             .await?,
         "first discovery must create a switch row"
     );
@@ -466,19 +484,25 @@ async fn switch_treats_na_chassis_serial_as_missing(
     let nvos_mac: MacAddress = "B8:3F:D2:90:97:D3".parse().unwrap();
 
     let expected_switch = expected_switch_fixture(bmc_mac, nvos_mac, "SW-NA");
+    let explored_switch =
+        explored_managed_switch_fixture("10.0.0.2".parse()?, nvos_mac, Some("NA"));
     let mut txn = env.pool.txn_begin().await?;
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
+    db_explored_endpoints::insert(
+        explored_switch.bmc_ip,
+        &explored_switch.report,
+        false,
+        &mut txn,
+    )
+    .await?;
+    db_explored_endpoints::set_preingestion_complete(explored_switch.bmc_ip, &mut txn).await?;
     txn.commit().await?;
 
     let switch_creator =
         SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
 
     let result = switch_creator
-        .create_managed_switch(
-            &explored_managed_switch_fixture("10.0.0.2".parse().unwrap(), nvos_mac, Some("NA")),
-            &expected_switch,
-            &env.pool,
-        )
+        .create_managed_switch(&explored_switch, &expected_switch, &env.pool)
         .await;
     assert!(
         result.is_err(),

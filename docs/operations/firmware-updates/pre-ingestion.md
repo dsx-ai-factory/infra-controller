@@ -183,9 +183,9 @@ The state machine performs the following work:
 1. **Continue ingestion.** NICo repeats target selection for the remaining
    ordered components. When none need an update, it marks pre-ingestion
    complete and the normal ingestion process can continue. Switch creation
-   waits until every existing explored endpoint on the BMC interface is
-   `Complete`, including aliases waiting for exploration or in an error state.
-   An allocated address without an explored endpoint does not block creation.
+   waits until every allocated address on the BMC interface has an explored
+   endpoint in `Complete`. An unexplored address or an endpoint with unfinished
+   or failed pre-ingestion blocks creation.
 
 `firmware_global.max_uploads` limits concurrent uploads across firmware
 workflows. `firmware_global.concurrency_limit` limits how many endpoints the

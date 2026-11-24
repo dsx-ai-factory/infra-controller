@@ -278,7 +278,7 @@ impl InventoryCreator {
     }
 }
 
-/// Check existing explored endpoints for every BMC address and the candidate IP.
+/// Require completed preingestion for every allocated BMC address and the candidate IP.
 /// The caller must retain the interface locks through its inventory creation writes.
 async fn is_preingestion_complete(
     txn: &mut PgConnection,
@@ -291,19 +291,22 @@ async fn is_preingestion_complete(
     let mut addresses = interfaces
         .iter()
         .flat_map(|interface| interface.addresses.iter().copied())
-        .collect::<Vec<_>>();
-    addresses.push(bmc_ip_address);
-    let endpoints = db::explored_endpoints::find_by_ips(&mut *txn, addresses).await?;
-    if let Some(endpoint) = endpoints
-        .iter()
-        .find(|endpoint| endpoint.preingestion_state != PreingestionState::Complete)
-    {
-        tracing::info!(
-            %bmc_mac_address,
-            bmc_ip_address = %endpoint.address,
-            "Waiting for all BMC endpoints to complete preingestion",
-        );
-        return Ok(false);
+        .collect::<HashSet<_>>();
+    addresses.insert(bmc_ip_address);
+    let endpoints =
+        db::explored_endpoints::find_by_ips(&mut *txn, addresses.iter().copied().collect()).await?;
+    for address in addresses {
+        if !endpoints.iter().any(|endpoint| {
+            endpoint.address == address
+                && endpoint.preingestion_state == PreingestionState::Complete
+        }) {
+            tracing::info!(
+                %bmc_mac_address,
+                bmc_ip_address = %address,
+                "Waiting for all BMC endpoints to complete preingestion",
+            );
+            return Ok(false);
+        }
     }
     Ok(true)
 }

@@ -4,8 +4,8 @@ This document describes the Finite State Machine (FSM) for Switches in NICo:
 lifecycle from creation through configuration, validation, ready, optional
 rack-level reprovisioning, operator maintenance, decommissioning, and deletion.
 
-Site Explorer creates the switch only after all existing explored BMC aliases
-complete pre-ingestion, including
+Site Explorer creates the switch only after every allocated BMC address has an
+explored endpoint that has completed pre-ingestion, including
 [initial NVOS password handling](../../operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion).
 
 ## High-Level Overview
