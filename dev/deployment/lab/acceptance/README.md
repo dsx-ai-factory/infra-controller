@@ -231,7 +231,7 @@ a missing requested family is detected after allocation and requires
 left unconfigured in the guest; an IPv6-only guest result alone does not prove
 that Core allocated only IPv6. For IPv6 guests, deploy the managed DHCPv6 relay, resolver and routes first.
 The DHCP runtime must include the
-[boot-stage lease handoff fix](https://github.com/dsx-ai-factory/infra-controller/pull/7934).
+[boot-stage lease handoff fix](https://github.com/dsx-ai-factory/infra-controller/pull/9107).
 
 Select a new private directory whose parent exists. Replace the example Core IDs
 with those returned by your lab's Core API:
