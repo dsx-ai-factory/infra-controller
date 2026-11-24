@@ -15,7 +15,8 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
-use carbide_redfish::libredfish::CredentialOpError;
+use carbide_machine_controller::platform_config::vendor_job_id;
+use carbide_machine_controller::uefi_password;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_uuid::machine::MachineId;
 use db::WithTransaction;
@@ -257,10 +258,7 @@ pub(crate) async fn clear_host_uefi_password(
                 "failed redfish clear_host_uefi_password subtask: {e}"
             ))
         })?;
-    let job_id = outcome.references().find_map(|reference| match reference {
-        bmc_platform::OperationReference::VendorJob { job_id, .. } => Some(job_id.to_string()),
-        bmc_platform::OperationReference::RedfishTask { .. } => None,
-    });
+    let job_id = vendor_job_id(&outcome).map(|job_id| job_id.to_string());
 
     Ok(Response::new(rpc::ClearHostUefiPasswordResponse { job_id }))
 }
@@ -348,31 +346,19 @@ pub(crate) async fn set_host_uefi_password(
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
     txn.commit().await?;
-    let host_uefi_credentials =
-        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &host_uefi_key).await?;
+    let Credentials::UsernamePassword {
+        password: host_uefi_password,
+        ..
+    } = read_uefi_credentials(api.credential_manager.as_ref(), &host_uefi_key).await?;
 
-    let job_id = api
-        .bmc_credential_ops
-        .uefi_setup(
-            &bmc_access_info,
-            false,
-            host_uefi_credentials,
-            &api.instrumentation,
-        )
+    let bmc = api.connect_bmc(&bmc_access_info).await?;
+    let job_id = uefi_password::set_host_uefi_password(&bmc, &host_uefi_password)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "Failed to run uefi_setup call");
-            match e {
-                // Keep the Redfish-classified error code (and its operator
-                // mitigation text) for client-creation failures.
-                CredentialOpError::ClientCreation(inner) => CarbideError::RedfishClientCreation {
-                    inner: inner.into(),
-                    machine_id,
-                },
-                e => CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}")),
-            }
+            tracing::error!(error = %e, "Failed to set the host UEFI password");
+            CarbideError::internal(format!("failed to set the host UEFI password: {e}"))
         })?;
-    // uefi_setup returns a BMC job_id; the password change completes
+    // The host returns a BMC job_id; the password change completes
     // asynchronously on the device and we do not poll it here. We optimistically
     // stamp bios_password_set_time and, in the same transaction, record host_uefi
     // convergence (keyed by the host BMC MAC, mirroring the backfill) so the two
@@ -504,31 +490,31 @@ pub(crate) async fn set_dpu_uefi_password(
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
     txn.commit().await?;
-    let dpu_uefi_credentials =
-        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &dpu_uefi_key).await?;
+    let Credentials::UsernamePassword {
+        password: dpu_uefi_password,
+        ..
+    } = read_uefi_credentials(api.credential_manager.as_ref(), &dpu_uefi_key).await?;
 
     // A DPU stages the UEFI change through Redfish BIOS settings and schedules no
     // job (it commits on the next DPU restart), so there is no job id to return.
-    api.bmc_credential_ops
-        .uefi_setup(
-            &bmc_access_info,
-            true,
-            dpu_uefi_credentials,
-            &api.instrumentation,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to run uefi_setup call for DPU");
-            match e {
-                // Keep the Redfish-classified error code (and its operator
-                // mitigation text) for client-creation failures.
-                CredentialOpError::ClientCreation(inner) => CarbideError::RedfishClientCreation {
-                    inner: inner.into(),
-                    machine_id,
-                },
-                e => CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}")),
-            }
-        })?;
+    let bmc = api.connect_bmc(&bmc_access_info).await?;
+    let staged = uefi_password::set_dpu_uefi_password(
+        &bmc,
+        api.credential_manager.as_ref(),
+        &dpu_uefi_password,
+        &api.instrumentation,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to set the DPU UEFI password");
+        CarbideError::internal(format!("failed to set the DPU UEFI password: {e}"))
+    })?;
+    // As in ingestion, a DPU that exposes no UEFI password (BlueField-4) staged
+    // nothing, so it is not enrolled for dpu_uefi rotation.
+    if !staged {
+        tracing::info!(%machine_id, "DPU exposes no UEFI password; nothing was set");
+        return Ok(Response::new(rpc::SetDpuUefiPasswordResponse {}));
+    }
 
     // Mirror the host path's optimistic convergence record: the change is staged
     // through Redfish BIOS settings and commits on the next DPU restart; record

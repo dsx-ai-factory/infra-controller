@@ -240,7 +240,7 @@ fn machine_state_controller(
         db_reader: api.database_connection.clone().into(),
         redfish_client_pool: clients.redfish.clone(),
         bmc_connector: BmcConnector::Libredfish(clients.redfish.clone()),
-        bmc_credential_ops: clients.redfish.clone(),
+        direct_redfish_pool: clients.redfish.clone().into(),
         ipmi_tool: carbide_ipmi::test_support(),
         site_config: config.machine_state_handler_site_config().into(),
         component_manager: None,

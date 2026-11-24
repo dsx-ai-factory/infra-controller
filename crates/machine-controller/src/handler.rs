@@ -131,9 +131,10 @@ use crate::health_report::{
 use crate::platform_config::{self, DpuSettings, PlatformBmc};
 use crate::redfish::{
     PowerControlError, did_dpu_finish_booting, host_power_control,
-    host_power_control_with_location, power_state, power_state_name, reboot_requested_mode,
-    reset_bmc, set_power,
+    host_power_control_with_location, poll_idrac_job, power_state, power_state_name,
+    reboot_requested_mode, reset_bmc, set_power,
 };
+use crate::uefi_password::{set_dpu_uefi_password, set_host_uefi_password};
 use crate::{
     MeasuringOutcome, get_measuring_prerequisites, handle_measuring_state,
     waiting_for_measurements_outcome,
@@ -5628,7 +5629,7 @@ impl DpuMachineStateHandler {
             DpuInitState::WaitingForPlatformConfiguration => {
                 // A known BMC MAC is a hard precondition for setting the DPU UEFI
                 // password: it keys the dpu_uefi rotation bookkeeping recorded once
-                // uefi_setup succeeds below, so refuse to drive the device without
+                // the password is staged below, so refuse to drive the device without
                 // it rather than discovering afterward that we cannot track it.
                 let dpu_bmc_mac = dpu_snapshot.status.bmc_info.mac.ok_or_else(|| {
                     StateHandlerError::MissingData {
@@ -5639,23 +5640,11 @@ impl DpuMachineStateHandler {
 
                 let dpf_used_for_ingestion = state.host_snapshot.config.dpf.used_for_ingestion;
 
-                // One access-info lookup serves both the general client
-                // and the credential op below.
-                let client_result = async {
-                    let access = ctx
-                        .services
-                        .bmc_access_info_for_machine(dpu_snapshot)
-                        .await?;
-                    let client = ctx
-                        .services
-                        .redfish_client_pool
-                        .client_by_info(&access)
-                        .await
-                        .map_err(StateHandlerError::from)?;
-                    Ok::<_, StateHandlerError>((access, client))
-                }
-                .await;
-                let (dpu_bmc_access, dpu_redfish_client) = match client_result {
+                let dpu_redfish_client = match ctx
+                    .services
+                    .create_redfish_client_from_machine(dpu_snapshot)
+                    .await
+                {
                     Ok(v) => v,
                     Err(e) => {
                         let msg = format!(
@@ -5746,32 +5735,36 @@ impl DpuMachineStateHandler {
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 )
                 .await?;
-                let dpu_uefi_credentials = read_site_uefi_credentials(
-                    ctx.services.bmc_credential_ops.credential_reader(),
+                let Credentials::UsernamePassword {
+                    password: dpu_uefi_password,
+                    ..
+                } = read_site_uefi_credentials(
+                    ctx.services.credential_manager.as_ref(),
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                     dpu_uefi_version,
                 )
                 .await?;
-                let credentials_updated = match ctx
-                    .services
-                    .bmc_credential_ops
-                    .uefi_setup(
-                        &dpu_bmc_access,
-                        true,
-                        dpu_uefi_credentials,
+                let staged = async {
+                    let bmc = ctx.services.connect_bmc(dpu_snapshot).await?;
+                    set_dpu_uefi_password(
+                        &bmc,
+                        ctx.services.credential_manager.as_ref(),
+                        &dpu_uefi_password,
                         &ctx.services.instrumentation,
                     )
                     .await
-                {
+                }
+                .await;
+                let credentials_updated = match staged {
                     Err(e) => {
                         let msg = format!(
-                            "Failed to run uefi_setup call failed for DPU {}: {}",
+                            "Failed to set the UEFI password for DPU {}: {}",
                             dpu_snapshot.id, e
                         );
                         tracing::warn!(
                             machine_id = %dpu_snapshot.id,
                             error = %e,
-                            "Failed to run uefi_setup for DPU",
+                            "Failed to set the DPU UEFI password",
                         );
                         let reboot_status = trigger_reboot_if_needed(
                             dpu_snapshot,
@@ -5787,11 +5780,9 @@ impl DpuMachineStateHandler {
                             dpu_snapshot.id
                         )));
                     }
-                    // BIOS does not expose a UEFI password field (e.g. BF4); skip
-                    // the restart and convergence record — nothing was staged.
-                    Ok(None) => false,
-                    // Password staged through Redfish BIOS settings; restart to commit.
-                    Ok(Some(_)) => true,
+                    // `false`: the BIOS exposes no UEFI password (e.g. BF4), so
+                    // nothing was staged to restart for or record.
+                    Ok(staged) => staged,
                 };
 
                 if credentials_updated {
@@ -5815,7 +5806,7 @@ impl DpuMachineStateHandler {
                 .next_state(&state.managed_state, dpu_machine_id)?;
 
                 if credentials_updated {
-                    // Record the version sent to `uefi_setup`, not a target
+                    // Record the version staged on the DPU, not a target
                     // published while the DPU was restarting.
                     let mut txn = ctx
                         .services
@@ -8709,27 +8700,20 @@ async fn handle_host_uefi_setup(
                 db::credential_rotation::CredentialRotationType::HostUefi,
             )
             .await?;
-            let host_uefi_credentials = read_site_uefi_credentials(
-                ctx.services.bmc_credential_ops.credential_reader(),
+            let Credentials::UsernamePassword {
+                password: host_uefi_password,
+                ..
+            } = read_site_uefi_credentials(
+                ctx.services.credential_manager.as_ref(),
                 db::credential_rotation::CredentialRotationType::HostUefi,
                 host_uefi_version,
             )
             .await?;
-            let host_bmc_access = ctx
-                .services
-                .bmc_access_info_for_machine(&state.host_snapshot)
-                .await?;
-            match ctx
-                .services
-                .bmc_credential_ops
-                .uefi_setup(
-                    &host_bmc_access,
-                    false,
-                    host_uefi_credentials,
-                    &ctx.services.instrumentation,
-                )
-                .await
-            {
+            // A failed connection returns Err so the framework retries. Falling
+            // through to the untested-vendor arm below would permanently skip
+            // setting the BIOS password over a blip.
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+            match set_host_uefi_password(&bmc, &host_uefi_password).await {
                 Ok(job_id) => Ok(StateHandlerOutcome::transition(
                     ManagedHostState::HostInit {
                         machine_state: MachineState::UefiSetup {
@@ -8741,13 +8725,6 @@ async fn handle_host_uefi_setup(
                         },
                     },
                 )),
-                // Client creation failed (credential store, TCP, or the
-                // vendor probe): return Err so the framework retries.
-                // Falling through to the untested-vendor arm below would
-                // permanently skip setting the BIOS password over a blip.
-                Err(carbide_redfish::libredfish::CredentialOpError::ClientCreation(e)) => {
-                    Err(e.into())
-                }
                 Err(e) => {
                     let msg = format!(
                         "failed to set the BIOS password on {} ({}): {}",
@@ -8783,19 +8760,10 @@ async fn handle_host_uefi_setup(
         }
         UefiSetupState::WaitForPasswordJobScheduled => {
             if let Some(job_id) = uefi_setup_info.uefi_password_jid.as_ref() {
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
-                let job_state = redfish_client
-                    .get_job_state(job_id)
-                    .await
-                    .map_err(|e| redfish_error("get_job_state", e))?;
-
-                if !matches!(job_state, libredfish::JobState::Scheduled) {
+                let status = poll_idrac_job(ctx.services, &state.host_snapshot, job_id).await?;
+                if !matches!(status, OperationStatus::AwaitingReset) {
                     return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for job {:#?} to be scheduled; current state: {job_state:#?}",
-                        job_id
+                        "waiting for job {job_id} to be scheduled; current state: {status:?}"
                     )));
                 }
             }
@@ -8828,20 +8796,10 @@ async fn handle_host_uefi_setup(
         }
         UefiSetupState::WaitForPasswordJobCompletion => {
             if let Some(job_id) = uefi_setup_info.uefi_password_jid.as_ref() {
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
-
-                let job_state = redfish_client
-                    .get_job_state(job_id)
-                    .await
-                    .map_err(|e| redfish_error("get_job_state", e))?;
-
-                if !matches!(job_state, libredfish::JobState::Completed) {
+                let status = poll_idrac_job(ctx.services, &state.host_snapshot, job_id).await?;
+                if !matches!(status, OperationStatus::Completed) {
                     return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for job {:#?} to complete; current state: {job_state:#?}",
-                        job_id
+                        "waiting for job {job_id} to complete; current state: {status:?}"
                     )));
                 }
             }

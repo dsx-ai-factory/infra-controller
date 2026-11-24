@@ -23,7 +23,7 @@ use bmc_runtime::{ConnectedBmc, ExploredBmcRefError, ExploredConnectError};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::libredfish::{DirectRedfishPool, RedfishClientPool};
 use carbide_redfish::nv_redfish::RedfishBmc;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::redfish::BmcAccessInfo;
@@ -60,12 +60,9 @@ pub struct MachineStateHandlerServices {
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
     /// Connects moved BMC operations through the site's `bmc_backend`.
     pub bmc_connector: BmcConnector,
-    /// Credential-lifecycle operations (password set/rotate/clear,
-    /// candidate validation). A sealed trait implemented only by the direct
-    /// pool, so handing these to a wrapper pool is a compile error (a
-    /// wrong-pool guard, not a wire-path guarantee -- see
-    /// [`BmcCredentialOps`]).
-    pub bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// Reaches the BMC without nico-bmc-proxy, which authenticates with stored
+    /// credentials a factory-reset BMC no longer accepts.
+    pub direct_redfish_pool: DirectRedfishPool,
     /// An implementation of the IPMITool that understands how to reboot a machine
     pub ipmi_tool: Arc<dyn IPMITool>,
     /// Configuration used by MachineStateHandler.
@@ -204,8 +201,7 @@ impl MachineStateHandlerServices {
         })
     }
 
-    /// Resolves a machine's BMC access info; credential-lifecycle call sites
-    /// hand this to [`BmcCredentialOps`], which builds its own direct client.
+    /// Resolves a machine's BMC access info.
     pub(crate) async fn bmc_access_info_for_machine(
         &self,
         machine: &Machine<impl MachineIdSubtypeTrait>,

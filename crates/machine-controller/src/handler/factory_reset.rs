@@ -492,8 +492,10 @@ async fn wait_for_bmc(
     // Readiness = a successful anonymous service-root read. The `Unknown` path
     // does no I/O at client creation and works against a just-reset BMC on its
     // factory password without consuming an authenticated login attempt.
-    let redfish = ctx.services.bmc_credential_ops.clone();
-    let ready = match redfish
+    let ready = match ctx
+        .services
+        .direct_redfish_pool
+        .pool()
         .create_client(
             &host,
             port,

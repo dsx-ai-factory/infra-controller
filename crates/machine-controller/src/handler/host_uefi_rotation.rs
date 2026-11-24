@@ -45,10 +45,7 @@
 //! several DPUs -- distinct enough from the host flow to keep the two states
 //! separate rather than overloading this one.
 
-use bmc_backend::BackendBmc;
-use bmc_platform::{
-    DriverOutcome, LockdownDesiredState, LockdownScope, OperationStatus, PlatformError, ResetType,
-};
+use bmc_platform::{LockdownDesiredState, LockdownScope, OperationStatus, ResetType};
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use db::TransactionVending as _;
@@ -63,31 +60,8 @@ use super::{current_site_uefi_target, handler_host_power_control, read_site_uefi
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 use crate::platform_config;
 use crate::redfish::poll_idrac_job;
+use crate::uefi_password::rotate_uefi_password_candidates;
 
-/// Walks `candidates` in order against `bmc.bios()?.change_uefi_password(...)`,
-/// returning the first [`DriverOutcome`] that succeeds. Used by both host and
-/// DPU UEFI password rotation.
-pub(super) async fn rotate_uefi_password_candidates(
-    bmc: &BackendBmc,
-    candidates: &[String],
-    new_password: &str,
-) -> Result<DriverOutcome, PlatformError> {
-    let bios = bmc.bios().map_err(PlatformError::from)?;
-    let mut last_err = None;
-    for candidate in candidates {
-        match bios.change_uefi_password(candidate, new_password).await {
-            Ok(outcome) => return Ok(outcome),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "UEFI password change failed for a current-password candidate; trying the next"
-                );
-                last_err = Some(error);
-            }
-        }
-    }
-    Err(last_err.expect("rotate_uefi_password_candidates requires at least one candidate"))
-}
 /// Whether a Ready host should enter `ManagedHostState::RotatingHostUefi` now.
 ///
 /// An operator force-converge request always wins -- the ops escape hatch is
@@ -504,7 +478,7 @@ mod tests {
     use axum::{Json, Router};
     use bmc_backend::BackendBmc;
     use bmc_mock::test_support::serve_https;
-    use bmc_platform::{OperationReference, VendorJobId};
+    use bmc_platform::{DriverOutcome, OperationReference, VendorJobId};
     use bmc_runtime::{DriverConnector, DriverPools};
     use carbide_redfish::nv_redfish::new_pool;
     use carbide_secrets::MemoryCredentialStore;

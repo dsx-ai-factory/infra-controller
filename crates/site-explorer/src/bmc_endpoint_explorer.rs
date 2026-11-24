@@ -25,7 +25,7 @@ use bmc_platform::{LockdownDesiredState, NicMode, PowerState, ResetType};
 use bmc_runtime::DriverConnector;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
-use carbide_redfish::libredfish::BmcCredentialOps;
+use carbide_redfish::libredfish::DirectRedfishPool;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials, DpfBmcRotationCandidate,
@@ -96,14 +96,13 @@ impl AuthenticatedBmcClient {
     /// Build the shared authenticated BMC client used by endpoint exploration
     /// and by callers performing BMC administration.
     ///
-    /// `redfish_client_pool` is the direct pool's credential-operations
-    /// handle ([`BmcCredentialOps`]): credential setup authenticates to the
-    /// endpoint itself. `proxied` (present only when `[bmc_proxy]` is
+    /// `redfish_client_pool` is the direct pool: credential setup
+    /// authenticates to the endpoint itself. `proxied` (present only when `[bmc_proxy]` is
     /// enabled) carries the ordinary established-endpoint traffic via
     /// nico-bmc-proxy; with `None`, every operation dials the BMC directly
     /// as before.
     pub fn new(
-        redfish_client_pool: Arc<dyn BmcCredentialOps>,
+        redfish_client_pool: DirectRedfishPool,
         nv_redfish_client_pool: Arc<NvRedfishClientPool>,
         proxied: Option<ProxiedPools>,
         ipmi_tool: Arc<dyn IPMITool>,
@@ -1785,7 +1784,7 @@ mod tests {
     ) -> BmcEndpointExplorer {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let bmc_client = Arc::new(AuthenticatedBmcClient::new(
-            sim,
+            sim.into(),
             Arc::new(NvRedfishClientPool::new(proxy_address)),
             None,
             carbide_ipmi::test_support(),
@@ -2148,7 +2147,7 @@ mod tests {
             .unwrap();
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let bmc_client = Arc::new(AuthenticatedBmcClient::new(
-            Arc::new(RedfishSim::default()),
+            Arc::new(RedfishSim::default()).into(),
             Arc::new(NvRedfishClientPool::new(proxy_address)),
             None,
             carbide_ipmi::test_support(),
@@ -2350,7 +2349,7 @@ mod tests {
 
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let bmc_client = Arc::new(AuthenticatedBmcClient::new(
-            sim.clone(),
+            sim.clone().into(),
             Arc::new(NvRedfishClientPool::new(proxy_address)),
             None,
             carbide_ipmi::test_support(),
@@ -2701,7 +2700,7 @@ mod tests {
             .await
             .unwrap();
         let client = AuthenticatedBmcClient::new(
-            sim.clone(),
+            sim.clone().into(),
             Arc::new(NvRedfishClientPool::new(Arc::new(ArcSwap::new(Arc::new(
                 None,
             ))))),

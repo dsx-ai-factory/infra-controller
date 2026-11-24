@@ -651,7 +651,7 @@ async fn admin_power_rechecks_the_persisted_drivers_ipmi_port(
     let mut api = power_api(&env, &bmc).await?;
     api.bmc_client = Arc::new(
         carbide_site_explorer::AuthenticatedBmcClient::new(
-            env.redfish_sim.clone(),
+            env.redfish_sim.clone().into(),
             pool,
             None,
             ipmi,

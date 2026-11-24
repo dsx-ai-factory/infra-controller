@@ -38,7 +38,7 @@ pub use legacy::PlatformBmc;
 
 /// The vendor job `outcome` started, which the host must wait for before
 /// restarting; other work is not waited on.
-pub(crate) fn vendor_job_id(outcome: &DriverOutcome) -> Option<VendorJobId> {
+pub fn vendor_job_id(outcome: &DriverOutcome) -> Option<VendorJobId> {
     outcome.references().find_map(|reference| match reference {
         OperationReference::VendorJob { job_id, .. } => Some(job_id.clone()),
         OperationReference::RedfishTask { .. } => None,

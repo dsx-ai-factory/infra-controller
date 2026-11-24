@@ -30,7 +30,7 @@ use carbide_credential_rotation::bmc_accounts;
 use carbide_hw_identification::host_serial::HOST_SERIAL_ASSEMBLY_CHASSIS_IDS;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
-    BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool, probe_bmc_vendor,
+    DirectRedfishPool, RedfishAuth, RedfishClientCreationError, RedfishClientPool, probe_bmc_vendor,
 };
 use carbide_redfish::nv_redfish::{NvRedfishClientPool, RedfishBmc, ServiceRoot};
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
@@ -53,7 +53,7 @@ use nv_redfish::schema::secure_boot::SecureBootUpdate;
 // Eventually, this file should only have code related to generating the site exploration report.
 #[derive(Clone)]
 pub(super) struct RedfishClient {
-    redfish_client_pool: Arc<dyn BmcCredentialOps>,
+    redfish_client_pool: DirectRedfishPool,
     nv_redfish_client_pool: Arc<NvRedfishClientPool>,
     /// Pools targeting nico-bmc-proxy; `Some` only when `[bmc_proxy]` is
     /// enabled. Established-endpoint traffic uses them; everything else,
@@ -105,7 +105,7 @@ pub enum BmcAccess {
 
 impl RedfishClient {
     pub(super) fn new(
-        redfish_client_pool: Arc<dyn BmcCredentialOps>,
+        redfish_client_pool: DirectRedfishPool,
         nv_redfish_client_pool: Arc<NvRedfishClientPool>,
         proxied: Option<ProxiedPools>,
     ) -> Self {
@@ -117,10 +117,14 @@ impl RedfishClient {
         }
     }
 
-    /// Connects with explicit credentials, which always bypass `nico-bmc-proxy`.
+    /// The connector for explicit-credential account operations: libredfish on
+    /// the direct pool, or the drivers when configured. Not for stored-credential
+    /// traffic, which would also bypass `nico-bmc-proxy`.
     fn bmc_connector(&self) -> BmcConnector {
-        let direct: Arc<dyn RedfishClientPool> = self.redfish_client_pool.clone();
-        BmcConnector::new(direct, self.driver_connector.clone())
+        BmcConnector::new(
+            self.redfish_client_pool.pool(),
+            self.driver_connector.clone(),
+        )
     }
 
     /// Connects to an established endpoint through the configured
@@ -214,6 +218,7 @@ impl RedfishClient {
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
         self.redfish_client_pool
+            .pool()
             .create_client(
                 &bmc_ip_address.ip().to_string(),
                 Some(bmc_ip_address.port()),
@@ -361,7 +366,7 @@ impl RedfishClient {
         credentials: Credentials,
     ) -> Result<RedfishVendor, EndpointExplorationError> {
         probe_bmc_vendor(
-            self.redfish_client_pool.as_ref(),
+            self.redfish_client_pool.pool().as_ref(),
             &bmc_ip_address.ip().to_string(),
             Some(bmc_ip_address.port()),
             credentials,
@@ -1361,7 +1366,7 @@ mod tests {
     fn build_redfish_client(sim: Arc<RedfishSim>) -> RedfishClient {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address));
-        RedfishClient::new(sim, nv_pool, None)
+        RedfishClient::new(sim.into(), nv_pool, None)
     }
 
     #[test]
@@ -1575,7 +1580,7 @@ mod tests {
         let general_sim = Arc::new(RedfishSim::default());
         let proxied_nv = nv_pool();
         let client = RedfishClient::new(
-            ops_sim.clone(),
+            ops_sim.clone().into(),
             nv_pool(),
             Some(ProxiedPools {
                 redfish: general_sim.clone(),
@@ -1634,7 +1639,7 @@ mod tests {
     async fn established_operations_dial_direct_with_carried_credentials_when_disabled() {
         use carbide_redfish::libredfish::test_support::RedfishAuthKind;
         let ops_sim = Arc::new(RedfishSim::default());
-        let client = RedfishClient::new(ops_sim.clone(), nv_pool(), None);
+        let client = RedfishClient::new(ops_sim.clone().into(), nv_pool(), None);
         let mac: MacAddress = "02:00:00:00:00:09".parse().unwrap();
 
         client
@@ -1707,7 +1712,8 @@ mod tests {
             "the proxy resolves the BMC's credentials itself"
         );
 
-        let direct_client = RedfishClient::new(Arc::new(RedfishSim::default()), nv_pool(), None);
+        let direct_client =
+            RedfishClient::new(Arc::new(RedfishSim::default()).into(), nv_pool(), None);
         let (pool, credentials) = direct_client
             .nv_pool_and_credentials(BmcAccess::Established(established(mac, stored.clone())));
         assert!(std::ptr::eq(

@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use bmc_runtime::{DriverConnector, ExploredConnectError};
 use carbide_redfish::libredfish::{
-    BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
+    DirectRedfishPool, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
 };
 use carbide_secrets::credentials::Credentials;
 use carbide_utils::redfish::BmcAccessInfo;
@@ -55,18 +55,18 @@ impl BmcConnector {
     }
 
     /// The drivers when the site configured them, otherwise libredfish using
-    /// `routed` for stored-credential traffic and the sealed direct pool
-    /// `direct` for explicit credentials that must bypass `nico-bmc-proxy`.
+    /// `routed` for stored-credential traffic and `direct` for explicit
+    /// credentials that must bypass `nico-bmc-proxy`.
     pub fn new_with_direct(
         routed: Arc<dyn RedfishClientPool>,
-        direct: Arc<dyn BmcCredentialOps>,
+        direct: DirectRedfishPool,
         drivers: Option<Arc<DriverConnector>>,
     ) -> Self {
         match drivers {
             Some(drivers) => Self::Drivers(drivers),
             None => Self::LibredfishSplit {
                 routed,
-                direct: direct as Arc<dyn RedfishClientPool>,
+                direct: direct.pool(),
             },
         }
     }
@@ -140,8 +140,9 @@ impl BmcConnector {
     }
 
     /// Connects to an explored BMC at `access` with explicit `credentials` for
-    /// account operations, always bypassing `nico-bmc-proxy` and selecting
-    /// drivers from `report`.
+    /// account operations through the direct pool, selecting drivers from
+    /// `report`. Libredfish uses the pool this connector was given: `direct`
+    /// for [`Self::new_with_direct`], or the only pool otherwise.
     pub async fn connect_with_credentials(
         &self,
         access: &BmcAccessInfo,
@@ -163,8 +164,9 @@ impl BmcConnector {
     }
 
     /// Connects to an unexplored BMC at `access` with explicit `credentials`
-    /// to change its password, always bypassing `nico-bmc-proxy`. The drivers
-    /// are selected from its live service root.
+    /// to change its password, through the same pool as
+    /// [`Self::connect_with_credentials`]. The drivers are selected from its
+    /// live service root.
     pub async fn connect_unexplored_with_credentials(
         &self,
         access: &BmcAccessInfo,
