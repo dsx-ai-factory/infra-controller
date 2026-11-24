@@ -38,7 +38,7 @@ use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
 use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
-    ExternalServiceError, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
+    StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use crate::context::MachineStateHandlerContextObjects;
@@ -571,12 +571,10 @@ pub(super) async fn handle_deconfiguring_dpus(
                 Ok(task) => {
                     let is_install = task.id == *task_id
                         && is_vanilla_bfb_install(&task).map_err(|error| {
-                            ExternalServiceError::with_source(
-                                "redfish",
-                                "get_task",
-                                format!("failed to decode the request for {install}: {error}"),
-                                "redfish_other_error",
-                                error,
+                            let details =
+                                format!("failed to decode the request for {install}: {error}");
+                            StateHandlerError::GenericError(
+                                eyre::Report::new(error).wrap_err(details),
                             )
                         })?;
                     if !is_install {
@@ -611,27 +609,20 @@ pub(super) async fn handle_deconfiguring_dpus(
                 }
                 Err(error) if error.not_found() => format!("{install} returned HTTP 404"),
                 Err(error) => {
-                    return Err(ExternalServiceError::with_source(
-                        "redfish",
-                        "get_task",
-                        format!("failed to poll {install}: {error}"),
-                        "redfish_other_error",
-                        error,
-                    )
-                    .into());
+                    let details = format!("failed to poll {install}: {error}");
+                    return Err(StateHandlerError::GenericError(
+                        eyre::Report::new(error).wrap_err(details),
+                    ));
                 }
             };
 
             let replacement = find_vanilla_bfb_install(redfish_client.as_ref())
                 .await
                 .map_err(|error| {
-                    ExternalServiceError::with_source(
-                        "redfish",
-                        "get_collection",
-                        format!("{recovery_reason}\nfailed to scan for a replacement vanilla BFB install: {error:#}"),
-                        "redfish_other_error",
-                        error,
-                    )
+                    let details = format!(
+                        "{recovery_reason}\nfailed to scan for a replacement vanilla BFB install: {error:#}"
+                    );
+                    StateHandlerError::GenericError(error.wrap_err(details))
                 })?;
             let Some(replacement_id) = replacement else {
                 let address = dpu

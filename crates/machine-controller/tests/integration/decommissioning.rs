@@ -348,7 +348,7 @@ async fn vanilla_bfb_retries_a_transient_poll_and_reports_failed_scans(pool: PgP
         .tick([(SAVED_TASK, StatusCode::SERVICE_UNAVAILABLE, Value::Null)])
         .await;
     fixture
-        .assert_error(&["Failed redfish operation: get_task", "503"], false)
+        .assert_error(&["failed to poll", "503"], false)
         .await;
 
     fixture
@@ -390,15 +390,7 @@ async fn vanilla_bfb_retries_a_transient_poll_and_reports_failed_scans(pool: PgP
             ])
             .await;
         fixture
-            .assert_error(
-                &[
-                    "Failed redfish operation: get_collection",
-                    "HTTP 404",
-                    "failed to scan",
-                    error,
-                ],
-                false,
-            )
+            .assert_error(&["HTTP 404", "failed to scan", error], false)
             .await;
     }
 }
