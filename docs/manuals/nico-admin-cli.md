@@ -135,13 +135,17 @@ protected, read-only operation. An empty inventory is also a valid result.
 Use [`component-manager component-reset`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-component-reset.md)
 to submit resets directly, and
 [`component-manager get-reset-status`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-reset-status.md)
-to query by device and required action. The RMS backend supports
-`sdn-factory-reset` and `nvos-factory-reset` on switches. BMC resets remain
-unsupported. Targets can be switch IDs or BMC MACs, including expected inventory
+to query by device and required action. `bmc-reset` restarts the management controller
+without host power cycling or restoring factory defaults. Switches also support
+`sdn-factory-reset` and `nvos-factory-reset`. BMC factory reset is unsupported.
+NICo requires both BMC and NVOS endpoints and credentials for every switch reset
+action, including before ingestion. Credentials come from Vault with expected-switch
+inventory as fallback.
+CLI targets can be switch IDs or BMC MACs, including expected inventory
 before ingestion. SDN reset disrupts fabric traffic and restores SDN defaults
 without reinstalling NVOS. NVOS reset erases operating-system configuration and
 reboots the switch. The optional `--domain-name` selector applies only to SDN
-reset; NVOS reset uses the RMS configured default NVL certificate domain and
+reset; NVOS reset uses the configured default NVL certificate domain and
 rejects that selector.
 
 For an ingested switch, after NVOS reset reports `COMPLETED`, an operator must
@@ -150,15 +154,20 @@ and password recorded in NICo for that switch before resuming managed operations
 Direct reset does not update the credentials stored in NICo or automatically
 rerun credential rotation.
 
-Submission success means accepted and tracked; it does not mean the reset
+For `bmc-reset`, submission success means command acceptance, without a tracked
+job or verified controller recovery. Its status query returns `SUCCESS`/`COMPLETED`
+as a no-op, even without a prior submission. The gRPC API also supports compute
+and power-shelf controllers, selected by device ID or BMC/PMC MAC.
+
+For SDN/NVOS, submission success means accepted and tracked; it does not mean the reset
 completed. Other valid targets can proceed when one target fails.
-`OUTCOME_UNKNOWN` means the reset may have started, including when RMS accepted
-it but NICo could not record its reference; do not automatically resubmit.
-`INVALID_ARGUMENT` means the target could not be prepared or RMS rejected it
+`OUTCOME_UNKNOWN` means the reset may have started, including when the reset was accepted
+but NICo could not record its reference; do not automatically resubmit.
+`INVALID_ARGUMENT` means the target could not be prepared or the request was rejected
 before dispatch. `NOT_FOUND` means the target or its credentials could not be
 resolved.
 
-NICo stores the most recently recorded accepted RMS job reference per device
+NICo stores the most recently recorded accepted reset reference per device
 MAC and reset action. This follows firmware direct-dispatch tracking: references
 survive NICo restarts, but are not operation history or durable completion
 records. A rejected or ambiguous submission leaves the previous reference
@@ -171,23 +180,20 @@ In the status API, the per-device result and reset state have different meanings
 | Result / reset state | Meaning and next step |
 |---|---|
 | `SUCCESS` / `QUEUED` or `IN_PROGRESS` | The tracked reset is still active. Continue querying status. |
-| `SUCCESS` / `COMPLETED` or `FAILED` | RMS reports a terminal outcome for the tracked reset. Read the error for a failed reset. |
+| `SUCCESS` / `COMPLETED` or `FAILED` | For SDN/NVOS, the tracked reset has finished. Read the error for a failed reset. For `bmc-reset`, `SUCCESS` / `COMPLETED` is a no-op that requires no prior submission and does not verify recovery. |
 | `NOT_FOUND` / `UNKNOWN` | NICo cannot resolve the target or has no reference. Read the error; this does not prove no reset occurred. |
-| `UNAVAILABLE` / `UNKNOWN` | Status could not be observed, for example because of a temporary RMS failure. Retry the status query. |
-| `OUTCOME_UNKNOWN` / `UNKNOWN` | The tracked RMS job cannot be found or its outcome cannot be established. Investigate before submitting another reset. |
+| `UNAVAILABLE` / `UNKNOWN` | Status could not be observed, for example because of a temporary service failure. Retry the status query. |
+| `OUTCOME_UNKNOWN` / `UNKNOWN` | The tracked reset cannot be found or its outcome cannot be established. Investigate before submitting another reset. |
 
-RMS job expiry or restart can make a previously observed completion unavailable.
-NICo does not retain pending submission intent or provide durable exclusion
-between reset requests. RMS admission applies to its tracked rack/node identity;
-it does not recover forgotten jobs or associate changed node IDs across ingestion.
+Reset records can expire or become unavailable, even after completion was
+previously observed. NICo does not retain pending submission intent or provide
+durable exclusion between reset requests. A changed device identity after
+ingestion may prevent correlation with an earlier reset.
 
 Do not automatically retry a reset after a submission error: the reset
-may have started even if NICo could not record its job reference. Investigate
-NICo/RMS logs and the device state. For a known job ID, use
-[`backend rms get-job-status`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/backend/backend-rms-get-job-status.md)
-with child records included to inspect the RMS outcome. This diagnostic requires
-the admin CLI role. Retry status queries as needed; another reset must be a
-deliberate action after establishing the outcome of the uncertain attempt.
+may have started even if NICo could not record its reference. Investigate
+NICo logs and the device state. Retry status queries as needed; another reset
+must be a deliberate action after establishing the outcome of the uncertain attempt.
 
 ## mTLS and authorization
 

@@ -131,7 +131,7 @@ async fn firmware_inventory_preserves_members_metadata_and_endpoint_order() {
             );
         }
     }
-    let manager = CoreComputeTrayManager::new(pool.clone());
+    let manager = CoreComponentManager::new(pool.clone());
     let before = pool.sim.timepoint();
 
     assert!(
@@ -419,7 +419,7 @@ async fn firmware_inventory_rejects_incomplete_or_malformed_raw_collections() {
         let endpoints = [test_compute_tray_endpoint(1)];
         let pool = compute_read_test_pool(&endpoints);
         pool.sim.set_resource(FIRMWARE_INVENTORY_URI, collection);
-        let manager = CoreComputeTrayManager::new(pool.clone());
+        let manager = CoreComponentManager::new(pool.clone());
         let before = pool.sim.timepoint();
 
         let results = manager.get_firmware_inventory(&endpoints).await.unwrap();
@@ -599,7 +599,7 @@ async fn firmware_inventory_reports_failures_without_losing_healthy_members() {
         let pool = compute_read_test_pool(&endpoints);
         set_firmware_test_inventory(&pool, &["BMC_Firmware".into(), "broken".into()]);
         let before = pool.sim.timepoint();
-        let manager = CoreComputeTrayManager::new(pool.clone());
+        let manager = CoreComponentManager::new(pool.clone());
         let delayed_first = pool.setup_gates.block(&endpoints[0]);
 
         let (results, logs) = capture_logs_async(async {
@@ -661,7 +661,8 @@ async fn firmware_inventory_reports_failures_without_losing_healthy_members() {
         let warnings: Vec<_> = logs
             .iter()
             .filter(|log| {
-                log.level == tracing::Level::WARN && log.target.ends_with("::core_compute_manager")
+                log.level == tracing::Level::WARN
+                    && log.target.ends_with("::core_component_manager")
             })
             .collect();
         if let Some(reason) = case.collection_reason {
@@ -730,7 +731,7 @@ async fn firmware_inventory_bounds_total_metadata_and_endpoint_count() {
         .firmware
         .member_gates
         .block_key(format!("{}/{id}", endpoints[0].bmc_ip));
-    let manager = CoreComputeTrayManager::new(pool.clone());
+    let manager = CoreComponentManager::new(pool.clone());
     let before = pool.sim.timepoint();
     let mut request = Box::pin(manager.get_firmware_inventory(&endpoints));
 
@@ -766,7 +767,7 @@ async fn firmware_inventory_bounds_total_metadata_and_endpoint_count() {
     // A fresh pool keeps the endpoint-boundary proof independent of byte accounting.
     let pool = compute_read_test_pool(&endpoints);
     set_firmware_test_inventory(&pool, &[]);
-    let manager = CoreComputeTrayManager::new(pool.clone());
+    let manager = CoreComponentManager::new(pool.clone());
     let before = pool.sim.timepoint();
 
     let accepted = manager
@@ -839,7 +840,7 @@ async fn firmware_inventory_cancellation_bounds_setup_listing_and_member_work() 
             ),
         };
         let senders: Vec<_> = keys.into_iter().map(|key| gates.block_key(key)).collect();
-        let manager = CoreComputeTrayManager::new(pool.clone());
+        let manager = CoreComponentManager::new(pool.clone());
         let before = pool.sim.timepoint();
         let mut request = Box::pin(manager.get_firmware_inventory(&endpoints));
         let active = if matches!(phase, Phase::Members) {
@@ -936,7 +937,7 @@ async fn firmware_inventory_deadline_preserves_peers_and_rejects_late_results() 
                     .block_key(format!("{}/{id}", endpoints[0].bmc_ip))
             })
             .collect();
-        let manager = CoreComputeTrayManager::new(pool.clone());
+        let manager = CoreComponentManager::new(pool.clone());
         let before = pool.sim.timepoint();
         let started = Instant::now();
 
@@ -1037,7 +1038,7 @@ async fn firmware_inventory_deadline_preserves_peers_and_rejects_late_results() 
         assert!(pool.sim.actions_since(&before).all_hosts().is_empty());
         assert!(
             logs.iter().all(|log| log.level != tracing::Level::WARN
-                || !log.target.ends_with("::core_compute_manager")),
+                || !log.target.ends_with("::core_component_manager")),
             "deadline path duplicated an I/O diagnostic"
         );
         assert!(logs.iter().all(|log| {

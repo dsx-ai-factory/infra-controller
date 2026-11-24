@@ -22,6 +22,7 @@ use sqlx::PgPool;
 
 use crate::compute_tray_manager::{Backend as ComputeBackend, ComputeTrayManager};
 use crate::config::ComponentManagerConfig;
+use crate::core_component_manager::CoreComponentManager;
 use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
@@ -784,6 +785,21 @@ pub async fn build_component_manager(
 
     let rack_profiles = Arc::new(rack_profiles);
 
+    let core_component_manager = redfish_pool
+        .map(|pool| {
+            let mut manager = CoreComponentManager::new(pool);
+            if driver_connector.is_some() {
+                let db = db.clone().ok_or_else(|| {
+                    ComponentManagerError::InvalidArgument(
+                        "bmc_backend is 'drivers' but database pool is not configured".into(),
+                    )
+                })?;
+                manager = manager.with_driver_connector(driver_connector, db);
+            }
+            Ok::<_, ComponentManagerError>(Arc::new(manager))
+        })
+        .transpose()?;
+
     let nv_switch: Arc<dyn NvSwitchManager> = match config.nv_switch_backend {
         NvSwitchBackend::Nsm => {
             let endpoint = config.nsm.as_ref().ok_or_else(|| {
@@ -812,14 +828,17 @@ pub async fn build_component_manager(
                     "nv_switch_backend is 'rms' but database pool is not configured".into(),
                 )
             })?;
-            Arc::new(crate::rms::RmsBackend::new(
-                client,
-                rms_switch_system_image_client.clone(),
-                db,
-                rack_profiles.clone(),
-                config.nvos_password_rotation_enabled,
-                instrumentation.clone(),
-            ))
+            Arc::new(
+                crate::rms::RmsBackend::new(
+                    client,
+                    rms_switch_system_image_client.clone(),
+                    db,
+                    rack_profiles.clone(),
+                    config.nvos_password_rotation_enabled,
+                    instrumentation.clone(),
+                )
+                .with_core_component_manager(core_component_manager.clone()),
+            )
         }
         NvSwitchBackend::Mock => Arc::new(crate::mock::MockNvSwitchManager::default()),
     };
@@ -852,14 +871,17 @@ pub async fn build_component_manager(
                     "power_shelf_backend is 'rms' but database pool is not configured".into(),
                 )
             })?;
-            Arc::new(crate::rms::RmsBackend::new(
-                client,
-                rms_switch_system_image_client.clone(),
-                db,
-                rack_profiles.clone(),
-                config.nvos_password_rotation_enabled,
-                instrumentation.clone(),
-            ))
+            Arc::new(
+                crate::rms::RmsBackend::new(
+                    client,
+                    rms_switch_system_image_client.clone(),
+                    db,
+                    rack_profiles.clone(),
+                    config.nvos_password_rotation_enabled,
+                    instrumentation.clone(),
+                )
+                .with_core_component_manager(core_component_manager.clone()),
+            )
         }
         PowerShelfBackend::Mock => Arc::new(crate::mock::MockPowerShelfManager),
     };
@@ -876,7 +898,7 @@ pub async fn build_component_manager(
                     "compute_tray_backend is 'rms' but database pool is not configured".into(),
                 )
             })?;
-            let pool = redfish_pool.clone().ok_or_else(|| {
+            let core = core_component_manager.clone().ok_or_else(|| {
                 ComponentManagerError::InvalidArgument(
                     "compute_tray_backend is 'rms' but Redfish client pool is not configured"
                         .into(),
@@ -886,35 +908,19 @@ pub async fn build_component_manager(
                 crate::rms::RmsBackend::new(
                     client,
                     rms_switch_system_image_client.clone(),
-                    db.clone(),
+                    db,
                     rack_profiles.clone(),
                     config.nvos_password_rotation_enabled,
                     instrumentation,
                 )
-                .with_core_compute_manager(
-                    crate::core_compute_manager::CoreComputeTrayManager::new(pool)
-                        .with_driver_connector(driver_connector.clone(), db),
-                ),
+                .with_core_component_manager(Some(core)),
             )
         }
-        ComputeBackend::Core => {
-            let pool = redfish_pool.ok_or_else(|| {
-                ComponentManagerError::InvalidArgument(
-                    "compute_tray_backend is 'core' but Redfish client pool is not configured"
-                        .into(),
-                )
-            })?;
-            let mut manager = crate::core_compute_manager::CoreComputeTrayManager::new(pool);
-            if driver_connector.is_some() {
-                let db = db.clone().ok_or_else(|| {
-                    ComponentManagerError::InvalidArgument(
-                        "bmc_backend is 'drivers' but database pool is not configured".into(),
-                    )
-                })?;
-                manager = manager.with_driver_connector(driver_connector, db);
-            }
-            Arc::new(manager)
-        }
+        ComputeBackend::Core => core_component_manager.clone().ok_or_else(|| {
+            ComponentManagerError::InvalidArgument(
+                "compute_tray_backend is 'core' but Redfish client pool is not configured".into(),
+            )
+        })?,
         ComputeBackend::Mock => Arc::new(crate::mock::MockComputeTrayManager),
     };
 
@@ -1637,6 +1643,127 @@ mod tests {
         .expect("RMS switch backend should build");
 
         assert!(cm.nv_switch.supports_password_rotation());
+    }
+
+    #[tokio::test]
+    async fn bmc_reset_delegates_each_component_backend_to_core() {
+        use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
+        use carbide_secrets::credentials::Credentials;
+
+        use crate::component_common::{BmcEndpoint, BmcVendor, RackComponent};
+
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused")
+            .unwrap();
+        db.close().await;
+        for (compute_backend, switch_backend, shelf_backend, components) in [
+            (
+                ComputeBackend::Core,
+                NvSwitchBackend::Mock,
+                PowerShelfBackend::Mock,
+                &[RackComponent::ComputeBmc][..],
+            ),
+            (
+                ComputeBackend::Rms,
+                NvSwitchBackend::Rms,
+                PowerShelfBackend::Rms,
+                &[
+                    RackComponent::ComputeBmc,
+                    RackComponent::SwitchBmc,
+                    RackComponent::PowerShelfPmc,
+                ][..],
+            ),
+        ] {
+            let redfish = Arc::new(RedfishSim::default());
+            let rms = Arc::new(MockRmsApi::new());
+            let manager = build_component_manager(
+                &ComponentManagerConfig {
+                    compute_tray_backend: compute_backend,
+                    nv_switch_backend: switch_backend,
+                    power_shelf_backend: shelf_backend,
+                    ..Default::default()
+                },
+                rms_rack_profiles(rms_rack_profile()),
+                Some(rms.clone()),
+                None,
+                Some(db.clone()),
+                Some(redfish.clone()),
+                None,
+                carbide_instrument::Instrumentation::global(),
+            )
+            .await
+            .unwrap();
+            let endpoints: Vec<_> = [1, 2]
+                .into_iter()
+                .map(|index| BmcEndpoint {
+                    bmc_ip: format!("192.0.2.{index}").parse().unwrap(),
+                    bmc_mac: format!("02:00:00:00:00:0{index}").parse().unwrap(),
+                    vendor: BmcVendor::Unknown,
+                    bmc_credentials: Credentials::new("reset-user", "test-password"),
+                })
+                .collect();
+            for component in components {
+                let before = redfish.timepoint();
+                redfish.fail_next_bmc_reset(libredfish::RedfishError::GenericError {
+                    error: "reset rejected".into(),
+                });
+                let results = match component {
+                    RackComponent::ComputeBmc => manager.compute_tray.reset_bmc(&endpoints).await,
+                    RackComponent::SwitchBmc | RackComponent::SwitchNvos => {
+                        let switch_endpoints: Vec<_> = endpoints
+                            .iter()
+                            .map(|endpoint| crate::nv_switch_manager::SwitchEndpoint {
+                                bmc_ip: endpoint.bmc_ip,
+                                bmc_mac: endpoint.bmc_mac,
+                                bmc_credentials: endpoint.bmc_credentials.clone(),
+                                nvos_ip: "192.0.2.99".parse().unwrap(),
+                                nvos_mac: "02:00:00:00:00:99".parse().unwrap(),
+                                nvos_credentials: Credentials::new("nvos-user", "nvos-password"),
+                                nvos_host_name: Some("switch.example.test".into()),
+                            })
+                            .collect();
+                        manager.nv_switch.reset_bmc(&switch_endpoints).await
+                    }
+                    RackComponent::PowerShelfPmc => manager.power_shelf.reset_bmc(&endpoints).await,
+                }
+                .unwrap();
+                assert_eq!(results.len(), 2);
+                assert!(!results[0].success, "{compute_backend}/{component:?}");
+                assert!(
+                    results[0]
+                        .error
+                        .as_ref()
+                        .unwrap()
+                        .contains("reset rejected")
+                );
+                assert!(results[1].success, "{compute_backend}/{component:?}");
+                assert_eq!(results[1].error, None);
+                for (endpoint, result) in endpoints.iter().zip(&results) {
+                    assert_eq!(
+                        (result.bmc_ip, result.bmc_mac),
+                        (endpoint.bmc_ip, endpoint.bmc_mac)
+                    );
+                    assert_eq!(result.backend_job_id, None);
+                    assert_eq!(
+                        redfish
+                            .actions_since(&before)
+                            .for_host(&endpoint.bmc_ip.to_string()),
+                        vec![RedfishSimAction::BmcReset(None)]
+                    );
+                }
+            }
+            assert!(rms.batch_set_power_state_calls().await.is_empty());
+            assert!(
+                rms.batch_reset_switch_factory_default_calls()
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                rms.batch_reset_switch_sdn_factory_default_calls()
+                    .await
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
