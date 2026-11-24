@@ -287,9 +287,9 @@ local entry if it already supplies the credential. A token in the environment
 source takes effect when Core restarts. See
 [UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
 
-To select token authentication explicitly, set `auth = "token"` in the fabric
-configuration and restart Core. Without `auth`, a non-empty password already
-selects token authentication.
+To select token authentication explicitly, set `auth = "token"` in the
+[fabric configuration](#nico-api-site-config) and restart Core. Without `auth`,
+a non-empty password already selects token authentication.
 
 ##### Client Authentication (mTLS)
 
@@ -328,13 +328,8 @@ openssl x509 -in server.crt -text -noout | grep DNS
 
 **Select Client Authentication mode.**
 
-Set the fabric to use the default SPIFFE client certificate:
-
-```toml
-[ib_fabrics.default]
-endpoints = ["https://ufm.example:443"]
-auth = "client_certificate"
-```
+Set `auth = "client_certificate"` in `[ib_fabrics.default]` in the
+[nico-api-site-config section](#nico-api-site-config).
 
 No UFM credential is needed. NICo reads
 `/var/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` for client
@@ -532,6 +527,7 @@ Infiniband typically expresses `Pkeys` in hex; the available range is `“0x0 ~ 
 ```toml
 [ib_fabrics.default]
 endpoints = ["https://10.217.161.194:443/"]
+# auth = "token" # Optional: "token" or "client_certificate"; see UFM Credential above.
 pkeys = [{ start = "256", end = "2303" }]
 ```
 

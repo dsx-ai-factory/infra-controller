@@ -426,16 +426,22 @@ now sent to UFM as a token, so UFM rejects it. Before upgrading, replace that
 credential in one of these ways:
 
 - Set a valid UFM bearer token.
-- Use the default SPIFFE client certificate: set
-  `auth = "client_certificate"` for the fabric. UFM must trust that certificate;
-  see
+- Use the default SPIFFE client certificate: give the fabric an empty password
+  in a source that returns it. That is Vault, or the environment or file source
+  with `ufm_source` set to `"local_first"` or `"local"`. UFM must trust that
+  certificate; see
   [Client Authentication (mTLS)](../playbooks/ib_runbook.md#client-authentication-mtls).
+
+Do not clear the password in Postgres. Postgres reads an empty password as no
+credential, so UFM client creation fails and the fabric monitor cannot load the
+fabric.
 
 Consider these compatibility details:
 
-- Sites that do not set `auth` keep their current authentication selection.
-- Sites that store credentials in Postgres and want mTLS must set
-  `auth = "client_certificate"`.
+- Set `auth` only after Core runs a version that supports it; an earlier version
+  rejects the unknown setting and fails to start.
+- After upgrading, a site that stores credentials in Postgres and wants the
+  client certificate sets `auth = "client_certificate"`.
 - `credential delete-ufm` now removes the UFM credential from the configured
   writer backend. It no longer stores an empty password, so on Vault it no
   longer switches UFM to the client certificate. An empty password already

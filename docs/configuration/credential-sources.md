@@ -39,11 +39,13 @@ Unknown fields in either table fail the boot.
 
 With `ufm_source = "local"` and InfiniBand management enabled, startup requires
 a local `ufm_auth_by_fabric` entry for every configured fabric unless that
-fabric sets `auth = "client_certificate"`. Startup fails naming a fabric whose
-required local credential is missing. With InfiniBand management disabled,
-startup succeeds because UFM is dormant. In this mode a Vault import configured
-by `[secrets] import_from` skips the `ufm/` subtree, so local ownership survives
-the import. Local sources remain operator-managed and read-only.
+fabric sets `auth = "client_certificate"`. For `auth = "token"`, the first local
+entry found must have a non-blank password. Startup fails naming a fabric whose
+required local credential is missing or blank. With InfiniBand management
+disabled, startup succeeds because UFM is dormant. In this mode a Vault import
+configured by `[secrets] import_from` skips the `ufm/` subtree, so local
+ownership survives the import. Local sources remain operator-managed and
+read-only.
 
 Each `[ib_fabrics.<name>]` table has an optional `auth` setting with no default:
 

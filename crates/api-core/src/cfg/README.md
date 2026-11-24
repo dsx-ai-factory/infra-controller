@@ -2175,10 +2175,11 @@ local environment and file sources before the configured persistent backends.
 
 When `ufm_source = "local"` and InfiniBand management is enabled, startup
 requires a local `ufm_auth_by_fabric` entry for every configured fabric unless
-that fabric sets `auth = "client_certificate"`. The mode is all-or-nothing:
-NICo does not fall back to Vault or Postgres for a missing required fabric. When
-`ufm_source` is omitted, `local_first` preserves the pre-existing local-override
-behavior.
+that fabric sets `auth = "client_certificate"`. For `auth = "token"`, the first
+local entry found must have a non-blank password. The mode is all-or-nothing:
+NICo does not fall back to Vault or Postgres for a missing or blank required
+fabric credential. When `ufm_source` is omitted, `local_first` preserves the
+pre-existing local-override behavior.
 
 When `bmc_site_wide_root_source = "local"`, readers report a missing local
 version 0 as unavailable without falling back to a persistent backend. With
@@ -2236,7 +2237,8 @@ live-reload workflows. The site-wide BMC root version 0 has the bootstrap-only
 boundary described above. With `ufm_source = "local_first"`, an environment entry
 overrides the corresponding file and persistent-backend entries. With
 `ufm_source = "local"`, every configured fabric must be present in the enabled
-environment/file sources unless it sets `auth = "client_certificate"`.
+environment/file sources unless it sets `auth = "client_certificate"`; an
+explicit token entry must have a non-blank password.
 
 For version 0 of the site-wide BMC root, the environment entry likewise
 precedes the file entry in `local_first` and `local` modes. Versioned roots do

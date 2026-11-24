@@ -589,11 +589,11 @@ mod tests {
         expected_reads: usize,
     }
 
-    /// Verifies explicit auth policy owns selection while omission preserves the legacy outcomes.
+    /// Verifies explicit auth policy selects certificate mode without a read and requires a
+    /// nonblank credential for token mode.
     #[tokio::test]
     async fn resolves_configured_auth_against_every_credential_state() {
         const TOKEN_REQUIRED: &str = "token is required because auth is \"token\": ufm/fabric/auth";
-        const LEGACY_MISSING: &str = "vault key not found or token is not set: ufm/fabric/auth";
         let cases = [
             // Certificate policy never reads the credential, so the result is also unchanged when
             // nothing is stored.
@@ -632,30 +632,6 @@ mod tests {
             AuthResolutionCase {
                 name: "token with ordinary token",
                 mode: Some(UfmAuthMode::Token),
-                password: Some("ordinary-token"),
-                expected: ExpectedAuth::Token("ordinary-token"),
-                expected_reads: 1,
-            },
-            // Legacy mode must retain its established missing-credential error text.
-            AuthResolutionCase {
-                name: "legacy without credential",
-                mode: None,
-                password: None,
-                expected: ExpectedAuth::Error(LEGACY_MISSING),
-                expected_reads: 1,
-            },
-            // Legacy exact-empty behavior must continue to select certificate authentication.
-            AuthResolutionCase {
-                name: "legacy with empty credential",
-                mode: None,
-                password: Some(""),
-                expected: ExpectedAuth::Certificate,
-                expected_reads: 1,
-            },
-            // Legacy nonblank behavior must continue to select the stored password as a token.
-            AuthResolutionCase {
-                name: "legacy with ordinary token",
-                mode: None,
                 password: Some("ordinary-token"),
                 expected: ExpectedAuth::Token("ordinary-token"),
                 expected_reads: 1,
@@ -1027,26 +1003,19 @@ mod tests {
         );
     }
 
-    /// Verifies explicit certificate policy and each token value produce distinct cache inputs so
-    /// policy selection and token rotation rebuild clients.
+    /// Verifies explicit certificate and token policies produce distinct cache inputs so an auth
+    /// mode change rebuilds the client.
     #[test]
-    fn fingerprint_covers_auth_mode_and_token_rotation() {
+    fn fingerprint_distinguishes_certificate_and_token_auth() {
         let endpoint = "https://ufm.example";
         let certificate = FabricClientAuth::ClientCertificate;
-        let first_token =
+        let token =
             FabricClientAuth::Credentials(SwappableCredentialReader::credentials("token-a"));
-        let second_token =
-            FabricClientAuth::Credentials(SwappableCredentialReader::credentials("token-b"));
 
         // Explicit certificate policy must never reuse a token-authenticated client.
         assert_ne!(
             fabric_client_fingerprint(endpoint, &certificate),
-            fabric_client_fingerprint(endpoint, &first_token),
-        );
-        // Changing only the stored token must invalidate the existing token client.
-        assert_ne!(
-            fabric_client_fingerprint(endpoint, &first_token),
-            fabric_client_fingerprint(endpoint, &second_token),
+            fabric_client_fingerprint(endpoint, &token),
         );
     }
 

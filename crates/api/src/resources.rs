@@ -638,18 +638,27 @@ async fn validate_local_ufm_credentials(
         let key = carbide_secrets::credentials::CredentialKey::UfmAuth {
             fabric: fabric.clone(),
         };
-        let mut found = false;
+        // Validate the first local entry only, matching runtime reader-chain precedence.
+        let mut local_credentials = None;
         for reader in local_readers {
-            if reader.get_credentials(&key).await?.is_some() {
-                found = true;
+            if let Some(credentials) = reader.get_credentials(&key).await? {
+                local_credentials = Some(credentials);
                 break;
             }
         }
-        if !found {
+        let Some(local_credentials) = local_credentials else {
             return Err(SecretsError::UfmCredentialReadBlocked {
                 fabric: fabric.clone(),
             }
             .into());
+        };
+        let carbide_secrets::credentials::Credentials::UsernamePassword { password, .. } =
+            local_credentials;
+        if definition.auth == Some(UfmAuthMode::Token) && password.trim().is_empty() {
+            return Err(eyre::eyre!(
+                "UFM fabric {fabric:?} sets auth = \"token\", but its local UFM credential has an \
+                 empty password"
+            ));
         }
     }
     Ok(())
@@ -1496,29 +1505,62 @@ mod tests {
         .expect("disabled IB management must not require dormant UFM credentials");
     }
 
-    /// Verifies local ownership skips explicit certificate fabrics but not explicit token fabrics.
+    /// Verifies local startup applies each explicit authentication mode to the highest-priority
+    /// credential while preserving legacy empty-password selection.
     #[tokio::test]
     async fn local_ufm_validation_follows_explicit_auth_mode() {
-        /// Describes one auth policy and whether it can start without local credentials.
+        /// Describes one authentication policy, its ordered local passwords, and any startup error.
         #[derive(Debug)]
         struct Case {
             name: &'static str,
             auth: Option<UfmAuthMode>,
-            succeeds_without_credentials: bool,
+            passwords: &'static [&'static str],
+            expected_error: Option<&'static str>,
         }
 
+        const EMPTY_TOKEN_ERROR: &str = "UFM fabric \"default\" sets auth = \"token\", but its local UFM credential has an empty password";
         let cases = [
             // Explicit certificate mode must start without a local credential because it never reads one.
             Case {
                 name: "client certificate",
                 auth: Some(UfmAuthMode::ClientCertificate),
-                succeeds_without_credentials: true,
+                passwords: &[],
+                expected_error: None,
             },
             // Explicit token mode must retain the local credential prerequisite for its bearer token.
             Case {
-                name: "token",
+                name: "token without credential",
                 auth: Some(UfmAuthMode::Token),
-                succeeds_without_credentials: false,
+                passwords: &[],
+                expected_error: Some("credentials.ufm_source"),
+            },
+            // The first empty token entry must fail instead of falling through to a later valid entry.
+            Case {
+                name: "token with empty password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &["", "later-token"],
+                expected_error: Some(EMPTY_TOKEN_ERROR),
+            },
+            // Whitespace-only input differs from exact empty input but is equally invalid as a token.
+            Case {
+                name: "token with whitespace-only password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &[" \t"],
+                expected_error: Some(EMPTY_TOKEN_ERROR),
+            },
+            // A nonblank local password satisfies explicit token mode.
+            Case {
+                name: "token with nonblank password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &["token"],
+                expected_error: None,
+            },
+            // Legacy selection still uses an empty password to select the SPIFFE certificate.
+            Case {
+                name: "legacy with empty password",
+                auth: None,
+                passwords: &[""],
+                expected_error: None,
             },
         ];
 
@@ -1532,16 +1574,38 @@ mod tests {
                 .expect("default fabric")
                 .auth = case.auth;
 
-            // No local readers means success can only come from certificate-mode exemption.
-            let result = validate_local_ufm_credentials(&config, &[]).await;
+            // Build local readers in runtime priority order from the case's credential entries.
+            let key = CredentialKey::UfmAuth {
+                fabric: "default".to_string(),
+            };
+            let mut readers = Vec::<Box<dyn CredentialReader>>::new();
+            for password in case.passwords {
+                let reader = MemoryCredentialStore::default();
+                reader
+                    .set_credentials(&key, &Credentials::new("", *password))
+                    .await
+                    .unwrap_or_else(|error| panic!("{}: seed credential: {error}", case.name));
+                readers.push(Box::new(reader));
+            }
 
-            // Distinguish the exempt mode from credential-dependent token mode.
-            assert_eq!(
-                result.is_ok(),
-                case.succeeds_without_credentials,
-                "{}: {result:?}",
-                case.name
-            );
+            let result = validate_local_ufm_credentials(&config, &readers).await;
+
+            match case.expected_error {
+                Some(expected) => {
+                    let error = match result {
+                        Ok(()) => panic!("{}: startup unexpectedly succeeded", case.name),
+                        Err(error) => error,
+                    };
+                    assert!(
+                        error.to_string().contains(expected),
+                        "{}: {error}",
+                        case.name
+                    );
+                }
+                None => result.unwrap_or_else(|error| {
+                    panic!("{}: startup unexpectedly failed: {error}", case.name)
+                }),
+            }
         }
     }
 

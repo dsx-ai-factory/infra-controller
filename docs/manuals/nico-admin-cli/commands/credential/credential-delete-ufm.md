@@ -15,13 +15,15 @@ nico-admin-cli credential delete-ufm <--url>
 
 ## DESCRIPTION
 
-Remove the UFM credential from the configured writer backend.
+Remove the default fabric's UFM credential, including its earlier
+versions, from the configured writer backend.
 
 ## OPTIONS
 
 `--url <URL>`
 
-The UFM url
+The UFM URL. It must be a valid URL, but it does not select what is
+deleted: the command always removes the default fabric's UFM credential.
 
 `--extended`
 

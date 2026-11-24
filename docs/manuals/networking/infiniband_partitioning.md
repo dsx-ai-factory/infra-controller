@@ -458,6 +458,9 @@ For a partition that is not removed, follow the diagnostics in
      its token in the configured credential source.
    - For `auth = "client_certificate"`, configure UFM to trust the default
      SPIFFE client certificate. Do not store a UFM API credential.
+   - If you leave `auth` unset, the stored password selects the method: a
+     non-empty password needs the token setup, and an empty or
+     whitespace-only password needs the client-certificate setup.
 3. In the NICo API server config:
    - Set `[ib_config].enabled = true` and any fabric-wide MTU / rate /
      service-level defaults.

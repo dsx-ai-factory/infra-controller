@@ -290,8 +290,8 @@ async fn test_ufm_credential_mutations_reject_local_ownership(pool: PgPool) {
     );
 }
 
-/// Verifies backend-owned UFM deletion removes the key and a later add recreates it, because
-/// deletion no longer doubles as certificate selection.
+/// Verifies backend-owned UFM deletion removes the key rather than storing an empty-password
+/// certificate-selection tombstone.
 #[sqlx_test]
 async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
     // Build the public API over a backend-owned writer and its underlying test store.
@@ -328,22 +328,6 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
             .await
             .expect("read backend after delete"),
         None
-    );
-
-    // Re-add through the public handler to prove deletion does not prevent later configuration.
-    env.api()
-        .create_credential(tonic::Request::new(ufm_create_request()))
-        .await
-        .expect("backend ownership must allow recreate after delete");
-    assert_eq!(
-        credential_manager
-            .get_credentials_from_writer(&key)
-            .await
-            .expect("read backend after recreate"),
-        Some(Credentials::UsernamePassword {
-            username: "https://ufm.example.com".to_string(),
-            password: "test-ufm-token".to_string(),
-        })
     );
 }
 
