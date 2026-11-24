@@ -161,8 +161,11 @@ assignment for the target address. Reclamation of another expired allocation
 candidate is a separate operation and can succeed before the target write fails.
 Firmware RELEASE ends the local Kea lease without expiring Core's assignment.
 Once Kea considers the released lease expired, the OS can reuse it without
-waiting for a background reclamation pass. Allocation-time retirement of that
-same NIC's selected expired or released target also preserves Core's assignment.
+waiting for a background reclamation pass. Hinted reuse validates the stored subnet
+and MAC before changing the selected expired or released target. It defers retirement
+until the replacement write succeeds, preserving the old row and DNS metadata on
+failure. If the OS never retries, the retained row remains eligible for background
+reclamation and its scoped Core expiry notification.
 Background reclamation retains the normal scoped expiry notification, including
 released firmware leases that the OS has not yet reclaimed. If Core's
 `dhcp_lease_expiry_handling` is enabled, that notification removes the matching
@@ -213,8 +216,9 @@ does not request DNS updates or its hostname is scrubbed to empty, replacement
 queues only the old owner's removal.
 Failed persistence queues no replacement cleanup. D2 delivery and DNS-server
 acceptance remain subject to Kea's configured queue, transport, and DNS policy.
-For native reuse of an expired or released lease, reclamation sends its removal
-separately from the subsequent addition, following Kea's normal D2 behavior.
+The same ordering applies to hinted reuse of the selected expired or released target.
+Reclamation of a different expired allocation candidate remains a separate operation
+and may send that candidate's removal before the selected target is written.
 With D2 enabled, the hook rejects differing shared-network, subnet, or pool
 overrides of `ddns-send-updates`, `ddns-override-no-update`,
 `ddns-override-client-update`, `ddns-replace-client-name`, `ddns-generated-prefix`,
