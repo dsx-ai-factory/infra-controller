@@ -184,7 +184,7 @@ mod tests {
                     max: "1980 MHz",
                 } => "1980 MHz".to_string(),
                 Row {
-                    applications: "[N/A]",
+                    applications: "N/A",
                     max: "1980 MHz",
                 } => "1980 MHz".to_string(),
                 Row {
