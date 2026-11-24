@@ -336,6 +336,9 @@ nico-admin-cli operating-system create \
   --param image_url=https://artifacts.example.com/images/ubuntu.qcow2
 ```
 
+The built-in `qcow-image` template uses the QCOW imager's
+[TLS verification defaults](image-based-operating-systems.md#qcow-download-tls-verification).
+
 The optional `--org` flag controls how REST assigns ownership when it discovers
 the definition:
 
