@@ -837,8 +837,6 @@ impl MainLoop {
                         if self.options.agent_platform_type.is_dpu_os()
                             && hbn_version >= self.fmds_minimum_hbn_version
                         {
-                            // Generate the fmds interface plan from the config. This does not apply the plan.
-                            // The plan is applied when the NVUE template is written
                             let fmds_proposed_interfaces = &self.agent_config.fmds_armos_networking;
                             let network_plan = DpuNetworkInterfaces::new(fmds_proposed_interfaces);
 
@@ -846,8 +844,13 @@ impl MainLoop {
                                 Interface::plan(self.hbn_device_names.sfs[0], network_plan).await?;
                             tracing::trace!("Interface plan: {:?}", fmds_interface_plan);
 
-                            // Generate the fmds route plan from conf.tenant_interfaces[n].address
-                            // the plan is applied when the nvue template is written
+                            Interface::apply(fmds_interface_plan).await?;
+
+                            // plan_fmds_armos_routing reads the interface's current IPv4 address
+                            // for prefsrc and returns Ok(None) when no address is present, skipping
+                            // route installation entirely. The config-version cache can prevent a
+                            // retry on the next tick, so the interface address must be applied
+                            // before the route plan is computed.
                             let route_plan = plan_fmds_armos_routing(
                                 self.hbn_device_names.sfs[0],
                                 &proposed_routes,
@@ -855,20 +858,6 @@ impl MainLoop {
                             .await?;
                             tracing::trace!("Route plan: {:?}", route_plan);
 
-                            // Apply the interface plan. This is where we actually configure
-                            // the FMDS phone home interface on the DPU.
-                            Interface::apply(fmds_interface_plan).await?;
-
-                            // If there are routes, apply the route plan. This is where we
-                            // actually add and remove FMDS phone home routes.
-                            //
-                            // When a DPU has recently booted, there may not be a pf0dpu1
-                            // interface configured yet, so routes may not be applied on the
-                            // first tick of the loop. Once the interface is configured, routes
-                            // can be added and removed.
-
-                            // This means that routes will be added last and might take a few seconds
-                            // to appear
                             if let Some(route_plan) = route_plan {
                                 Route::apply(route_plan).await?;
                             }
