@@ -26,9 +26,20 @@ on:
     branches:
       - main
     paths:
-      - 'fern/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain.toml'
       - 'docs/**'
+      - 'fern/**'
+      - 'helm-prereqs/**'
+      - 'rest-api/flow/docs/**'
+      - 'rest-api/openapi/**'
       - 'RELEASE.md'
+      - '.github/ci/fern-docs-paths.yml'
+      - '.github/workflows/ci.yaml'
+      - '.github/workflows/fern-docs-*.yml'
       - '.github/workflows/publish-fern-docs.yml'
   workflow_dispatch: {}
 
@@ -40,13 +51,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/fern-docs-ci.yml
+    with:
+      artifact: fern-publish
+
   publish:
+    needs: build
     runs-on: linux-amd64-cpu4
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Download validated Fern inputs
+        uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
+          name: fern-publish
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -54,16 +72,13 @@ jobs:
           node-version: '24.22.1'
 
       - name: Install Fern CLI
-        run: npm install -g fern-api@$(node -e "console.log(require('./fern/fern.config.json').version)")
+        run: npm install -g "fern-api@$(node -p 'require("./fern/fern.config.json").version')"
 
       - name: Publish Docs
         env:
           FERN_TOKEN: ${{ secrets.DOCS_FERN_TOKEN }}
         working-directory: ./fern
         run: |
-          OUTPUT=$(fern generate --docs 2>&1)
-          echo "$OUTPUT"
-          URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()')
-          if [ -n "$URL" ]; then
-            echo "### Published: [$URL]($URL)" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          set -o pipefail
+          fern generate --docs 2>&1 | tee "$RUNNER_TEMP/fern-publish.log"
+          grep -oE 'Published docs to https?://[^[:space:]()]+' "$RUNNER_TEMP/fern-publish.log" >> "$GITHUB_STEP_SUMMARY"

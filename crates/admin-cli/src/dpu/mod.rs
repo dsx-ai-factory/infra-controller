@@ -51,6 +51,6 @@ pub(crate) enum Cmd {
         visible_alias = "hr"
     )]
     HealthReport(health_report::Args),
-    #[clap(about = "Set DPU UEFI password directly on the device (via Redfish)")]
+    #[clap(about = "Set the UEFI password directly on the DPU using Redfish")]
     SetUefiPassword(set_uefi_password::Args),
 }

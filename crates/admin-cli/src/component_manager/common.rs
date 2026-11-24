@@ -32,7 +32,7 @@ pub(super) struct CredentialOverridesArgs {
         requires = "bmc_password",
         value_parser = clap::builder::NonEmptyStringValueParser::new(),
         help = "BMC username override for direct dispatch; requires a BMC password",
-        long_help = "BMC username override for direct dispatch. Uses NICO_BMC_USERNAME when the flag is omitted; requires a nonempty password via --bmc-password or NICO_BMC_PASSWORD. Also used for power-shelf PMCs. Supplied credential pairs apply to all directly dispatched targets and override Vault and expected inventory. Omitted pairs use stored credentials; authentication failures do not fall back. Requires a server supporting credential overrides. Ignored for queued operations, rack firmware updates, and standalone compute firmware reprovisioning; use --bypass-state-controller for direct dispatch where supported. Core does not save the overrides; NSM/PSM registration can persist them in Vault. Subsequent status/version requests use their existing credential lookup."
+        long_help = "BMC username override for direct dispatch. Uses NICO_BMC_USERNAME when the flag is omitted; requires a nonempty password supplied with --bmc-password or NICO_BMC_PASSWORD. Also used for power-shelf PMCs. Supplied credential pairs apply to all directly dispatched targets and override Vault and expected inventory. Omitted pairs use stored credentials; authentication failures do not fall back. Requires a server supporting credential overrides. Ignored for queued operations, rack firmware updates, and standalone compute firmware reprovisioning; use --bypass-state-controller for direct dispatch where supported. Core does not save the overrides; NSM/PSM registration can persist them in Vault. Subsequent status/version requests use their existing credential lookup."
     )]
     bmc_username: Option<String>,
 
@@ -52,7 +52,7 @@ pub(super) struct CredentialOverridesArgs {
         requires = "nvos_password",
         value_parser = clap::builder::NonEmptyStringValueParser::new(),
         help = "Switch NVOS username override for direct dispatch; requires an NVOS password",
-        long_help = "Switch NVOS username override for direct dispatch. Uses NICO_NVOS_USERNAME when the flag is omitted; requires a nonempty password via --nvos-password or NICO_NVOS_PASSWORD. Ignored for compute and power-shelf targets. Uses the same precedence, direct-dispatch scope, and backend persistence behavior as --bmc-username."
+        long_help = "Switch NVOS username override for direct dispatch. Uses NICO_NVOS_USERNAME when the flag is omitted; requires a nonempty password supplied with --nvos-password or NICO_NVOS_PASSWORD. Ignored for compute and power-shelf targets. Uses the same precedence, direct-dispatch scope, and backend persistence behavior as --bmc-username."
     )]
     nvos_username: Option<String>,
 

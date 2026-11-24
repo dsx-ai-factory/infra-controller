@@ -27,7 +27,7 @@ use crate::cfg::dispatch::Dispatch;
 #[derive(Parser, Debug, Dispatch)]
 pub(crate) enum Cmd {
     #[clap(
-        about = "Add capacity to one or more resource pools from a TOML file. See carbide-api admin_grow_resource_pool docs for example TOML."
+        about = "Add capacity to one or more resource pools from a TOML file. Refer to the admin_grow_resource_pool API documentation for a TOML example."
     )]
     Grow(grow::Args),
     #[clap(about = "List all resource pools with stats")]

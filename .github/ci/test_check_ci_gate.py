@@ -143,6 +143,7 @@ def _build_result_context(
     run_output = "run_core_ci" if workflow_name == "core" else "run_rest_ci"
     job_results["changes"]["outputs"] = {run_output: str(run_ci).lower()}
     if workflow_name == "core":
+        job_results["changes"]["outputs"]["run_fern_docs"] = str(run_ci and pull_request).lower()
         job_results["prepare"]["outputs"] = dict.fromkeys(
             CORE_JOBS_BY_PREPARE_OUTPUT, "true"
         )
@@ -558,6 +559,16 @@ class ResultTests(unittest.TestCase):
                     pull_request=case["pull_request"],
                     skipped_jobs=case["skipped_jobs"],
                 )
+
+    def test_docs_only_change_requires_fern_when_core_is_skipped(self) -> None:
+        jobs, env = _build_result_context(
+            "core", run_ci=False,
+            skipped_jobs=set(_read_gate_dependencies("core")) - {"changes", "migration-police"},
+        )
+        jobs["changes"]["outputs"]["run_fern_docs"] = "true"
+        self.assertIn("`fern-docs` was unexpectedly skipped", result_errors(jobs, "core", environment=env)[0])
+        jobs["fern-docs"]["result"] = "success"
+        self.assertEqual(result_errors(jobs, "core", environment=env), [])
 
     def test_merge_group_expects_pr_build(self) -> None:
         job_results, environment = _build_result_context(

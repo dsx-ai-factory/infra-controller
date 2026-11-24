@@ -177,7 +177,7 @@ pub(crate) enum CliCommand {
     #[clap(about = "Machine boot override", subcommand)]
     BootOverride(boot_override::Cmd),
     #[clap(
-        about = "Browse subsystem resource trees via the API server",
+        about = "Browse subsystem resource trees through the API server",
         subcommand
     )]
     Browse(browse::Cmd),

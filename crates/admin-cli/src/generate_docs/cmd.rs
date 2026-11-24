@@ -58,6 +58,15 @@ fn command_tree() -> Command {
     root
 }
 
+fn sorted_visible_subcommands(cmd: &Command) -> Vec<&Command> {
+    let mut children: Vec<_> = cmd
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set() && child.get_name() != "help")
+        .collect();
+    children.sort_unstable_by_key(|child| child.get_name());
+    children
+}
+
 pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
     let root = command_tree();
 
@@ -80,10 +89,7 @@ pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
     // used to build the domain index pages.
     let mut top_level: Vec<(String, String, CliDomain)> = Vec::new();
 
-    for sub in root.get_subcommands() {
-        if sub.is_hide_set() || sub.get_name() == "help" {
-            continue;
-        }
+    for sub in sorted_visible_subcommands(&root) {
         let name = sub.get_name().to_string();
         let about = first_line(&styled(sub.get_about()));
         let domain = domain_for_command(&name).ok_or_else(|| {
@@ -105,8 +111,6 @@ pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
 
         top_level.push((name, about, domain));
     }
-
-    top_level.sort_by(|a, b| a.0.cmp(&b.0));
 
     for domain in DOMAINS {
         let rows: Vec<&(String, String, CliDomain)> =
@@ -146,10 +150,7 @@ fn render_node(
         body
     };
 
-    let children: Vec<&Command> = cmd
-        .get_subcommands()
-        .filter(|c| !c.is_hide_set() && c.get_name() != "help")
-        .collect();
+    let children = sorted_visible_subcommands(cmd);
 
     std::fs::write(
         dir.join(format!("{}.md", stem(&path))),
@@ -676,6 +677,21 @@ mod tests {
         assert!(error.contains("read man page"), "{error}");
         assert!(error.contains(&path.display().to_string()), "{error}");
         assert!(error.contains(&cause.to_string()), "{error}");
+    }
+
+    #[test]
+    fn reference_lists_visible_subcommands_alphabetically() {
+        let command = clap::Command::new("parent").subcommands([
+            clap::Command::new("show"),
+            clap::Command::new("hidden").hide(true),
+            clap::Command::new("help"),
+            clap::Command::new("create"),
+        ]);
+        let names: Vec<_> = super::sorted_visible_subcommands(&command)
+            .into_iter()
+            .map(clap::Command::get_name)
+            .collect();
+        assert_eq!(names, ["create", "show"]);
     }
 
     #[test]

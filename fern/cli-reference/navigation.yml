@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+section: CLI reference
+path: manuals/cli-reference/index.md
+slug: cli-reference
+contents:
+  - folder: manuals/cli-reference/hardware
+    title: Hardware
+    title-source: frontmatter
+  - folder: manuals/cli-reference/network
+    title: Network
+    title-source: frontmatter
+  - folder: manuals/cli-reference/tenant
+    title: Tenant
+    title-source: frontmatter
+  - folder: manuals/cli-reference/admin
+    title: Admin
+    title-source: frontmatter

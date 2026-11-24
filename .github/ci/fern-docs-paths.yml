@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Inputs to the published Fern site, including the Rust CLI and its dependencies.
+fern_docs:
+  - 'crates/**'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - '.cargo/**'
+  - 'rust-toolchain.toml'
+  - 'docs/**'
+  - 'fern/**'
+  - 'helm-prereqs/**'
+  - 'rest-api/flow/docs/**'
+  - 'rest-api/openapi/**'
+  - 'RELEASE.md'
+  - '.github/ci/fern-docs-paths.yml'
+  - '.github/workflows/ci.yaml'
+  - '.github/workflows/fern-docs-*.yml'
+  - '.github/workflows/publish-fern-docs.yml'

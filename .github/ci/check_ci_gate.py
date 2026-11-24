@@ -409,6 +409,7 @@ def _core_jobs_allowed_to_skip(
     """Return the Core jobs that did not need to run."""
 
     should_run = _workflow_should_run(job_results, "run_core_ci")
+    run_fern_docs = _workflow_should_run(job_results, "run_fern_docs")
     is_pull_request = _is_pull_request_run(environment)
     is_merge_group_event = _is_merge_group_event(environment)
     if not should_run:
@@ -416,15 +417,18 @@ def _core_jobs_allowed_to_skip(
             raise GateInputError(
                 "`changes.run_core_ci` was false outside a pull request"
             )
-        # A REST-only PR skips Core, but `migration-police` still runs for the
-        # pull request as a whole.
-        return set(job_results) - {"changes", "migration-police"}
+        required = {"changes", "migration-police"}
+        if run_fern_docs:
+            required.add("fern-docs")
+        return set(job_results) - required
 
     prepare = job_results.get("prepare")
     if not isinstance(prepare, Mapping) or prepare.get("result") != "success":
         raise GateInputError("`prepare` was unexpectedly skipped")
 
     allowed: set[str] = set()
+    if not run_fern_docs:
+        allowed.add("fern-docs")
     # Use the decisions that `prepare` already made. Re-running path filters or
     # release logic here could disagree with the jobs we are checking.
     for output_name, jobs in CORE_JOBS_BY_PREPARE_OUTPUT.items():

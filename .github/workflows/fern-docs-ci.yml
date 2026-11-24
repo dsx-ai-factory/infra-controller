@@ -13,29 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Validates Fern docs configuration on pull requests.
-#
-# Fork PRs: do not run on untrusted head (copy-pr-bot FAQ). Same-repo PRs run
-# on pull_request. After /ok-to-test, copy-pr-bot pushes pull-request/<n>;
-# we run on that push like NICo Core CI (see ci.yaml).
-
 name: Fern docs (check)
 
 on:
-  pull_request:
-    paths:
-      - 'fern/**'
-      - 'docs/**'
-      - 'RELEASE.md'
-      - '.github/workflows/fern-docs-ci.yml'
-  push:
-    branches:
-      - 'pull-request/[0-9]+'
-    paths:
-      - 'fern/**'
-      - 'docs/**'
-      - 'RELEASE.md'
-      - '.github/workflows/fern-docs-ci.yml'
+  workflow_call:
+    inputs:
+      artifact:
+        description: Upload fern-preview or fern-publish. Omit for validation only.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -43,25 +29,84 @@ permissions:
 jobs:
   check:
     name: Fern Check
-    # Same-repo PR only, or trusted copy-pr-bot branch after maintainer ok-to-test
-    if: >-
-      (github.event_name == 'push' && contains(github.ref, 'refs/heads/pull-request/'))
-      || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: linux-amd64-cpu4
-    timeout-minutes: 10
+    runs-on: linux-amd64-cpu16
+    timeout-minutes: 60
+    container: rust:1.100.0-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl git libclang-dev \
+            libprotobuf-dev libssl-dev pkg-config protobuf-compiler python3-yaml
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install Pandoc 3.14
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/pandoc.deb" \
+            https://github.com/jgm/pandoc/releases/download/3.14/pandoc-3.14-1-amd64.deb
+          echo "dedb81f20345b76d7168ba551d90abceb707977fece789a79874094fe3833915  $RUNNER_TEMP/pandoc.deb" | sha256sum --check -
+          dpkg -i "$RUNNER_TEMP/pandoc.deb"
+
+      - uses: actions/setup-node@v4
         with:
           node-version: '24.22.1'
-
       - name: Install Fern CLI
-        run: npm install -g fern-api@$(node -e "console.log(require('./fern/fern.config.json').version)")
+        run: npm install -g "fern-api@$(node -p 'require("./fern/fern.config.json").version')"
 
-      - name: Validate Fern configuration
-        run: fern check
+      - name: Test CLI and prepare the Fern site
+        id: site
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+          TMPDIR: ${{ runner.temp }}
+          # CLI mock-server tests have short RPC deadlines under CPU contention.
+          RUST_TEST_THREADS: '2'
+        run: |
+          cargo test --locked -p nico-admin-cli -- --include-ignored
+          cargo build --locked -p nico-admin-cli --bin nico-admin-cli
+          python3 -B -m unittest discover -s fern/cli-reference
+          site=$(python3 -B fern/cli-reference/preview.py --cli target/debug/nico-admin-cli --check-coverage)
+          echo "path=$site" >> "$GITHUB_OUTPUT"
+
+      - name: Validate staged documentation
+        working-directory: ${{ steps.site.outputs.path }}
+        run: |
+          fern docs md check
+          fern check
+
+      - name: Record preview metadata
+        if: inputs.artifact == 'fern-preview'
+        env:
+          SITE: ${{ steps.site.outputs.path }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+        run: |
+          mkdir "$SITE/preview-metadata"
+          if [[ -z "$PR_NUMBER" ]]; then
+            PR_NUMBER=${GITHUB_REF_NAME#pull-request/}
+            HEAD_REF=$GITHUB_REF_NAME
+          fi
+          echo "$PR_NUMBER" > "$SITE/preview-metadata/pr_number"
+          echo "$HEAD_REF" > "$SITE/preview-metadata/head_ref"
+          git diff --name-only "origin/$BASE_REF...HEAD" -- '*.md' '*.mdx' > "$SITE/preview-metadata/changed_md_files"
+
+      - name: Upload validated Fern inputs
+        if: inputs.artifact != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ steps.site.outputs.path }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1

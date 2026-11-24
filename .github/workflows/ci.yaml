@@ -74,6 +74,7 @@ jobs:
     outputs:
       run_core_ci: ${{ steps.gate.outputs.run_core_ci }}
       non_rest_changed: ${{ steps.non-rest-changes.outputs.non_rest }}
+      run_fern_docs: ${{ steps.fern-inputs.outcome == 'skipped' && 'false' || steps.fern-inputs.outputs.fern_docs }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -150,6 +151,14 @@ jobs:
       - name: Check Core CI final-gate inventory
         run: python3 -B .github/ci/check_ci_gate.py inventory --policy core .github/workflows/ci.yaml
 
+      - name: Detect Fern site and CLI inputs
+        id: fern-inputs
+        if: github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/'))
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ github.event.merge_group.base_sha || github.event.repository.default_branch }}
+          filters: .github/ci/fern-docs-paths.yml
+
       - name: Detect non-rest changes
         id: non-rest-changes
         if: startsWith(github.ref, 'refs/heads/pull-request/')
@@ -191,6 +200,13 @@ jobs:
   # ============================================================================
   # PREPARE STAGE
   # ============================================================================
+
+  fern-docs:
+    needs: changes
+    if: needs.changes.outputs.run_fern_docs == 'true'
+    uses: ./.github/workflows/fern-docs-ci.yml
+    with:
+      artifact: ${{ github.event_name == 'push' && 'fern-preview' || '' }}
 
   prepare:
     needs:
@@ -3419,6 +3435,7 @@ jobs:
       # Detection and preparation
       - changes
       - prepare
+      - fern-docs
 
       # Build, runtime, and artifact base images
       - build-container-x86_64

@@ -35,11 +35,11 @@ use crate::errors::CarbideCliResult;
 
 #[derive(Parser, Debug, Dispatch)]
 pub(crate) enum Cmd {
-    #[clap(about = "Browse a Redfish resource tree via the API server")]
+    #[clap(about = "Browse a Redfish resource tree through the API server")]
     Redfish(redfish::Args),
-    #[clap(about = "Browse a UFM fabric via the API server")]
+    #[clap(about = "Browse a UFM fabric through the API server")]
     Ufm(ufm::Args),
-    #[clap(about = "Run an NMX-C browse operation via the API server")]
+    #[clap(about = "Run an NMX-C browse operation through the API server")]
     Nmxc(nmxc::Args),
 }
 

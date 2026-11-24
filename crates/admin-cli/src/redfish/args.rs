@@ -83,19 +83,19 @@ pub(super) enum Cmd {
     BootOnceUefiHttp,
     /// Delete all pending jobs
     ClearPending,
-    /// Create new BMC user
+    /// Create a BMC user
     CreateBmcUser(BmcUser),
-    /// Create new BMC user
+    /// Delete a BMC user
     DeleteBmcUser(DeleteBmcUser),
     /// Setup host for use
     MachineSetup(MachineSetupArgs),
-    /// Is everything MachineSetup does already done? What's missing?
+    /// Show which machine setup steps are complete and which are pending
     MachineSetupStatus(MachineSetupStatusArgs),
     /// Set our password policy
     SetForgePasswordPolicy,
     /// List one or all BIOS boot options
     GetBootOption(BootOptionSelector),
-    /// Is this thing on?
+    /// Show the machine's power state
     GetPowerState,
     /// Disable BMC/BIOS lockdown
     LockdownDisable,
@@ -125,7 +125,7 @@ Force-restart a machine (also accepted as the alias `reset`):
 
 ")]
     ForceRestart,
-    /// Graceful restart. Asks the OS to restart via ACPI
+    /// Request a graceful operating system restart using ACPI
     /// - Might restart DPUs if no OS is running
     /// - Will not apply pending BIOS/UEFI setting changes
     #[clap(alias = "restart", verbatim_doc_comment)]
@@ -256,9 +256,9 @@ Reset BIOS settings and restart the system to apply the change:
     IsInfiniteBootEnabled,
     /// Enable infinite boot
     EnableInfiniteBoot,
-    /// Set NIC mode (host networking via the NIC)
+    /// Set NIC mode to route host network traffic through the NIC
     SetNicMode,
-    /// Set DPU mode (host networking via the DPU)
+    /// Set DPU mode to route host network traffic through the DPU
     SetDpuMode,
     /// Power cycle a machine
     ChassisResetCard1Powercycle,
