@@ -305,7 +305,8 @@ them with `-`. The Redfish service root supplies manufacturer or model fallbacks
 A class-specific rule is skipped when an older report has no `HardwareClass`.
 Omitting the pattern makes the rule eligible for every host.
 
-Site rules run in declaration order, followed by the built-in chassis FRU
+Site rules run in declaration order. If no site rule yields a serial, the
+audit checks the primary-system serial and SKU before the built-in chassis FRU
 rules. Within a rule, matching chassis and their assembly members are tried
 in report order. Missing or whitespace-only serials are skipped. The first
 usable serial is trimmed and compared case-sensitively with the declared
