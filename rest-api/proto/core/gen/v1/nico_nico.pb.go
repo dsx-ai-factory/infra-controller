@@ -66841,7 +66841,8 @@ func (*GetComponentResetStatusRequest_PowerShelfPmcMacs) isGetComponentResetStat
 type ComponentResetStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// For BMC reset, SUCCESS/COMPLETED is an untracked no-op; malformed MACs return
-	// INVALID_ARGUMENT/UNKNOWN. Results echo only the supplied ID or MAC.
+	// INVALID_ARGUMENT/UNKNOWN. Results echo IDs as supplied; valid MACs use the
+	// canonical formatting produced after parsing. Malformed MACs are echoed as supplied.
 	// For SDN/NVOS, observation of the latest successfully recorded accepted reset reference,
 	// including per-device correlation and diagnostics. This may describe an
 	// earlier reset than a subsequent failed or unknown submission attempt.

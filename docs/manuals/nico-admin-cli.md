@@ -180,7 +180,7 @@ In the status API, the per-device result and reset state have different meanings
 | Result / reset state | Meaning and next step |
 |---|---|
 | `SUCCESS` / `QUEUED` or `IN_PROGRESS` | The tracked reset is still active. Continue querying status. |
-| `SUCCESS` / `COMPLETED` or `FAILED` | The tracked reset has finished. Read the error for a failed reset. |
+| `SUCCESS` / `COMPLETED` or `FAILED` | For SDN/NVOS, the tracked reset has finished. Read the error for a failed reset. For `bmc-reset`, `SUCCESS` / `COMPLETED` is a no-op that requires no prior submission and does not verify recovery. |
 | `NOT_FOUND` / `UNKNOWN` | NICo cannot resolve the target or has no reference. Read the error; this does not prove no reset occurred. |
 | `UNAVAILABLE` / `UNKNOWN` | Status could not be observed, for example because of a temporary service failure. Retry the status query. |
 | `OUTCOME_UNKNOWN` / `UNKNOWN` | The tracked reset cannot be found or its outcome cannot be established. Investigate before submitting another reset. |

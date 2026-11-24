@@ -74,7 +74,7 @@ async fn component_bmc_reset_routes_all_selectors_to_core(pool: sqlx::PgPool) {
         .execute(&mut *txn)
         .await
         .unwrap();
-    let underlay = db::network_segment::find_by_name(&mut txn, "UNDERLAY")
+    let underlay = db::network_segment::find_by_name(&mut *txn, "UNDERLAY")
         .await
         .unwrap();
     for (mac, association) in [
@@ -131,7 +131,7 @@ async fn component_bmc_reset_routes_all_selectors_to_core(pool: sqlx::PgPool) {
         .await
         .unwrap();
     // Every selected backend is RMS, but BMC resets must use the real Core path.
-    let rms = Arc::new(api_test_helper::mock_rms::MockRmsApi::new());
+    let rms = Arc::new(rms_mock::test_support::MockRmsApi::new());
     let cm = component_manager::component_manager::build_component_manager(
         &component_manager::config::ComponentManagerConfig::default(),
         crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
