@@ -404,6 +404,12 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_network_segments_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_network_segments have spent in a certain state</td></tr>
 <tr><td>carbide_network_segments_total</td><td>gauge</td><td>Number of carbide_network_segments in the system</td></tr>
 <tr><td>carbide_network_segments_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_network_segments whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
+<tr><td>carbide_nvlink_domains_count</td><td>gauge</td><td>Number of carbide_nvlink_domains in the system</td></tr>
+<tr><td>carbide_nvlink_domains_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_nvlink_domains in the system</td></tr>
+<tr><td>carbide_nvlink_domains_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_nvlink_domains</td></tr>
+<tr><td>carbide_nvlink_domains_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_nvlink_domains</td></tr>
+<tr><td>carbide_nvlink_domains_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_nvlink_domains</td></tr>
+<tr><td>carbide_nvlink_domains_total</td><td>gauge</td><td>Number of carbide_nvlink_domains in the system</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_groups_total</td><td>counter</td><td>Number of machine groups (chassis or rack) the partition monitor finished, by outcome</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>Time consumed for one monitor iteration</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_iteration_overruns_total</td><td>counter</td><td>Number of partition monitor iterations that ran longer than monitor_run_interval</td></tr>

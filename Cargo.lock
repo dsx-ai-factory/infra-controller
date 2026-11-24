@@ -819,6 +819,7 @@ dependencies = [
  "bmc-explorer",
  "bmc-platform",
  "bmc-runtime",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-redfish",
@@ -870,6 +871,7 @@ dependencies = [
  "bmc-platform",
  "bmc-vendor",
  "carbide-api-model",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-network",
  "carbide-test-support",
@@ -1313,6 +1315,7 @@ dependencies = [
  "carbide-mqtt-common",
  "carbide-network",
  "carbide-network-segment-controller",
+ "carbide-nvlink-domain-controller",
  "carbide-nvlink-manager",
  "carbide-power-shelf-controller",
  "carbide-preingestion-manager",
@@ -1586,6 +1589,7 @@ dependencies = [
  "base64",
  "bmc-vendor",
  "carbide-health-report",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-ipxe-renderer",
  "carbide-libmlx-model",
@@ -1868,10 +1872,18 @@ dependencies = [
 name = "carbide-credential-rotation"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "axum",
+ "bmc-backend",
+ "bmc-drivers",
+ "bmc-mock",
+ "bmc-platform",
+ "bmc-runtime",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-instrument",
+ "carbide-ipmi",
  "carbide-macros",
  "carbide-redfish",
  "carbide-secrets",
@@ -1880,7 +1892,6 @@ dependencies = [
  "carbide-utils",
  "carbide-uuid",
  "chrono",
- "libredfish",
  "mac_address",
  "serde_json",
  "sqlx",
@@ -2924,7 +2935,6 @@ dependencies = [
  "carbide-uuid",
  "proc-macro2",
  "quote",
- "sqlx-macros-core",
  "syn 2.0.117",
 ]
 
@@ -3077,6 +3087,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-nvlink-domain-controller"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "carbide-api-db",
+ "carbide-api-model",
+ "carbide-instrument",
+ "carbide-macros",
+ "carbide-sqlx-testing",
+ "config-version",
+ "sqlx",
+ "state-controller",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "carbide-nvlink-manager"
 version = "0.0.1"
 dependencies = [
@@ -3200,6 +3228,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tonic",
  "tracing",
  "version-compare 0.2.1",
 ]
@@ -3719,6 +3748,7 @@ dependencies = [
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-credential-rotation",
  "carbide-firmware",
  "carbide-health-report",
  "carbide-hw-identification",

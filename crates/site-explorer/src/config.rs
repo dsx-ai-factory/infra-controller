@@ -96,7 +96,9 @@ pub struct SiteExplorerConfig {
     )]
     pub exploration_timeouts_before_prevent_allocations: u32,
 
-    /// When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true
+    /// When false, SiteExplorer skips creating ManagedHost state machines; the
+    /// DPU agent (scout) must self-register via the DiscoverMachine gRPC endpoint
+    /// with create_machine=true. BMC preingestion is independent of this setting.
     #[serde(
         default = "SiteExplorerConfig::default_create_machines",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -154,7 +156,8 @@ pub struct SiteExplorerConfig {
     )]
     pub machine_creation_timeout: std::time::Duration,
 
-    /// Whether SiteExplorer should rotate/update Switch NVOS admin credentials
+    /// Deprecated and ignored. NVOS credentials are rotated during switch
+    /// pre-ingestion and by the switch controller after ingestion.
     #[serde(
         default = "SiteExplorerConfig::default_rotate_switch_nvos_credentials",
         deserialize_with = "deserialize_arc_atomic_bool",

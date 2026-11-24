@@ -144,6 +144,7 @@ mod bios_config;
 mod boot_interface_observation;
 mod decommissioning;
 mod dpf;
+mod dpf_bmc_rotation;
 mod dpu_action_handler;
 mod dpu_uefi_rotation;
 mod extension_services;
@@ -978,6 +979,30 @@ impl MachineStateHandler {
             return Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await;
         }
 
+        if let ManagedHostState::RotatingBmc {
+            retry_count,
+            dpf_rotation,
+        } = &mh_state
+        {
+            if let Some(rotation) = dpf_rotation {
+                return Box::pin(dpf_bmc_rotation::handle(
+                    mh_snapshot,
+                    ctx.services,
+                    self.dpu_handler.dpf_sdk.as_deref(),
+                    *retry_count,
+                    rotation,
+                ))
+                .await;
+            }
+            if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion
+                && !ctx.services.site_config.dpf_enabled
+            {
+                return Ok(StateHandlerOutcome::wait(
+                    "waiting for DPF to be enabled before rotating BMC credentials".to_string(),
+                ));
+            }
+        }
+
         // Cancel a never-sent request after release. Reboot preparation, retries and
         // errors run in Assigned/Ready so they cannot intercept lifecycle transitions.
         if let Some(outcome) = instance_reboot::cancel_unsent_request(mh_snapshot, ctx).await? {
@@ -1642,7 +1667,11 @@ impl MachineStateHandler {
                 // live in `rotation::should_enter_bmc_rotation`.
                 if rotation::should_enter_bmc_rotation(ctx.services, mh_snapshot).await? {
                     return Ok(StateHandlerOutcome::transition(
-                        ManagedHostState::RotatingBmc { retry_count: 0 },
+                        ManagedHostState::RotatingBmc {
+                            retry_count: 0,
+                            dpf_rotation: rotation::uses_dpf(ctx.services, mh_snapshot)
+                                .then(|| Box::new(dpf_bmc_rotation::start(mh_snapshot))),
+                        },
                     ));
                 }
 
@@ -1794,7 +1823,15 @@ impl MachineStateHandler {
                 .await
             }
 
-            ManagedHostState::RotatingBmc { retry_count } => {
+            ManagedHostState::RotatingBmc { retry_count, .. } => {
+                if rotation::uses_dpf(ctx.services, mh_snapshot) {
+                    return Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::RotatingBmc {
+                            retry_count: *retry_count,
+                            dpf_rotation: Some(Box::new(dpf_bmc_rotation::start(mh_snapshot))),
+                        },
+                    ));
+                }
                 // Hold site-explorer off every BMC of this managed host and wait
                 // until it has acknowledged, before changing any credential. This
                 // closes the window in which a probe could hit new-hardware /
@@ -1869,7 +1906,10 @@ impl MachineStateHandler {
                         Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
                     }
                     RotationStep::Retry { retry_count } => Ok(StateHandlerOutcome::transition(
-                        ManagedHostState::RotatingBmc { retry_count },
+                        ManagedHostState::RotatingBmc {
+                            retry_count,
+                            dpf_rotation: None,
+                        },
                     )),
                 }
             }

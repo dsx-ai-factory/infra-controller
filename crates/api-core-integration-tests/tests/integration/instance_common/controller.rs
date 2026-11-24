@@ -253,6 +253,7 @@ fn machine_state_controller(
             db::credential_rotation::CredentialRotationType::DpuUefi,
         ),
         dpf_per_dpu_bmc_credentials: false,
+        dpf_rotation_locks: Some(api.work_lock_manager_handle()),
         dpu_bmc_service_rotation_gate: rotation_gate(
             db::credential_rotation::CredentialRotationType::DpuBmcService,
         ),

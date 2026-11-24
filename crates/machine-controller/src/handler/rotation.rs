@@ -73,6 +73,13 @@ pub(crate) fn managed_host_bmc_endpoints(
         )
 }
 
+pub(super) fn uses_dpf(
+    services: &MachineStateHandlerServices,
+    mh: &ManagedHostStateSnapshot,
+) -> bool {
+    mh.host_snapshot.config.dpf.used_for_ingestion && services.dpf_per_dpu_bmc_credentials
+}
+
 /// `true` when the host BMC or any DPU BMC is behind the staged site-wide target
 /// and not currently quarantined -- i.e. the machine should enter its
 /// BMC-rotation state. Covers both the BMC-root family (host + every DPU) and
@@ -86,7 +93,6 @@ pub(crate) async fn bmc_rotation_needed(
         .chain(
             mh.dpu_snapshots
                 .iter()
-                .filter(|_| !services.dpf_per_dpu_bmc_credentials)
                 .filter_map(BmcEndpoint::from_machine),
         )
     {
@@ -102,7 +108,7 @@ pub(crate) async fn bmc_rotation_needed(
         }
     }
 
-    if services.dpf_per_dpu_bmc_credentials {
+    if uses_dpf(services, mh) {
         return Ok(false);
     }
 
@@ -141,6 +147,9 @@ pub(crate) async fn should_enter_bmc_rotation(
     services: &MachineStateHandlerServices,
     mh: &ManagedHostStateSnapshot,
 ) -> Result<bool, StateHandlerError> {
+    if mh.host_snapshot.config.dpf.used_for_ingestion && !services.site_config.dpf_enabled {
+        return Ok(false);
+    }
     if bmc_rotation_force_requested(mh) {
         return Ok(true);
     }
@@ -179,7 +188,7 @@ pub(crate) async fn rotate_managed_host_bmcs(
     for (machine_id, force, endpoint) in host.chain(dpus) {
         let is_dpu = machine_id.is_dpu();
         // DPF's immutable credential reference must stay in sync with the hardware password.
-        if is_dpu && services.dpf_per_dpu_bmc_credentials {
+        if is_dpu && uses_dpf(services, mh) {
             continue;
         }
         if !force && !is_sitewide_bmc_rotation_enabled {
@@ -272,28 +281,23 @@ async fn rotate_endpoint(
     endpoint: BmcEndpoint,
     force: bool,
 ) -> BmcRotationTick {
-    // The precise `RedfishVendor` is not persisted for a machine BMC (the stored
-    // hardware vendor is DMI-derived and too coarse), so defer resolution to the
-    // engine's probe, which runs inside the same quarantine-on-failure envelope
-    // as the rotation and reuses its credential candidates.
-    let target = endpoint.into_target_probing_vendor();
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.bmc_credential_ops.as_ref(),
-        &target,
+        &services.bmc_connector,
+        &endpoint,
         force,
         &services.instrumentation,
     )
     .await
     {
         Ok(RotateOutcome::Converged) => {
-            tracing::info!(mac = %target.device_mac, force, "BMC converged to site-wide rotation target");
+            tracing::info!(mac = %endpoint.device_mac, force, "BMC converged to site-wide rotation target");
             BmcRotationTick::Settled
         }
         Ok(RotateOutcome::Quarantined { until }) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 %until,
                 "BMC rotation attempt failed; quarantined until backoff elapses"
             );
@@ -301,7 +305,7 @@ async fn rotate_endpoint(
         }
         Ok(RotateOutcome::CredentialStoreReconcilePending) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 "BMC hardware changed but the per-device secret persist failed; holding rotation until the credential store reconciles"
             );
             BmcRotationTick::WaitForCredentialStoreReconcile
@@ -309,7 +313,7 @@ async fn rotate_endpoint(
         Ok(RotateOutcome::NoWork) => BmcRotationTick::Settled,
         Err(e) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 error = %e,
                 "transient BMC rotation bookkeeping failure; will retry the tick"
             );
@@ -335,7 +339,7 @@ async fn rotate_dpu_service_endpoint(
     match rotate_dpu_bmc_service(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.bmc_credential_ops.as_ref(),
+        &services.bmc_connector,
         &endpoint,
         force,
         &services.instrumentation,
@@ -418,6 +422,7 @@ mod tests {
             dpu_bmc_service_rotation_gate: gate(CredentialRotationType::DpuBmcService),
             nic_lockdown_rotation_gate: gate(CredentialRotationType::LockdownIkm),
             dpf_per_dpu_bmc_credentials: true,
+            dpf_rotation_locks: None,
             per_object_metrics_registry: carbide_health_metrics::PerObjectMetricsRegistry::new(
                 Vec::new(),
                 Duration::from_secs(60),
@@ -425,6 +430,7 @@ mod tests {
             per_object_info: None,
         };
         let mut mh = snapshot_with_distinct_bmcs();
+        mh.host_snapshot.config.dpf.used_for_ingestion = true;
         mh.host_snapshot.status.bmc_info.mac = None;
         mh.dpu_snapshots.truncate(1);
         mh.dpu_snapshots[0].bmc_credential_rotation_requested = true;
@@ -478,7 +484,7 @@ mod tests {
             (false, 1, "new-service-password"),
         ] {
             services.dpf_per_dpu_bmc_credentials = enabled;
-            assert_eq!(bmc_rotation_needed(&services, &mh).await.unwrap(), !enabled);
+            assert!(bmc_rotation_needed(&services, &mh).await.unwrap());
             assert!(matches!(
                 rotate_managed_host_bmcs(&services, &mh).await,
                 BmcRotationTick::Settled

@@ -388,6 +388,7 @@ impl TestEnv {
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
             dpf_per_dpu_bmc_credentials: false,
+            dpf_rotation_locks: Some(self.api.work_lock_manager_handle.clone()),
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -1726,6 +1727,7 @@ async fn create_test_env_with_overrides_inner(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
                 dpf_per_dpu_bmc_credentials: false,
+                dpf_rotation_locks: Some(api.work_lock_manager_handle.clone()),
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,

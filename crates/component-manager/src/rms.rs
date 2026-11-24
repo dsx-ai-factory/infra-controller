@@ -4991,8 +4991,22 @@ impl NvSwitchManager for RmsBackend {
         endpoint: &SwitchEndpoint,
         next_password: &str,
     ) -> Result<String, ComponentManagerError> {
-        let identities =
-            resolve_switch_identities(&self.db, std::slice::from_ref(&endpoint.bmc_mac)).await?;
+        let macs = std::slice::from_ref(&endpoint.bmc_mac);
+        let mut identities = resolve_switch_identities(&self.db, macs).await?;
+        // Initial password rotation precedes managed switch creation. A managed
+        // row with missing rack metadata must not fall back to expected inventory.
+        if !identities.contains_key(&endpoint.bmc_mac)
+            && db::switch::find_ids_by_bmc_macs(&self.db, macs)
+                .await
+                .map_err(|error| {
+                    ComponentManagerError::Internal(format!(
+                        "failed to look up switch for password rotation: {error}"
+                    ))
+                })?
+                .is_empty()
+        {
+            identities.extend(resolve_pre_ingestion_switch_identities(&self.db, macs).await?);
+        }
 
         let resolved = self
             .resolve_switch_or_power_shelf_node(
@@ -12543,6 +12557,117 @@ mod tests {
                 }),
             Some("nvos-pass"),
             "endpoint must retain the current password until RMS accepts the job"
+        );
+
+        // Expected inventory still has a valid rack, but it must not mask
+        // missing rack metadata on the managed switch.
+        let updated = sqlx::query("UPDATE switches SET rack_id = NULL WHERE id = $1")
+            .bind(sw1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        let error = NvSwitchManager::ensure_password_rotation(&backend, &endpoint, "next-password")
+            .await
+            .expect_err("a managed switch without a rack must prevent RMS dispatch");
+        assert!(matches!(
+            error,
+            ComponentManagerError::Internal(message) if message == RMS_IDENTITY_LOOKUP_ERROR
+        ));
+        assert_eq!(mock.update_switch_system_password_calls().await.len(), 1);
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_pre_ingestion_password_rotation_dispatches_via_expected_rack(pool: sqlx::PgPool) {
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+        let mut txn = pool.txn_begin().await.unwrap();
+        db::expected_rack::create(
+            &mut txn,
+            &model::expected_rack::ExpectedRack {
+                rack_group_id: None,
+                rack_id: rack_id.clone(),
+                rack_profile_id: RackProfileId::new(TEST_RACK_PROFILE_ID),
+                metadata: model::metadata::Metadata::default(),
+            },
+        )
+        .await
+        .unwrap();
+        db::expected_switch::create(
+            &mut txn,
+            model::expected_switch::ExpectedSwitch {
+                bmc_mac_address: endpoint.bmc_mac,
+                rack_id: Some(rack_id.clone()),
+                nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+                    mac_address: endpoint.nvos_mac,
+                    is_primary: true,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "WITH segment AS (
+                INSERT INTO network_segments (name, version, network_segment_type)
+                VALUES ('preingestion-password', 'V1-T0', 'admin') RETURNING id
+             )
+             INSERT INTO machine_interfaces
+                (segment_id, mac_address, primary_interface, hostname)
+             SELECT id, $1, false, 'preingestion-nvos' FROM segment",
+        )
+        .bind(endpoint.nvos_mac)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        // Neither a managed switch nor a live rack exists. Password rotation
+        // addresses the expected switch and its unassociated NVOS interface.
+        let mock = Arc::new(MockRmsApi::new());
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            pool.clone(),
+            Arc::new(rack_profile_config()),
+            true,
+            carbide_instrument::Instrumentation::noop(),
+        );
+        let node_id = endpoint.bmc_mac.to_string();
+        mock.enqueue_update_switch_system_password(Ok(rms::UpdateSwitchSystemPasswordResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "password-job".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+        assert_eq!(
+            NvSwitchManager::ensure_password_rotation(&backend, &endpoint, "next-password")
+                .await
+                .unwrap(),
+            "password-job"
+        );
+
+        let calls = mock.update_switch_system_password_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].username, "nvos-admin");
+        assert_eq!(calls[0].password, "next-password");
+        let nodes = &calls[0].nodes.as_ref().unwrap().nodes;
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.node_id, node_id);
+        assert_eq!(node.rack_id, rack_id.to_string());
+        assert_descriptor_node(node, ROLE_SWITCH);
+        assert!(node.bmc_endpoint.is_none());
+        let host = node.host_endpoint.as_ref().unwrap();
+        let interface = host.interface.as_ref().unwrap();
+        assert_eq!(interface.ip_address, endpoint.nvos_ip.to_string());
+        assert_eq!(interface.mac_address, endpoint.nvos_mac.to_string());
+        assert_eq!(interface.host_name.as_deref(), Some("preingestion-nvos"));
+        assert_eq!(
+            host.credentials,
+            Some(credentials_to_rms(&endpoint.nvos_credentials))
         );
     }
 

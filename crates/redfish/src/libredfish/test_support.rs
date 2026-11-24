@@ -150,7 +150,7 @@ struct RedfishSimState {
     /// `get_systems`, and `get_power_state` return `401` unless the client was
     /// created with a `Direct` credential whose password matches the seeded
     /// `users` entry. This makes credential selection and rejection observable
-    /// in callers such as `bmc_credentials_valid`.
+    /// in callers such as the credential probes in `bmc_accounts`.
     enforce_auth: bool,
     auth_attempts: Vec<RedfishSimAuthAttempt>,
     /// When set, `get_accounts` fails with a non-authentication transport error

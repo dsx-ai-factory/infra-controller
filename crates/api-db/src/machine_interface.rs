@@ -553,6 +553,22 @@ pub async fn find_by_mac_address(
     find_by(txn, ObjectColumnFilter::One(MacAddressColumn, &macaddr)).await
 }
 
+/// Lock a physical BMC's interface rows before coordinating its IP aliases.
+/// Callers retain these locks through the dependent preingestion or ingestion writes.
+pub async fn find_by_mac_address_for_update(
+    txn: &mut PgConnection,
+    mac_address: MacAddress,
+) -> Result<Vec<MachineInterfaceSnapshot>, DatabaseError> {
+    let query = "SELECT id FROM machine_interfaces WHERE mac_address = $1 ORDER BY id FOR UPDATE";
+    sqlx::query(query)
+        .bind(mac_address)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    find_by_mac_address(txn, mac_address).await
+}
+
 /// Loads all interface rows for report MACs, including unowned and BMC rows.
 pub async fn find_by_mac_addresses(
     db: impl DbReader<'_>,
