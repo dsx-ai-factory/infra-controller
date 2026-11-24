@@ -76,16 +76,27 @@ an operator removed while collection remains active.
 ## Submit a report
 
 Use `POST /admin/nvlink-domain/<DOMAIN_ID>/health/add-report` on the Admin web UI
-endpoint. This route accepts the first report even when the domain health page
-returns HTTP 404. The first successful submission creates the report storage
-needed to display the page. The inaccessible first-report form is tracked in
-NVBug 6658436.
+endpoint. Until a report exists for the domain, the health page returns HTTP 404
+and the **Submit Health Report** form is unavailable. The POST route accepts the
+first report and makes the page and form available.
 
 Before starting, obtain the NVLink domain UUID and access to your site's Admin
-web UI endpoint. Configure the Admin CLI for the same site. The commands below
-also require `curl` and `jq`. Add your deployment's required authentication and
-TLS options to `curl`, including session cookies if the Admin web UI requires
-them. A browser sign-in does not authenticate a separate `curl` process.
+web UI over HTTPS. Configure the Admin CLI for the same site. The commands below
+also require `curl` and `jq`. Use the `curl` authentication option that matches
+your deployment's [Admin web UI authentication mode](debug_webui.md#authentication).
+Add any TLS options your deployment requires.
+
+- For `basic` (the default), use `--user admin` as shown below and enter the password
+  when `curl` prompts. For a default Helm installation, use the command in the
+  chart's release notes to retrieve the password from the
+  `nico-api-web-basic-auth` Secret. If your deployment uses a custom credential,
+  use its configured password.
+- For `oauth2`, replace `--user admin` with `--cookie "$cookie_file"`, where
+  `cookie_file` points to a curl cookie file containing the cookies for an active
+  Admin web UI session on that endpoint. For automation, use the
+  [client credentials flow](../playbooks/nico_web_oauth2.md#alternative-auth-flow)
+  to obtain a session cookie.
+- For `none`, omit `--user admin`. Supply any authentication your proxy requires.
 
 Choose the apply mode before submitting. Mode values are case-sensitive:
 
@@ -140,6 +151,7 @@ information alongside other sources.
 
    ```sh
    curl --fail-with-body --silent --show-error \
+     --user admin \
      --header 'Content-Type: application/json' \
      --data-binary @nvlink-health-entry.json \
      --write-out 'HTTP %{http_code}\n' \
@@ -149,7 +161,8 @@ information alongside other sources.
    A successful submission returns HTTP 200 with an empty response body.
    An invalid domain UUID or an unsupported mode, such as `merge`, returns
    HTTP 400. Missing report fields or malformed JSON fail request validation.
-   A sign-in redirect does not confirm that the report was stored.
+   With Basic authentication, missing or invalid credentials return HTTP 401.
+   With OAuth2, a missing or expired session redirects you to sign in.
 
 1. Verify that your source and selected mode appear in the CLI output:
 
