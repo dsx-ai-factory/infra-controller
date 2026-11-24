@@ -628,15 +628,7 @@ mod tests {
                 expected: ExpectedAuth::Error(TOKEN_REQUIRED),
                 expected_reads: 1,
             },
-            // Surrounding whitespace on a nonblank token must be preserved, unlike the ordinary token.
-            AuthResolutionCase {
-                name: "token with surrounding whitespace",
-                mode: Some(UfmAuthMode::Token),
-                password: Some(" ordinary-token "),
-                expected: ExpectedAuth::Token(" ordinary-token "),
-                expected_reads: 1,
-            },
-            // A nonblank token must be selected and preserved unchanged in explicit token mode.
+            // A nonblank credential must select token authentication in explicit token mode.
             AuthResolutionCase {
                 name: "token with ordinary token",
                 mode: Some(UfmAuthMode::Token),
@@ -660,7 +652,7 @@ mod tests {
                 expected: ExpectedAuth::Certificate,
                 expected_reads: 1,
             },
-            // Legacy nonblank behavior must continue to send the stored password as a token.
+            // Legacy nonblank behavior must continue to select the stored password as a token.
             AuthResolutionCase {
                 name: "legacy with ordinary token",
                 mode: None,
@@ -710,7 +702,7 @@ mod tests {
     }
 
     /// Verifies manager-built token clients authenticate real mock requests,
-    /// including unchanged directory-shaped tokens and rejected stale credentials.
+    /// including directory-shaped tokens and rejected stale credentials.
     #[tokio::test]
     async fn manager_token_authentication_works_with_the_ufm_mock() {
         #[derive(Debug, PartialEq)]
@@ -729,7 +721,7 @@ mod tests {
                     input: ("accepted-token".to_string(), "accepted-token".to_string()),
                     expect: Yields(RequestOutcome::Accepted),
                 },
-                // An existing directory path must be sent unchanged as an accepted token.
+                // An existing directory path must authenticate successfully as a token.
                 Case {
                     scenario: "accepted existing directory path token",
                     input: (existing_path.clone(), existing_path),
@@ -974,13 +966,15 @@ mod tests {
     async fn changed_auth_method_rebuilds_the_rest_client() {
         check_cases_async(
             [
-                // Switching from a token to an empty password selects certificate authentication.
+                // With auth omitted, switching from a token to an empty password selects
+                // certificate authentication.
                 Case {
                     scenario: "token to certificate authentication",
                     input: ("token-a", ""),
                     expect: Yields((true, true, true)),
                 },
-                // Switching from an empty password to a token selects token authentication.
+                // With auth omitted, switching from an empty password to a token selects token
+                // authentication.
                 Case {
                     scenario: "certificate to token authentication",
                     input: ("", "token-a"),

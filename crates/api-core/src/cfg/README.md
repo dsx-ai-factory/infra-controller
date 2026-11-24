@@ -2174,10 +2174,11 @@ local environment and file sources before the configured persistent backends.
 | `file` | `Option<CredentialFileSourceConfig>` | — | Watched JSON or YAML static-credential file (see [CredentialFileSourceConfig](#credentialfilesourceconfig)). When present, it replaces the legacy file source selected by `CARBIDE_CREDENTIALS_FILE_*`; the environment source remains first when enabled. |
 
 When `ufm_source = "local"` and InfiniBand management is enabled, startup
-requires a local `ufm_auth_by_fabric` entry for every configured fabric. The
-mode is all-or-nothing: NICo does not fall back to Vault or Postgres for a
-missing fabric. When `ufm_source` is omitted, `local_first` preserves the
-pre-existing local-override behavior.
+requires a local `ufm_auth_by_fabric` entry for every configured fabric unless
+that fabric sets `auth = "client_certificate"`. The mode is all-or-nothing:
+NICo does not fall back to Vault or Postgres for a missing required fabric. When
+`ufm_source` is omitted, `local_first` preserves the pre-existing local-override
+behavior.
 
 When `bmc_site_wide_root_source = "local"`, readers report a missing local
 version 0 as unavailable without falling back to a persistent backend. With

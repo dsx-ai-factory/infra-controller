@@ -1322,8 +1322,9 @@ pub enum UfmCredentialSource {
     /// Local environment/file UFM entries are ignored.
     Backend,
     /// Read UFM credentials only from the local environment/file sources.
-    /// Every configured fabric must be present when IB management starts, and
-    /// persistent backend mutation is disabled.
+    /// Every configured fabric without explicit client-certificate authentication
+    /// must be present when IB management starts, and persistent backend mutation
+    /// is disabled.
     Local,
 }
 

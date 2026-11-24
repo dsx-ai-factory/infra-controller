@@ -50,8 +50,9 @@ Each `[ib_fabrics.<name>]` table has an optional `auth` setting with no default:
 - `auth = "client_certificate"` uses the default SPIFFE client certificate
   files. NICo does not read a UFM credential for that fabric, so none needs to
   be stored.
-- `auth = "token"` sends the stored password unchanged as the bearer token. A
-  missing credential or an empty or whitespace-only password is an error.
+- `auth = "token"` sends the stored password as the bearer token after removing
+  surrounding whitespace. A missing credential or an empty or whitespace-only
+  password is an error.
 - With `auth` unset, an empty or whitespace-only password selects the default
   SPIFFE client certificate, any other password is the bearer token, and a
   missing credential is an error.
