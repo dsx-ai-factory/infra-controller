@@ -260,7 +260,7 @@ impl BmcEndpointExplorer {
             let redfish = &self.bmc_client.redfish_client;
             let target = read(Target).await?;
             let (credential, version) = match redfish
-                .validate_bmc_credentials(address, target.clone())
+                .validate_bmc_root_credentials(address, mac, target.clone())
                 .await
             {
                 Ok(()) => (target, Some(current.target_version)),
@@ -271,7 +271,7 @@ impl BmcEndpointExplorer {
                     }
                     tokio::time::sleep(BMC_AUTH_RETRY_DURATION).await;
                     match redfish
-                        .validate_bmc_credentials(address, previous.clone())
+                        .validate_bmc_root_credentials(address, mac, previous.clone())
                         .await
                     {
                         Ok(()) => (previous, current.previous_version),
@@ -752,13 +752,12 @@ impl BmcEndpointExplorer {
         // before validating with the sitewide credentials.
         tokio::time::sleep(BMC_AUTH_RETRY_DURATION).await;
 
-        self.bmc_client
-            .redfish_client
-            .validate_and_apply_bmc_root_credentials(
-                bmc_ip_address,
-                bmc_mac_address,
-                credentials.clone(),
-            )
+        let redfish = &self.bmc_client.redfish_client;
+        redfish
+            .validate_bmc_root_credentials(bmc_ip_address, bmc_mac_address, credentials.clone())
+            .await?;
+        redfish
+            .apply_bmc_root_policy(bmc_ip_address, bmc_mac_address, None, credentials.clone())
             .await?;
 
         self.set_bmc_root_credentials(

@@ -327,33 +327,30 @@ impl RedfishClient {
             .unwrap_or_default()
     }
 
-    /// Validates the root `credentials` of an unexplored BMC, then applies the
-    /// default account policy (including Lenovo IPMI access) as them.
-    pub(super) async fn validate_and_apply_bmc_root_credentials(
+    /// Checks that the root `credentials` of an unexplored BMC authenticate,
+    /// failing with `Unauthorized` when the BMC rejects them.
+    pub(super) async fn validate_bmc_root_credentials(
         &self,
         bmc_ip_address: SocketAddr,
         bmc_mac_address: MacAddress,
         credentials: Credentials,
     ) -> Result<(), EndpointExplorationError> {
-        let connector = self.bmc_connector();
-        let access = bmc_access(bmc_ip_address, bmc_mac_address);
-        if !bmc_accounts::probe_bmc_credentials(
-            &connector,
-            &access,
+        let authenticated = bmc_accounts::probe_bmc_credentials(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
             None,
-            credentials.clone(),
+            credentials,
             false,
         )
         .await
-        .map_err(map_platform_error)?
-        {
-            return Err(map_platform_error(PlatformError::Auth(
+        .map_err(map_platform_error)?;
+        if authenticated {
+            Ok(())
+        } else {
+            Err(map_platform_error(PlatformError::Auth(
                 AuthError::InvalidCredentials,
-            )));
+            )))
         }
-        bmc_accounts::apply_bmc_root_policy(&connector, &access, None, credentials)
-            .await
-            .map_err(map_platform_error)
     }
 
     /// Resolve the precise `RedfishVendor` of a BMC using the supplied
@@ -1666,14 +1663,15 @@ mod tests {
         let (client, ops_sim, general_sim, _) = proxied_client();
 
         let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let credentials = Credentials::new("root", "password");
         client
-            .validate_and_apply_bmc_root_credentials(
-                test_addr(),
-                mac,
-                Credentials::new("root", "password"),
-            )
+            .validate_bmc_root_credentials(test_addr(), mac, credentials.clone())
             .await
             .expect("validation succeeds on the sim");
+        client
+            .apply_bmc_root_policy(test_addr(), mac, None, credentials)
+            .await
+            .expect("the policy applies on the sim");
 
         assert!(
             general_sim.create_client_calls().is_empty(),

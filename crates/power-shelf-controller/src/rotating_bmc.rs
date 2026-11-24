@@ -32,11 +32,10 @@
 //!   [`advance`] retry seam, and returns to `Ready` (clearing a satisfied force
 //!   request) or re-enters `RotatingBmc` with an incremented retry budget.
 //!
-//! Unlike the switch path (all NVIDIA MGX, so a fixed dispatch vendor), a power
-//! shelf's Lite-On/Delta PMC vendor is not persisted and is not exposed in the
-//! Redfish service root, so the engine probes it at rotation time
-//! ([`BmcEndpoint::into_target_probing_vendor`]) -- the repo's standard
-//! power-shelf vendor determination.
+//! A power shelf's Lite-On/Delta PMC vendor is not exposed in the Redfish
+//! service root, so the engine identifies it from the Chassis manufacturer in
+//! the PMC's exploration report, or by reading it from the PMC when there is
+//! no report -- the repo's standard power-shelf vendor determination.
 //!
 //! A BMC password change never touches the power shelf's power delivery, so this
 //! is safe in `Ready`.
