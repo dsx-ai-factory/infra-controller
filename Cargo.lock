@@ -2925,7 +2925,6 @@ dependencies = [
  "carbide-uuid",
  "proc-macro2",
  "quote",
- "sqlx-macros-core",
  "syn 2.0.117",
 ]
 
