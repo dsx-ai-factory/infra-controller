@@ -69,7 +69,10 @@ class LocalPrerequisitesTest(unittest.TestCase):
         self.assertIn(('Namespace', None, 'custom-rest'), objects)
         self.assertIn(('Namespace', None, 'custom-temporal'), objects)
         dashboards = objects[('ConfigMap', 'observability', 'grafana-dashboards-nico')]
-        self.assertEqual(len(dashboards['data']), 8)
+        self.assertEqual(len(dashboards['data']), 9)
+        self.assertEqual(dashboards['data']['tempo-overview.json'],
+                         (ROOT / 'dev/deployment/stack/dashboards/tempo-overview.json').read_text())
+        self.assertIn('prometheus', result.resources['tempo']['resource_deps'])
         self.assertEqual(dashboards['metadata']['labels'], {'grafana_dashboard': '1'})
         self.assertEqual(result.k8s_resources['rest-databases']['resource_deps'],
                          ['nico-postgres', 'nico-local-config'])
