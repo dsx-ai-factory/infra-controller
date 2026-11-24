@@ -13,7 +13,7 @@
  namespace ph = std::placeholders;
  
 +// The DHCPv6 hook checks this native persistence contract before loading.
-+extern "C" int nico_kea_lease6_handoff_contract() { return 2; }
++extern "C" int nico_kea_lease6_handoff_contract() { return 3; }
 +
  namespace {
 +
@@ -132,7 +132,19 @@
      if (!expired->expired()) {
          isc_throw(BadValue, "Attempt to recycle lease that is still valid");
      }
-@@ -1826,6 +1901,9 @@
+@@ -1776,7 +1851,10 @@
+         // The expired lease needs to be reclaimed before it can be reused.
+         // This includes declined leases for which probation period has
+         // elapsed.
+-        reclaimExpiredLease(expired, ctx.callout_handle_);
++        if (!expired->stateExpiredReclaimed()) {
++            reclaimExpiredLease(expired, DB_RECLAIM_LEAVE_UNCHANGED,
++                                ctx.callout_handle_, ctx.subnet_);
++        }
+     }
+ 
+     // address, lease type and prefixlen (0) stay the same
+@@ -1826,6 +1904,9 @@
  
          // The lease that will be assigned to a client
          ctx.callout_handle_->setArgument("lease6", expired);
@@ -142,7 +154,7 @@
  
          // Call the callouts
          HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
-@@ -1848,6 +1926,9 @@
+@@ -1848,6 +1929,9 @@
          // Let's use whatever callout returned. Hopefully it is the same lease
          // we handed to it.
          ctx.callout_handle_->getArgument("lease6", expired);
@@ -152,12 +164,12 @@
      }
  
      if (!ctx.fake_allocation_) {
-@@ -1860,7 +1941,14 @@
+@@ -1860,7 +1944,14 @@
          }
  
          // for REQUEST we do update the lease
 -        LeaseMgrFactory::instance().updateLease6(expired);
-+        if (original_address != expired->addr_) {
++        if (replacement || original_address != expired->addr_) {
 +            if (!persistLease6Replacement(ctx, expired, replacement, response_fqdn)) {
 +                return (Lease6Ptr());
 +            }
@@ -168,7 +180,7 @@
  
          // If the lease is in the current subnet we need to account
          // for the re-assignment of The lease.
-@@ -1898,6 +1986,9 @@
+@@ -1898,6 +1989,9 @@
              StatsMgr::instance().addValue(ctx.currentIA().type_ == Lease::TYPE_NA ?
                                            "cumulative-assigned-nas" : "cumulative-assigned-pds",
                                            static_cast<int64_t>(1));
@@ -178,7 +190,7 @@
          }
      }
  
-@@ -1987,6 +2078,9 @@
+@@ -1987,6 +2081,9 @@
          prefix_len = 128; // non-PD lease types must be always /128
      }
  
@@ -188,7 +200,7 @@
      uint32_t preferred = 0;
      uint32_t valid = 0;
      getLifetimes6(ctx, preferred, valid);
-@@ -2026,6 +2120,9 @@
+@@ -2026,6 +2123,9 @@
  
          // The lease that will be assigned to a client
          ctx.callout_handle_->setArgument("lease6", lease);
@@ -198,7 +210,7 @@
  
          // This is the first callout, so no need to clear any arguments
          HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
-@@ -2043,6 +2140,9 @@
+@@ -2043,6 +2143,9 @@
          // Let's use whatever callout returned. Hopefully it is the same lease
          // we handed to it.
          ctx.callout_handle_->getArgument("lease6", lease);
@@ -208,7 +220,7 @@
      }
  
      if (!ctx.fake_allocation_) {
-@@ -2055,7 +2155,8 @@
+@@ -2055,7 +2158,8 @@
          }
  
          // That is a real (REQUEST) allocation
@@ -218,7 +230,7 @@
  
          if (status) {
              // The lease insertion succeeded - if the lease is in the
-@@ -2096,8 +2197,12 @@
+@@ -2096,8 +2200,12 @@
                                                static_cast<int64_t>(1));
              }
  
@@ -232,7 +244,7 @@
  
              return (lease);
          } else {
-@@ -2137,12 +2242,25 @@
+@@ -2137,12 +2245,25 @@
                                                         ctx.currentIA().iaid_,
                                                         subnet->getID());
              for (auto const& l : leases_subnet) {
@@ -258,23 +270,51 @@
  
          if (!leases.empty()) {
              LOG_DEBUG(alloc_engine_logger, ALLOC_ENGINE_DBG_TRACE,
-@@ -2916,8 +3034,16 @@
+@@ -2891,6 +3012,14 @@
+ AllocEngine::reclaimExpiredLease(const Lease6Ptr& lease,
+                                  const DbReclaimMode& reclaim_mode,
+                                  const CalloutHandlePtr& callout_handle) {
++    reclaimExpiredLease(lease, reclaim_mode, callout_handle, ConstSubnet6Ptr());
++}
++
++void
++AllocEngine::reclaimExpiredLease(const Lease6Ptr& lease,
++                                 const DbReclaimMode& reclaim_mode,
++                                 const CalloutHandlePtr& callout_handle,
++                                 const ConstSubnet6Ptr& allocation_subnet) {
+ 
+     LOG_DEBUG(alloc_engine_logger, ALLOC_ENGINE_DBG_TRACE,
+               ALLOC_ENGINE_V6_LEASE_RECLAIM)
+@@ -2916,9 +3045,29 @@
          callout_handle->setArgument("lease6", lease);
          callout_handle->setArgument("remove_lease", reclaim_mode == DB_RECLAIM_REMOVE);
  
 +        bool reclaim_allowed = true;
++        bool reclaim_deferred = false;
 +        callout_handle->setArgument("lease6_reclaim_allowed", reclaim_allowed);
++        callout_handle->setArgument("lease6_reclaim_deferred", reclaim_deferred);
++        callout_handle->setArgument("subnet6", allocation_subnet);
 +
          HooksManager::callCallouts(Hooks.hook_index_lease6_expire_,
                                     *callout_handle);
-+
+ 
 +        callout_handle->getArgument("lease6_reclaim_allowed", reclaim_allowed);
 +        if (!reclaim_allowed || callout_handle->getStatus() == CalloutHandle::NEXT_STEP_DROP) {
 +            isc_throw(Unexpected, "DHCPv6 lease reclamation was refused by hook");
 +        }
- 
++
++        callout_handle->getArgument("lease6_reclaim_deferred", reclaim_deferred);
++        if (reclaim_deferred) {
++            if (!allocation_subnet || reclaim_mode != DB_RECLAIM_LEAVE_UNCHANGED) {
++                isc_throw(Unexpected, "only allocation-time IPv6 reuse may defer reclamation");
++            }
++            // SELECT must approve the retained row and persist its replacement.
++            // Leave DNS and counters untouched if SELECT or persistence fails.
++            return;
++        }
          skipped = callout_handle->getStatus() == CalloutHandle::NEXT_STEP_SKIP;
      }
+ 
 --- a/src/lib/dhcpsrv/csv_lease_file6.cc
 +++ b/src/lib/dhcpsrv/csv_lease_file6.cc
 @@ -10,6 +10,8 @@
@@ -578,3 +618,26 @@
      /// @brief Creates a new CSV file.
      ///
      /// The file creation will fail if there are no columns specified.
+--- a/src/lib/dhcpsrv/alloc_engine.h
++++ b/src/lib/dhcpsrv/alloc_engine.h
+@@ -1149,6 +1149,20 @@
+                              const DbReclaimMode& reclaim_mode,
+                              const hooks::CalloutHandlePtr& callout_handle);
+ 
++    /// @brief Reclaim an IPv6 candidate with its allocation subnet available to hooks.
++    ///
++    /// A hook may defer allocation-time reclamation until SELECT persists an
++    /// approved replacement. The original overload retains its ABI and sweep
++    /// behavior by forwarding with an empty allocation subnet.
++    /// @param lease Candidate lease.
++    /// @param reclaim_mode Database reclamation policy.
++    /// @param callout_handle Hook invocation handle.
++    /// @param allocation_subnet Subnet selected for the allocation, or empty.
++    void reclaimExpiredLease(const Lease6Ptr& lease,
++                             const DbReclaimMode& reclaim_mode,
++                             const hooks::CalloutHandlePtr& callout_handle,
++                             const ConstSubnet6Ptr& allocation_subnet);
++
+     /// @brief Reclaim DHCPv4 lease.
+     ///
+     /// This method variant accepts the @c reclaim_mode parameter which

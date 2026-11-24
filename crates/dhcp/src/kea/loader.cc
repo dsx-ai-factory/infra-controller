@@ -281,7 +281,7 @@ extern "C" int dhcp6_srv_configured(CalloutHandle &handle) {
 
 bool require_runtime_capability(const char *name) {
   const auto capability = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, name));
-  if (capability && capability() == 2) {
+  if (capability && capability() == 3) {
     return true;
   }
   LOG_ERROR(loader_logger, isc::log::LOG_CARBIDE_GENERIC)

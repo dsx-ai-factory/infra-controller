@@ -44,6 +44,7 @@ std::set<std::string> lease6_busy;
 const std::string lease6_mac_prefix = "mac:";
 const std::string lease6_guard_context = "carbide_lease6_transaction";
 const char LEASE6_RECLAIM_ALLOWED[] = "lease6_reclaim_allowed";
+const char LEASE6_RECLAIM_DEFERRED[] = "lease6_reclaim_deferred";
 struct Lease6Transaction {
   std::set<std::string> keys;
   ~Lease6Transaction() {
@@ -1645,7 +1646,7 @@ int lease6_select(CalloutHandle &handle) try {
     handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
     return 1;
   }
-  if (proposed_address == lease6->addr_) {
+  if (proposed_address == lease6->addr_ && !previous) {
     handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
     return 0;
   }
@@ -1670,15 +1671,18 @@ int lease6_select(CalloutHandle &handle) try {
           .arg("lease6_select: Kea lacks the safe lease replacement patch");
       return 1;
     }
-    if (candidate && candidate->state_ != Lease::STATE_EXPIRED_RECLAIMED) {
+    if (candidate && proposed_address != lease6->addr_ &&
+        candidate->state_ != Lease::STATE_EXPIRED_RECLAIMED) {
       return 1;
     }
     ConstSubnet6Ptr subnet;
     handle.getArgument("subnet6", subnet);
     using isc::stats::StatsMgr;
-    const bool reuse_outside_pool = candidate &&
-        !subnet->inPool(Lease::TYPE_NA, lease6->addr_);
-    const int64_t adjustment = int64_t(reuse_outside_pool) - int64_t(previous_assigned);
+    // CREATE gates native accounting on its original address; REUSE uses the
+    // final address. Count one committed row, replacing any prior assignment.
+    const bool native_assigned = subnet->inPool(Lease::TYPE_NA,
+        candidate ? lease6->addr_ : proposed_address);
+    const int64_t adjustment = 1 - int64_t(native_assigned) - int64_t(previous_assigned);
     if (adjustment) {
       adjustments[StatsMgr::generateName("subnet", lease6->subnet_id_, "assigned-nas")] = adjustment;
     }
@@ -1687,6 +1691,13 @@ int lease6_select(CalloutHandle &handle) try {
       if (pool) {
         adjustments[StatsMgr::generateName("subnet", previous->subnet_id_,
             StatsMgr::generateName("pool", pool->getID(), "assigned-nas"))] = -1;
+      }
+    }
+    if (!native_assigned) {
+      const auto pool = subnet->getPool(Lease::TYPE_NA, lease6->addr_, false);
+      if (pool) {
+        adjustments[StatsMgr::generateName("subnet", lease6->subnet_id_,
+            StatsMgr::generateName("pool", pool->getID(), "assigned-nas"))] += 1;
       }
     }
     handle.setArgument(LEASE6_REPLACEMENT, previous);
@@ -1883,9 +1894,12 @@ int lease6_expire(CalloutHandle &handle) {
   const bool selected_target = machine &&
       machine_ipv6_address(machine.get(), selected_address) && selected_address == lease->addr_;
   bool selected_handoff = false;
+  ConstSubnet6Ptr allocation_subnet;
+  handle.getArgument("subnet6", allocation_subnet);
   if (retire_owned && selected_target) {
     char *selected_mac = machine_get_discovery_mac(machine.get());
-    selected_handoff = selected_mac && mac == canonical_mac(selected_mac);
+    selected_handoff = selected_mac && mac == canonical_mac(selected_mac) &&
+        (!allocation_subnet || allocation_subnet->getID() == lease->subnet_id_);
     if (selected_mac) {
       machine_free_discovery_mac(selected_mac);
     }
@@ -1908,6 +1922,13 @@ int lease6_expire(CalloutHandle &handle) {
     auto &leases = isc::dhcp::LeaseMgrFactory::instance();
     const auto current = leases.getLease6(lease->type_, lease->addr_);
     if (!current || *current != *lease) {
+      return 0;
+    }
+    if (selected_handoff && allocation_subnet) {
+      // Native hinted REUSE must keep this row, its DNS ownership and counters
+      // until SELECT validates and atomically persists the approved replacement.
+      handle.setArgument(LEASE6_RECLAIM_DEFERRED, true);
+      handle.setArgument(LEASE6_RECLAIM_ALLOWED, true);
       return 0;
     }
     // Retire an owned IA_NA row before notifying Core. A failed write must
