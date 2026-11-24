@@ -1636,12 +1636,8 @@ fn expired_firmware_lease_hands_off_without_core_expiry() -> Result<(), eyre::Re
         assert_assigned_leases(&h.kea.statistics()?, 1, 1);
         assert!(h.api_server.expired_leases().is_empty());
         h.kea.lease_io.release()?;
-        h.kea.restart()?;
-        assert_eq!(
-            h.read_leases()?,
-            original,
-            "restart must preserve the refused handoff"
-        );
+        // Retry below in the same process to verify the refused handoff leaves
+        // neither a retired row nor transaction ownership that blocks recovery.
     }
 
     // A hint sends the expired row through native reclamation before SELECT.
@@ -3012,6 +3008,11 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
             h.kea.wait_for_failure()?;
             h.kea.restart()?;
             h.kea.lease_io.release()?;
+            assert_eq!(
+                h.read_leases()?,
+                before,
+                "restart must preserve the refused handoff"
+            );
         }
         if expired && hostname.is_none() {
             // If the OS never retries, the retained row must still be swept,

@@ -1973,8 +1973,8 @@ int lease6_expire(CalloutHandle &handle) {
     // Keep native declined-lease recovery and unsupported lease types intact.
     handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
   }
-  // Allocation-time retirement of the same NIC's selected expired or released
-  // target must preserve Core ownership. Background sweeps have no selection.
+  // Renewal-time retirement of the existing identity preserves Core ownership.
+  // Background sweeps have no selection.
   return selected_handoff ? 0 : handle_carbide_lease6_end(handle, "lease6_expire");
 }
 }
