@@ -4082,7 +4082,7 @@ paths:
             type: string
           in: query
           name: query
-          description: Search for matches across all VPC Prefixes. Input will be matched against name and status fields
+          description: Search for matches across all VPC Prefixes. Input will be matched against name, status, and labels fields
         - schema:
             type: string
             enum:
@@ -22717,6 +22717,9 @@ components:
       examples:
         - id: 0c03ba01-d86b-4a57-a41e-cc359b380a6f
           name: east-vpc-traffic-net
+          labels:
+            environment: production
+            owner: networking
           siteId: ea144def-d68f-44c3-9485-4b103fa2686f
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
           prefix: 192.168.1.0/24
@@ -22775,6 +22778,9 @@ components:
           minLength: 2
           maxLength: 256
           description: Name of the VPC Prefix
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing VPC Prefix labels
         siteId:
           type: string
           format: uuid
@@ -22840,6 +22846,9 @@ components:
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
           ipBlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
           prefixLength: 20
+          labels:
+            environment: production
+            owner: networking
         - name: application-network
           vpcId: 0b1c53a0-a27e-4714-98d7-0cd3bc579db2
           ipBlockId: 20d7dd4f-ae43-4245-a9d9-d093296009c4
@@ -22851,6 +22860,9 @@ components:
           minLength: 2
           maxLength: 256
           description: Human readable name for the VPC Prefix
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing VPC Prefix labels. Up to 10 key-value pairs can be specified
         vpcId:
           type: string
           format: uuid
@@ -22880,6 +22892,8 @@ components:
               type: string
               minLength: 2
               maxLength: 256
+            labels:
+              $ref: '#/components/schemas/Labels'
             vpcId:
               type: string
               format: uuid
@@ -22907,6 +22921,8 @@ components:
               type: string
               minLength: 2
               maxLength: 256
+            labels:
+              $ref: '#/components/schemas/Labels'
             vpcId:
               type: string
               format: uuid
@@ -22932,15 +22948,21 @@ components:
       type: object
       examples:
         - name: east-vpc-traffic-net
-      description: Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
+          labels:
+            environment: production
+            owner: networking
+      description: Request data for updating a VPC Prefix. Omitting `name` or passing `null` preserves the stored name. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
       properties:
         name:
-          type: string
-          description: 'Name of the VPCPrefix'
+          type:
+            - string
+            - 'null'
+          description: 'Name of the VPCPrefix. Omission or `null` preserves the stored name'
           minLength: 2
           maxLength: 256
-      required:
-        - name
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: Update labels of the VPC Prefix. The supplied map replaces all stored labels; an empty object clears them, while omission preserves them
     Subnet:
       title: Subnet
       type: object

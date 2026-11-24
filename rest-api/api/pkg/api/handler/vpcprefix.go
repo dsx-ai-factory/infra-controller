@@ -291,7 +291,19 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 		// Create VPC prefix in DB with the initial Core lifecycle state.
 		status := cdbm.VpcPrefixStatusProvisioning
 		statusMsg := "VPC Prefix is being provisioned on Site"
-		vpcPrefix, derr := vpcPrefixDAO.Create(ctx, tx, cdbm.VpcPrefixCreateInput{Name: apiRequest.Name, TenantOrg: org, SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, IpBlockID: &ipBlock.ID, Prefix: childPrefix.Cidr, PrefixLength: requestedPrefixLength, Status: status, CreatedBy: dbUser.ID})
+		vpcPrefix, derr := vpcPrefixDAO.Create(ctx, tx, cdbm.VpcPrefixCreateInput{
+			Name:         apiRequest.Name,
+			TenantOrg:    org,
+			SiteID:       site.ID,
+			VpcID:        vpc.ID,
+			TenantID:     tenant.ID,
+			IpBlockID:    &ipBlock.ID,
+			Labels:       apiRequest.Labels,
+			Prefix:       childPrefix.Cidr,
+			PrefixLength: requestedPrefixLength,
+			Status:       status,
+			CreatedBy:    dbUser.ID,
+		})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to create VPC prefix record in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed creating VPC prefix record", nil)
@@ -908,7 +920,21 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
 	err = cdb.WithTx(ctx, ush.dbSession, func(tx *cdb.Tx) error {
-		updated, derr := vpDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{VpcPrefixID: vpcPrefix.ID, Name: apiRequest.Name})
+		derr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString(vpcPrefix.ID.String()),
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire VPC Prefix update lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update VPC prefix, could not acquire data store lock", nil)
+		}
+
+		updated, derr := vpDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{
+			VpcPrefixID: vpcPrefix.ID,
+			Name:        apiRequest.Name,
+			Labels:      apiRequest.Labels,
+		})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating VPC prefix in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update VPC prefix", nil)
