@@ -2146,8 +2146,9 @@ impl Chassis {
             .iter()
             .find(|assembly| is_compute_tray_assembly(&self.id, assembly.model.as_deref()))
             .and_then(|assembly| assembly.serial_number.as_deref())
-            .or(self.serial_number.as_deref())
             .map(str::trim)
+            .none_if_empty()
+            .or_else(|| self.serial_number.as_deref().map(str::trim))
     }
 }
 

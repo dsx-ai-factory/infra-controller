@@ -499,6 +499,9 @@ mod tests {
                 {"MemberId": "1", "Model": "P5859 B01", "SerialNumber": "BOARD"},
                 {"MemberId": "0", "Model": "P4107", "SerialNumber": " TRAY "},
             ]}),
+            serde_json::json!({"Id": "Chassis_0", "SerialNumber": " TRAY ", "Assemblies": [
+                {"MemberId": "0", "Model": "P4107", "SerialNumber": " \t "},
+            ]}),
         ] {
             let stored: Chassis = serde_json::from_value(json).unwrap();
             let projected = rpc::site_explorer::Chassis::from(stored);
