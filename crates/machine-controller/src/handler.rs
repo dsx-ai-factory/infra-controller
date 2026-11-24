@@ -26,9 +26,7 @@ use std::sync::{Arc, Mutex};
 use attestation::{
     handle_spdm_attestation_failed_recovery, handle_spdm_poll_state, handle_spdm_trigger_state,
 };
-use bmc_backend::{
-    BackendBmc, idrac_job, libredfish_software_inventory, redfish_task, redfish_task_id,
-};
+use bmc_backend::{BackendBmc, idrac_job, redfish_task, redfish_task_id};
 use bmc_platform::{
     HostPrivilegeLevel, LockdownDesiredState, LockdownScope,
     LockdownState as PlatformLockdownState, OperationStatus, PlatformError, PowerState, ResetType,
@@ -108,7 +106,6 @@ use model::predicted_machine_interface::PredictedMachineInterface;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::ExploredEndpoint;
 use nv_redfish::schema::secure_boot::SecureBootUpdate;
-use nv_redfish::schema::software_inventory::SoftwareInventory;
 use sku::{
     handle_bom_validation_requested, handle_bom_validation_state, is_sku_verification_requested,
 };
@@ -4377,13 +4374,11 @@ async fn handle_dpu_reprovision(
         )),
         ReprovisionState::VerifyFirmareVersions => {
             // No need to compare version if machine is reprovisioned by DPF.
-            if !state.host_snapshot.config.dpf.used_for_ingestion {
-                let bmc = ctx.services.connect_bmc(dpu_snapshot).await?;
-                if let Some(outcome) =
-                    check_fw_component_version(ctx, &bmc, dpu_snapshot, hardware_models).await?
-                {
-                    return Ok(outcome);
-                }
+            if !state.host_snapshot.config.dpf.used_for_ingestion
+                && let Some(outcome) =
+                    check_fw_component_version(ctx, dpu_snapshot, hardware_models).await?
+            {
+                return Ok(outcome);
             }
 
             Ok(StateHandlerOutcome::transition(
@@ -5046,77 +5041,59 @@ pub async fn try_wait_for_dpu_discovery(
     Ok(None)
 }
 
-/// The DPU firmware components whose versions [`check_fw_component_version`]
-/// checks, in order, and the name their firmware inventory `Id` contains.
-const DPU_FIRMWARE_COMPONENTS: [(FirmwareComponentType, &str); 3] = [
-    // BF2 names its BMC firmware 6d53cf4d_BMC_Firmware; BF3 names it BMC_Firmware.
-    (FirmwareComponentType::Bmc, "BMC_Firmware"),
-    (FirmwareComponentType::Cec, "Bluefield_FW_ERoT"),
-    (FirmwareComponentType::Nic, "DPU_NIC"),
-];
-
-/// The firmware inventory `Id` of a DPU's UEFI.
-const DPU_UEFI_INVENTORY_ID: &str = "DPU_UEFI";
-
-/// The firmware inventory of the DPU behind `bmc`. libredfish reads each
-/// member separately, so it reads only [`DPU_FIRMWARE_COMPONENTS`] and the
-/// UEFI, and an unrelated member cannot fail the read.
-async fn dpu_firmware_inventory(
-    bmc: &BackendBmc,
-) -> Result<Vec<Arc<SoftwareInventory>>, StateHandlerError> {
-    let BackendBmc::Libredfish(client) = bmc else {
-        return bmc
-            .firmware()
-            .map_err(|e| platform_error("firmware", e.into()))?
-            .inventory()
-            .await
-            .map_err(|e| platform_error("firmware_inventory", e));
-    };
-    let ids = client
-        .get_software_inventories()
-        .await
-        .map_err(|e| redfish_error("get_software_inventories", e))?;
-    let mut inventories = Vec::new();
-    for id in ids.iter().filter(|id| {
-        *id == DPU_UEFI_INVENTORY_ID
-            || DPU_FIRMWARE_COMPONENTS
-                .iter()
-                .any(|(_, component_name)| id.contains(component_name))
-    }) {
-        let inventory = client
-            .get_firmware(id)
-            .await
-            .map_err(|e| redfish_error("get_firmware", e))?;
-        inventories.push(Arc::new(
-            libredfish_software_inventory(inventory)
-                .map_err(|e| platform_error("get_firmware", e))?,
-        ));
-    }
-    Ok(inventories)
-}
-
 /// Returns Option<StateHandlerOutcome>:
 ///     If Some(_) means at least one fw component is not updated.
 ///     If None: All fw components are updated.
 async fn check_fw_component_version(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-    bmc: &BackendBmc,
     dpu_snapshot: &DpuMachine,
     hardware_models: &FirmwareConfigSnapshot,
 ) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
-    let inventories = dpu_firmware_inventory(bmc).await?;
+    let redfish_client = ctx
+        .services
+        .create_redfish_client_from_machine(dpu_snapshot)
+        .await?;
 
-    for (component, component_name) in DPU_FIRMWARE_COMPONENTS {
-        let inventory = inventories
+    let redfish_component_name_map = HashMap::from([
+        // Note: DPU uses different name for BMC Firmware as
+        // BF2: 6d53cf4d_BMC_Firmware
+        // BF3: BMC_Firmware
+        (FirmwareComponentType::Nic, "DPU_NIC"),
+        (FirmwareComponentType::Bmc, "BMC_Firmware"),
+        (FirmwareComponentType::Uefi, "DPU_UEFI"),
+        (FirmwareComponentType::Cec, "Bluefield_FW_ERoT"),
+    ]);
+    let inventories = redfish_client
+        .get_software_inventories()
+        .await
+        .map_err(|e| redfish_error("get_software_inventories", e))?;
+
+    for component in [
+        FirmwareComponentType::Bmc,
+        FirmwareComponentType::Cec,
+        FirmwareComponentType::Nic,
+    ] {
+        let component_name = redfish_component_name_map.get(&component).unwrap();
+        let inventory_id = inventories
             .iter()
-            .find(|i| i.id.contains(component_name))
-            .ok_or_else(|| {
-                StateHandlerError::FirmwareUpdateError(eyre!(
-                    "no inventory found that matches redfish component name: {component_name}",
-                ))
-            })?;
+            .find(|i| i.contains(component_name))
+            .ok_or_else(|| StateHandlerError::FirmwareUpdateError(eyre!(
+                "no inventory found that matches redfish component name: {component_name}; inventory list: {inventories:#?}",
+            )))?;
 
-        let Some(cur_version) = inventory.version.clone().flatten() else {
+        let inventory = match redfish_client.get_firmware(inventory_id).await {
+            Ok(inventory) => inventory,
+            Err(e) => {
+                tracing::error!(
+                    machine_id = %dpu_snapshot.id,
+                    error = %e,
+                    "redfish command get_firmware error"
+                );
+                return Err(redfish_error("get_firmware", e));
+            }
+        };
+
+        if inventory.version.is_none() {
             let msg = format!("Unknown {component_name:?} version");
             tracing::error!(
                 machine_id = %dpu_snapshot.id,
@@ -5125,6 +5102,10 @@ async fn check_fw_component_version(
             );
             return Err(StateHandlerError::FirmwareUpdateError(eyre!(msg)));
         };
+
+        let cur_version = inventory
+            .version
+            .unwrap_or_else(|| "Unknown current installed BMC FW version".to_string());
 
         let model = identify_dpu(dpu_snapshot);
 
@@ -5190,10 +5171,18 @@ async fn check_fw_component_version(
                 .firmware_version
                 .is_some_and(|v| v != cur_version)
         {
-            let bios_version: String = inventories
-                .iter()
-                .find(|i| i.id == DPU_UEFI_INVENTORY_ID)
-                .and_then(|uefi| uefi.version.clone().flatten())
+            let bios_version: String = redfish_client
+                .get_firmware("DPU_UEFI")
+                .await
+                .inspect_err(|e| {
+                    tracing::error!(
+                        machine_id = %dpu_snapshot.id,
+                        error = %e,
+                        "redfish command get_firmware error"
+                    );
+                })
+                .ok()
+                .and_then(|uefi| uefi.version)
                 .unwrap_or_else(|| {
                     dpu_snapshot
                         .status
@@ -5675,7 +5664,6 @@ impl DpuMachineStateHandler {
                 if !state.host_snapshot.config.dpf.used_for_ingestion
                     && let Some(outcome) = check_fw_component_version(
                         ctx,
-                        &bmc,
                         dpu_snapshot,
                         &self.hardware_models.create_snapshot(),
                     )
