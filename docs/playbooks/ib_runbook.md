@@ -274,8 +274,8 @@ root:/# curl -s -k -XGET -u admin:password https://ufm:443/ufmRest/app/tokens | 
 ]
 ```
 
-Set `auth = "token"` in the fabric configuration. Then create the credential
-for the UFM client:
+Set `auth = "token"` in the fabric configuration. Restart Core for the changed
+`auth` value to take effect. Then create the credential for the UFM client:
 
 ```text
 root:/# nico-admin-cli credential add-ufm --url=https://<address:port> --token=<access_token>
@@ -325,6 +325,8 @@ Set the fabric to use the default SPIFFE client certificate:
 endpoints = ["https://ufm.example:443"]
 auth = "client_certificate"
 ```
+
+Restart Core for the changed `auth` value to take effect.
 
 No UFM credential is needed. NICo reads
 `/var/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` for client

@@ -228,7 +228,7 @@ nico-api:
       # overlap any other shard.
       # [ib_fabrics.default]
       # endpoints = ["https://10.180.126.181:443"]  # EXAMPLE - replace with your UFM endpoint
-      # auth = "client_certificate" # OPTIONAL - values: "client_certificate" or "token"
+      # auth = "client_certificate" # OPTIONAL - values: "client_certificate" or "token"; changes require a Core restart
       # pkeys = [{ start = "9000", end = "11000" }] # EXAMPLE - replace with your site PKey range
 
       # -----------------------------------------------------------------------

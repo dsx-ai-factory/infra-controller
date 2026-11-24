@@ -90,7 +90,7 @@ placing both instances' interfaces in the same partition.
 | Subnet manager, M_Key / SA_Key hardening, static topology | UFM host (see the IB runbook) |
 | UFM endpoint URL(s) and managed P_Key ranges | NICo API server TOML, under `[ib_fabrics.default]` |
 | Fabric-wide toggles (enable, MTU, rate limit, service level, monitor cadence) | NICo API server TOML, under `[ib_config]` |
-| UFM API credentials | Vault (or the configured secrets backend), not the TOML file |
+| UFM API credentials | The configured credential source, not the TOML file |
 | `IbPartition` objects (tenant-owned) | NICo database, managed by tenants via the REST API / `nicocli` |
 | Per-interface partition assignment | `InstanceInfinibandConfig` on the instance, set via an instance update |
 | Reconciliation between desired and actual UFM state | `IbFabricMonitor`, a background task inside the API server |
@@ -185,9 +185,11 @@ fabric_monitor_run_interval = "60s"
 
 ### UFM credentials
 
-UFM API credentials are not stored in TOML. Token authentication reads the
-credential from the configured credential sources. Rotate tokens at the secrets
-backend; NICo picks up the new value on its next client re-initialisation.
+UFM API credentials are not stored in TOML; token authentication reads from the
+configured credential sources. Rotate the token in the credential source that
+supplies it. Backend updates and valid watched-file reloads take effect when
+NICo next resolves the UFM client; environment credentials are snapshotted at
+startup and require a Core restart.
 Explicit client-certificate authentication reads no UFM credential. When `auth`
 is omitted, NICo reads the credential to select the authentication method. See
 [UFM Ownership Policy](../../configuration/credential-sources.md#ufm-ownership-policy)
@@ -450,7 +452,7 @@ For a partition that is not removed, follow the diagnostics in
    any required static topology configuration.
 2. Provision a UFM API user with permission to read ports / partitions
    and to create / update / delete partitions. Store its credentials in
-   the secrets backend.
+   the configured credential source.
 3. In the NICo API server config:
    - Set `[ib_config].enabled = true` and any fabric-wide MTU / rate /
      service-level defaults.
