@@ -27392,7 +27392,13 @@ components:
             - array
             - 'null'
           description: >-
-            Update NVLink Interfaces of the Instance. Omission or `null` leaves interfaces unchanged; an explicit list replaces them entirely, detaching any not included. An empty list (`[]`) removes all existing interfaces. If the owning VPC has `nvLinkLogicalPartitionId` set, changes to an Instance that already has live interfaces will return 400.
+            Omit this field or send `null` to keep the current NVLink assignments.
+            A supplied list defines the complete set of desired assignments.
+            Omit a GPU from the list to request removal of its assignment.
+            Send `[]` to request removal of all assignments where permitted.
+            If the VPC has `nvLinkLogicalPartitionId` set and the Instance already
+            has current NVLink assignments, NICo rejects a supplied list that
+            changes those assignments.
           items:
             $ref: '#/components/schemas/NVLinkInterfaceCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
