@@ -18155,7 +18155,7 @@ paths:
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
         '409':
-          description: Another DHCP Option Set with the same name exists for the Tenant on the Site, or another update of this DHCP Option Set is in progress
+          description: Another DHCP Option Set with the same name exists for the Tenant on the Site, or another request is changing this DHCP Option Set
           $ref: '#/components/responses/ConflictError'
         '412':
           description: The DHCP Option Set was changed on the Site since REST last stored its version
@@ -18193,6 +18193,9 @@ paths:
         '404':
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
+        '409':
+          description: Another request is changing this DHCP Option Set
+          $ref: '#/components/responses/ConflictError'
         '412':
           description: The Site refused the deletion, for example because a VPC or Instance still uses the DHCP Option Set
           $ref: '#/components/responses/GenericHttpError'

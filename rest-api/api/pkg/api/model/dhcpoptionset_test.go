@@ -72,7 +72,7 @@ func TestAPIDhcpOptionSetUpdateRequest_Validate(t *testing.T) {
 	}
 }
 
-func TestAPIDhcpOptionSetUpdateRequest_MergeOptions(t *testing.T) {
+func TestAPIDhcpOptionSetUpdateRequest_mergeOptions(t *testing.T) {
 	stored := &cdbm.DhcpOptions{DhcpOptions: &corev1.DhcpOptions{
 		V4: &corev1.DhcpOptionsV4{BootUrl: cutil.GetPtr("http://10.0.0.5/boot.ipxe"), DnsServers: []string{"10.0.0.53"}},
 		V6: &corev1.DhcpOptionsV6{DnsServers: []string{"fd00::53"}},
@@ -109,7 +109,7 @@ func TestAPIDhcpOptionSetUpdateRequest_MergeOptions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.request.MergeOptions(tt.current)
+			got := tt.request.mergeOptions(tt.current)
 			assert.True(t, proto.Equal(tt.want, got.DhcpOptions), "got: %v", got.DhcpOptions)
 		})
 	}

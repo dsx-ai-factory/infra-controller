@@ -165,40 +165,34 @@ func (cdosh CreateDhcpOptionSetHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusConflict, "Another DHCP Option Set with specified name already exists for Tenant on Site", conflictData)
 		}
 
-		dos, derr := dosDAO.Create(ctx, tx, cdbm.DhcpOptionSetCreateInput{
-			Name:        apiRequest.Name,
-			Description: apiRequest.Description,
-			TenantOrg:   org,
-			SiteID:      site.ID,
-			TenantID:    orgTenant.ID,
-			Options:     apiRequest.ToDBOptions(),
-			Labels:      apiRequest.Labels,
-			Status:      cdbm.DhcpOptionSetStatusPending,
-			CreatedBy:   dbUser.ID,
-		})
-		if derr != nil {
-			logger.Error().Err(derr).Msg("unable to create DHCP Option Set record in DB")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed creating DHCP Option Set record", nil)
-		}
+		dosID := uuid.New()
+		logger.Info().Str("DHCP Option Set ID", dosID.String()).Msg("creating DHCP Option Set via Core proxy")
 
-		logger.Info().Str("DHCP Option Set ID", dos.ID.String()).Msg("creating DHCP Option Set via Core proxy")
-
+		coreReq := apiRequest.ToProto(dosID, org)
 		coreResp := &corev1.CreateDhcpOptionSetResponse{}
-		proxyErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDhcpOptionSet_FullMethodName, apiRequest.ToProto(dos), coreResp, "")
+		proxyErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDhcpOptionSet_FullMethodName, coreReq, coreResp, "")
 		if proxyErr != nil {
 			logAPIError(logger, proxyErr, "failed to create DHCP Option Set on Site")
 			return cutil.NewAPIError(proxyErr.Code, proxyErr.Message, nil)
 		}
 
-		// Core's create is complete when it returns, so record its version and mark the set Ready
-		dos, derr = dosDAO.Update(ctx, tx, cdbm.DhcpOptionSetUpdateInput{
-			DhcpOptionSetID: dos.ID,
+		// Core's create is complete when it returns, so record the set as Ready with its version in a single write.
+		dos, derr := dosDAO.Create(ctx, tx, cdbm.DhcpOptionSetCreateInput{
+			DhcpOptionSetID: &dosID,
+			Name:            apiRequest.Name,
+			Description:     apiRequest.Description,
+			TenantOrg:       org,
+			SiteID:          site.ID,
+			TenantID:        orgTenant.ID,
+			Options:         &cdbm.DhcpOptions{DhcpOptions: coreReq.Options},
+			Labels:          apiRequest.Labels,
+			Status:          cdbm.DhcpOptionSetStatusReady,
 			Version:         cutil.GetPtr(coreResp.GetDhcpOptionSet().GetVersion()),
-			Status:          cutil.GetPtr(cdbm.DhcpOptionSetStatusReady),
+			CreatedBy:       dbUser.ID,
 		})
 		if derr != nil {
-			logger.Error().Err(derr).Msg("error recording Site version for DHCP Option Set")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to record version for DHCP Option Set", nil)
+			logger.Error().Err(derr).Msg("unable to create DHCP Option Set record in DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed creating DHCP Option Set record", nil)
 		}
 
 		ssd, derr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
@@ -272,15 +266,17 @@ func (gadosh GetAllDhcpOptionSetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
+	apiRequest := model.APIDhcpOptionSetGetAllRequest{}
 	pageRequest := pagination.PageRequest{}
-	err := common.ValidateKnownQueryParams(c.QueryParams(), struct {
-		SiteID          []string `query:"siteId"`
-		Status          []string `query:"status"`
-		Query           *string  `query:"query"`
-		IncludeRelation []string `query:"includeRelation"`
-	}{}, pageRequest)
+	err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pageRequest)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	err = c.Bind(&apiRequest)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding query parameters into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request query parameters", nil)
 	}
 
 	err = c.Bind(&pageRequest)
@@ -299,10 +295,9 @@ func (gadosh GetAllDhcpOptionSetHandler) Handle(c echo.Context) error {
 
 	// The siteId parameter repeats to filter on more than one Site, and the Tenant has to have access to every one of them.
 	var siteIDs []uuid.UUID
-	siteIDStrs := qParams["siteId"]
-	if len(siteIDStrs) > 0 {
-		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs))
-		for _, siteIDStr := range siteIDStrs {
+	if len(apiRequest.SiteID) > 0 {
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteId", apiRequest.SiteID))
+		for _, siteIDStr := range apiRequest.SiteID {
 			site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gadosh.dbSession)
 			if err != nil {
 				if errors.Is(err, common.ErrInvalidID) || errors.Is(err, cdb.ErrDoesNotExist) {
@@ -338,10 +333,9 @@ func (gadosh GetAllDhcpOptionSetHandler) Handle(c echo.Context) error {
 
 	// The status parameter repeats to match more than one Status.
 	var statuses []string
-	qStatuses := qParams["status"]
-	if len(qStatuses) > 0 {
-		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses))
-		for _, status := range qStatuses {
+	if len(apiRequest.Status) > 0 {
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", apiRequest.Status))
+		for _, status := range apiRequest.Status {
 			if !cdbm.DhcpOptionSetStatusMap[cdbm.DhcpOptionSetStatus(status)] {
 				logger.Warn().Str("status", status).Msg("invalid value in status query")
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Status value %v in query", status), nil)
@@ -460,11 +454,16 @@ func (gdosh GetDhcpOptionSetHandler) Handle(c echo.Context) error {
 	}
 
 	qParams := c.QueryParams()
-	err = common.ValidateKnownQueryParams(qParams, struct {
-		IncludeRelation []string `query:"includeRelation"`
-	}{})
+	apiRequest := model.APIDhcpOptionSetGetRequest{}
+	err = common.ValidateKnownQueryParams(qParams, apiRequest)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	err = c.Bind(&apiRequest)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding query parameters into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request query parameters", nil)
 	}
 
 	qIncludeRelations, errMsg := common.GetAndValidateQueryRelations(qParams, cdbm.DhcpOptionSetRelatedEntities)
@@ -600,12 +599,12 @@ func (udosh UpdateDhcpOptionSetHandler) Handle(c echo.Context) error {
 	var updatedDOS *cdbm.DhcpOptionSet
 
 	err = cdb.WithTx(ctx, udosh.dbSession, func(tx *cdb.Tx) error {
-		// Serialize updates of this set so each one merges into the latest stored values and version.
-		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString("dhcp-option-set-update:"+dos.ID.String()), nil)
+		// Serialize updates and deletes of this set so each one acts on the latest stored values and version.
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString("dhcp-option-set:"+dos.ID.String()), nil)
 		if derr != nil {
 			if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
-				logger.Warn().Err(derr).Msg("concurrent DHCP Option Set update detected")
-				return cutil.NewAPIError(http.StatusConflict, "Another update of this DHCP Option Set is in progress, retry the request", nil)
+				logger.Warn().Err(derr).Msg("concurrent DHCP Option Set change detected")
+				return cutil.NewAPIError(http.StatusConflict, "Another request is changing this DHCP Option Set, retry the request", nil)
 			}
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock for DHCP Option Set update")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update DHCP Option Set due to DB error", nil)
@@ -763,27 +762,46 @@ func (ddosh DeleteDhcpOptionSetHandler) Handle(c echo.Context) error {
 	}
 
 	err = cdb.WithTx(ctx, ddosh.dbSession, func(tx *cdb.Tx) error {
-		derr := dosDAO.Delete(ctx, tx, dos.ID)
+		// Shares the per-set lock with updates so a delete can't interleave with an update of this set.
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString("dhcp-option-set:"+dos.ID.String()), nil)
 		if derr != nil {
-			logger.Error().Err(derr).Msg("error deleting DHCP Option Set in DB")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete DHCP Option Set, DB error", nil)
+			if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+				logger.Warn().Err(derr).Msg("concurrent DHCP Option Set change detected")
+				return cutil.NewAPIError(http.StatusConflict, "Another request is changing this DHCP Option Set, retry the request", nil)
+			}
+			logger.Error().Err(derr).Msg("unable to acquire advisory lock for DHCP Option Set deletion")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete DHCP Option Set due to DB error", nil)
 		}
 
-		logger.Info().Str("DHCP Option Set ID", dos.ID.String()).Msg("deleting DHCP Option Set via Core proxy")
+		current, derr := dosDAO.GetByID(ctx, tx, dos.ID, nil)
+		if derr != nil {
+			if errors.Is(derr, cdb.ErrDoesNotExist) {
+				return cutil.NewAPIError(http.StatusNotFound, "Could not retrieve DHCP Option Set to delete", nil)
+			}
+			logger.Error().Err(derr).Msg("error retrieving DHCP Option Set DB entity")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Could not retrieve DHCP Option Set to delete", nil)
+		}
+
+		logger.Info().Str("DHCP Option Set ID", current.ID.String()).Msg("deleting DHCP Option Set via Core proxy")
 
 		// A retry joins a running call. After it closes, Temporal can start a new execution.
-		workflowID := "core-grpc-DeleteDhcpOptionSet-" + dos.ID.String()
+		workflowID := "core-grpc-DeleteDhcpOptionSet-" + current.ID.String()
 		proxyErr := common.ExecuteCoreGRPCWithConflictPolicy(ctx, stc, corev1.Forge_DeleteDhcpOptionSet_FullMethodName,
-			dos.ToDeletionRequestProto(), nil, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, "")
+			current.ToDeletionRequestProto(), nil, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, "")
 		if proxyErr != nil {
 			// A set the Site no longer knows about is already in the state the
 			// caller asked for, so let the deletion proceed.
-			if proxyErr.Code == http.StatusNotFound {
-				logger.Warn().Msg("DHCP Option Set not found on Site, treating as already deleted")
-				return nil
+			if proxyErr.Code != http.StatusNotFound {
+				logAPIError(logger, proxyErr, "failed to delete DHCP Option Set on Site")
+				return cutil.NewAPIError(proxyErr.Code, proxyErr.Message, nil)
 			}
-			logAPIError(logger, proxyErr, "failed to delete DHCP Option Set on Site")
-			return cutil.NewAPIError(proxyErr.Code, proxyErr.Message, nil)
+			logger.Warn().Msg("DHCP Option Set not found on Site, treating as already deleted")
+		}
+
+		derr = dosDAO.Delete(ctx, tx, current.ID)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error deleting DHCP Option Set in DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete DHCP Option Set, DB error", nil)
 		}
 
 		return nil

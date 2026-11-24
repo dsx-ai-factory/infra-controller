@@ -10,6 +10,7 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -170,23 +171,42 @@ func (r *APIDhcpOptionSetCreateRequest) Validate() error {
 	return util.ValidateLabels(r.Labels)
 }
 
-// ToDBOptions returns the requested values as stored options
-func (r *APIDhcpOptionSetCreateRequest) ToDBOptions() *cdbm.DhcpOptions {
-	return &cdbm.DhcpOptions{DhcpOptions: &corev1.DhcpOptions{
-		V4: r.IPv4.applyToV4(nil),
-		V6: r.IPv6.applyToV6(nil),
-	}}
+// ToProto builds the Core request that creates the DhcpOptionSet with ID `dosID` for the Tenant in `org`
+func (r *APIDhcpOptionSetCreateRequest) ToProto(dosID uuid.UUID, org string) *corev1.CreateDhcpOptionSetRequest {
+	metadata := &corev1.Metadata{
+		Name:   r.Name,
+		Labels: cdbm.Labels(r.Labels).ToProto(),
+	}
+	if r.Description != nil {
+		metadata.Description = *r.Description
+	}
+	return &corev1.CreateDhcpOptionSetRequest{
+		Id:                   &corev1.DhcpOptionSetId{Value: dosID.String()},
+		TenantOrganizationId: org,
+		Metadata:             metadata,
+		Options: &corev1.DhcpOptions{
+			V4: r.IPv4.applyToV4(nil),
+			V6: r.IPv6.applyToV6(nil),
+		},
+	}
 }
 
-// ToProto builds the Core request that creates the DhcpOptionSet; `dos` is the just-persisted DB record
-func (r *APIDhcpOptionSetCreateRequest) ToProto(dos *cdbm.DhcpOptionSet) *corev1.CreateDhcpOptionSetRequest {
-	dosProto := dos.ToProto()
-	return &corev1.CreateDhcpOptionSetRequest{
-		Id:                   dosProto.Id,
-		TenantOrganizationId: dosProto.TenantOrganizationId,
-		Metadata:             dosProto.Metadata,
-		Options:              dosProto.Options,
-	}
+// APIDhcpOptionSetGetAllRequest is the data structure to capture the query parameters of a request to list DhcpOptionSets
+type APIDhcpOptionSetGetAllRequest struct {
+	// SiteID filters by Site; repeat it to filter on more than one Site
+	SiteID []string `query:"siteId"`
+	// Status filters by Status; repeat it to match more than one Status
+	Status []string `query:"status"`
+	// Query is the search query
+	Query *string `query:"query"`
+	// IncludeRelation lists the related entities to include in the response
+	IncludeRelation []string `query:"includeRelation"`
+}
+
+// APIDhcpOptionSetGetRequest is the data structure to capture the query parameters of a request to retrieve a DhcpOptionSet
+type APIDhcpOptionSetGetRequest struct {
+	// IncludeRelation lists the related entities to include in the response
+	IncludeRelation []string `query:"includeRelation"`
 }
 
 // APIDhcpOptionSetUpdateRequest is the data structure to capture a user request to update a DhcpOptionSet
@@ -231,8 +251,8 @@ func (r *APIDhcpOptionSetUpdateRequest) Validate() error {
 	return util.ValidateLabels(r.Labels)
 }
 
-// MergeOptions returns the stored options with this request's values applied
-func (r *APIDhcpOptionSetUpdateRequest) MergeOptions(current *cdbm.DhcpOptions) *cdbm.DhcpOptions {
+// mergeOptions returns the stored options with this request's values applied
+func (r *APIDhcpOptionSetUpdateRequest) mergeOptions(current *cdbm.DhcpOptions) *cdbm.DhcpOptions {
 	var stored *corev1.DhcpOptions
 	if current != nil {
 		stored = current.DhcpOptions
@@ -261,7 +281,7 @@ func (r *APIDhcpOptionSetUpdateRequest) ToProto(dos *cdbm.DhcpOptionSet) *corev1
 		Id:                   dosProto.Id,
 		TenantOrganizationId: dosProto.TenantOrganizationId,
 		Metadata:             metadata,
-		Options:              r.MergeOptions(dos.Options).DhcpOptions,
+		Options:              r.mergeOptions(dos.Options).DhcpOptions,
 	}
 	if dos.Version != "" {
 		req.IfVersionMatch = &dos.Version

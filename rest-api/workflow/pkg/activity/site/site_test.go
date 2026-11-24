@@ -1122,6 +1122,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 		vpcPeeringID       uuid.UUID
 		nvllpID            uuid.UUID
 		nsgID              string
+		dhcpOptionSetID    uuid.UUID
 		skuID              string
 		dpuDeploymentID    uuid.UUID
 		interfaceIDs       []uuid.UUID
@@ -1191,6 +1192,17 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 		// Network Security Group
 		nsg := util.TestBuildNetworkSecurityGroup(t, dbSession, "nsg-"+tag, site, tenant, cdbm.NetworkSecurityGroupStatusReady, ipu)
 
+		// DHCP Option Set
+		dos, err := cdbm.NewDhcpOptionSetDAO(dbSession).Create(ctx, nil, cdbm.DhcpOptionSetCreateInput{
+			Name:      "dos-" + tag,
+			TenantOrg: tenant.Org,
+			SiteID:    site.ID,
+			TenantID:  tenant.ID,
+			Status:    cdbm.DhcpOptionSetStatusReady,
+			CreatedBy: tnu.ID,
+		})
+		require.NoError(t, err)
+
 		// DPU extension service + deployment
 		des := util.TestBuildDpuExtensionService(t, dbSession, "des-"+tag, site, tenant, "test-type", cutil.GetPtr("v1"), nil, []string{"v1"}, cdbm.DpuExtensionServiceStatusReady, ipu)
 		desd := util.TestBuildDpuExtensionServiceDeployment(t, dbSession, des.ID, site.ID, tenant.ID, instance.ID, "v1", cdbm.DpuExtensionServiceStatusReady, ipu)
@@ -1238,6 +1250,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 			vpcPeeringID:       vpcPeering.ID,
 			nvllpID:            nvllp.ID,
 			nsgID:              nsg.ID,
+			dhcpOptionSetID:    dos.ID,
 			skuID:              sku.ID,
 			dpuDeploymentID:    desd.ID,
 			interfaceIDs:       []uuid.UUID{iface1.ID, iface2.ID},
@@ -1335,6 +1348,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	assertGone("ssh_key_group_site_association", &cdbm.SSHKeyGroupSiteAssociation{}, "skgsa.id", site1Resources.sshKeyGroupSiteID)
 	assertGone("ssh_key_group_instance_association", &cdbm.SSHKeyGroupInstanceAssociation{}, "skgia.id", site1Resources.sshKeyGroupInstID)
 	assertGone("network_security_group", &cdbm.NetworkSecurityGroup{}, "nsg.id", site1Resources.nsgID)
+	assertGone("dhcp_option_set", &cdbm.DhcpOptionSet{}, "dos.id", site1Resources.dhcpOptionSetID)
 	assertGone("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site1Resources.dpuDeploymentID)
 	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
 	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
@@ -1362,6 +1376,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	assertPresent("ssh_key_group_site_association", &cdbm.SSHKeyGroupSiteAssociation{}, "skgsa.id", site2Resources.sshKeyGroupSiteID)
 	assertPresent("ssh_key_group_instance_association", &cdbm.SSHKeyGroupInstanceAssociation{}, "skgia.id", site2Resources.sshKeyGroupInstID)
 	assertPresent("network_security_group", &cdbm.NetworkSecurityGroup{}, "nsg.id", site2Resources.nsgID)
+	assertPresent("dhcp_option_set", &cdbm.DhcpOptionSet{}, "dos.id", site2Resources.dhcpOptionSetID)
 	assertPresent("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site2Resources.dpuDeploymentID)
 	assertPresent("sku", &cdbm.SKU{}, "sk.id", site2Resources.skuID)
 	assertPresent("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site2Resources.expectedMachineID)
