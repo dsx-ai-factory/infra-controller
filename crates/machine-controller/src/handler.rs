@@ -5043,6 +5043,18 @@ pub async fn try_wait_for_dpu_discovery(
     Ok(None)
 }
 
+/// The DPU firmware components whose versions [`check_fw_component_version`]
+/// checks, in order, and the name their firmware inventory `Id` contains.
+const DPU_FIRMWARE_COMPONENTS: [(FirmwareComponentType, &str); 3] = [
+    // BF2 names its BMC firmware 6d53cf4d_BMC_Firmware; BF3 names it BMC_Firmware.
+    (FirmwareComponentType::Bmc, "BMC_Firmware"),
+    (FirmwareComponentType::Cec, "Bluefield_FW_ERoT"),
+    (FirmwareComponentType::Nic, "DPU_NIC"),
+];
+
+/// The firmware inventory `Id` of a DPU's UEFI.
+const DPU_UEFI_INVENTORY_ID: &str = "DPU_UEFI";
+
 /// Returns Option<StateHandlerOutcome>:
 ///     If Some(_) means at least one fw component is not updated.
 ///     If None: All fw components are updated.
@@ -5052,35 +5064,25 @@ async fn check_fw_component_version(
     dpu_snapshot: &DpuMachine,
     hardware_models: &FirmwareConfigSnapshot,
 ) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
-    let redfish_component_name_map = HashMap::from([
-        // Note: DPU uses different name for BMC Firmware as
-        // BF2: 6d53cf4d_BMC_Firmware
-        // BF3: BMC_Firmware
-        (FirmwareComponentType::Nic, "DPU_NIC"),
-        (FirmwareComponentType::Bmc, "BMC_Firmware"),
-        (FirmwareComponentType::Uefi, "DPU_UEFI"),
-        (FirmwareComponentType::Cec, "Bluefield_FW_ERoT"),
-    ]);
     let inventories = bmc
         .firmware()
         .map_err(|e| platform_error("firmware", e.into()))?
-        .inventory()
+        .inventory_matching(|id| {
+            id == DPU_UEFI_INVENTORY_ID
+                || DPU_FIRMWARE_COMPONENTS
+                    .iter()
+                    .any(|(_, component_name)| id.contains(component_name))
+        })
         .await
         .map_err(|e| platform_error("firmware_inventory", e))?;
 
-    for component in [
-        FirmwareComponentType::Bmc,
-        FirmwareComponentType::Cec,
-        FirmwareComponentType::Nic,
-    ] {
-        let component_name = redfish_component_name_map.get(&component).unwrap();
+    for (component, component_name) in DPU_FIRMWARE_COMPONENTS {
         let inventory = inventories
             .iter()
             .find(|i| i.id.contains(component_name))
             .ok_or_else(|| {
-                let inventory_ids: Vec<_> = inventories.iter().map(|i| i.id.as_str()).collect();
                 StateHandlerError::FirmwareUpdateError(eyre!(
-                    "no inventory found that matches redfish component name: {component_name}; inventory list: {inventory_ids:#?}",
+                    "no inventory found that matches redfish component name: {component_name}",
                 ))
             })?;
 
@@ -5160,7 +5162,7 @@ async fn check_fw_component_version(
         {
             let bios_version: String = inventories
                 .iter()
-                .find(|i| i.id == "DPU_UEFI")
+                .find(|i| i.id == DPU_UEFI_INVENTORY_ID)
                 .and_then(|uefi| uefi.version.clone().flatten())
                 .unwrap_or_else(|| {
                     dpu_snapshot
@@ -5284,6 +5286,17 @@ async fn dpu_redfish_client(
         .map_err(|e| format!("Waiting for RedFish to become available: {e:?}"))
 }
 
+/// The DPU's BMC through the site's `bmc_backend`, or the reason to wait for it.
+async fn connect_dpu_bmc(
+    services: &MachineStateHandlerServices,
+    dpu_snapshot: &DpuMachine,
+) -> Result<BackendBmc, String> {
+    services
+        .connect_bmc(dpu_snapshot)
+        .await
+        .map_err(|e| format!("Waiting for RedFish to become available: {e:?}"))
+}
+
 impl DpuMachineStateHandler {
     pub fn new(
         dpu_nic_firmware_initial_update_enabled: bool,
@@ -5335,13 +5348,9 @@ impl DpuMachineStateHandler {
                 Ok(StateHandlerOutcome::transition(next_state))
             }
             DpuDiscoveringState::EnableRshim => {
-                let bmc = match ctx.services.connect_bmc(dpu_snapshot).await {
+                let bmc = match connect_dpu_bmc(ctx.services, dpu_snapshot).await {
                     Ok(bmc) => bmc,
-                    Err(e) => {
-                        return Ok(StateHandlerOutcome::wait(format!(
-                            "Waiting for RedFish to become available: {e:?}"
-                        )));
-                    }
+                    Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
                 };
                 async { bmc.dpu()?.enable_bmc_rshim().await }
                     .await
@@ -5417,13 +5426,9 @@ impl DpuMachineStateHandler {
                 // guaranteed to have POSTed), it will loop through all the interfaces between
                 // IPv4, IPv6 so it may take a while.
                 //
-                let bmc = match ctx.services.connect_bmc(dpu_snapshot).await {
+                let bmc = match connect_dpu_bmc(ctx.services, dpu_snapshot).await {
                     Ok(bmc) => bmc,
-                    Err(e) => {
-                        return Ok(StateHandlerOutcome::wait(format!(
-                            "Waiting for RedFish to become available: {e:?}"
-                        )));
-                    }
+                    Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
                 };
                 platform_config::boot_http_once(&bmc)
                     .await
@@ -5963,13 +5968,9 @@ impl DpuMachineStateHandler {
         let time_since_state_change: chrono::TimeDelta =
             state.host_snapshot.state.version.since_state_change();
 
-        let bmc = match services.connect_bmc(dpu_snapshot).await {
+        let bmc = match connect_dpu_bmc(services, dpu_snapshot).await {
             Ok(bmc) => bmc,
-            Err(e) => {
-                return Ok(StateHandlerOutcome::wait(format!(
-                    "Waiting for RedFish to become available: {e:?}"
-                )));
-            }
+            Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
         };
         let wait_for_dpu_to_come_up = if time_since_state_change.num_minutes() > 5 {
             false
