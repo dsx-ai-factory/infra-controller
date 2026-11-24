@@ -25,7 +25,8 @@
 # Checks (in order — fails fast so the most actionable issues appear first):
 #   1. Environment variables:    presence and format
 #   2. Required tools:           helm, helmfile, kubectl, jq, ssh-keygen
-#                                Core VIP validation also needs python3 + PyYAML
+#                                Core VIP validation and the DPF CoreDNS
+#                                default also need python3 + PyYAML
 #   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
 #   4. Cluster reachability:     kubectl can reach the API server
 #   5. Node resources:           at least 3 schedulable (Ready + untainted) nodes

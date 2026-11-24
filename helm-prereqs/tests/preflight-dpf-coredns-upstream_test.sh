@@ -29,6 +29,7 @@ values="${TEST_TMP_DIR}/values.yaml"
 cases=(
     "single VIP|nameservers: \"10.0.0.53\"|10.0.0.53"
     "comma list|nameservers: \"10.0.0.53, 10.0.0.54\"|10.0.0.53, 10.0.0.54"
+    "YAML list|nameservers: [\"10.0.0.53\"]|"
     "empty value|nameservers: \"\"|"
     "no nico-dhcp||"
 )
@@ -113,6 +114,7 @@ cases=(
     "file value is the default, commas become spaces|-|10.0.0.53, 10.0.0.54|false||10.0.0.53 10.0.0.54"
     "file value with --skip-core|-|10.0.0.53|true||10.0.0.53"
     "exported value wins, commas become spaces|10.0.0.60,10.0.0.61|10.0.0.53|false||10.0.0.60 10.0.0.61"
+    "exported value with no resolver falls back to the file|, |10.0.0.53|false||10.0.0.53"
     "second run reads the changed file|-|10.0.0.60|false|10.0.0.53|10.0.0.60"
     "no value is an error|-||false||"
 )
