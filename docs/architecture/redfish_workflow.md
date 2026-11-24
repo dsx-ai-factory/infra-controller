@@ -86,9 +86,10 @@ With an authenticated session, Site Explorer queries a comprehensive set of Redf
 
 The saved report retains serials on their source systems, chassis, and Assembly
 members. For the host ExpectedMachine audit, `site_explorer.host_serial_rules`
-selects a serial from that report. Site rules run before built-ins. If no rule
-yields a usable serial, the audit checks the primary-system serial, SKU, and
-chassis serials. Assembly collection follows the chassis patterns from all
+selects a serial from that report. If no site rule yields a usable value, the
+audit accepts the primary-system serial, the SKU, or the tray serial selected by
+a built-in rule. If no built-in rule finds a tray serial, chassis serials are
+also eligible. Assembly collection follows the chassis patterns from all
 assembly rules. See [Select the host inventory serial number](../provisioning/ingesting-hosts.md#select-the-host-inventory-serial-number)
 for selectors, precedence, and rollout.
 

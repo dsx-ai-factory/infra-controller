@@ -309,12 +309,13 @@ Site rules run in declaration order, followed by the built-in chassis FRU
 rules. Within a rule, matching chassis and their assembly members are tried
 in report order. Missing or whitespace-only serials are skipped. The first
 usable serial is trimmed and compared case-sensitively with the declared
-ExpectedMachine serial. That choice is authoritative even when another field
-matches the expected value.
+ExpectedMachine serial. A site rule's choice is authoritative even when
+another field matches the expected value.
 
-If no rule yields a serial, the audit accepts a matching primary-system serial,
-primary-system SKU, or chassis serial. The system and SKU fallback comparisons
-use the stored values directly, and the chassis fallback trims its serial.
+If no site rule yields a serial, the audit accepts the primary system's
+`SerialNumber` or `SKU` exactly as stored. These identifiers remain valid
+after a refresh adds Assembly data. The audit also accepts the built-in tray
+serial, or a matching trimmed chassis serial if no built-in rule yields a value.
 An older report can contain a tray serial in the chassis `SerialNumber` field.
 A `chassis` rule or the chassis fallback uses the stored value until a
 successful exploration replaces the report.

@@ -50,14 +50,12 @@ fn toml_round_trip_preserves_site_precedence_and_hardware_class() {
         (Some("other"), &[&serial][..]),
         (None, &[&serial][..]),
     ] {
-        let expected: Vec<_> = site_sources
-            .iter()
-            .copied()
-            .chain(defaults.sources(None))
-            .collect();
         assert_eq!(
-            saved.host_serial_rules.sources(class).collect::<Vec<_>>(),
-            expected,
+            saved
+                .host_serial_rules
+                .site_sources(class)
+                .collect::<Vec<_>>(),
+            site_sources,
             "{class:?}"
         );
     }
@@ -67,7 +65,6 @@ fn toml_round_trip_preserves_site_precedence_and_hardware_class() {
 fn default_sources_select_the_chassis_fru_by_its_exact_name_and_model() {
     use crate::pattern::exact;
 
-    let defaults = HostSerialRules::default();
     for (name, model) in [
         ("PDB Chassis FRU Assembly0", "GB200 NVL"),
         (
@@ -84,7 +81,7 @@ fn default_sources_select_the_chassis_fru_by_its_exact_name_and_model() {
             member_id: None,
         };
         assert!(
-            defaults.sources(None).any(|source| source == &expected),
+            HostSerialRules::built_in_sources(None).any(|source| source == &expected),
             "{name} / {model}"
         );
     }

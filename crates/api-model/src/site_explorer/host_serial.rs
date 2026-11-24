@@ -32,63 +32,72 @@ fn matches_field(pattern: Option<&Pattern>, value: Option<&str>) -> bool {
 }
 
 impl EndpointExplorationReport {
-    /// Returns the first usable host serial selected by a site or built-in rule.
-    /// Rules are evaluated independently of the expected serial.
-    fn host_inventory_serial_number(&self, rules: &HostSerialRules) -> Option<&str> {
-        rules
-            .sources(self.hardware_class.as_deref())
-            .find_map(|source| match source {
-                HostSerialSource::SystemSerial {} => self
-                    .primary_system()?
-                    .serial_number
-                    .as_deref()
-                    .and_then(usable_serial),
-                HostSerialSource::SystemSku {} => self
-                    .primary_system()?
-                    .sku
-                    .as_deref()
-                    .and_then(usable_serial),
-                HostSerialSource::Chassis { chassis_id } => self
-                    .chassis
-                    .iter()
-                    .filter(|chassis| chassis_id.matches(&chassis.id))
-                    .find_map(|chassis| chassis.serial_number.as_deref().and_then(usable_serial)),
-                HostSerialSource::ChassisAssembly {
-                    chassis_id,
-                    name,
-                    model,
-                    member_id,
-                } => self
-                    .chassis
-                    .iter()
-                    .filter(|chassis| chassis_id.matches(&chassis.id))
-                    .flat_map(|chassis| &chassis.assemblies)
-                    .filter(|assembly| {
-                        matches_field(name.as_ref(), assembly.name.as_deref())
-                            && matches_field(model.as_ref(), assembly.model.as_deref())
-                            && matches_field(member_id.as_ref(), Some(&assembly.member_id))
-                    })
-                    .find_map(|assembly| assembly.serial_number.as_deref().and_then(usable_serial)),
-            })
+    fn first_usable_serial<'a>(
+        &self,
+        mut sources: impl Iterator<Item = &'a HostSerialSource>,
+    ) -> Option<&str> {
+        sources.find_map(|source| match source {
+            HostSerialSource::SystemSerial {} => self
+                .primary_system()?
+                .serial_number
+                .as_deref()
+                .and_then(usable_serial),
+            HostSerialSource::SystemSku {} => self
+                .primary_system()?
+                .sku
+                .as_deref()
+                .and_then(usable_serial),
+            HostSerialSource::Chassis { chassis_id } => self
+                .chassis
+                .iter()
+                .filter(|chassis| chassis_id.matches(&chassis.id))
+                .find_map(|chassis| chassis.serial_number.as_deref().and_then(usable_serial)),
+            HostSerialSource::ChassisAssembly {
+                chassis_id,
+                name,
+                model,
+                member_id,
+            } => self
+                .chassis
+                .iter()
+                .filter(|chassis| chassis_id.matches(&chassis.id))
+                .flat_map(|chassis| &chassis.assemblies)
+                .filter(|assembly| {
+                    matches_field(name.as_ref(), assembly.name.as_deref())
+                        && matches_field(model.as_ref(), assembly.model.as_deref())
+                        && matches_field(member_id.as_ref(), Some(&assembly.member_id))
+                })
+                .find_map(|assembly| assembly.serial_number.as_deref().and_then(usable_serial)),
+        })
     }
 
-    /// Checks the selected inventory serial. Reports without a usable rule retain the
-    /// system serial, SKU and chassis fallbacks used by the ExpectedMachine audit.
+    /// A usable site override is authoritative. Otherwise the primary-system serial
+    /// and SKU remain valid alongside the built-in tray or fallback chassis serial.
     pub fn matches_expected_serial_number(&self, expected: &str, rules: &HostSerialRules) -> bool {
         let is_host = !(self.is_dpu() || self.is_switch() || self.is_power_shelf());
-        if is_host && let Some(serial) = self.host_inventory_serial_number(rules) {
+        let class = self.hardware_class.as_deref();
+        if is_host && let Some(serial) = self.first_usable_serial(rules.site_sources(class)) {
             return serial == expected;
         }
-        self.primary_system()
+        if self
+            .primary_system()
             .is_some_and(|s| s.check_serial_number(expected) || s.check_sku(expected))
-            || self.chassis.iter().any(|chassis| {
-                let serial = if is_host {
-                    chassis.serial_number.as_deref().map(str::trim)
-                } else {
-                    chassis.inventory_serial_number()
-                };
-                serial == Some(expected)
-            })
+        {
+            return true;
+        }
+        if is_host
+            && let Some(serial) = self.first_usable_serial(HostSerialRules::built_in_sources(class))
+        {
+            return serial == expected;
+        }
+        self.chassis.iter().any(|chassis| {
+            let serial = if is_host {
+                chassis.serial_number.as_deref().map(str::trim)
+            } else {
+                chassis.inventory_serial_number()
+            };
+            serial == Some(expected)
+        })
     }
 }
 
@@ -141,8 +150,6 @@ mod tests {
                     "TRAY" => true,
                     "163XXXXXXXXXX" => false,
                     "BOARD" => false,
-                    "SYSTEM" => false,
-                    "SKU" => false,
                 }
             );
         }
@@ -191,17 +198,17 @@ mod tests {
                 {"MemberId":"0","Name":"PDB Chassis FRU Assembly0","Model":"GB200 NVL","SerialNumber":"BUILT-IN"}
             ]),
         );
-        assert_eq!(report.host_inventory_serial_number(&rules), Some("SITE"));
+        assert!(report.matches_expected_serial_number("SITE", &rules));
+        assert!(!report.matches_expected_serial_number("BUILT-IN", &rules));
         report.hardware_class = None;
-        assert_eq!(report.host_inventory_serial_number(&rules), Some("SKU"));
+        assert!(report.matches_expected_serial_number("SKU", &rules));
+        assert!(!report.matches_expected_serial_number("SYSTEM", &rules));
         report.hardware_class = Some("other".into());
-        assert_eq!(report.host_inventory_serial_number(&rules), Some("SYSTEM"));
+        assert!(report.matches_expected_serial_number("SYSTEM", &rules));
+        assert!(!report.matches_expected_serial_number("SKU", &rules));
         report.systems[0].serial_number = None;
         report.systems[0].sku = Some("  ".into());
-        assert_eq!(
-            report.host_inventory_serial_number(&rules),
-            Some("BUILT-IN")
-        );
+        assert!(report.matches_expected_serial_number("BUILT-IN", &rules));
     }
 
     #[test]
@@ -215,15 +222,15 @@ mod tests {
                 {"Id":"Tray_2","SerialNumber":"CHASSIS-2","Assemblies":[{"MemberId":"0","Name":"Tray FRU","SerialNumber":"FRU-2"}]}
             ]
         })).unwrap();
-        value_scenarios!(run = |source: Value| {
+        value_scenarios!(run = |(source, expected): (Value, &str)| {
             let rules = serde_json::from_value(json!([{"id":"site", "source":source}])).unwrap();
-            report.host_inventory_serial_number(&rules)
+            report.matches_expected_serial_number(expected, &rules)
         };
             "first matching chassis with a serial" {
-                json!({"kind":"chassis","chassis_id":{"prefix":"tray_"}}) => Some("CHASSIS-1"),
+                (json!({"kind":"chassis","chassis_id":{"prefix":"tray_"}}), "CHASSIS-1") => true,
             }
             "first matching chassis with a usable FRU" {
-                json!({"kind":"chassis_assembly","chassis_id":{"contains":"RAY_"},"name":{"exact":"Tray FRU"}}) => Some("FRU-1"),
+                (json!({"kind":"chassis_assembly","chassis_id":{"contains":"RAY_"},"name":{"exact":"Tray FRU"}}), "FRU-1") => true,
             }
         );
     }
@@ -244,19 +251,32 @@ mod tests {
     }
 
     #[test]
-    fn legacy_reports_use_the_stored_chassis_serial() {
-        let report: EndpointExplorationReport = serde_json::from_value(json!({
+    fn refresh_preserves_system_serial_sku_and_tray_matches_without_a_site_override() {
+        let legacy: EndpointExplorationReport = serde_json::from_value(json!({
             "EndpointType":"Bmc",
             "Systems":[{"Id":"System","SerialNumber":"SYSTEM","Sku":"SKU"}],
-            "Chassis":[{"Id":"Chassis_0","SerialNumber":"LEGACY"}]
+            "Chassis":[{"Id":"Chassis_0","SerialNumber":"TRAY"}]
         }))
         .unwrap();
-        let rules = HostSerialRules::default();
-        value_scenarios!(run = |expected: &str| report.matches_expected_serial_number(expected, &rules);
-            "legacy inventory candidates" {
-                "SYSTEM" => true, "SKU" => true, "LEGACY" => true, "OTHER" => false,
-            }
+        let fresh = report(
+            "Chassis_0",
+            json!([
+                {"MemberId":"0","Name":"PDB Chassis FRU Assembly0","Model":"GB200 NVL","SerialNumber":"TRAY"}
+            ]),
         );
+        let missing_source = serde_json::from_value(json!([{
+            "id":"site-other-tray","source":{"kind":"chassis","chassis_id":{"exact":"OtherTray"}}
+        }]))
+        .unwrap();
+        for rules in [HostSerialRules::default(), missing_source] {
+            for report in [&legacy, &fresh] {
+                value_scenarios!(run = |expected: &str| report.matches_expected_serial_number(expected, &rules);
+                    "identifiers accepted before and after re-exploration" {
+                        "SYSTEM" => true, "SKU" => true, "TRAY" => true, "BOARD" => false, "OTHER" => false,
+                    }
+                );
+            }
+        }
     }
 
     #[test]
@@ -273,6 +293,8 @@ mod tests {
         );
         assert!(report.matches_expected_serial_number("BOARD", &rules));
         assert!(!report.matches_expected_serial_number("TRAY", &rules));
+        assert!(!report.matches_expected_serial_number("SYSTEM", &rules));
+        assert!(!report.matches_expected_serial_number("SKU", &rules));
         report.chassis.push(Chassis {
             id: "MGX_NVSwitch_0".into(),
             ..Default::default()

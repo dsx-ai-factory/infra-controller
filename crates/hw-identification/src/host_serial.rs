@@ -86,12 +86,27 @@ impl HostSerialRules {
         self.0.iter().chain(DEFAULT_HOST_SERIAL_RULES)
     }
 
-    /// Sources in precedence order. Class-specific rules require an observed hardware class.
-    pub fn sources<'a>(
+    /// Site overrides in declaration order for this hardware class.
+    pub fn site_sources<'a>(
         &'a self,
         hardware_class: Option<&'a str>,
     ) -> impl Iterator<Item = &'a HostSerialSource> {
-        self.rules()
+        Self::matching_sources(&self.0, hardware_class)
+    }
+
+    /// Built-in inventory sources for hosts without a usable site override.
+    pub fn built_in_sources(
+        hardware_class: Option<&str>,
+    ) -> impl Iterator<Item = &HostSerialSource> {
+        Self::matching_sources(DEFAULT_HOST_SERIAL_RULES, hardware_class)
+    }
+
+    fn matching_sources<'a>(
+        rules: &'a [HostSerialRule],
+        hardware_class: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a HostSerialSource> {
+        rules
+            .iter()
             .filter(move |rule| {
                 rule.hardware_class.as_ref().is_none_or(|pattern| {
                     hardware_class.is_some_and(|class| pattern.matches(class))
