@@ -163,8 +163,8 @@ impl BmcConnector {
     }
 
     /// Connects to an unexplored BMC at `access` with explicit `credentials`
-    /// for pre-exploration account operations (such as initial factory
-    /// takeover), always bypassing `nico-bmc-proxy`.
+    /// to change its password, always bypassing `nico-bmc-proxy`. The drivers
+    /// are selected from its live service root.
     pub async fn connect_unexplored_with_credentials(
         &self,
         access: &BmcAccessInfo,

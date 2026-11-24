@@ -2282,8 +2282,9 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: shared_redfish_pool.clone(),
-                bmc_connector: BmcConnector::new(
+                bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
+                    bmc_credential_ops.clone(),
                     driver_connector.clone(),
                 ),
                 bmc_credential_ops: bmc_credential_ops.clone(),
@@ -2573,11 +2574,11 @@ async fn initialize_and_start_controllers<'a>(
                     .power_shelf_state_controller
                     .rack_firmware_reprovisioning_enabled,
                 redfish_client_pool: shared_redfish_pool.clone(),
-                bmc_connector: BmcConnector::new(
+                bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
+                    bmc_credential_ops.clone(),
                     driver_connector.clone(),
                 ),
-                bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
                 ),
@@ -2664,11 +2665,11 @@ async fn initialize_and_start_controllers<'a>(
                     .effective_switch_mtls_services_as_i32(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
                 redfish_client_pool: shared_redfish_pool.clone(),
-                bmc_connector: BmcConnector::new(
+                bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
+                    bmc_credential_ops.clone(),
                     driver_connector.clone(),
                 ),
-                bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
                 ),

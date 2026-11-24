@@ -119,7 +119,6 @@ fn power_shelf_services(
         rack_firmware_reprovisioning_enabled: false,
         redfish_client_pool: env.redfish_sim.clone(),
         bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
-        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: RotationGate::new_for_family(CredentialRotationType::Bmc),
         bmc_rotation_enabled,
     }

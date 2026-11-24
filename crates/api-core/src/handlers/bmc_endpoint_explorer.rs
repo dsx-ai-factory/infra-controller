@@ -1403,11 +1403,18 @@ pub(crate) async fn set_bmc_root_password(
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report =
+        db::explored_endpoints::find_report_by_ip(&api.database_connection, bmc_addr.ip()).await?;
 
     tracing::info!(bmc_address = %bmc_addr, "Setting BMC root password");
 
     api.bmc_client
-        .set_bmc_root_password(bmc_addr, &machine_interface, &req.new_password)
+        .set_bmc_root_password(
+            bmc_addr,
+            &machine_interface,
+            report.as_ref(),
+            &req.new_password,
+        )
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1461,11 +1468,14 @@ async fn do_create_bmc_user(
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report =
+        db::explored_endpoints::find_report_by_ip(&api.database_connection, bmc_addr.ip()).await?;
 
     api.bmc_client
         .create_bmc_user(
             bmc_addr,
             &machine_interface,
+            report.as_ref(),
             create_username,
             create_password,
             create_role_id,
@@ -1483,9 +1493,11 @@ async fn do_delete_bmc_user(
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report =
+        db::explored_endpoints::find_report_by_ip(&api.database_connection, bmc_addr.ip()).await?;
 
     api.bmc_client
-        .delete_bmc_user(bmc_addr, &machine_interface, delete_user)
+        .delete_bmc_user(bmc_addr, &machine_interface, report.as_ref(), delete_user)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
