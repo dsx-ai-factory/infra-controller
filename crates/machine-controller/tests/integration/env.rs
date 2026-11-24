@@ -240,6 +240,7 @@ impl EnvBuilder {
             ),
             // Zero TTL for the same reason as the BMC gate above.
             dpf_per_dpu_bmc_credentials,
+            dpf_rotation_locks: Some(api.work_lock_manager_handle()),
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::with_ttl_and_family(
                     std::time::Duration::ZERO,

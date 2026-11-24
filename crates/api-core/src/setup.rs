@@ -2303,6 +2303,7 @@ async fn initialize_and_start_controllers<'a>(
                 dpf_per_dpu_bmc_credentials: dpf_sdk
                     .as_ref()
                     .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
+                dpf_rotation_locks: Some(work_lock_manager_handle.clone()),
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,

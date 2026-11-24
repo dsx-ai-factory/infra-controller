@@ -427,6 +427,7 @@ mod tests {
             dpu_bmc_service_rotation_gate: gate(CredentialRotationType::DpuBmcService),
             nic_lockdown_rotation_gate: gate(CredentialRotationType::LockdownIkm),
             dpf_per_dpu_bmc_credentials: true,
+            dpf_rotation_locks: None,
             per_object_metrics_registry: carbide_health_metrics::PerObjectMetricsRegistry::new(
                 Vec::new(),
                 Duration::from_secs(60),

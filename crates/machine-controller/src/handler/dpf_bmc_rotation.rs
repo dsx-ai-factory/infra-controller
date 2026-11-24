@@ -3,13 +3,16 @@
 
 use std::time::Duration;
 
+use carbide_credential_rotation::site_explorer_pause::GateDecision;
 use carbide_credential_rotation::{RotationStep, advance, site_explorer_pause};
 use carbide_dpf::{BmcCredentialFailureReason, BmcCredentialHealth, BmcCredentialObservation};
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials, DpfBmcRotationCandidate,
 };
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use chrono::Utc;
 use db::credential_rotation::CredentialRotationType;
+use db::work_lock_manager::AcquireLockError;
 use db::{TransactionVending as _, dpf_bmc_rotation as recovery};
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::machine::dpf_bmc_rotation::{
@@ -32,6 +35,15 @@ const REFERENCE_UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 const REFERENCE_RETRY_DELAY: chrono::Duration = chrono::Duration::seconds(5);
 
 type Outcome = StateHandlerOutcome<ManagedHostState>;
+
+enum RotationWrite<'a> {
+    None,
+    SuppressExploration,
+    ClearRequest(MachineId),
+    InsertRecovery(recovery::Recovery),
+    CheckpointDpu(&'a DpfDpuBmcRotation),
+    ResumeExploration,
+}
 
 pub(super) fn start(mh: &ManagedHostStateSnapshot) -> DpfBmcRotation {
     DpfBmcRotation {
@@ -68,52 +80,36 @@ pub(super) async fn handle(
         ));
     };
     let host = &mh.host_snapshot;
-    let host_id = host.id.to_string();
-    let mut txn = services
-        .db_pool
-        .txn_begin()
-        .await
-        .map_err(StateHandlerError::from_transaction)?;
-    recovery::lock_host(&mut txn, &host_id).await?;
-    if !db::machine::find_one(&mut *txn, &host.id, MachineSearchConfig::default())
+    let manager = services
+        .dpf_rotation_locks
+        .as_ref()
+        .ok_or_else(|| retry("DPF BMC rotation work lock manager is unavailable"))?;
+    let lease = match manager.try_acquire_lock(recovery::work_key(host.id)).await {
+        Ok(lease) => lease,
+        Err(AcquireLockError::WorkAlreadyLocked(_)) => {
+            return Ok(Outcome::wait(
+                "waiting for DPF BMC work on this host".to_string(),
+            ));
+        }
+        Err(error) => return Err(StateHandlerError::GenericError(error.into())),
+    };
+    if !db::machine::find_one(&services.db_pool, &host.id, MachineSearchConfig::default())
         .await?
         .is_some_and(|live| live.state.version == host.state.version)
     {
         return Ok(Outcome::do_nothing());
     }
 
+    let mut bmc_macs = rotation.bmc_macs.clone();
+    let mut write = RotationWrite::None;
     let phase = match &rotation.phase {
         Phase::SuppressExploration => {
-            for &mac in &rotation.bmc_macs {
-                db::bmc_suppression::upsert(
-                    &mut txn,
-                    &NewBmcSuppression {
-                        bmc_mac_address: mac,
-                        subsystem: BmcSuppressionSubsystem::SiteExplorer,
-                        source: SOURCE,
-                        reason: "DPF BMC credential rotation".to_string(),
-                    },
-                )
-                .await?;
-            }
+            write = RotationWrite::SuppressExploration;
             Phase::AwaitExplorationSuppression
         }
         Phase::AwaitExplorationSuppression => {
-            let rows = db::bmc_suppression::find_many(
-                &mut *txn,
-                &rotation.bmc_macs,
-                BmcSuppressionSubsystem::SiteExplorer,
-                SOURCE,
-            )
-            .await?;
-            if !rotation.bmc_macs.iter().all(|mac| {
-                rows.iter()
-                    .any(|row| row.bmc_mac_address == *mac && row.acknowledged_at.is_some())
-            }) {
-                return Ok(Outcome::wait(
-                    "waiting for site-explorer to acknowledge the BMC rotation suppression"
-                        .to_string(),
-                ));
+            if !exploration_paused(services, &bmc_macs).await? {
+                return Ok(wait_for_exploration());
             }
             Phase::RotateHost
         }
@@ -134,11 +130,7 @@ pub(super) async fn handle(
                 }
                 RotationStep::Settled => {
                     if host.bmc_credential_rotation_requested {
-                        db::machine::clear_bmc_credential_rotation_requested(
-                            &mut txn,
-                            &host.id.into(),
-                        )
-                        .await?;
+                        write = RotationWrite::ClearRequest(host.id.into());
                     }
                     Phase::RotateDpus {
                         completed: Vec::new(),
@@ -154,14 +146,50 @@ pub(super) async fn handle(
         Phase::RotateDpus {
             completed,
             current: None,
-        } => match select_dpu(&mut txn, mh, services, sdk, completed).await? {
-            Selection::Work(current) => Phase::RotateDpus {
-                completed: completed.clone(),
-                current: Some(Box::new(current)),
-            },
-            Selection::Wait(reason) => return Ok(Outcome::wait(reason)),
-            Selection::Complete => Phase::ResumeExploration,
-        },
+        } => {
+            for mac in start(mh).bmc_macs {
+                if !bmc_macs.contains(&mac) {
+                    bmc_macs.push(mac);
+                }
+            }
+            if bmc_macs != rotation.bmc_macs {
+                write = RotationWrite::SuppressExploration;
+                rotation.phase.clone()
+            } else {
+                if !exploration_paused(services, &bmc_macs).await? {
+                    return Ok(wait_for_exploration());
+                }
+                match select_dpu(mh, services, sdk, completed).await? {
+                    Selection::Work(current) => {
+                        write = RotationWrite::InsertRecovery(recovery::Recovery {
+                            operation_id: current.operation_id,
+                            device_mac: current.device_mac,
+                            host_machine_id: host.id.to_string(),
+                            host_dpf_id: host.dpf_id().ok_or_else(|| retry("read host BMC MAC"))?,
+                            previous_version: current.previous_version,
+                            target_version: current.target_version,
+                            patch_pending: false,
+                            detached: false,
+                        });
+                        Phase::RotateDpus {
+                            completed: completed.clone(),
+                            current: Some(Box::new(current)),
+                        }
+                    }
+                    Selection::Skip(dpu_id) => {
+                        write = RotationWrite::ClearRequest(dpu_id.into());
+                        let mut completed = completed.clone();
+                        completed.push(dpu_id);
+                        Phase::RotateDpus {
+                            completed,
+                            current: None,
+                        }
+                    }
+                    Selection::Wait(reason) => return Ok(Outcome::wait(reason)),
+                    Selection::Complete => Phase::ResumeExploration,
+                }
+            }
+        }
         Phase::RotateDpus {
             current: Some(current),
             ..
@@ -176,8 +204,9 @@ pub(super) async fn handle(
         Phase::RotateDpus {
             completed,
             current: Some(current),
-        } => match rotate_dpu(&mut txn, services, sdk, current).await? {
+        } => match rotate_dpu(services, sdk, current).await? {
             Progress::Advance(step) => {
+                write = RotationWrite::CheckpointDpu(current);
                 let mut current = current.clone();
                 current.step = step;
                 Phase::RotateDpus {
@@ -187,6 +216,7 @@ pub(super) async fn handle(
             }
             Progress::Wait(reason) => return Ok(Outcome::wait(reason)),
             Progress::Complete => {
+                write = RotationWrite::CheckpointDpu(current);
                 let mut completed = completed.clone();
                 completed.push(current.dpu_machine_id);
                 Phase::RotateDpus {
@@ -196,39 +226,97 @@ pub(super) async fn handle(
             }
         },
         Phase::ResumeExploration => {
-            site_explorer_pause::resume_after_credential_change(
-                &mut txn,
-                &rotation.bmc_macs,
-                SOURCE,
-            )
-            .await?;
-            return Ok(Outcome::transition(ManagedHostState::Ready).with_txn(txn));
+            write = RotationWrite::ResumeExploration;
+            Phase::ResumeExploration
         }
     };
+    // Keep the checkpoint and its database effects atomic, and reject a
+    // force-delete admission that advanced the host while this step was running.
+    let mut txn = services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
+    lease.fence_transaction(&mut txn).await?;
+    if !db::machine::find_one(
+        &mut txn,
+        &host.id,
+        MachineSearchConfig {
+            for_update: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .is_some_and(|live| live.state.version == host.state.version)
+    {
+        txn.rollback()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
+        return Ok(Outcome::do_nothing());
+    }
+    match write {
+        RotationWrite::None => {}
+        RotationWrite::SuppressExploration => {
+            for &mac in &bmc_macs {
+                db::bmc_suppression::upsert(
+                    &mut txn,
+                    &NewBmcSuppression {
+                        bmc_mac_address: mac,
+                        subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                        source: SOURCE,
+                        reason: "DPF BMC credential rotation".to_string(),
+                    },
+                )
+                .await?;
+            }
+        }
+        RotationWrite::ClearRequest(id) => {
+            db::machine::clear_bmc_credential_rotation_requested(&mut txn, &id).await?;
+        }
+        RotationWrite::InsertRecovery(row) => recovery::insert(&mut txn, &row).await?,
+        RotationWrite::CheckpointDpu(current) => checkpoint_dpu(&mut txn, current).await?,
+        RotationWrite::ResumeExploration => {
+            site_explorer_pause::resume_after_credential_change(&mut txn, &bmc_macs, SOURCE)
+                .await?;
+            return Ok(Outcome::transition(ManagedHostState::Ready).with_txn(txn));
+        }
+    }
     Ok(Outcome::transition(ManagedHostState::RotatingBmc {
         retry_count,
-        dpf_rotation: Some(Box::new(DpfBmcRotation {
-            bmc_macs: rotation.bmc_macs.clone(),
-            phase,
-        })),
+        dpf_rotation: Some(Box::new(DpfBmcRotation { bmc_macs, phase })),
     })
     .with_txn(txn))
 }
 
+async fn exploration_paused(
+    services: &MachineStateHandlerServices,
+    macs: &[mac_address::MacAddress],
+) -> Result<bool, StateHandlerError> {
+    Ok(
+        site_explorer_pause::gate_before_credential_change(&services.db_pool, macs, SOURCE).await?
+            == GateDecision::Proceed,
+    )
+}
+
+fn wait_for_exploration() -> Outcome {
+    Outcome::wait(
+        "waiting for site-explorer to acknowledge the BMC rotation suppression".to_string(),
+    )
+}
+
 enum Selection {
     Work(DpfDpuBmcRotation),
+    Skip(DpuMachineId),
     Wait(String),
     Complete,
 }
 
 async fn select_dpu(
-    txn: &mut PgConnection,
     mh: &ManagedHostStateSnapshot,
     services: &MachineStateHandlerServices,
     sdk: &dyn DpfOperations,
-    completed: &[carbide_uuid::machine::DpuMachineId],
+    completed: &[DpuMachineId],
 ) -> Result<Selection, StateHandlerError> {
-    let host = &mh.host_snapshot;
     for dpu in &mh.dpu_snapshots {
         let forced = dpu.bmc_credential_rotation_requested;
         if completed.contains(&dpu.id) || !(forced || services.site_config.bmc_rotation_enabled) {
@@ -236,15 +324,13 @@ async fn select_dpu(
         }
         let Some(device_mac) = dpu.status.bmc_info.mac else {
             if forced {
-                return Ok(Selection::Wait(format!(
-                    "DPU {} is missing its BMC MAC",
-                    dpu.id
-                )));
+                tracing::warn!(dpu_id = %dpu.id, "Skipping forced BMC credential rotation for a DPU with no BMC MAC");
+                return Ok(Selection::Skip(dpu.id));
             }
             continue;
         };
         let status = db::credential_rotation::device_rotation_status(
-            &mut *txn,
+            &services.db_pool,
             CredentialRotationType::Bmc,
             device_mac,
         )
@@ -286,7 +372,7 @@ async fn select_dpu(
         let target_version = match &status {
             Some(status) => status.target_version,
             None => db::credential_rotation::current_target_version(
-                &mut *txn,
+                &services.db_pool,
                 CredentialRotationType::Bmc,
             )
             .await?
@@ -300,7 +386,7 @@ async fn select_dpu(
                 .is_some_and(|status| status.current_version == Some(target_version))
         {
             if forced {
-                db::machine::clear_bmc_credential_rotation_requested(txn, &dpu.id.into()).await?;
+                return Ok(Selection::Skip(dpu.id));
             }
             continue;
         }
@@ -316,20 +402,6 @@ async fn select_dpu(
             forced,
             step: DpfDpuBmcRotationStep::SaveRecoveryCredentials,
         };
-        recovery::insert(
-            txn,
-            &recovery::Recovery {
-                operation_id: current.operation_id,
-                device_mac,
-                host_machine_id: host.id.to_string(),
-                host_dpf_id: host.dpf_id().ok_or_else(|| retry("read host BMC MAC"))?,
-                previous_version: current.previous_version,
-                target_version,
-                patch_pending: false,
-                detached: false,
-            },
-        )
-        .await?;
         return Ok(Selection::Work(current));
     }
     Ok(Selection::Complete)
@@ -342,7 +414,6 @@ enum Progress {
 }
 
 async fn rotate_dpu(
-    txn: &mut PgConnection,
     services: &MachineStateHandlerServices,
     sdk: &dyn DpfOperations,
     current: &DpfDpuBmcRotation,
@@ -402,8 +473,6 @@ async fn rotate_dpu(
         }
         Step::EnsureTargetSecret => {
             ensure_target(sdk, store, current, &device_id).await?;
-            recovery::set_patch_pending(txn, current.device_mac, current.operation_id, true)
-                .await?;
             Step::UpdateReference
         }
         Step::UpdateReference => {
@@ -512,17 +581,8 @@ async fn rotate_dpu(
                 .map_err(|_| retry("reconcile the DPU BMC credential store"))?;
             Step::InvalidateSessions
         }
-        Step::InvalidateSessions => {
-            db::bmc_redfish_session::delete_by_mac(txn, current.device_mac).await?;
-            Step::RecordVersion
-        }
-        Step::RecordVersion => {
-            recovery::record_applied_version(txn, current.device_mac, Some(current.target_version))
-                .await?;
-            recovery::set_patch_pending(txn, current.device_mac, current.operation_id, false)
-                .await?;
-            Step::DeletePreviousSecret
-        }
+        Step::InvalidateSessions => Step::RecordVersion,
+        Step::RecordVersion => Step::DeletePreviousSecret,
         Step::DeletePreviousSecret => {
             if let Some(old) = current
                 .previous_secret
@@ -543,18 +603,42 @@ async fn rotate_dpu(
                     .await
                     .map_err(|_| retry("remove the DPU BMC recovery credential"))?;
             }
-            recovery::remove(txn, current.device_mac, current.operation_id).await?;
-            if current.forced {
-                db::machine::clear_bmc_credential_rotation_requested(
-                    txn,
-                    &current.dpu_machine_id.into(),
-                )
-                .await?;
-            }
             return Ok(Progress::Complete);
         }
     };
     Ok(Progress::Advance(next))
+}
+
+async fn checkpoint_dpu(
+    txn: &mut PgConnection,
+    dpu: &DpfDpuBmcRotation,
+) -> Result<(), StateHandlerError> {
+    use DpfDpuBmcRotationStep as Step;
+
+    match dpu.step {
+        Step::EnsureTargetSecret => {
+            recovery::set_patch_pending(txn, dpu.device_mac, dpu.operation_id, true).await?;
+        }
+        Step::InvalidateSessions => {
+            db::bmc_redfish_session::delete_by_mac(txn, dpu.device_mac).await?;
+        }
+        Step::RecordVersion => {
+            recovery::record_applied_version(txn, dpu.device_mac, Some(dpu.target_version)).await?;
+            recovery::set_patch_pending(txn, dpu.device_mac, dpu.operation_id, false).await?;
+        }
+        Step::ForgetRecoveryCredentials => {
+            recovery::remove(txn, dpu.device_mac, dpu.operation_id).await?;
+            if dpu.forced {
+                db::machine::clear_bmc_credential_rotation_requested(
+                    txn,
+                    &dpu.dpu_machine_id.into(),
+                )
+                .await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 async fn ensure_target(

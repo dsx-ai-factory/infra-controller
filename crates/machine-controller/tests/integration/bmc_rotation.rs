@@ -117,6 +117,15 @@ async fn stage_lagging_bmc(
 
 #[sqlx_test]
 async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
+    assert_dpf_adoption_recovers_lost_patch(pool, 0).await;
+}
+
+#[sqlx_test]
+async fn dpf_adoption_recovers_a_lost_patch_response_when_version_advances(pool: PgPool) {
+    assert_dpf_adoption_recovers_lost_patch(pool, 1).await;
+}
+
+async fn assert_dpf_adoption_recovers_lost_patch(pool: PgPool, target_version: u32) {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -126,6 +135,11 @@ async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
 
     let patched = Arc::new(Mutex::new(None::<String>));
     let adopted = Arc::new(AtomicBool::new(false));
+    let target_password = if target_version == 0 {
+        "shared-password"
+    } else {
+        "rotated-password"
+    };
     let mut sdk = MockDpfOperations::new();
     let observed = patched.clone();
     let adoption_ready = adopted.clone();
@@ -147,8 +161,8 @@ async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
     });
     sdk.expect_ensure_bmc_rotation_secret()
         .times(1)
-        .returning(|id, version, password| {
-            assert_eq!((version, password), (0, "shared-password"));
+        .returning(move |id, version, password| {
+            assert_eq!((version, password), (target_version, target_password));
             Ok(carbide_dpf::bmc_credential_secret_name(id, Some(version)))
         });
     let updated = patched.clone();
@@ -206,13 +220,21 @@ async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
     cm.set_credentials(&per_device_key(dpu_mac), &creds("admin", "shared-password"))
         .await
         .unwrap();
-    cm.set_credentials(&rotate_to_key(0), &creds("", "shared-password"))
+    cm.set_credentials(&rotate_to_key(target_version), &creds("", target_password))
         .await
         .unwrap();
     let mut conn = pool.acquire().await.unwrap();
     record_device_enrolled(&mut conn, dpu_mac, BMC, Some(0))
         .await
         .unwrap();
+    if target_version != 0 {
+        assert!(matches!(
+            set_next_target_version(&mut conn, BMC, 0, serde_json::json!({}))
+                .await
+                .unwrap(),
+            db::ConditionalWrite::Applied(_)
+        ));
+    }
     db::machine::set_bmc_credential_rotation_requested(&mut conn, &dpu_id.into())
         .await
         .unwrap();
@@ -243,6 +265,14 @@ async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
                 DpfBmcRotationPhase::RotateDpus { current: Some(current), .. }
                     if current.step == DpfDpuBmcRotationStep::AwaitAdoption)
     ));
+    assert_eq!(
+        device_rotation_status(&pool, BMC, dpu_mac)
+            .await
+            .unwrap()
+            .unwrap()
+            .current_version,
+        Some(0),
+    );
 
     adopted.store(true, Ordering::Relaxed);
     for _ in 0..16 {
@@ -264,7 +294,7 @@ async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
             .unwrap()
             .unwrap()
             .current_version,
-        Some(0),
+        Some(i32::try_from(target_version).unwrap()),
     );
 }
 

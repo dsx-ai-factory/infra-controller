@@ -552,6 +552,7 @@ mod tests {
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
             dpf_per_dpu_bmc_credentials: false,
+            dpf_rotation_locks: None,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,

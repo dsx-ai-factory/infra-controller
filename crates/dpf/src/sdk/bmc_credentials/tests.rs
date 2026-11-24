@@ -499,6 +499,17 @@ async fn bmc_credential_observation_distinguishes_adoption_pending_and_dpf_failu
         BmcCredentialHealth::Pending,
         false,
     ));
+    let mut no_generation = device(Some("new"), Some("new"), "True", "Success");
+    no_generation["status"]["conditions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("observedGeneration");
+    cases.push((
+        "condition generation missing",
+        no_generation,
+        BmcCredentialHealth::Pending,
+        false,
+    ));
     for (reason, expected) in [
         (
             "CredentialsSecretNotFound",
