@@ -1286,7 +1286,7 @@ for them on its own:
   version those hosts cannot receive while they are held. Releasing by hand is
   how such a host is recovered.
 
-Outstanding holds are visible in monitoring. The gauge `carbide_hosts_dpu_service_sync_pending_count` counts the hosts on the worklist that [`dpf service-sync list`](#dpf-service-sync-alias-ss--list-and-release-dpuservice-holds) prints. The gauge `carbide_hosts_dpu_service_sync_oldest_pending_age_seconds` reports the age in seconds of the oldest outstanding hold.
+The `carbide_hosts_dpu_service_sync_pending_count` gauge counts hosts with outstanding records on the [`dpf service-sync list`](#dpf-service-sync-list) worklist as of the replica's last successful read. The `carbide_hosts_dpu_service_sync_oldest_pending_age_seconds` gauge reports the age in seconds of the oldest outstanding hold, measured from its initial request.
 
 Both gauges carry two labels. The `above_sla` label is `true` when the host is past the SLA of its current state. The `in_use` label is `true` when an instance is allocated on the host. The automatic release does not apply to a host with an instance, so a non-zero count for `in_use="true"` is expected during a rollout.
 

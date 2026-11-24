@@ -68,6 +68,14 @@ fn samples(env: &TestEnv, gauge: &str) -> [[u64; 2]; 2] {
     ]
 }
 
+/// The server process behind a pool's only connection.
+async fn backend_pid(pool: &sqlx::PgPool) -> i32 {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 async fn complete_sync(pool: &sqlx::PgPool, host_id: &MachineId) {
     let mut conn = pool.acquire().await.unwrap();
     assert!(
@@ -106,8 +114,15 @@ async fn enter_state(
 #[crate::sqlx_test]
 async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
+    // The monitor reads through a connection of its own, so that the test can
+    // tell whether a read gave it back.
+    let reader_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
     let mut monitor = DpuServiceSyncHoldMonitor::new(
-        pool.clone(),
+        reader_pool.clone(),
         &env.test_meter.meter(),
         env.config.host_health,
         MachineSlaConfig::new(env.config.machine_state_controller.failure_retry_time),
@@ -214,6 +229,7 @@ async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    let reader_pid = backend_pid(&reader_pool).await;
     let error = monitor
         .run_single_iteration()
         .await
@@ -221,6 +237,11 @@ async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
     assert!(
         error.to_string().contains(&idle.id.to_string()),
         "a read that one host fails must name that host, got {error}"
+    );
+    assert_eq!(
+        backend_pid(&reader_pool).await,
+        reader_pid,
+        "a read that fails without being abandoned returns its connection"
     );
     assert_eq!(
         samples(&env, PENDING_COUNT),
@@ -342,4 +363,5 @@ async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
         ["1"],
         "a capped read warns how many hosts it counted without a check"
     );
+    reader_pool.close().await;
 }

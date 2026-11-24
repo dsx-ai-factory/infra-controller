@@ -19,7 +19,7 @@
 //! and a bounded history of the work already done.
 
 use carbide_uuid::DbTable;
-use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtypeTrait};
 use model::machine_pending_action::{
     MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind, PendingActionHost,
 };
@@ -28,7 +28,10 @@ use sqlx::PgConnection;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
-/// Records that `kind` is owed for `machine_id`, returning the outstanding row.
+/// Records that `kind` is owed for `host_id`, returning the outstanding row.
+///
+/// The action is owed for a host, and [`find_outstanding_hosts`] reads the
+/// outstanding rows back as hosts, so the type keeps a DPU's ID out of them.
 ///
 /// Re-requesting an action that is already outstanding is a no-op write that
 /// preserves the original `requested_at`, so the returned timestamp is how long
@@ -36,7 +39,7 @@ use crate::{DatabaseError, DatabaseResult};
 /// starts a new row, leaving the earlier completion in the history.
 pub async fn request(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    host_id: &HostMachineId,
     kind: MachinePendingActionKind,
 ) -> DatabaseResult<MachinePendingAction> {
     // The conflict target is the partial unique index over outstanding rows, so
@@ -55,7 +58,7 @@ pub async fn request(
     );
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(machine_id)
+        .bind(host_id)
         .bind(kind)
         .fetch_one(txn)
         .await
@@ -213,15 +216,17 @@ pub async fn find_all_for_machine(
 
 #[cfg(test)]
 mod tests {
-    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
-    use model::machine_pending_action::{MachinePendingActionActor, MachinePendingActionKind};
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+    use model::machine_pending_action::{
+        MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind,
+    };
     use sqlx::{PgConnection, PgPool};
 
     use super::{
         complete, find_all_for_machine, find_outstanding_by_machine_ids,
-        find_outstanding_machine_ids, is_outstanding, request,
+        find_outstanding_machine_ids, is_outstanding,
     };
-    use crate::TransactionVending as _;
+    use crate::{DatabaseResult, TransactionVending as _};
 
     const DPU_SERVICE_SYNC: MachinePendingActionKind = MachinePendingActionKind::DpuServiceSync;
     const AUTOMATIC: MachinePendingActionActor = MachinePendingActionActor::Automatic;
@@ -234,6 +239,17 @@ mod tests {
             hardware_id,
             MachineType::Host,
         )
+    }
+
+    /// [`super::request`] for a machine these tests name by its plain ID. Every
+    /// machine they create is a host.
+    async fn request(
+        txn: &mut PgConnection,
+        machine_id: &MachineId,
+        kind: MachinePendingActionKind,
+    ) -> DatabaseResult<MachinePendingAction> {
+        let host_id = HostMachineId::try_from(machine_id).expect("test machines are hosts");
+        super::request(txn, &host_id, kind).await
     }
 
     async fn seed_machine(

@@ -317,11 +317,24 @@ impl DpuServiceSyncHoldMonitor {
     }
 
     async fn read_holds(&self) -> Result<HoldMetrics, DatabaseError> {
+        // Dropping the guard at the deadline discards the connection instead of
+        // waiting for it to be cleaned up.
+        let mut session = DbSessionGuard::acquire(&self.database_connection).await?;
+        let read = self.read_snapshot(&mut session).await;
+        // The read ran to its end, with or without an error, so its transaction
+        // is committed or rolled back before the connection is used again. Only
+        // a read that is abandoned discards its connection.
+        session.return_to_pool();
+        read
+    }
+
+    async fn read_snapshot(
+        &self,
+        session: &mut DbSessionGuard,
+    ) -> Result<HoldMetrics, DatabaseError> {
         let now = Utc::now();
         // One snapshot for both statements, so a host cannot change state or
-        // disappear between them. Dropping the guard at the deadline discards
-        // the connection instead of waiting for it to be cleaned up.
-        let mut session = DbSessionGuard::acquire(&self.database_connection).await?;
+        // disappear between them.
         let mut txn = session.begin_read_only_snapshot(STATEMENT_TIMEOUT).await?;
         let holds =
             db::machine_pending_action::find_outstanding_hosts(&mut txn, DpuServiceSync).await?;
@@ -363,7 +376,6 @@ impl DpuServiceSyncHoldMonitor {
         // Warned only after every lookup succeeded, so that the counts describe
         // checks that were made.
         plan.warn_if_capped();
-        session.return_to_pool();
         Ok(metrics)
     }
 
