@@ -196,6 +196,10 @@ export NICO_DPF_DPU_CLUSTER_VIP=<VIP for the DPU cluster control plane>
 
 Set them to the same values used at initial install (they are not persisted by `setup.sh`).
 
+`setup.sh` also needs a resolver for the DPU cluster CoreDNS. It reads `nico-dhcp.config.kea.hookParameters.nameservers` from the core values file in every DPF run that does not set `NICO_DPF_COREDNS_UPSTREAM`, including with `--skip-core`. Reading the file needs `python3` with PyYAML. A site that passed `--core-values` at initial install passes the same file again. Export `NICO_DPF_COREDNS_UPSTREAM` only to use other resolvers or when that file is not available. Preflight reports an error when neither gives a value.
+
+`setup.sh` sets `spec.coreDNS.upstreamNameservers` in the `DPFOperatorConfig` to that resolver. Since DPF v26.8.0, the CoreDNS that serves the DPU cluster runs in the host cluster and forwards names outside the cluster domain, such as the `.forge` names, to the resolvers in this field. A site installed without the field gets it when `setup.sh` runs phase 5b again. Upgrades performed outside `setup.sh` must set the field. Refer to [DPFOperatorConfig](dpf.md#32-dpfoperatorconfig).
+
 ### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
 
 Before upgrading an agent that serves an active Virtualized-to-Flat peering, inspect every affected Flat prefix contained by an effective `site_fabric_null_routes` prefix. Ensure the tenant VRF learns an imported or explicitly admitted underlay route that is at least as specific as the containing blackhole, and verify forward and return reachability before starting the agent rollout. A leaked default does not qualify when the blackhole is more specific than `/0`; combining a `/0` null route with same-family default-route leakage is unsupported. Follow the [FNN-to-Flat routing prerequisite](vpc/vpc_peering_management.md#virtualized-to-flat-routing-prerequisite) for the supported route-provisioning methods.

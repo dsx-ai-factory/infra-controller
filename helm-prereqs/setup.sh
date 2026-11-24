@@ -20,6 +20,7 @@
 # Tool requirements:
 #   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
 #   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
+#   So does the default for NICO_DPF_COREDNS_UPSTREAM (unless --skip-dpf).
 #   The default DPF image tag requires Python 3.11+ or the tomli package.
 #   --skip-vault preflight also requires a python3 TOML parser (3.11 tomllib
 #   or the tomli package) to inspect the site config's [secrets] section.
@@ -81,6 +82,16 @@
 #   NICO_DPF_K8S_API_VIP   Host-cluster API server IP reachable from DPUs.
 #                          Default: derived from the kubernetes Endpoints.
 #   NICO_DPF_K8S_API_PORT  Host-cluster API server port. Default: derived.
+#   NICO_DPF_COREDNS_UPSTREAM
+#                          Override for the resolvers the DPU cluster CoreDNS
+#                          forwards to: IP addresses separated by spaces or
+#                          commas. Default:
+#                          nico-dhcp.config.kea.hookParameters.nameservers from
+#                          the core values file, read in every DPF run that
+#                          does not set this override, also with --skip-core
+#                          (needs python3 with PyYAML).
+#                          CoreDNS spreads queries across all listed resolvers,
+#                          so each one must serve the .forge zone.
 #   NICO_DPF_DPU_INTERFACE Controller interface for the Kamaji keepalived VIP.
 #                          REQUIRED when DPF install is enabled.
 #   NICO_DPF_DPU_CLUSTER_VIP
@@ -1883,7 +1894,10 @@ if "${INSTALL_DPF}"; then
     export NICO_DPF_K8S_API_VIP NICO_DPF_K8S_API_PORT
     export NICO_DPF_DPU_INTERFACE NICO_DPF_DPU_CLUSTER_VIP
     export NICO_DPF_CP_LABEL_VALUE="${NICO_DPF_CP_LABEL_VALUE:-}"
-    envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT}' \
+    # preflight.sh resolves the CoreDNS upstream into _DPF_COREDNS_UPSTREAM.
+    echo "DPU cluster CoreDNS upstream: ${_DPF_COREDNS_UPSTREAM}"
+    NICO_DPF_COREDNS_UPSTREAM="${_DPF_COREDNS_UPSTREAM}" \
+        envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT} ${NICO_DPF_COREDNS_UPSTREAM}' \
         < operators/dpf/dpfoperatorconfig.yaml.tmpl | kubectl apply -f -
     envsubst '${NICO_DPF_DPU_INTERFACE} ${NICO_DPF_DPU_CLUSTER_VIP} ${NICO_DPF_CP_LABEL_VALUE}' \
         < operators/dpf/dpucluster.yaml.tmpl | kubectl apply -f -

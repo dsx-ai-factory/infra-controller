@@ -213,6 +213,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
 | `NICO_DPF_NICO_NGC_API_KEY` | No | NGC API key with access to the NICo DPUService images (`nico-pull-secret`). Defaults to `NICO_DPF_NGC_API_KEY`. |
 | `NICO_DPF_K8S_API_VIP` / `NICO_DPF_K8S_API_PORT` | No | Host-cluster API server address/port that DPUs must reach. Defaults are derived from the `kubernetes` Endpoints — override when the derived address is not routable from the DPUs. |
+| `NICO_DPF_COREDNS_UPSTREAM` | No (DPF only) | Override for the resolvers that the DPU cluster CoreDNS forwards to: IP addresses separated by spaces or commas. Defaults to `nico-dhcp.config.kea.hookParameters.nameservers` from the core values file, which `setup.sh` reads in every DPF run that does not set the override, including with `--skip-core`. Reading the file needs `python3` with PyYAML. CoreDNS spreads queries across all listed resolvers, so each one must serve the `.forge` zone. Unless `--skip-dpf`, preflight reports an error when neither source has a value. |
 | `NICO_DPF_DPU_INTERFACE` | Unless `--skip-dpf` | Controller interface on which keepalived advertises the DPU cluster VIP. |
 | `NICO_DPF_DPU_CLUSTER_VIP` | Unless `--skip-dpf` | Floating IP the DPUs use to reach their (Kamaji) control plane. |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password used to seed `nico-system/nico-bmc-v0-credentials` after Core deployment is accepted and before Core starts. setup.sh stores username `admin`, mounts the Secret as the authoritative version-0 credential source, and unsets the variable before invoking child tools. A DPF-enabled rerun reuses the Secret and rejects a different value rather than changing a credential managed hardware may use. Declining Core deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. Using the variable with `--skip-core` or `--skip-dpf` is an error. Not needed when `siteCredentials` renders the credential file, and not usable with it: setup fails when the Core values already name a different `existingSecret`. Refer to [Site Credentials Secret](#site-credentials-secret). |
@@ -390,6 +391,7 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 `setup.sh` runs preflight validation automatically before the installation phases.
 Reading the default DPF image tag requires Python 3.11 or later (`tomllib`), or the `tomli` package. This is skipped with `--skip-dpf` or an explicit `NICO_DPF_IMAGE_TAG`.
 Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`. A VIP used by more than one Service is a warning unless every Service on it has the same `allow-shared-ip` value, the same `externalTrafficPolicy`, and distinct protocol and port pairs, and `Local` Services share only within one chart; these warnings do not stop `setup.sh`.
+The default DPU cluster CoreDNS upstream is also read from the core values file with PyYAML. This applies to every DPF run that does not set `NICO_DPF_COREDNS_UPSTREAM`, including runs with `--skip-core`.
 
 It supports these common deployment modes:
 
@@ -1523,7 +1525,9 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
 4. **Operator CRs** — `DPFOperatorConfig`, `DPUCluster` (keepalived VIP from
    `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP`), and, when
    `NICO_DPF_METALLB_POOL` is set, the VIP LoadBalancer Service that makes the
-   DPU cluster VIP routable.
+   DPU cluster VIP routable. The `DPFOperatorConfig` carries the CoreDNS
+   upstream: the Kea `nameservers` value unless `NICO_DPF_COREDNS_UPSTREAM` is
+   set.
 5. **carbide-api enablement (phase 6)** — Core starts with `[dpf]` enabled and
    initializes the BFB, DPUFlavor, and DPUDeployment during that deployment.
    The `nico-api-dpf` Role is created via `nico-api.dpf.rbacCreate=true`. The API
@@ -1534,8 +1538,11 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    startup when v0 is current or the current target cannot be resolved.
 
 Requirements (unless `--skip-dpf`): `envsubst` on the machine running setup,
-an NGC API key, and `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP` for
-the DPU cluster VIP. The BMC root is optional at install time in `local_first`
+an NGC API key, `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP` for
+the DPU cluster VIP, and a resolver for the DPU cluster CoreDNS: the Kea
+`nameservers` value in the core values file, or `NICO_DPF_COREDNS_UPSTREAM`.
+`setup.sh` writes that resolver into the `DPFOperatorConfig`, so run it again
+after changing the resolver. The BMC root is optional at install time in `local_first`
 or `backend` mode but required before DPU provisioning. The DPF and RMS phases
 each also need `git` and a record of their pinned commit: a git checkout of
 this repository that records the submodule (`helm-prereqs/doca-platform` for

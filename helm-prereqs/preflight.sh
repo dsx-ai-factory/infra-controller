@@ -28,7 +28,8 @@
 # Checks (in order — fails fast so the most actionable issues appear first):
 #   1. Environment variables:    presence and format
 #   2. Required tools:           helm, helmfile, kubectl, jq, ssh-keygen
-#                                Core VIP validation also needs python3 + PyYAML;
+#                                Core VIP validation and the DPF CoreDNS
+#                                default also need python3 + PyYAML;
 #                                --skip-vault also a TOML parser (3.11 tomllib or tomli)
 #   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
 #   3b. Site values completeness: no placeholder or empty required value
@@ -510,6 +511,26 @@ if [[ -n "${KUBECONFIG:-}" && ! -f "${KUBECONFIG}" ]]; then
     ERRORS+=("KUBECONFIG='${KUBECONFIG}' does not exist — check the path to your cluster kubeconfig")
 fi
 
+# Prints nico-dhcp.config.kea.hookParameters.nameservers from core values file
+# $1. Prints nothing when the file or value is missing.
+_kea_nameservers() {
+    [[ -f "$1" ]] && command -v python3 &>/dev/null || return 0
+    python3 - "$1" <<'PY' 2>/dev/null || true
+import sys, yaml
+v = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+for k in ("nico-dhcp", "config", "kea", "hookParameters", "nameservers"):
+    v = v.get(k) if isinstance(v, dict) else None
+print(v if isinstance(v, str) else "")
+PY
+}
+
+# Prints $1 with commas and runs of white space turned into single spaces.
+_space_separated() {
+    local _parts
+    read -r -a _parts <<< "${1//[,[:space:]]/ }"
+    echo "${_parts[*]:-}"
+}
+
 # A phase that installs from a pinned helm-prereqs/<name> submodule needs git
 # and a record of the pinned commit: the gitlink in a git checkout of this
 # repository, or the helm-prereqs/<name>.pin file shipped with the packaged
@@ -563,6 +584,15 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
         ERRORS+=("NICO_DPF_DPU_INTERFACE is not set    (controller interface for the DPU cluster keepalived VIP; required unless --skip-dpf)")
     [[ -z "${NICO_DPF_DPU_CLUSTER_VIP:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_CLUSTER_VIP is not set    (VIP the DPUs use to reach their control plane; required unless --skip-dpf)")
+    # The DPU cluster CoreDNS otherwise forwards to the host node's resolv.conf,
+    # which usually does not serve the .forge zone. Default to the DHCP resolver.
+    # Kept in a private variable so that sourcing this file does not turn the
+    # default into an override in the operator's shell.
+    _DPF_COREDNS_UPSTREAM="$(_space_separated "${NICO_DPF_COREDNS_UPSTREAM:-}")"
+    [[ -n "${_DPF_COREDNS_UPSTREAM}" ]] || \
+        _DPF_COREDNS_UPSTREAM="$(_space_separated "$(_kea_nameservers "${_CORE_VALUES_CFG}")")"
+    [[ -z "${_DPF_COREDNS_UPSTREAM}" ]] && \
+        ERRORS+=("NICO_DPF_COREDNS_UPSTREAM is not set and no nico-dhcp.config.kea.hookParameters.nameservers value was found in ${_CORE_VALUES_LABEL} - set nameservers there (reading the file needs python3 with PyYAML), pass --core-values <file>, or export NICO_DPF_COREDNS_UPSTREAM    (resolver serving .forge for the DPU cluster CoreDNS; required unless --skip-dpf)")
     if [[ -z "${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}" ]]; then
         WARNINGS+=("NICO_DPF_NGC_API_KEY / REGISTRY_PULL_SECRET not set — the DPF operator + public DOCA images still pull anonymously, but the Argo repo secrets are skipped, so the private NICo DPUService charts (carbide) won't authenticate unless you mirror/build them into your own registry")
     fi
