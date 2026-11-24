@@ -28,6 +28,7 @@
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
+use carbide_hw_identification::bluefield_bmc::BlueFieldGeneration;
 use carbide_uuid::network::NetworkSegmentId;
 use instance::config::network::InterfaceFunctionId;
 use mac_address::MacAddress;
@@ -432,7 +433,20 @@ mod tests {
         value_scenarios!(run = |model: DpuModel| model.to_string();
             "BF2" { DpuModel::BlueField2 => "bluefield2".to_string(), }
             "BF3" { DpuModel::BlueField3 => "bluefield3".to_string(), }
+            "BF4" { DpuModel::BlueField4 => "bluefield4".to_string(), }
             "unknown" { DpuModel::Unknown => "unknown".to_string(), }
+        );
+    }
+
+    #[test]
+    fn dpu_model_from_description_preserves_legacy_generations() {
+        value_scenarios!(run = |description: &str| DpuModel::from(description);
+            "Scout and firmware model strings" {
+                "BlueField-2 P-Series DPU" => DpuModel::BlueField2,
+                "Bluefield 3 SmartNIC Main Card" => DpuModel::BlueField3,
+                "NVIDIA BlueField-4 B4220 P-Series FHHL DPU" => DpuModel::Unknown,
+                "B4240V" => DpuModel::Unknown,
+            }
         );
     }
 
@@ -609,12 +623,23 @@ mod tests {
     }
 }
 
-/// DPU related config.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Model of a DPU endpoint, including cards whose generation could not be identified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DpuModel {
     BlueField2,
     BlueField3,
+    BlueField4,
     Unknown,
+}
+
+impl DpuModel {
+    fn from_generation(generation: BlueFieldGeneration) -> Self {
+        match generation {
+            BlueFieldGeneration::BlueField2 => Self::BlueField2,
+            BlueFieldGeneration::BlueField3 => Self::BlueField3,
+            BlueFieldGeneration::BlueField4 => Self::BlueField4,
+        }
+    }
 }
 
 impl<T> From<T> for DpuModel
@@ -635,6 +660,7 @@ impl fmt::Display for DpuModel {
         f.write_str(match self {
             Self::BlueField2 => "bluefield2",
             Self::BlueField3 => "bluefield3",
+            Self::BlueField4 => "bluefield4",
             Self::Unknown => "unknown",
         })
     }

@@ -17,7 +17,7 @@
 
 //! NVIDIA BlueField-3.
 
-use crate::pattern::{Pattern, prefix};
+use crate::pattern::{Pattern, contains, prefix};
 
 /// NVIDIA part number for the 00CV-AA0 variant of the BlueField-3 9D3B6 DPU.
 pub const DPU_9D3B6_00CV_AA0: &str = "900-9D3B6-00CV-AA0";
@@ -33,3 +33,6 @@ pub const SUPERNIC_9D3B4_PART_NUMBERS: &[Pattern] = &[prefix("900-9D3B4")];
 
 /// Part-number prefix for BlueField-3 9D3D4 SuperNICs.
 pub const SUPERNIC_PART_NUMBERS: &[Pattern] = &[prefix("900-9D3D4")];
+
+/// BlueField-3 firmware reports both "Bluefield 3 SmartNIC Main Card" and "BlueField-3 DPU" (#4829).
+pub const MODEL_NAMES: &[Pattern] = &[contains("BlueField 3"), contains("BlueField-3")];

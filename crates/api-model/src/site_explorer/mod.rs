@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use carbide_hw_identification::bluefield_bmc::{self, is_dpu_product_chassis_id};
 use carbide_hw_identification::host_serial::is_compute_tray_assembly;
 use carbide_network::BaseMac;
 use carbide_utils::arch::CpuArchitecture;
@@ -1235,7 +1236,7 @@ impl EndpointExplorationReport {
 
     /// Return `true` if the explored endpoint is a DPU
     pub fn is_dpu(&self) -> bool {
-        self.identify_dpu().is_some()
+        self.primary_system().is_some_and(is_bluefield_system)
     }
 
     /// Return `true` if the explored endpoint is a PowerShelf.
@@ -1266,27 +1267,17 @@ impl EndpointExplorationReport {
     /// Return `DpuModel` if the explored endpoint is a DPU.
     /// Return `Unknown` if no DPU generation is recognized or recognized generations conflict.
     pub fn identify_dpu(&self) -> Option<DpuModel> {
-        if !self
-            .systems
-            .first()
-            .map(is_bluefield_system)
-            .unwrap_or(false)
-        {
-            return None;
-        }
-
-        let mut models = self
-            .chassis
-            .iter()
-            .filter(|chassis| is_dpu_product_chassis_id(&chassis.id))
-            .filter_map(chassis_model)
-            .map(DpuModel::from)
-            .filter(|model| *model != DpuModel::Unknown);
-        let model = models.next().unwrap_or(DpuModel::Unknown);
-        Some(if models.all(|other| other == model) {
-            model
-        } else {
-            DpuModel::Unknown
+        self.is_dpu().then(|| {
+            bluefield_bmc::identify_generation(
+                self.service_root
+                    .as_ref()
+                    .and_then(|root| root.product.as_deref()),
+                self.chassis
+                    .iter()
+                    .filter_map(|chassis| Some((chassis.id.as_str(), chassis.model.as_deref()?))),
+            )
+            .map(DpuModel::from_generation)
+            .unwrap_or(DpuModel::Unknown)
         })
     }
 
@@ -2374,25 +2365,9 @@ pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
         || normalized_part_number.starts_with("900-9d4a4")
 }
 
-/// Whether a DPU BMC chassis member can carry the card product identity
-/// (part/model/serial).
-///
-/// Older Redfish reports publish this identity on `Card1`; newer BF4 firmware may
-/// instead publish it on the integrated BMC chassis (`Bluefield_BMC` or
-/// `BlueField_BMC_0`). Reports can contain several of these chassis, including
-/// placeholders or BMC component models. Model identification requires the
-/// recognized DPU generations to agree.
-fn is_dpu_product_chassis_id(id: &str) -> bool {
-    matches!(id, "Card1" | "Bluefield_BMC" | "BlueField_BMC_0")
-}
-
-/// Whether a Redfish ComputerSystem id identifies a BlueField DPU system.
-///
-/// Firmware is inconsistent: older dumps expose `/redfish/v1/Systems/Bluefield`
-/// while newer BF4 firmware exposes `/redfish/v1/Systems/BlueField_0`. Accept
-/// both so DPU detection is not silently skipped.
+/// Whether the Redfish ComputerSystem identifies a BlueField endpoint.
 pub fn is_bluefield_system(system: &ComputerSystem) -> bool {
-    matches!(system.id.as_str(), "Bluefield" | "BlueField_0")
+    bluefield_bmc::is_bluefield_system_id(&system.id)
 }
 
 fn chassis_part_number(chassis: &Chassis) -> Option<&str> {
@@ -2846,7 +2821,7 @@ mod explored_mlx_device_tests {
         bmc_chassis.serial_number = Some(SERIAL.to_string());
         bmc_chassis.model = Some("B4240".to_string());
 
-        assert_eq!(report.identify_dpu(), Some(DpuModel::Unknown));
+        assert_eq!(report.identify_dpu(), Some(DpuModel::BlueField4));
         assert_eq!(report.machine_id_serial_number(), Some(SERIAL));
         assert_eq!(report.dpu_pairing_serial_number(), Some(SERIAL));
     }
@@ -3511,8 +3486,12 @@ mod tests {
     #[test]
     fn identify_dpu_recognizes_bluefield_model_variants() {
         value_scenarios!(
-            run = |(system_id, model)| {
+            run = |(system_id, root_product, model): (&str, Option<&str>, &str)| {
                 let report = EndpointExplorationReport {
+                    service_root: root_product.map(|product| ServiceRoot {
+                        product: Some(product.into()),
+                        ..Default::default()
+                    }),
                     systems: vec![ComputerSystem {
                         id: system_id.to_string(),
                         ..Default::default()
@@ -3531,11 +3510,13 @@ mod tests {
                 identified
             };
             "BlueField model identification" {
-                ("Bluefield", "NVIDIA BlueField 2 DPU") => Some(DpuModel::BlueField2),
-                ("Bluefield", "NVIDIA BlueField 3 DPU") => Some(DpuModel::BlueField3),
-                ("Bluefield", "BlueField-3 DPU") => Some(DpuModel::BlueField3),
-                ("Bluefield", "unrecognized DPU") => Some(DpuModel::Unknown),
-                ("System", "BlueField-3 DPU") => None,
+                ("Bluefield", None, "NVIDIA BlueField 2 DPU") => Some(DpuModel::BlueField2),
+                ("Bluefield", None, "NVIDIA BlueField 3 DPU") => Some(DpuModel::BlueField3),
+                ("Bluefield", None, "BlueField-3 DPU") => Some(DpuModel::BlueField3),
+                ("Bluefield", None, "unrecognized DPU") => Some(DpuModel::Unknown),
+                ("BlueField_0", Some("B4240V"), "N/A") => Some(DpuModel::BlueField4),
+                ("Bluefield", Some("B4240"), "BlueField-3 DPU") => Some(DpuModel::Unknown),
+                ("System", Some("BlueField-4"), "BlueField-3 DPU") => None,
             }
         );
     }

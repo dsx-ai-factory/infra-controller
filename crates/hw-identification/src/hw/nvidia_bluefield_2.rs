@@ -17,7 +17,10 @@
 
 //! NVIDIA BlueField-2.
 
-use crate::pattern::{Pattern, prefix};
+use crate::pattern::{Pattern, contains, prefix};
 
 /// Part-number prefix for BlueField-2 DPUs.
 pub const DPU_PART_NUMBERS: &[Pattern] = &[prefix("MBF2")];
+
+/// BlueField-2 card descriptions include "Bluefield 2 SmartNIC Main Card".
+pub const MODEL_NAMES: &[Pattern] = &[contains("BlueField 2"), contains("BlueField-2")];
