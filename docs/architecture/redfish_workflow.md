@@ -74,7 +74,7 @@ With an authenticated session, Site Explorer queries a comprehensive set of Redf
 | Data Collected | Redfish Source | Purpose |
 |---|---|---|
 | System serial numbers | `GET /redfish/v1/Systems/{id}` | Machine identification |
-| Chassis serial numbers | `GET /redfish/v1/Chassis/{id}` | Fallback identification |
+| Chassis serial numbers | `GET /redfish/v1/Chassis/{id}` | Host inventory serial selection and fallback |
 | Chassis Assembly members | `GET` on selected chassis's `Assembly` link | Host inventory serial selection |
 | Network adapters + serials | `GET /redfish/v1/Chassis/{id}/NetworkAdapters` | DPU-host pairing |
 | PCIe devices + serials | `GET /redfish/v1/Systems/{id}` (PCIeDevices) | DPU-host pairing |
