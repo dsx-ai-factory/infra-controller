@@ -14,11 +14,11 @@ nico-admin-cli expected-machine patch
 [-u|--bmc-username] [-p|--bmc-password]
 [-s|--chassis-serial-number]
 [-d|--fallback-dpu-serial-number] [--meta-name]
-[--meta-description] [--label] [--sku-id]
-[--rack-id] [--default_pause_ingestion_and_poweron]
-[--dpf-enabled] [--bmc-ip-address] [--extended]
-[--bmc-retain-credentials] [--dpu-policy]
-[--bmc-ip-allocation] [--interfaces]
+[--meta-description] [--label] [--extended]
+[--sku-id] [--rack-id]
+[--default_pause_ingestion_and_poweron] [--dpf-enabled]
+[--bmc-ip-address] [--bmc-retain-credentials]
+[--dpu-policy] [--bmc-ip-allocation] [--interfaces]
 [--disable-lockdown] [--retain-hbn-config-on-boot]
 [--sort-by] [-h|--help]
 ```
@@ -100,6 +100,14 @@ preserved. Core PATCH allows up to 16 keys. Keys must be nonempty ASCII
 and at most 255 characters; values allow at most 255 bytes. Whitespace
 around each key and value is trimmed. Omission preserves labels
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--sku-id <SKU_ID>`
 
 Replace the expected machine SKU ID. Omission preserves it
@@ -138,14 +146,6 @@ value.
 Static BMC IP (updates pre-allocated machine_interface when safe, same
 as expected switches). Must not be unspecified, multicast, or IPv4
 limited broadcast, including the IPv4-mapped IPv6 form of each
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
@@ -232,13 +232,13 @@ setting
 
 `--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
 
-If true, designate the machine to retain its HBN config on boot.
-This allows the machine to boot while NICO's DHCP and gRPC services
-are unavailable. The machine must declare a DPU BMC and a DPU OS
-interface, and the host BMC and both DPU interfaces must then use a
-fixed or retained IP allocation. A machine whose DPU policy attaches
-no DPU declares neither. If unset or false, the machine will need NICo
-to be up in order to boot.
+If true, designate the machine to retain its HBN config on boot. This
+allows the machine to boot while NICO's DHCP and gRPC services are
+unavailable. The machine must declare a DPU BMC and a DPU OS interface,
+and the host BMC and both DPU interfaces must then use a fixed or
+retained IP allocation. A machine whose DPU policy attaches no DPU
+declares neither. If unset or false, the machine will need NICo to be up
+in order to boot.
 
 *Possible values:*
 

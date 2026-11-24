@@ -13,7 +13,7 @@ Validation plugin
 nico-admin-cli machine-validation plugins create <--name>
 [--type] <--image> <--entrypoint> [--parameters]
 [--context] [--platform] [--timeout]
-[--privileged] [--host-access-full] [--extended]
+[--privileged] [--extended] [--host-access-full]
 [--sort-by] [-h|--help]
 ```
 
@@ -45,8 +45,6 @@ Create an OCI Machine Validation plugin
 
 `--privileged`
 
-`--host-access-full`
-
 `--extended`
 
 Extended result output.
@@ -54,6 +52,8 @@ Extended result output.
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
+
+`--host-access-full`
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
