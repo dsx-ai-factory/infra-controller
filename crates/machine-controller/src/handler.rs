@@ -26,7 +26,9 @@ use std::sync::{Arc, Mutex};
 use attestation::{
     handle_spdm_attestation_failed_recovery, handle_spdm_poll_state, handle_spdm_trigger_state,
 };
-use bmc_backend::{BackendBmc, idrac_job, redfish_task, redfish_task_id};
+use bmc_backend::{
+    BackendBmc, idrac_job, libredfish_software_inventory, redfish_task, redfish_task_id,
+};
 use bmc_platform::{
     HostPrivilegeLevel, LockdownDesiredState, LockdownScope,
     LockdownState as PlatformLockdownState, OperationStatus, PlatformError, PowerState, ResetType,
@@ -106,6 +108,7 @@ use model::predicted_machine_interface::PredictedMachineInterface;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::ExploredEndpoint;
 use nv_redfish::schema::secure_boot::SecureBootUpdate;
+use nv_redfish::schema::software_inventory::SoftwareInventory;
 use sku::{
     handle_bom_validation_requested, handle_bom_validation_state, is_sku_verification_requested,
 };
@@ -5055,6 +5058,43 @@ const DPU_FIRMWARE_COMPONENTS: [(FirmwareComponentType, &str); 3] = [
 /// The firmware inventory `Id` of a DPU's UEFI.
 const DPU_UEFI_INVENTORY_ID: &str = "DPU_UEFI";
 
+/// The firmware inventory of the DPU behind `bmc`. libredfish reads each
+/// member separately, so it reads only [`DPU_FIRMWARE_COMPONENTS`] and the
+/// UEFI, and an unrelated member cannot fail the read.
+async fn dpu_firmware_inventory(
+    bmc: &BackendBmc,
+) -> Result<Vec<Arc<SoftwareInventory>>, StateHandlerError> {
+    let BackendBmc::Libredfish(client) = bmc else {
+        return bmc
+            .firmware()
+            .map_err(|e| platform_error("firmware", e.into()))?
+            .inventory()
+            .await
+            .map_err(|e| platform_error("firmware_inventory", e));
+    };
+    let ids = client
+        .get_software_inventories()
+        .await
+        .map_err(|e| redfish_error("get_software_inventories", e))?;
+    let mut inventories = Vec::new();
+    for id in ids.iter().filter(|id| {
+        *id == DPU_UEFI_INVENTORY_ID
+            || DPU_FIRMWARE_COMPONENTS
+                .iter()
+                .any(|(_, component_name)| id.contains(component_name))
+    }) {
+        let inventory = client
+            .get_firmware(id)
+            .await
+            .map_err(|e| redfish_error("get_firmware", e))?;
+        inventories.push(Arc::new(
+            libredfish_software_inventory(inventory)
+                .map_err(|e| platform_error("get_firmware", e))?,
+        ));
+    }
+    Ok(inventories)
+}
+
 /// Returns Option<StateHandlerOutcome>:
 ///     If Some(_) means at least one fw component is not updated.
 ///     If None: All fw components are updated.
@@ -5064,17 +5104,7 @@ async fn check_fw_component_version(
     dpu_snapshot: &DpuMachine,
     hardware_models: &FirmwareConfigSnapshot,
 ) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
-    let inventories = bmc
-        .firmware()
-        .map_err(|e| platform_error("firmware", e.into()))?
-        .inventory_matching(|id| {
-            id == DPU_UEFI_INVENTORY_ID
-                || DPU_FIRMWARE_COMPONENTS
-                    .iter()
-                    .any(|(_, component_name)| id.contains(component_name))
-        })
-        .await
-        .map_err(|e| platform_error("firmware_inventory", e))?;
+    let inventories = dpu_firmware_inventory(bmc).await?;
 
     for (component, component_name) in DPU_FIRMWARE_COMPONENTS {
         let inventory = inventories

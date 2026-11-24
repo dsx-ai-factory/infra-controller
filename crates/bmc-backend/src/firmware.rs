@@ -45,38 +45,30 @@ pub enum BackendFirmware<'a> {
 }
 
 impl BackendFirmware<'_> {
-    /// The [`Firmware::inventory`] members whose `Id` `select` accepts.
-    /// libredfish reads only those members, so the others cannot fail the
-    /// read; the drivers read the whole inventory.
-    pub async fn inventory_matching(
-        &self,
-        select: impl Fn(&str) -> bool,
-    ) -> Result<Vec<Arc<SoftwareInventory>>, PlatformError> {
+    /// See [`Firmware::inventory`]. libredfish reads every member of the
+    /// `FirmwareInventory` collection in turn.
+    pub async fn inventory(&self) -> Result<Vec<Arc<SoftwareInventory>>, PlatformError> {
         match self {
             Self::Libredfish(client) => {
                 let ids = client
                     .get_software_inventories()
                     .await
                     .map_err(platform_error)?;
-                let mut inventories = Vec::new();
-                for id in ids.iter().filter(|id| select(id)) {
-                    let inventory = client.get_firmware(id).await.map_err(platform_error)?;
-                    inventories.push(Arc::new(software_inventory(inventory)?));
+                let mut inventories = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let inventory = client.get_firmware(&id).await.map_err(platform_error)?;
+                    inventories.push(Arc::new(libredfish_software_inventory(inventory)?));
                 }
                 Ok(inventories)
             }
-            Self::Drivers(firmware) => {
-                let mut inventories = firmware.inventory().await?;
-                inventories.retain(|inventory| select(&inventory.id));
-                Ok(inventories)
-            }
+            Self::Drivers(firmware) => firmware.inventory().await,
         }
     }
 }
 
-/// `inventory` as the drivers report it. libredfish keeps no `Name`, which the
-/// schema requires, so the `Id` stands in for it.
-fn software_inventory(
+/// The libredfish `inventory` as the drivers report it. libredfish keeps no
+/// `Name`, which the schema requires, so the `Id` stands in for it.
+pub fn libredfish_software_inventory(
     inventory: libredfish::model::software_inventory::SoftwareInventory,
 ) -> Result<SoftwareInventory, PlatformError> {
     serde_json::from_value(json!({
@@ -101,7 +93,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn libredfish_inventory_reads_the_selected_members() {
+    async fn libredfish_inventory_reads_every_member() {
         let sim = Arc::new(RedfishSim::default());
         let access = BmcAccessInfo {
             host: "127.0.0.1".to_string(),
@@ -117,7 +109,7 @@ mod tests {
         let inventory = bmc
             .firmware()
             .expect("firmware")
-            .inventory_matching(|id| id != "DPU_NIC")
+            .inventory()
             .await
             .expect("inventory succeeds");
 
@@ -144,14 +136,19 @@ mod tests {
                     Some("00.02.0180.0000".to_string()),
                     "/redfish/v1/UpdateService/FirmwareInventory/Bluefield_FW_ERoT".to_string(),
                 ),
+                (
+                    "DPU_NIC",
+                    Some("32.39.2048".to_string()),
+                    "/redfish/v1/UpdateService/FirmwareInventory/DPU_NIC".to_string(),
+                ),
             ]
         );
     }
 
     #[test]
     fn a_libredfish_inventory_without_a_version_or_description_converts() {
-        let inventory =
-            software_inventory(libredfish::model::software_inventory::SoftwareInventory {
+        let inventory = libredfish_software_inventory(
+            libredfish::model::software_inventory::SoftwareInventory {
                 odata: libredfish::model::ODataLinks {
                     odata_context: None,
                     odata_id: "/redfish/v1/UpdateService/FirmwareInventory/DPU_UEFI".to_string(),
@@ -163,8 +160,9 @@ mod tests {
                 id: "DPU_UEFI".to_string(),
                 version: None,
                 release_date: None,
-            })
-            .expect("converts");
+            },
+        )
+        .expect("converts");
 
         assert_eq!(inventory.id, "DPU_UEFI");
         assert_eq!(inventory.version.flatten(), None);

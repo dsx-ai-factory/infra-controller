@@ -43,7 +43,7 @@ use carbide_redfish::nv_redfish::RedfishBmc;
 pub use connector::{BmcConnectError, BmcConnector};
 pub use convert::platform_error;
 pub use dpu::BackendDpu;
-pub use firmware::BackendFirmware;
+pub use firmware::{BackendFirmware, libredfish_software_inventory};
 use libredfish::Redfish;
 pub use lockdown::BackendLockdown;
 pub use power::BackendPower;

@@ -68,7 +68,7 @@ lazy_static = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
 mockall = { workspace = true, optional = true }
-nv-redfish = { workspace = true, features = ["secure-boot"] }
+nv-redfish = { workspace = true, features = ["secure-boot", "update-service"] }
 opentelemetry = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
