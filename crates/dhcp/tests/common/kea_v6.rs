@@ -182,6 +182,7 @@ pub(crate) struct Kea6 {
     temp_base_directory: TempDir,
     process: Option<Child>,
     logs: Arc<Mutex<Vec<String>>>,
+    log_readers: Vec<thread::JoinHandle<()>>,
     _run_permit: Option<Kea6RunPermit>,
 }
 
@@ -311,6 +312,7 @@ impl Kea6 {
             metrics_endpoint_reservation,
             process: None,
             logs: Arc::new(Mutex::new(Vec::new())),
+            log_readers: Vec::new(),
             _run_permit: None,
         })
     }
@@ -436,7 +438,7 @@ impl Kea6 {
         let stdout_logs = self.logs.clone();
         // Keep child logs in memory so tests can assert warnings and failures
         // include useful diagnostics. These reader threads end at pipe EOF.
-        thread::spawn(move || {
+        self.log_readers.push(thread::spawn(move || {
             for line in stdout.lines() {
                 let line = line.unwrap();
                 stdout_logs
@@ -445,9 +447,9 @@ impl Kea6 {
                     .push(format!("KEA6 STDOUT: {line}"));
                 println!("KEA6 STDOUT: {line}");
             }
-        });
+        }));
         let stderr_logs = self.logs.clone();
-        thread::spawn(move || {
+        self.log_readers.push(thread::spawn(move || {
             for line in stderr.lines() {
                 let line = line.unwrap();
                 stderr_logs
@@ -456,7 +458,7 @@ impl Kea6 {
                     .push(format!("KEA6 STDERR: {line}"));
                 println!("KEA6 STDERR: {line}");
             }
-        });
+        }));
 
         self.process = Some(process);
 
@@ -465,6 +467,7 @@ impl Kea6 {
             thread::sleep(Duration::from_millis(100));
             if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
                 self.process = None;
+                self.join_log_readers();
                 return Ok(Some(status));
             }
 
@@ -477,6 +480,7 @@ impl Kea6 {
                     thread::sleep(KEA_EXIT_SETTLE);
                     if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
                         self.process = None;
+                        self.join_log_readers();
                         return Ok(Some(status));
                     }
                     if let Some(status) = self.wait_for_metrics_endpoint(deadline)? {
@@ -513,6 +517,7 @@ impl Kea6 {
             }
             if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
                 self.process = None;
+                self.join_log_readers();
                 return Ok(Some(status));
             }
             if Instant::now() >= deadline {
@@ -559,6 +564,7 @@ impl Kea6 {
         loop {
             if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
                 self.process = None;
+                self.join_log_readers();
                 eyre::ensure!(
                     !status.success(),
                     "storage failure must stop kea with an error"
@@ -669,15 +675,22 @@ impl Kea6 {
                 match process.try_wait() {
                     Ok(Some(_)) => break,
                     Ok(None) if Instant::now() < deadline => thread::sleep(KEA_SHUTDOWN_POLL),
-                    Ok(None) => {
+                    Ok(None) | Err(_) => {
                         process.kill().unwrap();
+                        process.wait().unwrap();
                         break;
                     }
-                    Err(_) => break,
                 }
             }
         }
         self.process = None;
+        self.join_log_readers();
+    }
+
+    fn join_log_readers(&mut self) {
+        for reader in self.log_readers.drain(..) {
+            reader.join().expect("kea6 log reader panicked");
+        }
     }
 
     fn config(
