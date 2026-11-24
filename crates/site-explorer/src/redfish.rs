@@ -26,6 +26,7 @@ use bmc_platform::{
     NicMode, PlatformError, PowerState, ResetType,
 };
 use bmc_runtime::DriverConnector;
+use carbide_hw_identification::host_serial::HOST_SERIAL_ASSEMBLY_CHASSIS_IDS;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
     BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
@@ -1157,6 +1158,7 @@ fn nv_bmc_explore_config(
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
         error_classifier: &bmc_explorer::nv_redfish_error_class,
+        assembly_chassis_ids: HOST_SERIAL_ASSEMBLY_CHASSIS_IDS,
         // Chosen arbitrarily: we want to wait a bit between tries,
         // but not for too long relative to the total exploration
         // time.

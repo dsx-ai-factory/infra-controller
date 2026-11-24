@@ -75,7 +75,6 @@ use model::site_explorer::{
     LockdownStatus, MachineSetupDiff, MachineSetupStatus, ServiceRoot as ModelServiceRoot,
     derive_hardware_class,
 };
-use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
 use nv_redfish::core::ODataId;
 use nv_redfish::oem::ami::config_bmc::{
@@ -125,6 +124,8 @@ pub struct Config<'a, B: Bmc> {
     pub boot_interface_mac: Option<MacAddress>,
     pub error_classifier: ErrorClassifier<'a, B>,
     pub retry_timeout: Duration,
+    /// Redfish chassis IDs whose Assembly links to follow. An empty list skips assembly collection.
+    pub assembly_chassis_ids: &'a [&'a str],
     /// Whether to read drive firmware versions from the primary system's
     /// Storage subsystems and report each enabled drive with a usable model
     /// and version as a `Drive_<Model>_<DriveId>` firmware inventory entry.
@@ -145,28 +146,22 @@ fn should_fetch_bf4_chassis_except_irot_nic(odata_id: &ODataId) -> bool {
 
 /// Builds the chassis exploration config shared by [`nv_generate_exploration_report`]
 /// and the [`detect_hw_type`] accessor, so detection cannot drift between them.
-fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Config {
+fn build_chassis_explore_config<'a, B: Bmc>(
+    root: &ServiceRoot<B>,
+    assembly_chassis_ids: &'a [&'a str],
+) -> chassis::Config<'a> {
     let is_nvidia_vendor = root.vendor() == Some(Vendor::new("Nvidia"))
         || root.vendor() == Some(Vendor::new("NVIDIA"));
     let need_bf4_network_device_fns = is_nvidia_vendor && is_bf4_product(root.product());
 
     chassis::Config {
+        assembly_chassis_ids,
         network_adapter: network_adapter::Config {
             // Dell exploration needs NDF data for host-DPU pairing. BF4 needs
             // NDF0 `PermanentMACAddress` to derive PF0 base MAC as (NDF0 - 0x10)
             // while some BMC firmware does not expose ComputerSystem BaseMAC.
             need_network_device_fns: root.vendor() == Some(Vendor::new("Dell"))
                 || need_bf4_network_device_fns,
-        },
-        need_assembly_sn: |id| {
-            // For GB200 and Vera Rubin hosts, use the Chassis_0 assembly serial
-            // number to match Nautobot / expected-machine inventory serials.
-            (id == "Chassis_0").then_some(|model| {
-                model.is_some_and(|model| {
-                    hw::vera_rubin::chassis_assembly_serial_model(model.into_inner())
-                }) || model == Some(AssemblyModel::new("GB200 NVL"))
-                    || model == Some(AssemblyModel::new("Titania-Bianca Compute Tray PDB"))
-            })
         },
         // BlueField-3 DPU (Tested on BF-25.10-9 firmware) has issue
         // with ERoT chassis. It stucks sometimes until next request
@@ -248,7 +243,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
-    let chassis_explore_config = build_chassis_explore_config(&root);
+    let chassis_explore_config = build_chassis_explore_config(&root, config.assembly_chassis_ids);
     let mut explored_chassis =
         ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
             .await?;
