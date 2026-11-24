@@ -16,6 +16,7 @@
  */
 use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
+use std::time::Duration;
 
 use db::TransactionVending as _;
 use mac_address::MacAddress;
@@ -24,6 +25,7 @@ use rpc::forge::forge_server::Forge;
 
 use crate::tests::common::api_fixtures::network_segment::create_network_segment;
 use crate::tests::common::api_fixtures::{FIXTURE_DHCP_RELAY_ADDRESS, create_test_env};
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 use crate::tests::machine_dhcp::{
     RPC_MESSAGE_KIND_V6_INFO_REQUEST, RPC_MESSAGE_KIND_V6_SOLICIT, add_ipv6_prefix,
@@ -34,7 +36,8 @@ use crate::tests::machine_dhcp::{
 /// Verify one physical NIC retains one interface while gaining independent v4 and v6 leases.
 ///
 /// Cross-family DHCP must merge identity without allowing either protocol to
-/// return or overwrite the other family's address.
+/// return or overwrite the other family's address. A short BMC rotation lock
+/// delays renewal and missing-family allocation without changing either result.
 #[crate::sqlx_test]
 async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
     pool: sqlx::PgPool,
@@ -66,16 +69,52 @@ async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
     assert!(addresses[0].address.is_ipv4());
 
-    // Request DHCPv6 later for the same MAC; it should add only the v6 family.
-    let v6_response = env
-        .api
-        .discover_dhcp(dhcpv6_discovery(
-            mac,
-            "2001:db8:2::1",
-            RPC_MESSAGE_KIND_V6_SOLICIT,
-        ))
-        .await?
-        .into_inner();
+    let cases = [
+        (
+            "IPv4 renewal",
+            DhcpDiscovery::builder(mac, FIXTURE_DHCP_RELAY_ADDRESS).tonic_request(),
+            "UPDATE machine_interfaces SET last_dhcp",
+        ),
+        (
+            "first IPv6 allocation",
+            dhcpv6_discovery(mac, "2001:db8:2::1", RPC_MESSAGE_KIND_V6_SOLICIT),
+            "SELECT segment_id FROM machine_interfaces",
+        ),
+    ];
+    let mut responses = Vec::new();
+    for (scenario, request, blocked_query) in cases {
+        let mut rotation = pool.txn_begin().await?;
+        let locked =
+            db::machine_interface::find_by_mac_address_for_update(&mut rotation, mac).await?;
+        assert_eq!(locked.len(), 1, "{scenario}");
+        assert_eq!(locked[0].id, interface_id, "{scenario}");
+        let rotation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *rotation)
+            .await?;
+
+        let discovery = env.api.discover_dhcp(request);
+        tokio::pin!(discovery);
+        tokio::select! {
+            result = &mut discovery => panic!("{scenario} bypassed the BMC interface lock: {result:?}"),
+            _ = wait_for_blocked_query(&pool, rotation_pid, blocked_query) => {},
+        }
+        rotation.commit().await?;
+        let response = tokio::time::timeout(Duration::from_secs(30), discovery)
+            .await?
+            .map_err(|error| format!("{scenario}: {error}"))?
+            .into_inner();
+        assert_eq!(
+            response.machine_interface_id,
+            Some(interface_id),
+            "{scenario}"
+        );
+        responses.push(response);
+    }
+    let v4_renewal = &responses[0];
+    assert_eq!(v4_renewal.address, v4_response.address);
+    assert_eq!(v4_renewal.prefix, v4_response.prefix);
+    assert_eq!(v4_renewal.fqdn, v4_response.fqdn);
+    let v6_response = &responses[1];
     assert!(v6_response.address.parse::<IpAddr>()?.is_ipv6());
     assert_eq!(v6_response.prefix, "2001:db8:2::/64");
     assert!(v6_response.gateway.is_none());
@@ -88,10 +127,12 @@ async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
     let (_, addresses) = interface_addresses_for_mac(&pool, mac).await?;
     assert_eq!(addresses.len(), 2);
     assert!(addresses.iter().any(|address| {
-        address.allocation_type == AllocationType::Dhcp && address.address.is_ipv4()
+        address.allocation_type == AllocationType::Dhcp
+            && address.address.to_string() == v4_response.address
     }));
     assert!(addresses.iter().any(|address| {
-        address.allocation_type == AllocationType::Dhcp && address.address.is_ipv6()
+        address.allocation_type == AllocationType::Dhcp
+            && address.address.to_string() == v6_response.address
     }));
 
     Ok(())

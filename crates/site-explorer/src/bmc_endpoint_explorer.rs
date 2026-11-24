@@ -32,7 +32,6 @@ use db::TransactionVending as _;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::expected_entity::{BmcCredentialsData, ExpectedEntity};
-use model::expected_switch::ExpectedSwitch;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, LockdownStatus,
@@ -125,7 +124,6 @@ impl AuthenticatedBmcClient {
 pub struct BmcEndpointExplorer {
     instrumentation: carbide_instrument::Instrumentation,
     bmc_client: Arc<AuthenticatedBmcClient>,
-    rotate_switch_nvos_credentials: Arc<AtomicBool>,
     /// Whether nv-redfish reports include drive firmware inventory entries.
     explore_drive_firmware: bool,
     dpf_per_dpu_bmc_credentials: AtomicBool,
@@ -142,14 +140,12 @@ impl BmcEndpointExplorer {
     /// Event instrumentation. Retain its provider while the explorer runs.
     pub fn new(
         bmc_client: Arc<AuthenticatedBmcClient>,
-        rotate_switch_nvos_credentials: Arc<AtomicBool>,
         database_connection: Option<PgPool>,
         instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
             instrumentation,
             bmc_client,
-            rotate_switch_nvos_credentials,
             explore_drive_firmware: false,
             dpf_per_dpu_bmc_credentials: AtomicBool::new(false),
             database_connection,
@@ -272,16 +268,6 @@ impl BmcEndpointExplorer {
         self.bmc_client
             .credential_client
             .get_dpu_factory_default_credentials(model)
-            .await
-    }
-
-    pub async fn get_switch_nvos_admin_credentials(
-        &self,
-        bmc_mac_address: MacAddress,
-    ) -> Result<Credentials, EndpointExplorationError> {
-        self.bmc_client
-            .credential_client
-            .get_switch_nvos_admin_credentials(bmc_mac_address)
             .await
     }
 
@@ -684,35 +670,6 @@ impl BmcEndpointExplorer {
         };
         Ok(vendor)
     }
-
-    // Handle switch NVOS admin credentials setup
-    // Store NVOS admin credentials in vault for the switch if they exist in expected_switch
-    pub async fn set_sitewide_switch_nvos_admin_credentials(
-        &self,
-        bmc_mac_address: MacAddress,
-        expected_switch: &ExpectedSwitch,
-    ) -> Result<(), EndpointExplorationError> {
-        if let (Some(nvos_username), Some(nvos_password)) = (
-            expected_switch.nvos_username.as_ref(),
-            expected_switch.nvos_password.as_ref(),
-        ) {
-            tracing::info!(
-                %bmc_mac_address,
-                "Storing NVOS admin credentials in vault"
-            );
-            self.bmc_client
-                .credential_client
-                .set_bmc_nvos_admin_credentials(
-                    bmc_mac_address,
-                    &Credentials::UsernamePassword {
-                        username: nvos_username.clone(),
-                        password: nvos_password.clone(),
-                    },
-                )
-                .await?;
-        }
-        Ok(())
-    }
 }
 
 impl AuthenticatedBmcClient {
@@ -967,40 +924,6 @@ impl EndpointExplorer for BmcEndpointExplorer {
                 return Err(e);
             }
         };
-
-        // Check for switch NVOS admin credentials if this is a switch
-        if let Some(ExpectedEntity::Switch(expected_switch)) = expected
-            && expected_switch.nvos_username.is_some()
-            && expected_switch.nvos_password.is_some()
-        {
-            // Only check if rotation is enabled
-            if self.rotate_switch_nvos_credentials.load(Ordering::Relaxed) {
-                match self
-                    .get_switch_nvos_admin_credentials(bmc_mac_address)
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::trace!(
-                            %bmc_ip_address, %bmc_mac_address,
-                            "NVOS admin credentials already exist in vault"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::info!(
-                            %bmc_ip_address,
-                            %bmc_mac_address,
-                            error = %e,
-                            "Failed to load NVOS admin credentials; attempting credential setup",
-                        );
-                        self.set_sitewide_switch_nvos_admin_credentials(
-                            bmc_mac_address,
-                            expected_switch,
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
 
         Ok(report)
     }
@@ -1656,12 +1579,7 @@ mod tests {
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
         ));
-        BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            None,
-            instrumentation,
-        )
+        BmcEndpointExplorer::new(bmc_client, None, instrumentation)
     }
 
     #[sqlx_test]
@@ -1863,6 +1781,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exploration_does_not_copy_expected_switch_nvos_credentials() {
+        let test_meter = TestMeter::default();
+        let (server, _) = bmc_mock::test_support::serve_https(
+            "expected-switch-credentials",
+            nvidia_gh200_swapped_managers_router(),
+        );
+        let credentials = Arc::new(TestCredentialManager::default());
+        let interface =
+            MachineInterfaceSnapshot::mock_with_mac("02:00:00:00:00:01".parse().unwrap());
+        credentials
+            .set_credentials(
+                &get_bmc_root_credential_key(interface.mac_address),
+                &Credentials::new("root", "password"),
+            )
+            .await
+            .unwrap();
+        let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
+        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
+            Arc::new(RedfishSim::default()),
+            Arc::new(NvRedfishClientPool::new(proxy_address)),
+            None,
+            carbide_ipmi::test_support(),
+            credentials.clone(),
+        ));
+        let explorer = BmcEndpointExplorer::new(
+            bmc_client,
+            None,
+            carbide_instrument::Instrumentation::new(test_meter.meter()),
+        );
+        let expected = ExpectedEntity::Switch(model::expected_switch::ExpectedSwitch {
+            bmc_mac_address: interface.mac_address,
+            nvos_username: Some("admin".to_string()),
+            nvos_password: Some("factory-nvos-password".to_string()),
+            ..Default::default()
+        });
+
+        explorer
+            .explore_endpoint(
+                server.address,
+                &interface,
+                Some(&expected),
+                None,
+                None,
+                Box::new(|| panic!("stored BMC credentials must avoid loading site credentials")),
+            )
+            .await
+            .expect("BMC exploration should succeed independently of NVOS credentials");
+
+        assert!(
+            credentials
+                .get_credentials(&CredentialKey::SwitchNvosAdmin {
+                    bmc_mac_address: interface.mac_address,
+                })
+                .await
+                .unwrap()
+                .is_none(),
+            "NVOS credential persistence belongs to password reconciliation"
+        );
+    }
+
+    #[tokio::test]
     async fn default_nvredfish_mode_does_not_apply_lenovo_fallback_to_generic_ami() {
         let (router, _state) = bmc_mock::test_support::
             generic_ami_router_with_network_adapter_port_and_disabled_system_mac(
@@ -2032,7 +2011,6 @@ mod tests {
         let metrics = MetricsCapture::for_registry(test_meter.registry());
         let explorer = BmcEndpointExplorer::new(
             bmc_client,
-            Arc::new(AtomicBool::new(false)),
             None,
             carbide_instrument::Instrumentation::new(test_meter.meter()),
         );

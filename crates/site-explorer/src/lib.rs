@@ -117,7 +117,6 @@ use model::network_segment::NetworkSegmentType;
 use model::rack::Rack;
 pub mod config;
 pub mod errors;
-use std::sync::atomic::AtomicBool;
 
 use errors::{SiteExplorerError, SiteExplorerResult};
 
@@ -160,19 +159,13 @@ fn should_scan_underlay_interface_for_redfish(
 /// while the explorer runs.
 pub fn new_bmc_explorer(
     bmc_client: Arc<AuthenticatedBmcClient>,
-    rotate_switch_nvos_credentials: Arc<AtomicBool>,
     explore_drive_firmware: bool,
     database_connection: PgPool,
     instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<BmcEndpointExplorer> {
-    BmcEndpointExplorer::new(
-        bmc_client,
-        rotate_switch_nvos_credentials,
-        Some(database_connection),
-        instrumentation,
-    )
-    .with_drive_firmware(explore_drive_firmware)
-    .into()
+    BmcEndpointExplorer::new(bmc_client, Some(database_connection), instrumentation)
+        .with_drive_firmware(explore_drive_firmware)
+        .into()
 }
 
 pub fn enrich_endpoint_exploration_report(
@@ -2596,12 +2589,11 @@ impl SiteExplorer {
                         .expected
                         .is_some_and(|v| matches!(v, ExpectedEntity::PowerShelf(_)));
 
-                    if !self.config.create_machines.load(Ordering::Relaxed)
-                        || power_shelf_manual_ingestion
+                    if power_shelf_manual_ingestion
                         || is_endpoint_in_managed_host(address, txn.as_pgconn()).await?
                     {
-                        // Manual ingestion must not run automatic setup, and managed BMCs
-                        // must not repeat preingestion for another address. Keep this in the
+                        // Power shelves use manual setup, and managed BMCs must not
+                        // repeat preingestion for another address. Keep this in the
                         // insert branch so refreshes preserve explicit preingestion retries.
                         db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?
                     }

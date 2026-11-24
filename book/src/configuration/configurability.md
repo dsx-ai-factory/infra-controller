@@ -406,6 +406,10 @@ plus thresholds for DPU agent compliance. Operators flip this from
   no DHCP lease is discovered at its static `expected_power_shelves` IP as a
   matter of course.
 
+These creation toggles do not control BMC pre-ingestion. In particular, disabling
+switch creation still allows [initial NVOS password rotation](../../../docs/operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
+to complete before a switch state machine is created.
+
 Site Explorer auto-creation is additionally gated per device on a matching
 expected-hardware record (`expected_machines`, `expected_switches`,
 `expected_power_shelves`), so it only ingests declared hardware; other
