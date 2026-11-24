@@ -452,9 +452,12 @@ For a partition that is not removed, follow the diagnostics in
 1. Stand up UFM per the [InfiniBand Setup runbook](../../playbooks/ib_runbook.md).
    Confirm `default_membership = limited`, M_Key / SA_Key hardening, and
    any required static topology configuration.
-2. Provision a UFM API user with permission to read ports / partitions
-   and to create / update / delete partitions. Store its credentials in
-   the configured credential source.
+2. Prepare UFM authentication for the mode you select:
+   - For `auth = "token"`, provision a UFM API user with permission to read
+     ports and partitions and to create, update, and delete partitions. Store
+     its token in the configured credential source.
+   - For `auth = "client_certificate"`, configure UFM to trust the default
+     SPIFFE client certificate. Do not store a UFM API credential.
 3. In the NICo API server config:
    - Set `[ib_config].enabled = true` and any fabric-wide MTU / rate /
      service-level defaults.

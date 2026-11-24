@@ -210,7 +210,7 @@ root:/# curl -s -k -XPUT -H "Content-Type: application/json" -u admin:123456 -d 
 }
 ```
 
-Generate a token for admin as follows:
+If NICo will use token authentication, generate a token for admin as follows:
 
 ```text
 root:/# curl -s -k -XPOST -u admin:x https://ufm.example.org:443/ufmRest/app/tokens | jq
@@ -574,7 +574,8 @@ The default home directory is `/opt/ufm`.
 
 ### How to check UFM connection?
 
-There is a debug tools for QA/SRE to check the address/token of UFM:
+For token authentication, QA/SRE can use this debug tool to check the UFM
+address and token:
 
 ```text
 root@host-client:/$ kubectl apply -f https://bit.ly/debug-console
@@ -612,7 +613,14 @@ Ports          :
 
 ### How to check the auth token and UFM IP in NICo?
 
-After configuring UFM credentials in NICo, using the following commands to check whether the token was updated in the credential store. The commands below apply to the default Vault backend. With the Postgres store, confirm the journal row instead: in the `nico_system_nico` database, `SELECT path, seq, kek_id, created_at FROM secrets WHERE path LIKE 'ufm/%' ORDER BY seq DESC;` lists the entries without revealing the encrypted token.
+This check applies when NICo reads a UFM credential; a fabric with
+`auth = "client_certificate"` reads none. After configuring UFM credentials in
+NICo, use the following commands to check whether the token was updated in the
+credential store. The commands below apply to the default Vault backend. With
+the Postgres store, confirm the journal row instead: in the
+`nico_system_nico` database, `SELECT path, seq, kek_id, created_at FROM secrets
+WHERE path LIKE 'ufm/%' ORDER BY seq DESC;` lists the entries without revealing
+the encrypted token.
 
 If a local environment or file source supplies the fabric's credential, NICo reads that source first regardless of what the backend holds; refer to [Credential Sources](../configuration/credential-sources.md) for details.
 
