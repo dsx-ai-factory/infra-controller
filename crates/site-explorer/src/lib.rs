@@ -76,7 +76,9 @@ pub mod test_support;
 pub use metrics::{SiteExplorationMetrics, site_explorer_latency_histogram_view};
 mod bmc_endpoint_explorer;
 mod redfish;
-pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
+pub use bmc_endpoint_explorer::{
+    AuthenticatedBmcClient, BmcEndpointExplorer, DpfBmcRecoveryDrainCheck,
+};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools, lockdown_report};
 mod boot_interfaces;
 mod host_interfaces;
@@ -1777,8 +1779,26 @@ impl SiteExplorer {
             BmcSuppressionSubsystem::SiteExplorer,
         )
         .await?;
+        let rotation_macs = suppressions
+            .iter()
+            .filter(|suppression| {
+                suppression.source
+                    == model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation
+            })
+            .map(|suppression| suppression.bmc_mac_address)
+            .collect::<Vec<_>>();
+        let recovering = if rotation_macs.is_empty() {
+            Vec::new()
+        } else {
+            db::dpf_bmc_rotation::detached_macs(&self.database_connection, &rotation_macs).await?
+        };
         let suppressed_bmc_macs = suppressions
             .iter()
+            .filter(|suppression| {
+                suppression.source
+                    != model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation
+                    || !recovering.contains(&suppression.bmc_mac_address)
+            })
             .map(|suppression| suppression.bmc_mac_address)
             .collect();
 

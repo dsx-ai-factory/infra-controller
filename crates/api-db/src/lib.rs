@@ -38,6 +38,7 @@ pub mod dhcp_record;
 pub mod direct_dispatch_rms_job;
 pub mod dns;
 pub mod dpa_interface;
+pub mod dpf_bmc_rotation;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;

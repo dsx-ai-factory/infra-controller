@@ -54,6 +54,10 @@ pub(super) struct CredentialClient {
 }
 
 impl CredentialClient {
+    pub(super) fn manager(&self) -> &dyn CredentialManager {
+        self.credential_manager.as_ref()
+    }
+
     fn valid_password(credentials: &Credentials) -> bool {
         let (_, password) = match credentials {
             Credentials::UsernamePassword { username, password } => (username, password),

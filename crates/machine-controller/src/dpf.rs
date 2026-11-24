@@ -107,6 +107,12 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         dpu_device_names: &[String],
     ) -> Result<bool, DpfError>;
 
+    async fn bmc_credential_resources_gone(
+        &self,
+        node_id: &str,
+        device_id: &str,
+    ) -> Result<bool, DpfError>;
+
     /// Read a DPU phase and terminal failure details from the same CR observation.
     ///
     /// `device_id` excludes the `device-` prefix. `node_name` accepts a node ID
@@ -862,6 +868,19 @@ async fn initial_dpu_bmc_credential(
 ) -> Result<(Option<u32>, String), DpfError> {
     use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
     use db::credential_rotation::{CredentialRotationType, device_rotation_operation_state};
+    if db::dpf_bmc_rotation::get(db_pool, bmc_mac_address)
+        .await
+        .map_err(|_| {
+            DpfError::BmcPasswordSourceUnavailable(
+                "could not read DPU BMC credential recovery state".to_string(),
+            )
+        })?
+        .is_some()
+    {
+        return Err(DpfError::BmcPasswordSourceUnavailable(
+            "DPU BMC credential recovery must complete before registration".to_string(),
+        ));
+    }
     let state =
         device_rotation_operation_state(db_pool, CredentialRotationType::Bmc, bmc_mac_address)
             .await
@@ -984,6 +1003,16 @@ impl DpfOperations for DpfSdkOps {
     ) -> Result<bool, DpfError> {
         self.sdk
             .delete_host_bmc_credential_secrets(node_id, dpu_device_names)
+            .await
+    }
+
+    async fn bmc_credential_resources_gone(
+        &self,
+        node_id: &str,
+        device_id: &str,
+    ) -> Result<bool, DpfError> {
+        self.sdk
+            .bmc_credential_resources_gone(node_id, &[device_id.to_string()])
             .await
     }
 

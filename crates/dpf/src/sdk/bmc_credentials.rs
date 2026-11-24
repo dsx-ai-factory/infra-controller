@@ -231,19 +231,12 @@ impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
 impl<R: BmcCredentialRepository + DpuNodeRepository + DpuDeviceRepository + DpuRepository, L>
     DpfSdk<R, L>
 {
-    /// Delete all NICo-owned credential revisions for a drained host. Returns `false` while
-    /// its DPUNode, DPUDevices, DPUs, or credential Secrets still exist, including finalizer waits.
-    /// Secrets are deleted using observed UID/resource-version preconditions; shared and foreign
-    /// Secrets are never deleted. On older DPF versions this is a no-op returning `true`.
-    /// Callers must serialize cleanup with registration for this host.
-    pub async fn delete_host_bmc_credential_secrets(
+    /// Check only the resources identified by this host and its devices.
+    pub async fn bmc_credential_resources_gone(
         &self,
         node_id: &str,
         device_ids: &[String],
     ) -> Result<bool, DpfError> {
-        if !self.supports_per_dpu_bmc_credentials() {
-            return Ok(true);
-        }
         let node_name = super::dpu_node_cr_name(node_id);
         if DpuNodeRepository::get(&*self.repo, &node_name, &self.namespace)
             .await?
@@ -270,6 +263,28 @@ impl<R: BmcCredentialRepository + DpuNodeRepository + DpuDeviceRepository + DpuR
             {
                 return Ok(false);
             }
+        }
+        Ok(true)
+    }
+
+    /// Delete all NICo-owned credential revisions for a drained host. Returns `false` while
+    /// its DPUNode, DPUDevices, DPUs, or credential Secrets still exist, including finalizer waits.
+    /// Secrets are deleted using observed UID/resource-version preconditions; shared and foreign
+    /// Secrets are never deleted. On older DPF versions this is a no-op returning `true`.
+    /// Callers must serialize cleanup with registration for this host.
+    pub async fn delete_host_bmc_credential_secrets(
+        &self,
+        node_id: &str,
+        device_ids: &[String],
+    ) -> Result<bool, DpfError> {
+        if !self.supports_per_dpu_bmc_credentials() {
+            return Ok(true);
+        }
+        if !self
+            .bmc_credential_resources_gone(node_id, device_ids)
+            .await?
+        {
+            return Ok(false);
         }
         let mut complete = true;
         for id in device_ids {
