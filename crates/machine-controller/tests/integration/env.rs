@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_machine_controller::context::MachineStateHandlerServices;
+use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::handler::{
     MachineStateHandlerBuilder, PowerOptionConfig, ReachabilityParams,
 };
@@ -52,6 +53,7 @@ pub(super) struct EnvBuilder {
     component_manager: Option<Arc<ComponentManager>>,
     credential_manager: Option<Arc<dyn CredentialManager>>,
     controller_redfish_pool: Option<ControllerRedfishPool>,
+    dpf_sdk: Option<Arc<dyn DpfOperations>>,
 }
 
 impl Env {
@@ -68,6 +70,7 @@ impl Env {
             component_manager: None,
             credential_manager: None,
             controller_redfish_pool: None,
+            dpf_sdk: None,
         }
     }
 
@@ -85,6 +88,12 @@ impl Env {
 }
 
 impl EnvBuilder {
+    pub(super) fn with_dpf_bmc_rotation(mut self, sdk: Arc<dyn DpfOperations>) -> Self {
+        self.runtime_config.dpf.enabled = true;
+        self.dpf_sdk = Some(sdk);
+        self
+    }
+
     pub(super) fn configure_runtime(mut self, configure: impl FnOnce(&mut CarbideConfig)) -> Self {
         configure(&mut self.runtime_config);
         self
@@ -142,6 +151,7 @@ impl EnvBuilder {
             component_manager,
             credential_manager,
             controller_redfish_pool,
+            dpf_sdk,
         } = self;
         let controller_redfish_sim = redfish_sim.clone();
         let runtime_config = Arc::new(runtime_config);
@@ -161,6 +171,7 @@ impl EnvBuilder {
             uefi_boot_wait: runtime_config.machine_state_controller.uefi_boot_wait,
         };
         let power_options: PowerOptionConfig = runtime_config.power_manager_options.clone().into();
+        let dpf_per_dpu_bmc_credentials = dpf_sdk.is_some();
         let machine_handler = MachineStateHandlerBuilder::builder(api.instrumentation().clone())
             .dpu_up_threshold(runtime_config.machine_state_controller.dpu_up_threshold)
             .dpu_nic_firmware_reprovision_update_enabled(
@@ -184,6 +195,7 @@ impl EnvBuilder {
             )
             .credential_reader(api.credential_manager().clone())
             .power_options_config(power_options)
+            .dpf_sdk(dpf_sdk)
             .build();
         let per_object_metrics_registry = PerObjectMetricsRegistry::new(
             runtime_config
@@ -227,7 +239,8 @@ impl EnvBuilder {
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
             // Zero TTL for the same reason as the BMC gate above.
-            dpf_per_dpu_bmc_credentials: false,
+            dpf_per_dpu_bmc_credentials,
+            dpf_rotation_locks: Some(api.work_lock_manager_handle()),
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::with_ttl_and_family(
                     std::time::Duration::ZERO,

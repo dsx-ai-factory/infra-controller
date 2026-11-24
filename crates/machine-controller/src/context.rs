@@ -95,6 +95,7 @@ pub struct MachineStateHandlerServices {
     pub dpu_bmc_service_rotation_gate: RotationGate,
     /// Startup-cached DPF capability; DPF owns BF4 service-account passwords when true.
     pub dpf_per_dpu_bmc_credentials: bool,
+    pub dpf_rotation_locks: Option<db::work_lock_manager::WorkLockManagerHandle>,
     /// Short-TTL cache of the site-wide NIC lockdown IKM rotation aggregate,
     /// shared across this replica's per-object ticks. Family-scoped to
     /// `lockdown_ikm` and keyed by each NIC's MAC.

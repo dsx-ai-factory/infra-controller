@@ -73,6 +73,13 @@ pub(crate) fn managed_host_bmc_endpoints(
         )
 }
 
+pub(super) fn uses_dpf(
+    services: &MachineStateHandlerServices,
+    mh: &ManagedHostStateSnapshot,
+) -> bool {
+    mh.host_snapshot.config.dpf.used_for_ingestion && services.dpf_per_dpu_bmc_credentials
+}
+
 /// `true` when the host BMC or any DPU BMC is behind the staged site-wide target
 /// and not currently quarantined -- i.e. the machine should enter its
 /// BMC-rotation state. Covers both the BMC-root family (host + every DPU) and
@@ -86,7 +93,6 @@ pub(crate) async fn bmc_rotation_needed(
         .chain(
             mh.dpu_snapshots
                 .iter()
-                .filter(|_| !services.dpf_per_dpu_bmc_credentials)
                 .filter_map(BmcEndpoint::from_machine),
         )
     {
@@ -102,7 +108,7 @@ pub(crate) async fn bmc_rotation_needed(
         }
     }
 
-    if services.dpf_per_dpu_bmc_credentials {
+    if uses_dpf(services, mh) {
         return Ok(false);
     }
 
@@ -141,6 +147,9 @@ pub(crate) async fn should_enter_bmc_rotation(
     services: &MachineStateHandlerServices,
     mh: &ManagedHostStateSnapshot,
 ) -> Result<bool, StateHandlerError> {
+    if mh.host_snapshot.config.dpf.used_for_ingestion && !services.site_config.dpf_enabled {
+        return Ok(false);
+    }
     if bmc_rotation_force_requested(mh) {
         return Ok(true);
     }
@@ -179,7 +188,7 @@ pub(crate) async fn rotate_managed_host_bmcs(
     for (machine_id, force, endpoint) in host.chain(dpus) {
         let is_dpu = machine_id.is_dpu();
         // DPF's immutable credential reference must stay in sync with the hardware password.
-        if is_dpu && services.dpf_per_dpu_bmc_credentials {
+        if is_dpu && uses_dpf(services, mh) {
             continue;
         }
         if !force && !is_sitewide_bmc_rotation_enabled {
@@ -418,6 +427,7 @@ mod tests {
             dpu_bmc_service_rotation_gate: gate(CredentialRotationType::DpuBmcService),
             nic_lockdown_rotation_gate: gate(CredentialRotationType::LockdownIkm),
             dpf_per_dpu_bmc_credentials: true,
+            dpf_rotation_locks: None,
             per_object_metrics_registry: carbide_health_metrics::PerObjectMetricsRegistry::new(
                 Vec::new(),
                 Duration::from_secs(60),
@@ -425,6 +435,7 @@ mod tests {
             per_object_info: None,
         };
         let mut mh = snapshot_with_distinct_bmcs();
+        mh.host_snapshot.config.dpf.used_for_ingestion = true;
         mh.host_snapshot.status.bmc_info.mac = None;
         mh.dpu_snapshots.truncate(1);
         mh.dpu_snapshots[0].bmc_credential_rotation_requested = true;
@@ -478,7 +489,7 @@ mod tests {
             (false, 1, "new-service-password"),
         ] {
             services.dpf_per_dpu_bmc_credentials = enabled;
-            assert_eq!(bmc_rotation_needed(&services, &mh).await.unwrap(), !enabled);
+            assert!(bmc_rotation_needed(&services, &mh).await.unwrap());
             assert!(matches!(
                 rotate_managed_host_bmcs(&services, &mh).await,
                 BmcRotationTick::Settled
