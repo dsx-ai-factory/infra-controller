@@ -40,8 +40,7 @@
 //! [`RotatingDpuUefi`]: model::machine::ManagedHostState::RotatingDpuUefi
 //! [`RotationGate::rotation_needed`]: carbide_credential_rotation::RotationGate::rotation_needed
 
-use bmc_vendor::DpuModel;
-use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
+use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_uuid::machine::DpuMachineId;
 use db::TransactionVending as _;
 use db::credential_rotation::NoStagedCredentialRotation;
@@ -51,9 +50,9 @@ use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
-use super::host_uefi_rotation::rotate_uefi_password_candidates;
 use super::{current_site_uefi_target, handler_restart_dpu, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
+use crate::uefi_password::{read_dpu_factory_default, rotate_uefi_password_candidates};
 
 /// `true` when this DPU's UEFI credential lags the staged site-wide `dpu_uefi`
 /// target and is not quarantined. A DPU with no BMC MAC (untrackable) or no
@@ -135,7 +134,9 @@ pub(crate) async fn dpu_uefi_current_candidates(
         }
     }
     // Factory default last: a never-set DPU still holds its hardware password.
-    candidates.push(read_dpu_factory_default(reader).await?);
+    candidates.push(read_dpu_factory_default(reader).await.map_err(|e| {
+        StateHandlerError::GenericError(eyre!("read DPU UEFI factory default: {e}"))
+    })?);
     Ok(candidates)
 }
 
@@ -153,30 +154,6 @@ async fn read_dpu_uefi_password(
         ))
     })?;
     Ok(credentials.map(|Credentials::UsernamePassword { password, .. }| password))
-}
-
-/// Read the DPU hardware factory-default UEFI password (a hardware constant, not
-/// a versioned/site credential), falling back to the well-known "bluefield"
-/// default when the store has no entry -- matching the ingestion `uefi_setup`
-/// path so a never-set DPU authenticates identically whether it converges via
-/// ingestion or via a forced rotation.
-async fn read_dpu_factory_default(
-    reader: &dyn CredentialReader,
-) -> Result<String, StateHandlerError> {
-    let key = CredentialKey::DpuUefi {
-        credential_type: CredentialType::DpuHardwareDefault {
-            model: DpuModel::Unknown,
-        },
-    };
-    let credentials = reader.get_credentials(&key).await.map_err(|e| {
-        StateHandlerError::GenericError(eyre::eyre!(
-            "read dpu UEFI factory default {}: {e}",
-            key.to_key_str()
-        ))
-    })?;
-    Ok(credentials
-        .map(|Credentials::UsernamePassword { password, .. }| password)
-        .unwrap_or_else(|| "bluefield".to_string()))
 }
 
 /// Converge one DPU's UEFI (BIOS setup) password to the staged site-wide
@@ -366,8 +343,9 @@ pub(crate) async fn handle_rotating_dpu_uefi(
 
 #[cfg(test)]
 mod tests {
+    use bmc_vendor::DpuModel;
     use carbide_secrets::MemoryCredentialStore;
-    use carbide_secrets::credentials::CredentialWriter;
+    use carbide_secrets::credentials::{CredentialType, CredentialWriter};
 
     use super::*;
 

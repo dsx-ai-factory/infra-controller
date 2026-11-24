@@ -17,7 +17,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::Arc;
 
 use ::rpc::common::SystemPowerControl;
 use ::rpc::forge::{self as rpc};
@@ -75,11 +74,9 @@ const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this 
 
 /// The core compute-tray backend standalone hosts use. It authenticates with
 /// explicit per-endpoint credentials, which the proxied pool rejects by
-/// design, so it always dials BMCs directly through the credential-ops pool.
+/// design, so it always dials BMCs directly through the direct pool.
 pub(crate) fn standalone_compute_tray_manager(api: &Api) -> CoreComputeTrayManager {
-    let direct_pool: Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-        api.bmc_credential_ops.clone();
-    CoreComputeTrayManager::new(direct_pool).with_driver_connector(
+    CoreComputeTrayManager::new(api.direct_redfish_pool.pool()).with_driver_connector(
         api.driver_connector.clone(),
         api.database_connection.clone(),
     )

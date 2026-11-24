@@ -65,7 +65,7 @@ use carbide_rack_controller::context::RackStateHandlerServices;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::libredfish::{DirectRedfishPool, RedfishClientPool};
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
@@ -165,9 +165,9 @@ fn create_ipmi_tool(
 /// pool by a call-site mistake.
 struct BmcProxyPools {
     /// The pool for ordinary BMC traffic: nico-bmc-proxy when `[bmc_proxy]`
-    /// is enabled, otherwise the direct pool itself. Credential-lifecycle
-    /// work never uses this handle -- that is what the [`BmcCredentialOps`]
-    /// handle is for.
+    /// is enabled, otherwise the direct pool itself. Work with explicit
+    /// credentials never uses this handle -- that is what the
+    /// [`DirectRedfishPool`] is for.
     general: Arc<dyn RedfishClientPool>,
     /// The pools the driver connector uses: ordinary traffic routed like
     /// `general`, and the direct pool for explicit credentials.
@@ -257,7 +257,7 @@ fn create_redfish_pool(
     carbide_config: &CarbideConfig,
     credential_manager: Arc<dyn CredentialManager>,
     instrumentation: carbide_instrument::Instrumentation,
-) -> eyre::Result<(Arc<dyn RedfishClientPool>, Arc<dyn BmcCredentialOps>)> {
+) -> eyre::Result<(Arc<dyn RedfishClientPool>, DirectRedfishPool)> {
     let pool = libredfish::RedfishClientPool::builder()
         .danger_accept_invalid_certs()
         .build()
@@ -301,7 +301,7 @@ fn create_redfish_pool(
         (None, None, _) => {} // leave bmc_proxy untouched
     }
 
-    Ok(carbide_redfish::libredfish::new_pool_with_credential_ops(
+    Ok(carbide_redfish::libredfish::new_pool_with_direct(
         credential_manager,
         pool,
         carbide_config.site_explorer.bmc_proxy.clone(),
@@ -356,7 +356,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         )?)
     };
 
-    let (shared_redfish_pool, bmc_credential_ops) = create_redfish_pool(
+    let (shared_redfish_pool, direct_redfish_pool) = create_redfish_pool(
         &carbide_config,
         credential_manager.clone(),
         instrumentation.clone(),
@@ -691,7 +691,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
 
     let bmc_client = Arc::new(
         AuthenticatedBmcClient::new(
-            bmc_credential_ops.clone(),
+            direct_redfish_pool.clone(),
             shared_nv_redfish_pool,
             // Established-endpoint traffic goes through nico-bmc-proxy when
             // enabled; credential setup stays on the direct handle above.
@@ -899,7 +899,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         eth_data,
         ib_fabric_manager,
         redfish_pool: general_redfish_pool,
-        bmc_credential_ops: bmc_credential_ops.clone(),
+        direct_redfish_pool: direct_redfish_pool.clone(),
         driver_connector: driver_connector.clone(),
         bmc_proxy_passthrough,
         bmc_session_manager,
@@ -1879,7 +1879,7 @@ async fn initialize_and_start_controllers<'a>(
         database_connection: db_pool,
         ib_fabric_manager,
         redfish_pool: shared_redfish_pool,
-        bmc_credential_ops,
+        direct_redfish_pool,
         driver_connector,
         work_lock_manager_handle,
         rms_client,
@@ -2284,10 +2284,10 @@ async fn initialize_and_start_controllers<'a>(
                 redfish_client_pool: shared_redfish_pool.clone(),
                 bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
-                    bmc_credential_ops.clone(),
+                    direct_redfish_pool.clone(),
                     driver_connector.clone(),
                 ),
-                bmc_credential_ops: bmc_credential_ops.clone(),
+                direct_redfish_pool: direct_redfish_pool.clone(),
                 ipmi_tool: ipmi_tool.clone(),
                 site_config: carbide_config.machine_state_handler_site_config().into(),
                 component_manager: component_manager.clone().map(Arc::new),
@@ -2576,7 +2576,7 @@ async fn initialize_and_start_controllers<'a>(
                 redfish_client_pool: shared_redfish_pool.clone(),
                 bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
-                    bmc_credential_ops.clone(),
+                    direct_redfish_pool.clone(),
                     driver_connector.clone(),
                 ),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
@@ -2667,7 +2667,7 @@ async fn initialize_and_start_controllers<'a>(
                 redfish_client_pool: shared_redfish_pool.clone(),
                 bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
-                    bmc_credential_ops.clone(),
+                    direct_redfish_pool.clone(),
                     driver_connector.clone(),
                 ),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(

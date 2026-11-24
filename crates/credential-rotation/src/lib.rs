@@ -897,7 +897,9 @@ async fn enter_device_rotation(
 /// re-quarantines through the normal backoff bookkeeping.
 ///
 /// `connector` connects with explicit credentials on the configured
-/// `bmc_backend` (always bypassing `nico-bmc-proxy`).
+/// `bmc_backend`; build it with the direct pool
+/// (`BmcConnector::new_with_direct`), since nico-bmc-proxy refuses explicit
+/// credentials.
 /// Terminal Event metrics use the supplied instrumentation.
 pub async fn rotate_bmc(
     db_pool: &PgPool,
@@ -1013,7 +1015,9 @@ pub async fn rotate_bmc(
 /// remains to promote.
 ///
 /// `connector` connects with explicit credentials on the configured
-/// `bmc_backend` (always bypassing `nico-bmc-proxy`).
+/// `bmc_backend`; build it with the direct pool
+/// (`BmcConnector::new_with_direct`), since nico-bmc-proxy refuses explicit
+/// credentials.
 /// Terminal Event metrics use the supplied instrumentation.
 pub async fn rotate_dpu_bmc_service(
     db_pool: &PgPool,

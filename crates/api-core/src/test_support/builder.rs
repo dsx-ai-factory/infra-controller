@@ -22,7 +22,7 @@ use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
-use carbide_redfish::libredfish::BmcCredentialOps;
+use carbide_redfish::libredfish::DirectRedfishPool;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
@@ -63,7 +63,7 @@ pub struct TestApiBuilder {
     work_lock_manager: WorkLockManagerHandle,
     runtime_config: Option<Arc<CarbideConfig>>,
     credential_manager: Option<Arc<dyn CredentialManager>>,
-    redfish_pool: Option<Arc<dyn BmcCredentialOps>>,
+    redfish_pool: Option<DirectRedfishPool>,
     rms_client: Option<Arc<dyn RmsApi>>,
     nmxc_client_pool: Option<Arc<dyn NmxcPool>>,
     eth_data: Option<EthVirtData>,
@@ -130,12 +130,11 @@ impl TestApiBuilder {
         }
     }
 
-    /// Installs the Redfish pool the API under test uses. Takes the
-    /// credential-operations handle because tests hand one sim in as both
-    /// the general pool and the ops handle.
-    pub fn with_redfish_pool(self, redfish_pool: Arc<dyn BmcCredentialOps>) -> Self {
+    /// Installs the Redfish pool the API under test uses, as both the general
+    /// and the direct pool.
+    pub fn with_redfish_pool(self, redfish_pool: impl Into<DirectRedfishPool>) -> Self {
         Self {
-            redfish_pool: Some(redfish_pool),
+            redfish_pool: Some(redfish_pool.into()),
             ..self
         }
     }
@@ -272,9 +271,9 @@ impl TestApiBuilder {
         let machine_state_handler_enqueuer = Enqueuer::new(self.db_pool.clone());
         let dpu_health_log_limiter = LogLimiter::default();
 
-        let redfish_pool: Arc<dyn BmcCredentialOps> = self
+        let redfish_pool = self
             .redfish_pool
-            .unwrap_or_else(|| Arc::new(RedfishSim::default()));
+            .unwrap_or_else(|| Arc::new(RedfishSim::default()).into());
 
         let eth_data = self.eth_data.unwrap_or_else(default_test_eth_virt_data);
         let ib_fabric_manager = self
@@ -362,9 +361,9 @@ impl TestApiBuilder {
             credential_manager,
             certificate_provider,
             database_connection: self.db_pool,
-            // dyn upcast: the ops handle is also the general pool in tests.
-            redfish_pool: redfish_pool.clone(),
-            bmc_credential_ops: redfish_pool,
+            // Tests use the one sim as both the general and the direct pool.
+            redfish_pool: redfish_pool.pool(),
+            direct_redfish_pool: redfish_pool,
             driver_connector: None,
             bmc_proxy_passthrough: None,
             eth_data,
