@@ -549,13 +549,21 @@ To configure these flows:
 The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, next-server, boot file, etc.) are sourced from:
 
 - The `ntp_servers` list in `siteConfig` — preferred for DHCP option 42 when non-empty.
-- The Kea hook parameters in the `nico-dhcp` Helm chart (`nico-nameserver`, `nico-ntpserver`, etc.) — set these to the `unbound.nico` (or `unbound.nico`, see [section 3](#3-dns-configuration)) recursive resolver VIP. `nico-ntpserver` is used only as a fallback when `siteConfig.ntp_servers` is empty.
+- The Kea hook parameters in the `nico-dhcp` Helm chart. Set the nameserver parameter to the `unbound.nico` (see [section 3](#3-dns-configuration)) recursive resolver VIP. Do not use that VIP for NTP: Unbound serves DNS, not NTP. Set `nico-dhcp.config.kea.hookParameters.ntpServer` to a comma-separated list of reachable IPv4 NTP server addresses, such as the `nico-ntp` VIPs or your own servers. The chart writes this setting to both the `nico-ntpserver` and `carbide-ntpserver` hook parameters, and the current hook reads `carbide-ntpserver`. The hook uses it only as a fallback when `siteConfig.ntp_servers` is empty.
 - The per-segment definitions in `siteConfig` `[networks.<name>]` blocks — gateway, MTU, additional routes.
 
 The DPU-local DHCP server evaluates NTP precedence independently for each address family. Valid site-configured addresses replace service-discovered addresses only for the same family. When a family has no valid site-configured address, its service-discovered fallback is retained. Because `siteConfig.ntp_servers` accepts IPv4 addresses, it overrides DHCPv4 option 42 without suppressing service-discovered IPv6 servers advertised through DHCPv6 option 56.
 
 <Note>
-NICo does not run a standalone NTP service. Point `siteConfig.ntp_servers` to your enterprise IPv4 NTP servers. NICo also attempts to set those servers on host BMCs during pre-ingestion. If the Redfish operation fails repeatedly, pre-ingestion continues and the failure is logged.
+NICo can deploy a bundled NTP service: the `nico-ntp` Helm chart runs chrony with three replicas by default (the count is configurable). Each replica gets its own external VIP only when `nico-ntp.externalService.enabled` is `true`; the chart default is `false`. List only VIPs that are configured and reachable over UDP/123. You can also use your own NTP servers instead. For the exact Helm values, see the `nico-ntp` and `nico-dhcp` rows in `helm-prereqs/README.md`.
+
+NTP reaches DPUs through three separate paths:
+
+- **Kea DHCPv4 Helm setting:** `nico-dhcp.config.kea.hookParameters.ntpServer` feeds DHCPv4 option 42 as a fallback when `siteConfig.ntp_servers` is empty.
+- **Kea DHCPv6 Helm setting:** `nico-dhcp.dhcp.v6NtpServers` takes comma-separated IPv6 addresses and emits them in DHCPv6 option 56. See [Deploy DHCPv6](dhcpv6-deployment.md).
+- **DPU agent DNS lookup:** the agent resolves `carbide-ntp.forge` (see [section 3.3](#33-nico-dns-service-endpoints)). That name needs A records for reachable IPv4 NTP addresses and AAAA records for reachable IPv6 NTP addresses. IPv4 VIPs alone do not provide the DHCPv6 option 56 fallback.
+
+Set `siteConfig.ntp_servers` to the IPv4 NTP servers you want to use, whether bundled or your own. NICo also attempts to set those servers on host BMCs during pre-ingestion. If the Redfish operation fails repeatedly, pre-ingestion continues and the failure is logged.
 </Note>
 
 ### 2.3 How to Verify DHCP Is Working
@@ -670,7 +678,7 @@ The required DNS records are shown with both PXE and NTP names where they differ
 | `carbide-api.forge` (default) or `nico-api.nico` (rebranded image) | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Partly - there is no `NICO_API_URL` setting. Stock DPU agents use `carbide-api.forge` unless the interface is on the static-assignments segment and `external_api_url` is set; see [DNS Service Endpoints](../configuration/dns-service-endpoints.md) |
 | `carbide-pxe.forge` (stock) or `nico-pxe.nico` (rebranded image) | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. Stock DPU agents resolve `carbide-pxe.forge` at startup and stop if it does not resolve. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
 | `carbide-static-pxe.forge` (stock fallback) | 80 | Static PXE asset server VIP | Full Scout filesystem and update assets | **Yes, at boot.** Scout accepts `newrootfs=` for its full-image download and `pxe_uri=` for update checks. Embedded fallback URLs remain; see the [canonical endpoint reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server). |
-| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
+| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | NTP server IPs — A records for reachable IPv4 NTP addresses, AAAA records for reachable IPv6 NTP addresses. Point them at the bundled `nico-ntp` VIPs (configured and reachable over UDP/123) or at your own NTP infrastructure | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
 | `otel-receiver.forge` (default) | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
 
@@ -836,7 +844,7 @@ expanding the rollout to the rest of the fleet:
       without managed DPUs.
 - [ ] `initial_domain_name` set in `siteConfig`.
 - [ ] `dhcp_servers` set in `siteConfig` (or left as `[]`).
-- [ ] `ntp_servers` set in `siteConfig`, or the legacy `nico-ntp` DNS / `nico-dhcp` `nico-ntpserver` fallback is intentionally configured.
+- [ ] `ntp_servers` set in `siteConfig`, or the `nico-ntp` DNS and `nico-dhcp.config.kea.hookParameters.ntpServer` fallbacks are intentionally configured with reachable NTP addresses.
 - [ ] `expected_machines.json` uploaded for every host; a Fixed `host_bmc`
       interface or compatible top-level `bmc_ip_address` configured for any
       host that needs a predefined BMC IP.
