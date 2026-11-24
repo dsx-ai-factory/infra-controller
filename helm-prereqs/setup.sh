@@ -461,8 +461,6 @@ _reject_bundled_flow_manager_upgrade() {
 
 _reject_bundled_flow_manager_upgrade
 
-NICO_CORE_IMAGE_NAME="${NICO_CORE_IMAGE_NAME:-nico}"
-
 # shellcheck source=preflight.sh
 source "${SCRIPT_DIR}/preflight.sh"
 

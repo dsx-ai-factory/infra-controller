@@ -1291,20 +1291,22 @@ Override namespace detection with `NICO_NS`, `VAULT_NS`, `POSTGRES_NS`,
 
 ### Upgrading
 
-Day-2 upgrades use plain `helm upgrade` against the merged values:
+Day-2 upgrades use plain `helm upgrade` against the merged values. The Core
+image name is `nico` for images built with `make images` and `nvmetal-carbide`
+in registries that use the legacy name:
 
 ```bash
 helm diff upgrade nico ./helm \
   -n nico-system \
   -f helm-prereqs/values/nico-core.yaml \
-  --set global.image.repository=<registry>/nvmetal-carbide \
+  --set global.image.repository=<registry>/<core-image-name> \
   --set global.image.tag=<new-tag>
 
 # Review the diff, then:
 helm upgrade nico ./helm \
   -n nico-system \
   -f helm-prereqs/values/nico-core.yaml \
-  --set global.image.repository=<registry>/nvmetal-carbide \
+  --set global.image.repository=<registry>/<core-image-name> \
   --set global.image.tag=<new-tag>
 ```
 

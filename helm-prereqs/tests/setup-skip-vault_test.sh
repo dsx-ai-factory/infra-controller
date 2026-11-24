@@ -553,6 +553,7 @@ build() { # $1 block, $2 array name, $3 INSTALL_VAULT; prints the array on one l
         NICO_RMS_IMAGE_REPO=registry.example.com/rms NICO_RMS_IMAGE_TAG=v0.8.0
         _CORE_VALUES_ARG=/values/core.yaml
         NICO_IMAGE_REGISTRY=registry.example.com/nico NICO_CORE_IMAGE_TAG=core-tag NICO_REST_IMAGE_TAG=rest-tag
+        NICO_CORE_IMAGE_NAME="${core_image_name}"
         NICO_FLOW_NAMESPACE=flow
         eval "$1"
         local -n _built="$2"
@@ -567,6 +568,7 @@ expect_command() { # $1 case, $2 block, $3 array, $4 INSTALL_VAULT, $5 expected 
     printf '%s\n' "${built}"
 }
 
+core_image_name=nico # preflight's default for NICO_CORE_IMAGE_NAME
 issuer_sets="--set global.certificate.issuerRef.name=site-issuer --set global.certificate.issuerRef.kind=ClusterIssuer --set global.certificate.issuerRef.group=cert-manager.io"
 vault_free_core_sets="${issuer_sets} --set global.certificate.useCertManager=true --set global.certificate.useCertManagerUfm=true --set nico-api.vault.enabled=false"
 expect_command "RMS default" "${rms_block}" NICO_RMS_CMD true \
@@ -574,11 +576,13 @@ expect_command "RMS default" "${rms_block}" NICO_RMS_CMD true \
 expect_command "RMS --skip-vault" "${rms_block}" NICO_RMS_CMD false \
     "helm upgrade --install rack /charts/rms --namespace rack-manager -f /prereqs/values/rms.yaml --set namespace=rack-manager --set-string apiServer.image.repository=registry.example.com/rms --set-string global.image.tag=v0.8.0 --set certificates.issuerRef.name=site-issuer --set certificates.issuerRef.kind=ClusterIssuer --set certificates.issuerRef.group=cert-manager.io" >/dev/null
 core_default="$(expect_command "Core default" "${core_block}" NICO_CORE_CMD true \
-    "helm upgrade --install nico ./helm --namespace nico-system -f /values/core.yaml --set-string global.image.repository=registry.example.com/nico/nvmetal-carbide --set-string global.image.tag=core-tag --timeout 600s --wait --set nico-api.dpf.rbacCreate=true")"
+    "helm upgrade --install nico ./helm --namespace nico-system -f /values/core.yaml --set-string global.image.repository=registry.example.com/nico/nico --set-string global.image.tag=core-tag --timeout 600s --wait --set nico-api.dpf.rbacCreate=true")"
 ! grep -Fq "site-issuer" <<< "${core_default}" || fail "Core default: the manual command names site-issuer" "${core_default}"
+core_image_name=nvmetal-carbide expect_command "Core legacy image name" "${core_block}" NICO_CORE_CMD true \
+    "helm upgrade --install nico ./helm --namespace nico-system -f /values/core.yaml --set-string global.image.repository=registry.example.com/nico/nvmetal-carbide --set-string global.image.tag=core-tag --timeout 600s --wait --set nico-api.dpf.rbacCreate=true" >/dev/null
 core_skip="$(expect_command "Core --skip-vault" "${core_block}" NICO_CORE_CMD false \
-    "helm upgrade --install nico ./helm --namespace nico-system -f /values/core.yaml --set-string global.image.repository=registry.example.com/nico/nvmetal-carbide --set-string global.image.tag=core-tag --timeout 600s --wait ${vault_free_core_sets} --set nico-api.dpf.rbacCreate=true")"
-grep -Fq "DISPLAY: helm upgrade --install nico ./helm --namespace nico-system -f /values/core.yaml --set-string global.image.repository=registry.example.com/nico/nvmetal-carbide --set-string global.image.tag=core-tag --timeout 600s --wait ${vault_free_core_sets} --set nico-api.dpf.rbacCreate=true" <<< "${core_skip}" \
+    "helm upgrade --install nico ./helm --namespace nico-system -f /values/core.yaml --set-string global.image.repository=registry.example.com/nico/nico --set-string global.image.tag=core-tag --timeout 600s --wait ${vault_free_core_sets} --set nico-api.dpf.rbacCreate=true")"
+grep -Fq "DISPLAY: helm upgrade --install nico ./helm --namespace nico-system -f /values/core.yaml --set-string global.image.repository=registry.example.com/nico/nico --set-string global.image.tag=core-tag --timeout 600s --wait ${vault_free_core_sets} --set nico-api.dpf.rbacCreate=true" <<< "${core_skip}" \
     || fail "Core --skip-vault: the manual command printed when the operator declines the Core deployment does not show the Vault-free values" "${core_skip}"
 expect_command "Flow default" "${flow_block}" NICO_FLOW_ARGS true \
     "--namespace flow --create-namespace --set global.image.repository=registry.example.com/nico --set global.image.tag=rest-tag" >/dev/null

@@ -183,7 +183,10 @@ Build and push images from the same repository revision as the target release ch
 export NICO_IMAGE_REGISTRY=registry.example.com/nico   # your registry
 export NICO_CORE_IMAGE_TAG=v2.1.0                      # new Core tag
 export NICO_REST_IMAGE_TAG=v2.1.0                      # new REST tag
+# export NICO_CORE_IMAGE_NAME=nvmetal-carbide          # only if your registry uses the legacy Core image name
 ```
+
+`setup.sh` deploys NICo Core from `<registry>/nico`, the image that `make images` builds. A site whose registry holds the Core image as `nvmetal-carbide` must set `NICO_CORE_IMAGE_NAME=nvmetal-carbide`. Without it, the Core pods fail to pull their image. Preflight reports the missing image when it can query the registry with your credentials.
 
 If you are upgrading DPF as part of this release, the DPF version is the pinned `helm-prereqs/doca-platform` commit of the `setup.sh` you run: the submodule gitlink in a git checkout, or `helm-prereqs/doca-platform.pin` in the packaged `nico-prereqs` chart, which `setup.sh` clones at that commit. There is no version variable to set, and both paths install the same commit. Air-gapped sites that set `NICO_DPF_SRC` manage that checkout themselves: update it to the same commit (`git submodule status helm-prereqs/doca-platform`, or the sha in `doca-platform.pin`), because `setup.sh` installs whatever it contains and only warns when its HEAD differs from the pin. Remove `NICO_DPF_VERSION` and `NICO_DPF_SRC_DIR` from your environment files: `setup.sh` now rejects them when installing DPF. A leftover `helm-prereqs/.dpf-src/` clone from earlier releases is no longer used and can be deleted.
 
