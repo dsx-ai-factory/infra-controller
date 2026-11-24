@@ -30,9 +30,8 @@ use bmc_runtime::ConnectedBmc;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
 use carbide_redfish::nv_redfish::RedfishBmc;
-use carbide_uuid::machine::MachineIdSubtypeTrait;
 use libredfish::{BiosProfileVendor, Redfish, RedfishError};
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use model::machine::ManagedHostStateSnapshot;
 use serde_json::Value;
 use state_controller::state_handler::StateHandlerError;
 
@@ -40,8 +39,8 @@ use super::DpuSettings;
 use crate::config::MachineStateHandlerSiteConfig;
 use crate::context::MachineStateHandlerServices;
 
-/// A host's or DPU's BMC for its platform settings: the libredfish client the
-/// caller already holds, or the drivers.
+/// A host's BMC for its platform settings: the libredfish client the caller
+/// already holds, or the drivers.
 pub enum PlatformBmc<'a> {
     Libredfish {
         client: &'a dyn Redfish,
@@ -61,32 +60,11 @@ impl<'a> PlatformBmc<'a> {
         redfish_client: &'a dyn Redfish,
     ) -> Result<Self, StateHandlerError> {
         let host = &mh_snapshot.host_snapshot;
-        let expected_dpu_count = host.associated_dpu_machine_ids().len();
-        Self::connect_machine(services, host, expected_dpu_count, redfish_client).await
-    }
-
-    /// The BMC of `dpu` through the site's `bmc_backend`, reusing
-    /// `redfish_client` under libredfish. The DPU's host has at least this
-    /// DPU.
-    pub(crate) async fn connect_dpu(
-        services: &MachineStateHandlerServices,
-        dpu: &Machine<impl MachineIdSubtypeTrait>,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        Self::connect_machine(services, dpu, 1, redfish_client).await
-    }
-
-    async fn connect_machine(
-        services: &MachineStateHandlerServices,
-        machine: &Machine<impl MachineIdSubtypeTrait>,
-        expected_dpu_count: usize,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        Ok(match services.connect_drivers(machine).await? {
+        Ok(match services.connect_drivers(host).await? {
             Some(bmc) => Self::Drivers(bmc),
             None => Self::Libredfish {
                 client: redfish_client,
-                expected_dpu_count,
+                expected_dpu_count: host.associated_dpu_machine_ids().len(),
             },
         })
     }
