@@ -1834,7 +1834,7 @@ fn expired_candidate_redirects_to_authoritative_address() -> Result<(), eyre::Re
                     idx,
                     DHCPv6Factory::server_id(&offer),
                     candidate,
-                    new_duid.clone(),
+                    new_duid,
                     true,
                 ),
             )?
