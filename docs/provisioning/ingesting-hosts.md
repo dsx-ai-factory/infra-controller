@@ -237,9 +237,9 @@ identify the correct Redfish value. Site Explorer compares it with the stored
 exploration report.
 
 On supported GB200 and Vera Rubin compute trays,
-built-in rules identify the chassis FRU in `Chassis_0/Assembly` by its name
-and model. These rules distinguish the tray from board and product FRUs even
-when their models are identical.
+built-in rules identify the chassis field-replaceable unit (FRU) in
+`Chassis_0/Assembly` by its name and model. These rules distinguish the tray
+from board and product FRUs even when their models are identical.
 
 <Note>
 During the audit, Site Explorer checks stored host reports that match an
