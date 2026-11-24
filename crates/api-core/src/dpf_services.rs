@@ -70,7 +70,7 @@ pub(crate) const DHCP_SERVER_SERVICE_IMAGE_NAME: &str = "forge-dhcp-server";
 /// DTS service definitions
 /// (DTS_SERVICE_NAME lives in carbide_dpf::types so the DPF SDK can wire its dependencies.)
 pub(crate) const DTS_SERVICE_HELM_NAME: &str = "doca-telemetry";
-pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.27.8";
+pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.25.43";
 
 // DPU Agent Service Definitions
 pub(crate) const DPU_AGENT_SERVICE_HELM_NAME: &str = "nico-dpu-agent";
@@ -93,9 +93,9 @@ pub(crate) const OTEL_COLLECTOR_SERVICE_IMAGE_NAME: &str = "otelcol-contrib";
 /// `[dpf.deployments.<name>.extra_services.doca_weave_dhcp_agent]` take precedence. Keep
 /// defaults here so enabling Astra does not require every site to restate the chart and image.
 pub(crate) const DOCA_WEAVE_DHCP_AGENT_SERVICE_HELM_NAME: &str = "dpf-weave";
-pub(crate) const DOCA_WEAVE_DHCP_AGENT_SERVICE_HELM_VERSION: &str = "v26.8.0-d464e7bf-nightly";
+pub(crate) const DOCA_WEAVE_DHCP_AGENT_SERVICE_HELM_VERSION: &str = "v30.0.0";
 pub(crate) const DOCA_WEAVE_DHCP_AGENT_SERVICE_IMAGE_NAME: &str = "weave-system";
-pub(crate) const DOCA_WEAVE_DHCP_AGENT_SERVICE_IMAGE_TAG: &str = "v26.8.0-d464e7bf-nightly";
+pub(crate) const DOCA_WEAVE_DHCP_AGENT_SERVICE_IMAGE_TAG: &str = "v30.0.0";
 
 /// Built-in defaults for the Weave flow-controller extra service.
 ///
@@ -103,9 +103,9 @@ pub(crate) const DOCA_WEAVE_DHCP_AGENT_SERVICE_IMAGE_TAG: &str = "v26.8.0-d464e7
 /// deployment-local overrides under
 /// `[dpf.deployments.<name>.extra_services.doca_weave_flow_controller]` take precedence.
 pub(crate) const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_HELM_NAME: &str = "dpf-weave";
-pub(crate) const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_HELM_VERSION: &str = "v26.8.0-d464e7bf-nightly";
+pub(crate) const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_HELM_VERSION: &str = "v30.0.0";
 pub(crate) const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_IMAGE_NAME: &str = "weave-system";
-pub(crate) const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_IMAGE_TAG: &str = "v26.8.0-d464e7bf-nightly";
+pub(crate) const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_IMAGE_TAG: &str = "v30.0.0";
 
 /// Built-in defaults for the Xplane extra service.
 ///
