@@ -117,13 +117,19 @@ if docker ps --format '{{.Names}}' | grep -w "$PG_CONTAINER" >/dev/null; then
 else
   CERTS_DIR="$REPO_ROOT/dev/certs/localhost"
   info "Starting Postgres..."
+  # Postgres rejects a private key that is not owned by its server user or root.
+  # With rootful Docker on Linux, bind mounts keep the host owner, so copy the
+  # key into the container with postgres ownership before starting the server.
   docker run --rm --detach --name "$PG_CONTAINER" \
     -e POSTGRES_PASSWORD="admin" \
     -e POSTGRES_HOST_AUTH_METHOD=trust \
     -v "$CERTS_DIR/localhost.crt:/var/lib/postgresql/server.crt:ro" \
-    -v "$CERTS_DIR/localhost.key:/var/lib/postgresql/server.key:ro" \
+    -v "$CERTS_DIR/localhost.key:/certs/server.key:ro" \
     -p 5432:5432 \
+    --entrypoint sh \
     postgres:14.5-alpine \
+    -c 'install -o postgres -g postgres -m 0600 /certs/server.key /var/lib/postgresql/server.key &&
+        exec docker-entrypoint.sh postgres "$@"' sh \
     -c ssl=on \
     -c ssl_cert_file=/var/lib/postgresql/server.crt \
     -c ssl_key_file=/var/lib/postgresql/server.key \
