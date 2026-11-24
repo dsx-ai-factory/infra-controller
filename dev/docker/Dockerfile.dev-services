@@ -6,6 +6,21 @@
 ARG CONTAINER_BUILD=nico-dev-build
 ARG CONTAINER_RUNTIME=nico-dev-runtime
 
+FROM debian:bookworm-slim AS freeipmi-builder
+
+ARG FREEIPMI_VERSION=1.6.20
+RUN apt-get update && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		build-essential ca-certificates curl libgcrypt20-dev && \
+	curl -fsSL "https://ftp.gnu.org/gnu/freeipmi/freeipmi-${FREEIPMI_VERSION}.tar.gz" \
+		-o /tmp/freeipmi.tar.gz && \
+	cd /tmp && tar xzf freeipmi.tar.gz && \
+	cd "freeipmi-${FREEIPMI_VERSION}" && \
+	./configure --prefix=/usr --sysconfdir=/etc --quiet && \
+	make -j"$(nproc)" --quiet && \
+	make install DESTDIR=/tmp/freeipmi-install --quiet && \
+	rm -rf /tmp/freeipmi.tar.gz /tmp/freeipmi-${FREEIPMI_VERSION}
+
 FROM ${CONTAINER_BUILD} AS source
 
 ARG TARGETARCH
@@ -143,6 +158,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   tpm2-tools \
   && rm -rf /var/lib/apt/lists/*
 
+# Ensure source-built freeipmi 1.6.20 overrides Debian-packaged 1.6.10.
+COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/libfreeipmi.so.17.2.18 /tmp/freeipmi-lib/libfreeipmi.so.17.2.18
+RUN triplet=$(uname -m | sed 's/x86_64/x86_64-linux-gnu/' | sed 's/aarch64/aarch64-linux-gnu/') && \
+	cp /tmp/freeipmi-lib/libfreeipmi.so.17.2.18 "/usr/lib/${triplet}/libfreeipmi.so.17.2.18" && \
+	cd "/usr/lib/${triplet}" && \
+	rm -f libfreeipmi.so.17.2.9 libfreeipmi.so.17 && \
+	ln -sf libfreeipmi.so.17.2.18 libfreeipmi.so.17 && \
+	ldconfig && rm -rf /tmp/freeipmi-lib
+
 RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea
 
 COPY crates/api/casbin-policy.csv /opt/carbide/casbin-policy.csv
@@ -215,6 +239,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   openipmi \
   && rm -rf /var/lib/apt/lists/*
 
+# Ensure source-built freeipmi 1.6.20 overrides Debian-packaged 1.6.10.
+COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/libfreeipmi.so.17.2.18 /tmp/freeipmi-lib/libfreeipmi.so.17.2.18
+RUN triplet=$(uname -m | sed 's/x86_64/x86_64-linux-gnu/' | sed 's/aarch64/aarch64-linux-gnu/') && \
+	cp /tmp/freeipmi-lib/libfreeipmi.so.17.2.18 "/usr/lib/${triplet}/libfreeipmi.so.17.2.18" && \
+	cd "/usr/lib/${triplet}" && \
+	rm -f libfreeipmi.so.17.2.9 libfreeipmi.so.17 && \
+	ln -sf libfreeipmi.so.17.2.18 libfreeipmi.so.17 && \
+	ldconfig && rm -rf /tmp/freeipmi-lib
+
 RUN mkdir -p /opt/machine-a-tron/bin /tmp/machine-a-tron-data
 
 COPY crates/bmc-mock/dell_poweredge_r750.tar.gz /opt/machine-a-tron/dell_poweredge_r750.tar.gz
@@ -235,6 +268,15 @@ ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends ipmitool libudev1 libssl3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Ensure source-built freeipmi 1.6.20 overrides Debian-packaged 1.6.10.
+COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/libfreeipmi.so.17.2.18 /tmp/freeipmi-lib/libfreeipmi.so.17.2.18
+RUN triplet=$(uname -m | sed 's/x86_64/x86_64-linux-gnu/' | sed 's/aarch64/aarch64-linux-gnu/') && \
+	cp /tmp/freeipmi-lib/libfreeipmi.so.17.2.18 "/usr/lib/${triplet}/libfreeipmi.so.17.2.18" && \
+	cd "/usr/lib/${triplet}" && \
+	rm -f libfreeipmi.so.17.2.9 libfreeipmi.so.17 && \
+	ln -sf libfreeipmi.so.17.2.18 libfreeipmi.so.17 && \
+	ldconfig && rm -rf /tmp/freeipmi-lib
 
 RUN mkdir -p /opt/carbide
 

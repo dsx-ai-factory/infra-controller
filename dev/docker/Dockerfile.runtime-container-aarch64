@@ -14,6 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+FROM arm64v8/debian:12-slim@sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f AS freeipmi-builder
+
+ARG FREEIPMI_VERSION=1.6.20
+RUN apt-get update && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		build-essential ca-certificates curl libgcrypt20-dev && \
+	curl -fsSL "https://ftp.gnu.org/gnu/freeipmi/freeipmi-${FREEIPMI_VERSION}.tar.gz" \
+		-o /tmp/freeipmi.tar.gz && \
+	cd /tmp && tar xzf freeipmi.tar.gz && \
+	cd "freeipmi-${FREEIPMI_VERSION}" && \
+	./configure --prefix=/usr --sysconfdir=/etc --quiet && \
+	make -j"$(nproc)" --quiet && \
+	make install DESTDIR=/tmp/freeipmi-install --quiet && \
+	rm -rf /tmp/freeipmi.tar.gz /tmp/freeipmi-${FREEIPMI_VERSION}
+
 FROM arm64v8/debian:12-slim@sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f
 
 ARG KEA_VERSION
@@ -71,6 +86,17 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		tpm2-tools \
 		zlib1g && \
 	rm -rf /var/lib/apt/lists/*
+
+# Overwrite vulnerable Debian-packaged freeipmi 1.6.10 (CVE-2026-85506,
+# CVE-2026-85509, CVE-2026-85508, CVE-2026-85504, CVE-2026-85507) with
+# source-built 1.6.20. The source build installs to /usr/lib/ but Debian's
+# multiarch path (/usr/lib/<arch>/) takes precedence, so we copy the new
+# .so into the multiarch directory and re-link.
+COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/libfreeipmi.so.17.2.18 /usr/lib/aarch64-linux-gnu/libfreeipmi.so.17.2.18
+RUN cd /usr/lib/aarch64-linux-gnu && \
+	rm -f libfreeipmi.so.17.2.9 libfreeipmi.so.17 && \
+	ln -sf libfreeipmi.so.17.2.18 libfreeipmi.so.17 && \
+	ldconfig
 
 RUN test "$(dpkg-query -W -f='${Version}' kea-dhcp6-server)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V
