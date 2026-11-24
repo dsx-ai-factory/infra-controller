@@ -338,14 +338,14 @@ env:
 ## must contain JSON or YAML. UFM entries have this shape (both fields are
 ## required). When a fabric does not set `auth`, an empty or whitespace-only
 ## password selects the default SPIFFE client certificate; any other value is
-## the bearer token. A fabric with `auth = "client_certificate"` reads no UFM
+## the UFM token. A fabric with `auth = "client_certificate"` reads no UFM
 ## credential; one with `auth = "token"` requires a nonblank token. See
 ## docs/configuration/credential-sources.md (UFM Ownership Policy).
 ##
 ## ufm_auth_by_fabric:
 ##   default:
 ##     username: ignored-for-token-or-certificate-auth
-##     password: bearer-token-or-empty
+##     password: ufm-token-or-empty
 ##
 ## bmc_site_wide_root:
 ##   username: root

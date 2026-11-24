@@ -837,7 +837,7 @@ at most one configured fabric, named `default`. The
 defines the supported fabric settings, P_Key ranges, and credential
 configuration. The optional `auth` setting selects `"client_certificate"` or
 `"token"`. Client-certificate mode uses the default SPIFFE files and needs no
-UFM credential. Token mode requires a stored, nonblank bearer token. When
+UFM credential. Token mode requires a stored, nonblank UFM token. When
 `auth` is omitted, an empty or whitespace-only password selects the client
 certificate and any other password is a token. An `auth` change takes effect
 when Core restarts.

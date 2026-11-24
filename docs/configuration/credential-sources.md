@@ -52,11 +52,11 @@ Each `[ib_fabrics.<name>]` table has an optional `auth` setting with no default:
 - `auth = "client_certificate"` uses the default SPIFFE client certificate
   files. NICo does not read a UFM credential for that fabric, so none needs to
   be stored.
-- `auth = "token"` sends the stored password as the bearer token after removing
+- `auth = "token"` sends the stored password as the UFM token after removing
   surrounding whitespace. A missing credential or an empty or whitespace-only
   password is an error.
 - With `auth` unset, an empty or whitespace-only password selects the default
-  SPIFFE client certificate, any other password is the bearer token, and a
+  SPIFFE client certificate, any other password is the UFM token, and a
   missing credential is an error.
 
 Postgres reads an exactly empty password as no credential. An empty entry
@@ -117,7 +117,7 @@ Variable names start with the prefix `CARBIDE_STATIC_CREDENTIAL_`, which `CARBID
 ```bash
 export CARBIDE_CREDENTIALS_ENV_ENABLED=true
 export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__USERNAME=ignored-for-token-or-certificate-auth
-export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-token-or-empty
+export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=ufm-token-or-empty
 ```
 
 A variable with a missing `username` or `password`, or one that does not parse, fails startup without echoing the value.
@@ -130,7 +130,7 @@ The file is JSON or YAML, and only the keys you need have to be present. Every c
 ufm_auth_by_fabric:
   default:
     username: ignored-for-token-or-certificate-auth
-    password: bearer-token-or-empty
+    password: ufm-token-or-empty
 nmxm_auth_by_id:
   nmxm-1:
     username: admin
@@ -158,7 +158,7 @@ machine_identity:
 The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`.
 
 When a fabric leaves `auth` unset, an empty or whitespace-only UFM password
-selects the default SPIFFE client certificate, and any other value is the bearer
+selects the default SPIFFE client certificate, and any other value is the UFM
 token. Explicit `client_certificate` authentication reads no credential, while
 explicit `token` authentication requires a nonblank password. See
 [UFM Ownership Policy](#ufm-ownership-policy).

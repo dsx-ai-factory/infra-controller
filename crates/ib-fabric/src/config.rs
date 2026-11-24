@@ -146,7 +146,7 @@ impl IBFabricConfig {
 pub enum UfmAuthMode {
     /// Authenticate with the default SPIFFE client certificate files.
     ClientCertificate,
-    /// Authenticate with the stored credential password as a bearer token.
+    /// Authenticate with the stored credential password as a UFM token.
     Token,
 }
 

@@ -248,12 +248,12 @@ No additional steps are required to enable Infiniband in NVIDIA Infra Controller
 
 One of two options can be selected for UFM authentication. Set `auth = "token"`
 or `auth = "client_certificate"` in the fabric configuration to select one
-explicitly. Token authentication uses the password as the bearer token. Client
+explicitly. Token authentication uses the password as the UFM token. Client
 authentication uses the default SPIFFE client certificate files and needs no
 UFM credential.
 
 When `auth` is not set, an empty or whitespace-only password selects the default
-SPIFFE client certificate, while any other password is a bearer token. The
+SPIFFE client certificate, while any other password is a UFM token. The
 empty-password route does not work with Postgres credential storage. See
 [UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
 

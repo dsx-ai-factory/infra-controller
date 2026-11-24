@@ -25,7 +25,7 @@ The UFM url
 
 `--token <TOKEN> [default: ]`
 
-The UFM bearer token. With auth = "client_certificate" in the fabric
+The UFM token. With auth = "client_certificate" in the fabric
 configuration, do not add a credential. When auth is not set, omitting
 --token stores an empty password, which selects the client certificate;
 Postgres reads an empty password as no credential. See

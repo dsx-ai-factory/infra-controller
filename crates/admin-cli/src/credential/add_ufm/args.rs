@@ -39,7 +39,7 @@ pub(crate) struct Args {
     #[clap(
         long,
         default_value(""),
-        help = "The UFM bearer token. With auth = \"client_certificate\" in the fabric \
+        help = "The UFM token. With auth = \"client_certificate\" in the fabric \
             configuration, do not add a credential. When auth is not set, omitting --token stores \
             an empty password, which selects the client certificate; Postgres reads an empty \
             password as no credential. See \

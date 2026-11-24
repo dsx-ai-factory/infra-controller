@@ -1527,7 +1527,7 @@ mod tests {
                 passwords: &[],
                 expected_error: None,
             },
-            // Explicit token mode must retain the local credential prerequisite for its bearer token.
+            // Explicit token mode must retain the local credential prerequisite for its UFM token.
             Case {
                 name: "token without credential",
                 auth: Some(UfmAuthMode::Token),

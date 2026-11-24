@@ -29,7 +29,6 @@ pub fn ib_fabric_test_manager(
     credential_manager: Arc<dyn CredentialManager>,
 ) -> Arc<IBFabricManagerImpl> {
     let ib_config = config.ib_config.clone().unwrap_or_default();
-    // Mirror production endpoint and auth transport so mock-backed API tests use the same config.
     ib::create_ib_fabric_manager(
         credential_manager,
         ib::IBFabricManagerConfig {
@@ -45,17 +44,7 @@ pub fn ib_fabric_test_manager(
             } else {
                 Default::default()
             },
-            auth_modes: if ib_config.enabled {
-                config
-                    .ib_fabrics
-                    .iter()
-                    .filter_map(|(fabric_id, fabric_definition)| {
-                        fabric_definition.auth.map(|auth| (fabric_id.clone(), auth))
-                    })
-                    .collect()
-            } else {
-                Default::default()
-            },
+            auth_modes: Default::default(),
             manager_type: if ib_config.enabled {
                 IBFabricManagerType::Mock
             } else {

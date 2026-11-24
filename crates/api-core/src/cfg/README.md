@@ -647,7 +647,7 @@ disabled in v2.4.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `endpoints` | `Vec<String>` | **required** | UFM endpoint URLs. |
-| `auth` | `Option<UfmAuthMode>` | — | UFM authentication mode. `"client_certificate"` uses the default SPIFFE client certificate files and reads no UFM credential. `"token"` requires a stored, nonblank bearer token. When omitted, an empty or whitespace-only password selects the client certificate, any other password is a token, and a missing credential is an error. |
+| `auth` | `Option<UfmAuthMode>` | — | UFM authentication mode. `"client_certificate"` uses the default SPIFFE client certificate files and reads no UFM credential. `"token"` requires a stored, nonblank UFM token. When omitted, an empty or whitespace-only password selects the client certificate, any other password is a token, and a missing credential is an error. |
 | `pkeys` | `Vec<Range>` | **required** | P_Key ranges available to the fabric. |
 | `backend` | `Option<String>` | — | Named resource-pool backend for this fabric's P_Keys. |
 | `remote_pool` | `Option<String>` | — | Provider lookup name for this fabric's P_Key pool. |
@@ -2223,10 +2223,10 @@ UFM fabric using the default prefix:
 ```bash
 export CARBIDE_CREDENTIALS_ENV_ENABLED=true
 export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__USERNAME=ignored-for-token-or-certificate-auth
-export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-token-or-empty
+export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=ufm-token-or-empty
 ```
 
-With `auth = "token"`, the password must be a nonblank bearer token. With
+With `auth = "token"`, the password must be a nonblank UFM token. With
 `auth` unset, an empty or whitespace-only password selects the default SPIFFE
 client certificate. A fabric with `auth = "client_certificate"` does not read
 these variables.
@@ -2253,16 +2253,16 @@ not use either local source.
 
 The watcher keeps the last valid snapshot when a reload fails. A UFM-only YAML
 file has the following shape; both `username` and `password` are required. With
-`auth = "token"`, the password is a nonblank bearer token. With `auth` unset, an
+`auth = "token"`, the password is a nonblank UFM token. With `auth` unset, an
 empty or whitespace-only password selects the default SPIFFE client certificate
-and any other password is the bearer token. A fabric with
+and any other password is the UFM token. A fabric with
 `auth = "client_certificate"` does not read this credential:
 
 ```yaml
 ufm_auth_by_fabric:
   default:
     username: ignored-for-token-or-certificate-auth
-    password: bearer-token-or-empty
+    password: ufm-token-or-empty
 ```
 
 A sparse file may instead contain only version 0 of the site-wide BMC root:

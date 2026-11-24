@@ -425,7 +425,7 @@ A UFM password that names a certificate directory is no longer supported and is
 now sent to UFM as a token, so UFM rejects it. Before upgrading, replace that
 credential in one of these ways:
 
-- Set a valid UFM bearer token.
+- Set a valid UFM token.
 - Use the default SPIFFE client certificate: give the fabric an empty password
   in a source that returns it. That is Vault, or the environment or file source
   with `ufm_source` set to `"local_first"` or `"local"`. UFM must trust that

@@ -155,7 +155,7 @@ Fields:
 | Field | Purpose |
 |---|---|
 | `endpoints` | UFM server URLs. At the time of writing only the first endpoint is consulted; multi-endpoint support exists in the schema for forward compatibility |
-| `auth` | Optional UFM authentication mode: `"client_certificate"` uses the default SPIFFE client certificate files without reading a credential; `"token"` requires a stored, nonblank bearer token. When omitted, an empty or whitespace-only password selects the client certificate and any other password is a token |
+| `auth` | Optional UFM authentication mode: `"client_certificate"` uses the default SPIFFE client certificate files without reading a credential; `"token"` requires a stored, nonblank UFM token. When omitted, an empty or whitespace-only password selects the client certificate and any other password is a token |
 | `pkeys` | One or more P_Key ranges, hex-encoded, with an inclusive start and an exclusive end. These define the pool from which Core allocates P_Keys for tenant REST requests |
 
 P_Key ranges may be **extended in future restarts but never shrunk**:

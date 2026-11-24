@@ -54,7 +54,7 @@ pub(super) fn client_certificate_auth(spiffe_cert_dir: &Path) -> AuthMethod {
     })
 }
 
-/// Detects the authentication method `auth` selects: a bearer token, or
+/// Detects the authentication method `auth` selects: a UFM token, or
 /// client-certificate files on disk. An empty or whitespace-only `auth` string
 /// selects the SPIFFE certificate files under `spiffe_cert_dir`; every other
 /// value is a token. The [`AuthMethod::Cert`] paths are exactly what
@@ -477,7 +477,7 @@ mod tests {
                         ],
                     ),
                 },
-                // An ordinary nonempty credential remains a bearer token.
+                // An ordinary nonempty credential remains a UFM token.
                 Check {
                     scenario: "ordinary credential is a token",
                     input: "test-token".to_string(),
