@@ -23,7 +23,7 @@
 
 #[cfg(unix)]
 use std::ffi::CString;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 #[cfg(unix)]
 use std::{os::unix::ffi::OsStrExt, os::unix::fs::MetadataExt, os::unix::fs::PermissionsExt};
@@ -102,57 +102,64 @@ struct CapturedOutput {
     log_dropped: bool,
 }
 
-/// Ensures a cancelled execution still removes its named container.
+/// Owns attempt files until cleanup succeeds, including cancellation before launch.
 ///
 /// `nerdctl` can create a container before its client process exits. The
 /// caller's future may be cancelled during Scout shutdown, so relying only on
 /// `kill_on_drop` would leave that container running.
-struct ContainerCleanupGuard<F>
+struct PluginCleanupGuard<F>
 where
-    F: FnOnce(String),
+    F: FnOnce(String, PathBuf),
 {
+    attempt_dir: Option<PathBuf>,
     container_name: Option<String>,
     schedule_cleanup: Option<F>,
 }
 
-impl<F> ContainerCleanupGuard<F>
+impl<F> PluginCleanupGuard<F>
 where
-    F: FnOnce(String),
+    F: FnOnce(String, PathBuf),
 {
-    fn new(container_name: String, schedule_cleanup: F) -> Self {
+    fn new(attempt_dir: PathBuf, schedule_cleanup: F) -> Self {
         Self {
-            container_name: Some(container_name),
+            attempt_dir: Some(attempt_dir),
+            container_name: None,
             schedule_cleanup: Some(schedule_cleanup),
         }
     }
 
     fn disarm(&mut self) {
+        self.attempt_dir = None;
         self.container_name = None;
     }
 }
 
-impl<F> Drop for ContainerCleanupGuard<F>
+impl<F> Drop for PluginCleanupGuard<F>
 where
-    F: FnOnce(String),
+    F: FnOnce(String, PathBuf),
 {
     fn drop(&mut self) {
-        let Some(container_name) = self.container_name.take() else {
+        let Some(attempt_dir) = self.attempt_dir.take() else {
             return;
         };
-        if let Some(schedule_cleanup) = self.schedule_cleanup.take() {
-            schedule_cleanup(container_name);
-        } else {
-            warn!("Could not schedule cleanup for cancelled machine validation plugin container");
+        if let Some(container_name) = self.container_name.take() {
+            if let Some(schedule_cleanup) = self.schedule_cleanup.take() {
+                schedule_cleanup(container_name, attempt_dir);
+            }
+        } else if let Err(error) = remove_attempt_directory(&attempt_dir) {
+            warn!(%error, "Failed to remove cancelled plugin attempt directory");
         }
     }
 }
 
-fn schedule_container_cleanup(container_name: String) {
+fn schedule_container_cleanup(container_name: String, attempt_dir: PathBuf) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             std::mem::drop(handle.spawn(async move {
                     if let Err(error) = force_remove_plugin_container(&container_name).await {
                         warn!(%container_name, %error, "Failed to remove cancelled machine validation plugin container");
+                    } else if let Err(error) = remove_attempt_directory(&attempt_dir) {
+                        warn!(%container_name, %error, "Failed to remove cancelled plugin attempt directory");
                     }
                 }));
         }
@@ -173,6 +180,7 @@ pub(crate) async fn execute_plugin(
     timeout: std::time::Duration,
     contract_dir: &Path,
     log_sender: Option<mpsc::Sender<PluginLogChunk>>,
+    authorize_launch: impl std::future::Future<Output = Result<(), String>>,
 ) -> Result<PluginExecution, String> {
     let deadline = tokio::time::Instant::now() + timeout;
     validate_runtime_spec(spec)?;
@@ -198,6 +206,8 @@ pub(crate) async fn execute_plugin(
         };
     }
 
+    let mut cleanup_guard =
+        PluginCleanupGuard::new(attempt_dir.clone(), schedule_container_cleanup);
     let (execution, remove_attempt_dir) = async {
         if let Err(error) = std::fs::write(input_dir.join("input.json"), serialized_input) {
             return (Err(format!("failed to write plugin input: {error}")), true);
@@ -227,6 +237,9 @@ pub(crate) async fn execute_plugin(
         {
             return (Err(error), true);
         }
+        if let Err(error) = authorize_before_launch(deadline, authorize_launch).await {
+            return (Err(error), true);
+        }
 
         let container_name = format!("mv-plugin-{}", Uuid::new_v4());
         let mut command = tokio::process::Command::new("nerdctl");
@@ -244,15 +257,20 @@ pub(crate) async fn execute_plugin(
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        if tokio::time::Instant::now() >= deadline {
+            return (
+                Err("plugin timeout exhausted before launch".to_owned()),
+                true,
+            );
+        }
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return (Err(format!("failed to execute plugin: {error}")), true),
         };
-        let mut cleanup_guard =
-            ContainerCleanupGuard::new(container_name.clone(), schedule_container_cleanup);
+        cleanup_guard.container_name = Some(container_name.clone());
         match tokio::time::timeout_at(deadline, collect_plugin_output(child, log_sender)).await {
             Ok(Ok((status, stdout, stderr))) => {
-                cleanup_guard.disarm();
+                cleanup_guard.container_name = None;
                 warn_if_log_chunks_dropped(&stdout, &stderr);
                 let result = adapter
                     .interpret(
@@ -281,7 +299,7 @@ pub(crate) async fn execute_plugin(
             }
             Ok(Err(error)) => match force_remove_plugin_container(&container_name).await {
                 Ok(()) => {
-                    cleanup_guard.disarm();
+                    cleanup_guard.container_name = None;
                     (Err(error), true)
                 }
                 Err(cleanup_error) => (
@@ -295,7 +313,7 @@ pub(crate) async fn execute_plugin(
                 let timeout_error = format!("plugin timed out after {} seconds", timeout.as_secs());
                 match force_remove_plugin_container(&container_name).await {
                     Ok(()) => {
-                        cleanup_guard.disarm();
+                        cleanup_guard.container_name = None;
                         (Err(timeout_error), true)
                     }
                     Err(error) => (
@@ -312,8 +330,25 @@ pub(crate) async fn execute_plugin(
 
     if remove_attempt_dir {
         remove_attempt_directory(&attempt_dir)?;
+        cleanup_guard.disarm();
     }
     execution
+}
+
+async fn authorize_before_launch(
+    deadline: tokio::time::Instant,
+    authorize: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err("plugin timeout exhausted before launch".to_owned());
+    }
+    tokio::time::timeout_at(deadline, authorize)
+        .await
+        .map_err(|_| "plugin timeout exhausted authorizing launch".to_owned())??;
+    if tokio::time::Instant::now() >= deadline {
+        return Err("plugin timeout exhausted before launch".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_runtime_spec(spec: &PluginRuntimeSpec) -> Result<(), String> {
@@ -861,6 +896,8 @@ mod tests {
         let mut runtime = spec(PluginPrivilege::Isolated);
         runtime.image = image;
         runtime.container_plugin_adapter = Some("DSXHealthValidation".to_owned());
+        // Qualify the DCGM 4 profile against the PR #269 CLI, which defaults
+        // to TENANT_GUEST unless OPERATOR_INFRA is selected explicitly.
         runtime.entrypoint = vec![
             "/health-validation".to_owned(),
             "run".to_owned(),
@@ -885,6 +922,7 @@ mod tests {
             std::time::Duration::from_secs(180),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
             Some(sender),
+            async { Ok(()) },
         )
         .await
         .expect("the real DSX adapter must complete an assessment");
@@ -913,6 +951,7 @@ mod tests {
             std::time::Duration::from_secs(30),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
             None,
+            async { Ok(()) },
         )
         .await
         .expect_err("qualification process must time out");
@@ -1324,24 +1363,50 @@ mod tests {
         assert!(!container_not_found("permission denied"));
     }
 
-    #[test]
-    fn cancelled_execution_schedules_container_cleanup() {
-        let removed_containers = Arc::new(Mutex::new(Vec::new()));
-        let scheduler_containers = Arc::clone(&removed_containers);
-        {
-            let _cleanup_guard =
-                ContainerCleanupGuard::new("mv-plugin-example".to_owned(), move |container_name| {
-                    scheduler_containers
-                        .lock()
-                        .expect("lock scheduled cleanup")
-                        .push(container_name);
+    #[tokio::test]
+    async fn cancelled_execution_cleans_files_only_after_the_container_is_gone() {
+        for launched in [false, true] {
+            let directory = std::env::temp_dir().join(format!("plugin-cancel-{}", Uuid::new_v4()));
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("input.json"), b"{}").unwrap();
+            let removed_containers = Arc::new(Mutex::new(Vec::new()));
+            let scheduler_containers = Arc::clone(&removed_containers);
+            let attempt_dir = directory.clone();
+            let (ready, waiting) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut guard = PluginCleanupGuard::new(attempt_dir, move |name, path| {
+                    assert!(path.join("input.json").exists());
+                    scheduler_containers.lock().unwrap().push((name, path));
                 });
+                if launched {
+                    guard.container_name = Some("mv-plugin-example".to_owned());
+                }
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+                drop(guard);
+            });
+            waiting.await.unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let scheduled = removed_containers.lock().unwrap();
+            if launched {
+                assert_eq!(
+                    *scheduled,
+                    [("mv-plugin-example".to_owned(), directory.clone())]
+                );
+                assert!(
+                    directory.exists(),
+                    "preserve mounts until container cleanup succeeds"
+                );
+                std::fs::remove_dir_all(&directory).unwrap();
+            } else {
+                assert!(scheduled.is_empty());
+                assert!(
+                    !directory.exists(),
+                    "preparation cancellation must remove input files"
+                );
+            }
         }
-
-        assert_eq!(
-            *removed_containers.lock().expect("lock scheduled cleanup"),
-            ["mv-plugin-example"]
-        );
     }
 
     #[test]
@@ -1349,7 +1414,7 @@ mod tests {
         let removed_containers = Arc::new(Mutex::new(Vec::new()));
         let scheduler_containers = Arc::clone(&removed_containers);
         let mut cleanup_guard =
-            ContainerCleanupGuard::new("mv-plugin-example".to_owned(), move |container_name| {
+            PluginCleanupGuard::new("/unused-attempt".into(), move |container_name, _| {
                 scheduler_containers
                     .lock()
                     .expect("lock scheduled cleanup")
@@ -1363,6 +1428,35 @@ mod tests {
                 .lock()
                 .expect("lock scheduled cleanup")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_authorization_fails_closed_and_respects_the_attempt_deadline() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        assert!(
+            authorize_before_launch(deadline, async { Ok(()) })
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            authorize_before_launch(deadline, async { Err("policy revoked".to_owned()) }).await,
+            Err("policy revoked".to_owned())
+        );
+        assert_eq!(
+            authorize_before_launch(tokio::time::Instant::now(), async {
+                panic!("an expired attempt must not request launch authorization")
+            })
+            .await,
+            Err("plugin timeout exhausted before launch".to_owned())
+        );
+        assert_eq!(
+            authorize_before_launch(
+                tokio::time::Instant::now() + std::time::Duration::from_millis(5),
+                std::future::pending(),
+            )
+            .await,
+            Err("plugin timeout exhausted authorizing launch".to_owned())
         );
     }
 

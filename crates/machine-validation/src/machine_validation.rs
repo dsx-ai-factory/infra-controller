@@ -1262,6 +1262,27 @@ impl MachineValidation {
                                 execution_timeout,
                                 Path::new(&self.options.plugin_contract_dir),
                                 log_sender,
+                                async {
+                                    if spec.container_plugin_adapter.is_some() {
+                                        let accepted = self
+                                            .clone()
+                                            .heartbeat_machine_validation_run(
+                                                validation_id,
+                                                Some(test.test_id.clone()),
+                                            )
+                                            .await
+                                            .map_err(|error| {
+                                                format!(
+                                                    "plugin launch authorization failed: {error}"
+                                                )
+                                            })?;
+                                        if !accepted {
+                                            return Err("plugin launch authorization was rejected"
+                                                .to_owned());
+                                        }
+                                    }
+                                    Ok(())
+                                },
                             )
                             .await;
                             if let Some(task_guard) = &mut log_task_guard {

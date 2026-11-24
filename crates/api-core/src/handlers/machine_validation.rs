@@ -916,6 +916,32 @@ pub(crate) async fn heartbeat_machine_validation_run(
     }
 
     let mut txn = api.txn_begin().await?;
+    if test_id.is_some() || run_item_id.is_some() || attempt_id.is_some() {
+        let items =
+            db::machine_validation_execution::find_run_items_by_run_id(&mut txn, validation_id)
+                .await?;
+        for item in items.iter().filter(|item| {
+            test_id.as_deref() == Some(item.test_id.as_str())
+                || run_item_id == Some(item.id)
+                || (attempt_id.is_some() && item.current_attempt_id == attempt_id)
+        }) {
+            // Use the immutable execution snapshot, not a newer catalog revision.
+            // Named adapters reauthorize through this heartbeat immediately before launch.
+            if let Some(plugin) = &item.plugin
+                && plugin.container_plugin_adapter.is_some()
+            {
+                validate_machine_validation_plugin(
+                    &plugin.clone().into(),
+                    &api.runtime_config.machine_validation_config,
+                )
+                .map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "plugin launch denied by current site policy: {error}"
+                    ))
+                })?;
+            }
+        }
+    }
     let heartbeat = db::machine_validation_execution::record_heartbeat(
         &mut txn,
         validation_id,
@@ -1206,16 +1232,15 @@ fn validate_machine_validation_plugin(
     let adapter_name = plugin.container_plugin_adapter.as_deref();
     let adapter = machine_validation_adapters::resolve(adapter_name)
         .map_err(CarbideError::InvalidArgument)?;
-    if let Some(name) = adapter_name {
-        if !config
+    if let Some(name) = adapter_name
+        && !config
             .allowed_container_plugin_adapters
             .iter()
             .any(|allowed| allowed == name)
-        {
-            return Err(CarbideError::InvalidArgument(format!(
-                "container plugin adapter {name:?} is not approved by site policy"
-            )));
-        }
+    {
+        return Err(CarbideError::InvalidArgument(format!(
+            "container plugin adapter {name:?} is not approved by site policy"
+        )));
     }
     config
         .validate_plugin_runtime_requirements(adapter.requirements())

@@ -2091,6 +2091,10 @@ be propagated there by DPF.
 | `tests` | `Vec<MachineValidationTestConfig>` | `[]` | Per-test enable/disable overrides. |
 | `approved_plugin_registries` | `Vec<String>` | `[]` | Registries allowed for Machine Validation plugin images. Empty denies plugin registration; legacy tests are unaffected. |
 | `allowed_plugin_types` | `Vec<String>` | `["container"]` | Plugin execution types allowed for the site. Empty denies plugin registration; the only accepted value is `container`. |
+| `allowed_container_plugin_adapters` | `Vec<String>` | `[]` | Named container adapters approved for registration, enablement, and pre-launch authorization. Empty denies named adapters; omission of an adapter retains the standard NICo contract. |
+| `allow_plugin_host_network` | `bool` | `false` | Allows approved adapters to share the host network namespace. |
+| `allow_plugin_host_pid` | `bool` | `false` | Allows approved adapters to share the host PID namespace. |
+| `allow_plugin_host_sockets` | `bool` | `false` | Allows approved adapters to connect to explicitly mounted host Unix sockets. Read-only socket mounts still permit protocol requests. |
 | `allow_privileged_plugins` | `bool` | `false` | Allows registration of plugins that request the privileged container profile. |
 | `allow_full_host_plugins` | `bool` | `false` | Allows registration of privileged plugins that request a writable host-root mount. Each revision still needs separate approval before it can be enabled. |
 | `attempt_logs` | `MachineValidationAttemptLogConfig` | enabled, 16 KiB/chunk, 1 MiB/attempt, 30d | Site-wide storage policy for Machine Validation attempt logs. |
