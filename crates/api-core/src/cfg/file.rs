@@ -1659,10 +1659,11 @@ pub enum PerObjectStateMetricObjectType {
     SpdmAttestation,
     IbPartition,
     NvlinkDomain,
+    ExtensionService,
 }
 
 impl PerObjectStateMetricObjectType {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Machine,
         Self::Switch,
         Self::Rack,
@@ -1672,6 +1673,7 @@ impl PerObjectStateMetricObjectType {
         Self::SpdmAttestation,
         Self::IbPartition,
         Self::NvlinkDomain,
+        Self::ExtensionService,
     ];
 
     /// The `object_type` label token; must match what the controllers record.
@@ -1686,6 +1688,7 @@ impl PerObjectStateMetricObjectType {
             Self::SpdmAttestation => "spdm_attestation",
             Self::IbPartition => "ib_partition",
             Self::NvlinkDomain => "nvlink_domain",
+            Self::ExtensionService => "extension_service",
         }
     }
 }
@@ -5674,21 +5677,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn per_object_state_metrics_accepts_nvlink_domains() {
-        let config: PerObjectStateMetricsConfig = toml::from_str(
-            r#"enabled = true
-object_types = ["nvlink_domain"]"#,
-        )
-        .unwrap();
+    fn per_object_state_metrics_accepts_controller_types() {
+        for token in ["nvlink_domain", "extension_service"] {
+            let config: PerObjectStateMetricsConfig =
+                toml::from_str(&format!("enabled = true\nobject_types = [\"{token}\"]")).unwrap();
+            assert!(config.enabled);
+            assert_eq!(config.object_types.len(), 1);
+            let object_type = config.object_types[0];
+            assert_eq!(object_type.as_str(), token);
+            assert_eq!(serde_json::to_value(object_type).unwrap(), token);
+            assert!(
+                PerObjectStateMetricsConfig::default()
+                    .object_types
+                    .contains(&object_type)
+            );
+        }
+    }
+
+    #[test]
+    fn per_object_state_metrics_defaults_include_extension_services() {
+        let config: PerObjectStateMetricsConfig = toml::from_str("enabled = true").unwrap();
         assert!(config.enabled);
-        assert_eq!(config.object_types.len(), 1);
-        let domain = config.object_types[0];
-        assert_eq!(domain.as_str(), "nvlink_domain");
-        assert_eq!(serde_json::to_value(domain).unwrap(), "nvlink_domain");
         assert!(
-            PerObjectStateMetricsConfig::default()
+            config
                 .object_types
-                .contains(&domain)
+                .iter()
+                .any(|object_type| object_type.as_str() == "extension_service")
         );
     }
 

@@ -53,8 +53,8 @@ object_types = ["machine", "switch", "power_shelf", "rack"]  # default: all
 
 `object_types` deserializes into an enum, so a mistyped token fails config
 parsing instead of silently emitting nothing. Every state controller feeds
-the endpoint, so `network_segment`, `vpc_prefix`, `spdm_attestation`, and
-`ib_partition` and `nvlink_domain` are also valid.
+the endpoint, so `network_segment`, `vpc_prefix`, `spdm_attestation`,
+`ib_partition`, `nvlink_domain`, and `extension_service` are also valid.
 
 This lets operators scrape it slower (60–120s — the series change only on
 state transitions), route it to a different tenant/retention, or skip it —
