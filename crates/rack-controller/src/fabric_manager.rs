@@ -18,7 +18,10 @@
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use carbide_secrets::credentials::Credentials;
+use carbide_rack::firmware_update::{
+    RackSwitchFirmwareInventory, load_rack_switch_firmware_inventory,
+};
+use carbide_secrets::credentials::{CredentialManager, Credentials};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
@@ -29,6 +32,7 @@ use db::switch as db_switch;
 use mac_address::MacAddress;
 use model::rack::FirmwareUpgradeDeviceInfo;
 use sqlx::PgConnection;
+use state_controller::state_handler::StateHandlerError;
 
 pub(super) fn validate_switch_inventory_for_nmx_cluster(
     switches: &[FirmwareUpgradeDeviceInfo],
@@ -259,6 +263,66 @@ pub(super) fn switch_endpoint_from_firmware_device(
         nvos_credentials,
         nvos_host_name: device.os_hostname.clone().none_if_empty(),
     })
+}
+
+pub(super) fn validate_complete_nmx_fabric_inventory(
+    switch_inventory: &RackSwitchFirmwareInventory,
+) -> Result<(), String> {
+    let resolved_switch_ids = switch_inventory
+        .switches
+        .iter()
+        .map(|switch| switch.node_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+
+    let missing_switch_ids = switch_inventory
+        .switch_ids
+        .iter()
+        .filter_map(|switch_id| {
+            let switch_id = switch_id.to_string();
+            (!resolved_switch_ids.contains(switch_id.as_str())).then_some(switch_id)
+        })
+        .collect::<Vec<_>>();
+
+    if missing_switch_ids.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "missing endpoint info for switches: {}",
+        missing_switch_ids.join(", ")
+    ))
+}
+
+/// Loads the complete rack switch set required by the RMS V2 fabric contract.
+///
+/// Endpoint resolution must return every rack switch so V2 cannot reconcile a
+/// partial fabric.
+pub(super) async fn load_nmx_fabric_inventory(
+    rack_id: &RackId,
+    operation: &str,
+    db_pool: &sqlx::PgPool,
+    credential_manager: &dyn CredentialManager,
+) -> Result<RackSwitchFirmwareInventory, StateHandlerError> {
+    let switch_inventory =
+        load_rack_switch_firmware_inventory(db_pool, credential_manager, rack_id)
+            .await
+            .map_err(|error| {
+                StateHandlerError::GenericError(eyre::eyre!(
+                    "failed to load rack switch firmware inventory for {}: {}",
+                    operation,
+                    error
+                ))
+            })?;
+
+    validate_complete_nmx_fabric_inventory(&switch_inventory).map_err(|error| {
+        StateHandlerError::GenericError(eyre::eyre!(
+            "failed to load complete rack switch inventory for {}: {}",
+            operation,
+            error
+        ))
+    })?;
+
+    Ok(switch_inventory)
 }
 
 #[cfg(test)]

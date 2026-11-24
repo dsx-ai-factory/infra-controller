@@ -138,6 +138,8 @@ pub async fn handle_ready(
         }));
     }
 
+    crate::fabric_observation::reconcile_missing_fabric_metadata(state, ctx).await?;
+
     Ok(StateHandlerOutcome::wait(
         "rack is ready, no maintenance requested".into(),
     ))
