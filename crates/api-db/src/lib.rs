@@ -133,6 +133,7 @@ pub use db_session::DbSessionGuard;
 pub use writable_pool::writable_pool_options;
 
 #[cfg(any(test, feature = "test-support"))]
+#[allow(txn_held_across_await)]
 pub mod test_support;
 
 use std::backtrace::{Backtrace, BacktraceStatus};
