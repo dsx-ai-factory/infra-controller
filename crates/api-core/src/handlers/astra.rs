@@ -24,7 +24,7 @@ use ::rpc::forge::{
     AstraMultiplaneInterface, AstraPhase,
 };
 use carbide_uuid::machine::DpuMachineId;
-use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
+use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
 use mac_address::MacAddress;
@@ -266,6 +266,17 @@ pub(super) async fn get_astra_config(
     }))
 }
 
+/// What one Astra attachment report claims about a card's host address.
+///
+/// The revision and partition travel with the address because a MAC alone does
+/// not identify a configuration: a delayed report from an earlier assignment
+/// names the same card as the current one.
+struct ReportedHostAddress {
+    config_version: ConfigVersion,
+    partition_id: SpxPartitionId,
+    host_ipv4: IpAddr,
+}
+
 /// `process_astra_config_status` replaces observations when Astra reporting is
 /// enabled. Successful processing accepts Ready entries for current Astra
 /// interfaces and preserves current SVPC observations. It drops observations
@@ -321,7 +332,7 @@ pub(super) async fn process_astra_config_status(
     })?;
 
     let mut reported_observations = Vec::new();
-    let mut reported_host_addresses: HashMap<MacAddress, IpAddr> = HashMap::new();
+    let mut reported_host_addresses: HashMap<MacAddress, ReportedHostAddress> = HashMap::new();
 
     // Resolve reported VNIs before taking the host lock.
     for obs in astra_config_status.astra_attachments_status.iter() {
@@ -419,11 +430,20 @@ pub(super) async fn process_astra_config_status(
 
         // Weave assigns the address, so the agent reports it only once the
         // attachment has one. Parsing here keeps an address Weave could not have
-        // produced from reaching the column.
+        // produced from reaching the column. The revision and partition this
+        // report carried are kept with it so a later check can tell whether it
+        // describes the assignment the card holds now.
         if let Some(reported_host_ipv4) = obs.host_ipv4.as_deref() {
             match Ipv4Addr::from_str(reported_host_ipv4) {
                 Ok(host_ipv4) => {
-                    reported_host_addresses.insert(obs_mac, IpAddr::from(host_ipv4));
+                    reported_host_addresses.insert(
+                        obs_mac,
+                        ReportedHostAddress {
+                            config_version: ncv,
+                            partition_id: spx_partition_id,
+                            host_ipv4: IpAddr::from(host_ipv4),
+                        },
+                    );
                 }
                 Err(e) => tracing::error!(
                     mac_address = %obs.mac_address,
@@ -455,23 +475,58 @@ pub(super) async fn process_astra_config_status(
     // An Astra card holds Weave's host address in `overlay_ip`, the column DHCP
     // fills for an SVPC card. It belongs to the tenancy, so only an assigned
     // card carries one and `try_update_controller_state` clears it when that
-    // tenancy ends. Reports repeat an unchanged address every iteration, so
-    // write only what the row does not already carry.
-    for interface in dpa_interfaces.iter().filter(|interface| {
-        interface.interface_type == DpaInterfaceType::Astra
-            && matches!(
-                interface.controller_state.value,
-                DpaInterfaceControllerState::Assigned
-            )
-    }) {
-        let Some(&host_ipv4) = reported_host_addresses.get(&interface.mac_address) else {
-            continue;
-        };
-        if interface.overlay_ip == Some(host_ipv4) {
-            continue;
-        }
+    // tenancy ends.
+    //
+    // Read the assignment under the host lock: the address must be checked
+    // against the tenancy the card holds now, not the one the pre-lock snapshot
+    // saw. A report that names a different revision or partition was produced
+    // for a configuration this card has since left, and its address would
+    // otherwise overwrite the current tenancy's. Reports also repeat an
+    // unchanged address every iteration, so write only what the row lacks.
+    if !reported_host_addresses.is_empty() {
+        let instance =
+            db::instance::find_by_machine_id(txn.as_mut(), &snapshot.host_snapshot.id.into())
+                .await?;
 
-        db::dpa_interface::update_astra_overlay_ip(txn.as_mut(), interface.id, host_ipv4).await?;
+        for interface in dpa_interfaces.iter().filter(|interface| {
+            interface.interface_type == DpaInterfaceType::Astra
+                && matches!(
+                    interface.controller_state.value,
+                    DpaInterfaceControllerState::Assigned
+                )
+        }) {
+            let Some(reported) = reported_host_addresses.get(&interface.mac_address) else {
+                continue;
+            };
+
+            let (expected_version, expected_partition_id) =
+                interface.expected_attachment_revision(&instance);
+            if reported.config_version != expected_version
+                || reported.partition_id != expected_partition_id
+            {
+                tracing::info!(
+                    dpa_interface_id = %interface.id,
+                    mac_address = %interface.mac_address,
+                    reported_config_version = %reported.config_version,
+                    expected_config_version = %expected_version,
+                    reported_partition_id = %reported.partition_id,
+                    expected_partition_id = %expected_partition_id,
+                    "Astra host address describes a superseded assignment, skipping",
+                );
+                continue;
+            }
+
+            if interface.overlay_ip == Some(reported.host_ipv4) {
+                continue;
+            }
+
+            db::dpa_interface::update_astra_overlay_ip(
+                txn.as_mut(),
+                interface.id,
+                reported.host_ipv4,
+            )
+            .await?;
+        }
     }
 
     let mut spx_attachment_observations = machine

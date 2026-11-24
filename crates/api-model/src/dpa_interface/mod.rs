@@ -24,7 +24,7 @@ use carbide_libmlx_model::firmware::operation::FirmwareOperation;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::machine::HostMachineId;
-use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
+use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use mac_address::MacAddress;
@@ -325,6 +325,38 @@ impl DpaInterface {
         self.machine_id
     }
 
+    /// Config version and SPX partition the current assignment expects this
+    /// interface's attachment to report.
+    ///
+    /// A card the instance attached to a partition reports the instance's SPX
+    /// config version against that partition. Otherwise the card sits on the
+    /// managed-host (admin) network, where it reports this interface's own
+    /// network config version and no partition.
+    ///
+    /// Together the pair identifies one configuration of this card, so a report
+    /// that disagrees came from a configuration that is no longer current.
+    pub fn expected_attachment_revision(
+        &self,
+        instance: &Option<InstanceSnapshot>,
+    ) -> (ConfigVersion, SpxPartitionId) {
+        let mac_address = self.mac_address.to_string();
+        instance
+            .as_ref()
+            .and_then(|instance| {
+                instance
+                    .config
+                    .spxconfig
+                    .spx_attachments
+                    .iter()
+                    .find(|attachment| {
+                        attachment.mac_address.as_deref().unwrap_or_default() == mac_address
+                            && attachment.spx_partition_id != NULL_SPX_PARTITION_ID
+                    })
+                    .map(|attachment| (instance.spx_config_version, attachment.spx_partition_id))
+            })
+            .unwrap_or((self.network_config.version, NULL_SPX_PARTITION_ID))
+    }
+
     // If the DPA machine is an instance, the config version sent to the card will
     // the spx_config_version of the instance.
     // If the DPA machine is a managed host, the config version sent to the card will
@@ -346,8 +378,6 @@ impl DpaInterface {
             return true;
         }
 
-        let mut dpa_expected_version = self.network_config.version;
-
         // If we haven't yet seen any observations, we are not synced
         let Some(spx_status_observation) = spx_status_observation else {
             tracing::info!(
@@ -357,24 +387,7 @@ impl DpaInterface {
             return false;
         };
 
-        // If there is an instance, and the instance has SPX attachments,
-        // and one of the attachments matches our mac address and has a non-zero partition ID,
-        // then the DPA expected version should be the instance's SPX config version.
-        if let Some(instance) = instance {
-            let mac_address = self.mac_address.to_string();
-            if instance
-                .config
-                .spxconfig
-                .spx_attachments
-                .iter()
-                .any(|attachment| {
-                    attachment.mac_address.as_deref().unwrap_or_default() == mac_address
-                        && attachment.spx_partition_id != NULL_SPX_PARTITION_ID
-                })
-            {
-                dpa_expected_version = instance.spx_config_version;
-            }
-        }
+        let (dpa_expected_version, _) = self.expected_attachment_revision(instance);
 
         for obs in spx_status_observation.spx_attachments.iter() {
             if obs.mac_address == self.mac_address

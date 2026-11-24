@@ -886,3 +886,89 @@ async fn astra_report_withholds_host_ipv4_from_an_unassigned_interface(pool: sql
 
     assert_eq!(stored_host_ipv4(&fixture, &fixture.astra).await, None);
 }
+
+// A card keeps its MAC and its Assigned state across reassignment, so neither
+// identifies the configuration a report came from. A report that names a
+// superseded revision or a partition the card is no longer attached to was
+// produced for a tenancy that has ended, and must not overwrite the address the
+// current one is using. The revision the current assignment does expect still
+// lands, so the check rejects staleness rather than reporting in general.
+#[crate::sqlx_test]
+async fn stale_astra_report_does_not_overwrite_the_current_assignment_host_ipv4(
+    pool: sqlx::PgPool,
+) {
+    let fixture = create_astra_status_fixture(pool).await;
+    let current_address: IpAddr = "192.0.2.10".parse().unwrap();
+    let stale_address: IpAddr = "192.0.2.99".parse().unwrap();
+    assign_astra(&fixture, &fixture.astra).await;
+
+    // Reassign the card by advancing the revision Core expects it to report.
+    let mut txn = fixture.env.db_txn().await;
+    assert_eq!(
+        db::dpa_interface::try_update_network_config(
+            &mut txn,
+            &fixture.astra.id,
+            fixture.astra.network_config.version,
+            &fixture.astra.network_config.value,
+        )
+        .await
+        .expect("advance the expected Astra revision"),
+        ConditionalWrite::Applied(fixture.astra.id)
+    );
+    txn.commit().await.unwrap();
+    let reassigned = db::dpa_interface::find_by_ids(&fixture.env.pool, &[fixture.astra.id], false)
+        .await
+        .expect("read the reassigned Astra interface")
+        .remove(0);
+    assert_ne!(
+        reassigned.network_config.version,
+        fixture.astra.network_config.version
+    );
+
+    // A report still in flight from before the reassignment.
+    let mut stale = astra_status(&fixture.astra, AstraPhase::PhaseReady);
+    stale.astra_attachments_status[0].host_ipv4 = Some(stale_address.to_string());
+    record_astra_status(&fixture, Some(stale)).await;
+    assert_eq!(
+        stored_host_ipv4(&fixture, &fixture.astra).await,
+        None,
+        "a report from a superseded revision must not record an address"
+    );
+
+    // The revision the card is now assigned at is accepted.
+    let mut current = astra_status(&reassigned, AstraPhase::PhaseReady);
+    current.astra_attachments_status[0].host_ipv4 = Some(current_address.to_string());
+    record_astra_status(&fixture, Some(current)).await;
+    assert_eq!(
+        stored_host_ipv4(&fixture, &fixture.astra).await,
+        Some(current_address),
+        "the revision the current assignment expects is accepted"
+    );
+
+    // A partition the card is not attached to also identifies another tenancy,
+    // even when the revision matches.
+    let partition = fixture
+        .env
+        .api
+        .create_spx_partition(Request::new(SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "stale-astra-report-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("create SPX partition for the stale Astra report")
+        .into_inner();
+    assert!(partition.vni > 0);
+    let mut other_partition = astra_status(&reassigned, AstraPhase::PhaseReady);
+    other_partition.astra_attachments_status[0].vni = i32::try_from(partition.vni).unwrap();
+    other_partition.astra_attachments_status[0].host_ipv4 = Some(stale_address.to_string());
+    record_astra_status(&fixture, Some(other_partition)).await;
+    assert_eq!(
+        stored_host_ipv4(&fixture, &fixture.astra).await,
+        Some(current_address),
+        "a report against another partition must not replace the current address"
+    );
+}
