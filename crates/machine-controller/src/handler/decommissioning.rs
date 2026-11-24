@@ -25,7 +25,8 @@ use carbide_secrets::credentials::{
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use db::TransactionVending as _;
 use itertools::Itertools;
-use libredfish::model::task::TaskState;
+use libredfish::Redfish;
+use libredfish::model::task::{Task, TaskState};
 use libredfish::model::update_service::TransferProtocolType;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
@@ -37,7 +38,7 @@ use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
 use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
-    StateHandlerContext, StateHandlerError, StateHandlerOutcome,
+    ExternalServiceError, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use crate::context::MachineStateHandlerContextObjects;
@@ -46,6 +47,12 @@ use crate::redfish::{
     did_dpu_finish_booting, host_power_control, poll_idrac_job, power_state, power_state_name,
     reset_bmc_to_factory_defaults,
 };
+
+const VANILLA_BFB_IMAGE_URI: &str =
+    "carbide-pxe.forge//public/blobs/internal/aarch64/preingestion.bfb";
+const DPU_OS_TARGET: &str = "redfish/v1/UpdateService/FirmwareInventory/DPU_OS";
+const SIMPLE_UPDATE_ACTION: &str = "/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate";
+const TASKS_COLLECTION: &str = "/redfish/v1/TaskService/Tasks";
 
 fn deconfiguring_dpus_after_host_reset(state: &ManagedHostStateSnapshot) -> ManagedHostState {
     ManagedHostState::Decommissioning {
@@ -467,7 +474,13 @@ pub(super) async fn handle_deconfiguring_dpus(
             object_id: state.host_snapshot.id.to_string(),
             missing: "dpu_snapshot",
         })?;
-    let mut next_states = dpu_states.clone();
+    let transition_dpu = |next_dpu_state| {
+        let mut dpu_states = dpu_states.clone();
+        dpu_states.insert(dpu_id, next_dpu_state);
+        StateHandlerOutcome::transition(ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::DeconfiguringDpus { dpu_states },
+        })
+    };
 
     match dpu_state {
         DeconfiguringDpuState::DeletingFromDpf => {
@@ -537,8 +550,8 @@ pub(super) async fn handle_deconfiguring_dpus(
             let redfish_client = ctx.services.create_redfish_client_from_machine(dpu).await?;
             let task = redfish_client
                 .update_firmware_simple_update(
-                    "carbide-pxe.forge//public/blobs/internal/aarch64/preingestion.bfb",
-                    vec!["redfish/v1/UpdateService/FirmwareInventory/DPU_OS".to_string()],
+                    VANILLA_BFB_IMAGE_URI,
+                    vec![DPU_OS_TARGET.to_string()],
                     TransferProtocolType::HTTP,
                 )
                 .await
@@ -547,47 +560,104 @@ pub(super) async fn handle_deconfiguring_dpus(
                         "failed to install vanilla BFB on DPU {dpu_id}: {error}"
                     ))
                 })?;
-            next_states.insert(
-                dpu_id,
+            Ok(transition_dpu(
                 DeconfiguringDpuState::WaitForInstallComplete { task_id: task.id },
-            );
-            Ok(StateHandlerOutcome::transition(
-                ManagedHostState::Decommissioning {
-                    decommissioning_state: DecommissioningState::DeconfiguringDpus {
-                        dpu_states: next_states,
-                    },
-                },
             ))
         }
         DeconfiguringDpuState::WaitForInstallComplete { task_id } => {
             let redfish_client = ctx.services.create_redfish_client_from_machine(dpu).await?;
-            let task = redfish_client.get_task(task_id).await.map_err(|error| {
-                StateHandlerError::GenericError(eyre::eyre!(
-                    "failed to verify vanilla BFB install task {task_id} on DPU {dpu_id}: {error}"
-                ))
-            })?;
-            match task.task_state {
-                Some(TaskState::Completed) => {
-                    next_states
-                        .insert(dpu_id, DeconfiguringDpuState::WaitingForBootAfterBfbInstall);
-                    Ok(StateHandlerOutcome::transition(
-                        ManagedHostState::Decommissioning {
-                            decommissioning_state: DecommissioningState::DeconfiguringDpus {
-                                dpu_states: next_states,
-                            },
-                        },
-                    ))
+            let install = format!("vanilla BFB install task {task_id} on DPU {dpu_id}");
+            let recovery_reason = match redfish_client.get_task(task_id).await {
+                Ok(task) => {
+                    let is_install = task.id == *task_id
+                        && is_vanilla_bfb_install(&task).map_err(|error| {
+                            ExternalServiceError::with_source(
+                                "redfish",
+                                "get_task",
+                                format!("failed to decode the request for {install}: {error}"),
+                                "redfish_other_error",
+                                error,
+                            )
+                        })?;
+                    if !is_install {
+                        format!(
+                            "the task returned for {install} does not identify the expected SimpleUpdate"
+                        )
+                    } else {
+                        match task.task_state {
+                            Some(TaskState::Completed) => {
+                                return Ok(transition_dpu(
+                                    DeconfiguringDpuState::WaitingForBootAfterBfbInstall,
+                                ));
+                            }
+                            Some(TaskState::New | TaskState::Starting | TaskState::Running) => {
+                                return Ok(StateHandlerOutcome::wait(format!(
+                                    "waiting for {install} to complete: {}%",
+                                    task.percent_complete.unwrap_or_default()
+                                )));
+                            }
+                            Some(TaskState::Exception) => {
+                                let messages =
+                                    task.messages.iter().map(|msg| &msg.message).join("\n");
+                                format!("{install} failed with state Exception\n{messages}")
+                            }
+                            task_state => {
+                                return Err(StateHandlerError::GenericError(eyre::eyre!(
+                                    "{install} failed with state {task_state:?}"
+                                )));
+                            }
+                        }
+                    }
                 }
-                Some(TaskState::Running | TaskState::New | TaskState::Starting) => {
-                    Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for vanilla BFB install on DPU {dpu_id} to complete: {}%",
-                        task.percent_complete.unwrap_or_default()
-                    )))
+                Err(error) if error.not_found() => format!("{install} returned HTTP 404"),
+                Err(error) => {
+                    return Err(ExternalServiceError::with_source(
+                        "redfish",
+                        "get_task",
+                        format!("failed to poll {install}: {error}"),
+                        "redfish_other_error",
+                        error,
+                    )
+                    .into());
                 }
-                task_state => Err(StateHandlerError::GenericError(eyre::eyre!(
-                    "vanilla BFB install task {task_id} on DPU {dpu_id} failed with state {task_state:?}"
-                ))),
+            };
+
+            let replacement = find_vanilla_bfb_install(redfish_client.as_ref())
+                .await
+                .map_err(|error| {
+                    ExternalServiceError::with_source(
+                        "redfish",
+                        "get_collection",
+                        format!("{recovery_reason}\nfailed to scan for a replacement vanilla BFB install: {error:#}"),
+                        "redfish_other_error",
+                        error,
+                    )
+                })?;
+            let Some(replacement_id) = replacement else {
+                let address = dpu
+                    .bmc_addr()
+                    .ok_or_else(|| StateHandlerError::MissingData {
+                        object_id: dpu_id.to_string(),
+                        missing: "BMC Endpoint Information (bmc_info.ip)",
+                    })?;
+                return Err(StateHandlerError::ManualInterventionRequired(format!(
+                    "{recovery_reason}\nNo eligible replacement vanilla BFB install was found. Retry on the DPU BMC with:\n\
+                     nico-admin-cli redfish --address {address} --username \"$BMC_USERNAME\" \
+                     --password \"$BMC_PASSWORD\" simple-update --image-uri {VANILLA_BFB_IMAGE_URI} \
+                     --target {DPU_OS_TARGET}"
+                )));
+            };
+            if replacement_id == *task_id {
+                // The task may have appeared at the same ID between the poll and the scan.
+                return Ok(StateHandlerOutcome::wait(format!(
+                    "found {install} in the task collection; will poll it again"
+                )));
             }
+            Ok(transition_dpu(
+                DeconfiguringDpuState::WaitForInstallComplete {
+                    task_id: replacement_id,
+                },
+            ))
         }
         DeconfiguringDpuState::WaitingForBootAfterBfbInstall => {
             let bmc = ctx.services.connect_bmc(dpu).await?;
@@ -603,17 +673,60 @@ pub(super) async fn handle_deconfiguring_dpus(
                     "waiting for DPU {dpu_id} to finish booting after vanilla BFB installation: {boot_progress:?}"
                 )));
             }
-            next_states.insert(dpu_id, DeconfiguringDpuState::Complete);
-            Ok(StateHandlerOutcome::transition(
-                ManagedHostState::Decommissioning {
-                    decommissioning_state: DecommissioningState::DeconfiguringDpus {
-                        dpu_states: next_states,
-                    },
-                },
-            ))
+            Ok(transition_dpu(DeconfiguringDpuState::Complete))
         }
         DeconfiguringDpuState::Complete => unreachable!("complete DPU states are skipped"),
     }
+}
+
+fn is_vanilla_bfb_install(task: &Task) -> Result<bool, serde_json::Error> {
+    let Some(payload) = &task.payload else {
+        return Ok(false);
+    };
+    if payload.http_operation.as_deref() != Some("POST")
+        || payload.target_uri.as_deref() != Some(SIMPLE_UPDATE_ACTION)
+    {
+        return Ok(false);
+    }
+    let Some(body) = payload.json_body.as_deref() else {
+        return Ok(false);
+    };
+    let body: serde_json::Value = serde_json::from_str(body)?;
+    Ok(body["ImageURI"] == VANILLA_BFB_IMAGE_URI
+        && body["Targets"] == serde_json::json!([DPU_OS_TARGET]))
+}
+
+async fn find_vanilla_bfb_install(client: &dyn Redfish) -> eyre::Result<Option<String>> {
+    let mut collection = client.get_collection(TASKS_COLLECTION.into()).await?;
+    let members = collection
+        .body
+        .remove("Members")
+        .ok_or_else(|| eyre::eyre!("expanded Redfish task collection is missing Members"))?;
+    let tasks: Vec<Task> = serde_json::from_value(members)?;
+    select_vanilla_bfb_install(&tasks)
+}
+
+fn select_vanilla_bfb_install(tasks: &[Task]) -> eyre::Result<Option<String>> {
+    let active = tasks.iter().filter(|task| {
+        matches!(
+            task.task_state,
+            Some(TaskState::New | TaskState::Starting | TaskState::Running)
+        )
+    });
+    let completed = tasks
+        .iter()
+        .filter(|task| matches!(task.task_state, Some(TaskState::Completed)));
+    for task in active.chain(completed) {
+        if is_vanilla_bfb_install(task).map_err(|error| {
+            eyre::Report::new(error).wrap_err(format!(
+                "invalid SimpleUpdate request body on task {}",
+                task.id
+            ))
+        })? {
+            return Ok(Some(task.id.clone()));
+        }
+    }
+    Ok(None)
 }
 
 async fn pending_dhcp_acknowledgement_macs(
@@ -1047,4 +1160,86 @@ async fn delete_managed_credentials(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn task(id: &str, state: &str, method: &str, action: &str, body: Value) -> Task {
+        serde_json::from_value(json!({
+            "@odata.id": format!("{TASKS_COLLECTION}/{id}"),
+            "@odata.type": "#Task.v1_4_3.Task",
+            "Id": id,
+            "TaskState": state,
+            "Payload": {
+                "HttpOperation": method,
+                "TargetUri": action,
+                "JsonBody": body.to_string(),
+            },
+        }))
+        .unwrap()
+    }
+
+    fn install_body() -> Value {
+        json!({"ImageURI": VANILLA_BFB_IMAGE_URI, "Targets": [DPU_OS_TARGET]})
+    }
+
+    #[test]
+    fn vanilla_bfb_install_matches_the_captured_request() {
+        let mut other_image = install_body();
+        other_image["ImageURI"] =
+            json!("carbide-pxe.other//public/blobs/internal/aarch64/preingestion.bfb");
+        let mut other_target = install_body();
+        other_target["Targets"] = json!(["redfish/v1/UpdateService/FirmwareInventory/BMC"]);
+        let mut extra_target = install_body();
+        extra_target["Targets"] = json!([
+            DPU_OS_TARGET,
+            "redfish/v1/UpdateService/FirmwareInventory/BMC"
+        ]);
+        value_scenarios!(run = |(method, action, body)| {
+            is_vanilla_bfb_install(&task("install", "Running", method, action, body)).unwrap()
+        };
+            "exact request" { ("POST", SIMPLE_UPDATE_ACTION, install_body()) => true }
+            "different method" { ("PATCH", SIMPLE_UPDATE_ACTION, install_body()) => false }
+            "different action" {
+                ("POST", "/redfish/v1/UpdateService/upload", install_body()) => false
+            }
+            "different image" { ("POST", SIMPLE_UPDATE_ACTION, other_image) => false }
+            "different target" { ("POST", SIMPLE_UPDATE_ACTION, other_target) => false }
+            "additional target" { ("POST", SIMPLE_UPDATE_ACTION, extra_target) => false }
+        );
+    }
+
+    #[test]
+    fn vanilla_bfb_selection_prefers_active_then_collection_order() {
+        let install = |id, state| task(id, state, "POST", SIMPLE_UPDATE_ACTION, install_body());
+        let history = [
+            install("failed", "Exception"),
+            install("completed-z", "Completed"),
+            install("completed-a", "Completed"),
+        ];
+        let active = [
+            task(
+                "unrelated",
+                "Running",
+                "PATCH",
+                SIMPLE_UPDATE_ACTION,
+                install_body(),
+            ),
+            install("running-z", "Running"),
+            install("running-a", "Running"),
+        ];
+        value_scenarios!(run = |tasks: Vec<Task>| select_vanilla_bfb_install(&tasks).unwrap();
+            "active beats earlier completed" {
+                [&history[..], &active[..]].concat() => Some("running-z".to_owned())
+            }
+            "completed fallback" {
+                history.to_vec() => Some("completed-z".to_owned())
+            }
+        );
+    }
 }

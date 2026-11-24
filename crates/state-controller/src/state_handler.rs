@@ -103,14 +103,14 @@ impl ExternalServiceError {
         operation: &'static str,
         details: impl Into<String>,
         metric_label: &'static str,
-        source: impl std::error::Error + Send + Sync + 'static,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
     ) -> Self {
         Self {
             service,
             operation,
             details: details.into(),
             metric_label,
-            source: Some(Box::new(source)),
+            source: Some(source.into()),
         }
     }
 
