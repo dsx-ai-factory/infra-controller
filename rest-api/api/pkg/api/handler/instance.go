@@ -3600,9 +3600,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	var dbskgs []cdbm.SSHKeyGroup
 	var ssds []cdbm.StatusDetail
 	reqCtx := ctx
-	reIssueInfiniBandInterfaces := false
 	reIssueNVLinkInterfaces := false
-	_ = reIssueInfiniBandInterfaces
 
 	// timeoutResp lets the closure signal a post-rollback handler — the
 	// TerminateWorkflow call has to run after the closure returns so that
