@@ -317,14 +317,17 @@ An older report can contain a tray serial in the chassis `SerialNumber` field.
 A `chassis` rule or the chassis fallback uses the stored value until a
 successful exploration replaces the report.
 
-During exploration, Site Explorer collects Assembly inventory for every chassis
-whose ID matches any configured or built-in `chassis_assembly` rule. Collection
-uses the chassis pattern before the report's hardware class is derived.
-`hardware_class` and the assembly selectors apply when the audit reads the
-completed report. Overlapping rules collect each chassis once. A broader
-chassis pattern can read more Assembly resources. An error reading a selected
-Assembly fails that exploration. A newly selected chassis contributes assembly
-data after its next successful exploration.
+During exploration, Site Explorer reads the advertised `Assembly` property
+for collected chassis whose IDs match a configured or built-in
+`chassis_assembly` rule. A chassis without the property contributes no
+members. An error reading or decoding a selected Assembly or member fails
+the exploration.
+
+Collection uses chassis IDs before the report's hardware class is derived.
+The audit uses `hardware_class` and the Assembly member selectors when
+it evaluates the saved report. Overlapping rules collect each chassis once.
+A broader chassis pattern can read more Assembly resources. A newly selected
+chassis contributes members after a successful exploration saves them.
 
 For diagnosis, inspect the stored `explored_endpoints.exploration_report` JSON,
 including `HardwareClass`, `Systems`, `Chassis[].Id`, and
