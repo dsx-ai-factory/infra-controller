@@ -65,4 +65,15 @@ pub(super) static DEFAULT_HOST_SERIAL_RULES: &[HostSerialRule] = &[
             member_id: None,
         },
     },
+    // VRB-2601-28.00 reports the P4107 chassis FRU under the unindexed PDB name.
+    HostSerialRule {
+        id: Borrowed("vr-nvl-pdb-chassis-fru-unindexed"),
+        hardware_class: None,
+        source: HostSerialSource::ChassisAssembly {
+            chassis_id: COMPUTE_TRAY_CHASSIS,
+            name: Some(exact(nvidia_openbmc::PDB_CHASSIS_FRU_NAME)),
+            model: Some(exact(nvidia_vr_nvl_pdb::CHASSIS_FRU_ASSEMBLY_MODEL)),
+            member_id: None,
+        },
+    },
 ];

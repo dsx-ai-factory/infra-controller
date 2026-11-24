@@ -74,6 +74,7 @@ fn default_sources_select_the_chassis_fru_by_its_exact_name_and_model() {
             "PDB Chassis FRU Assembly0",
             "Titania-Bianca Compute Tray PDB",
         ),
+        ("PDB Chassis FRU Assembly0", "P4107"),
         ("PDB_0 Chassis FRU Assembly0", "P4107"),
     ] {
         let expected = HostSerialSource::ChassisAssembly {
@@ -84,7 +85,7 @@ fn default_sources_select_the_chassis_fru_by_its_exact_name_and_model() {
         };
         assert!(
             defaults.sources(None).any(|source| source == &expected),
-            "{model}"
+            "{name} / {model}"
         );
     }
 }

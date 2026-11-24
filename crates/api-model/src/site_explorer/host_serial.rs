@@ -127,7 +127,6 @@ mod tests {
                 "Titania-Bianca Compute Tray PDB",
             ),
             ("PDB Chassis FRU Assembly0", "GB200 NVL"),
-            ("PDB_0 Chassis FRU Assembly0", "P4107"),
         ] {
             let report = report(
                 "Chassis_0",
@@ -147,6 +146,26 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn vera_rubin_firmware_variants_match_the_tray_serial_with_default_rules() {
+        let rules = HostSerialRules::default();
+        value_scenarios!(run = |assemblies: Value| {
+            report("Chassis_0", assemblies).matches_expected_serial_number("TRAY", &rules)
+        };
+            "VRB-2601-28.00" {
+                json!([
+                    {"MemberId":"0","Name":"PDB Chassis FRU Assembly0","Model":"P4107","SerialNumber":"TRAY"}
+                ]) => true,
+            }
+            "VRB-2605-16.00 with the same model on the board FRU" {
+                json!([
+                    {"MemberId":"1","Name":"PDB_0 Board FRU Assembly1","Model":"P4107","SerialNumber":"BOARD"},
+                    {"MemberId":"0","Name":"PDB_0 Chassis FRU Assembly0","Model":"P4107","SerialNumber":"TRAY"}
+                ]) => true,
+            }
+        );
     }
 
     #[test]
