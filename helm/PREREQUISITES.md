@@ -23,7 +23,9 @@ helm install cert-manager jetstack/cert-manager \
 
 ### HashiCorp Vault
 
-Required for PKI (certificate signing) and, by default, secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components. NICo can keep the credentials it manages in Postgres instead; see [Secrets Storage](../docs/configuration/secrets-storage.md).
+Required only when a selected provider needs it. By default Vault serves as the PKI backend of the `vault-nico-issuer` ClusterIssuer and as the credential store of `nico-api`. NICo can keep the credentials it manages in Postgres instead; refer to [Secrets Storage](../docs/configuration/secrets-storage.md). A site that keeps credentials in Postgres, uses no Transit KEK provider, issues certificates through a cert-manager CA issuer (Section 5) with `global.certificate.useCertManager` and `global.certificate.useCertManagerUfm` both `true`, and sets `nico-api.vault.enabled: false` needs no Vault; refer to [Running without Vault](README.md#running-without-vault). The reference installer does this with `setup.sh --skip-vault`.
+
+When Vault is used:
 
 - Vault must be deployed and unsealed.
 - A PKI secrets engine must be configured for certificate signing.
@@ -97,7 +99,7 @@ kubectl create secret generic forge-system.nico.forge-pg-cluster.credentials \
 
 ### `nico-vault-approle-tokens`
 
-Vault AppRole credentials for automated secret access by NICo services.
+Vault AppRole credentials for automated secret access by NICo services. The `nico-api` Deployment references it only when `nico-api.vault.enabled` is `true` (the default), and marks both keys optional.
 
 **Required keys:** `VAULT_ROLE_ID`, `VAULT_SECRET_ID`
 
@@ -110,14 +112,14 @@ kubectl create secret generic nico-vault-approle-tokens \
 
 ### `nico-vault-token`
 
-Vault token for direct API access.
+Vault token for direct API access. Required only when `nico-api.vault.enabled` is `true` (the default); the Deployment reads its `token` key into `VAULT_TOKEN`.
 
-**Required keys:** `VAULT_TOKEN`
+**Required keys:** `token`
 
 ```bash
 kubectl create secret generic nico-vault-token \
   --namespace forge-system \
-  --from-literal=VAULT_TOKEN='<vault-token>'
+  --from-literal=token='<vault-token>'
 ```
 
 ### `ssh-host-key` (for nico-ssh-console-rs)
@@ -171,7 +173,7 @@ global:
 
 ### `vault-cluster-info`
 
-Provides Vault connection information to NICo services.
+Provides Vault connection information to NICo services. Required only when `nico-api.vault.enabled` is `true` (the default). With it `false`, the Deployment does not reference the ConfigMap, and the chart rejects a non-empty `nico-api.vaultClusterInfo`.
 
 **Required keys:** `VAULT_SERVICE`, `NICO_VAULT_MOUNT`, `NICO_VAULT_PKI_MOUNT`
 
@@ -229,6 +231,22 @@ spec:
         serviceAccountRef:
           name: cert-manager
 ```
+
+### Example: cert-manager CA ClusterIssuer (no Vault)
+
+A CA issuer signs directly with a CA certificate and key held in a Kubernetes Secret, so it needs no Vault. cert-manager reads `spec.ca.secretName` from its own namespace (the cluster resource namespace), so create the Secret with `tls.crt` and `tls.key` there. The reference installation creates this issuer as `site-issuer`, backed by the self-signed `site-root` CA, and `setup.sh --skip-vault` points every NICo chart at it:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: site-issuer
+spec:
+  ca:
+    secretName: site-root
+```
+
+Set `global.certificate.issuerRef.name` to its name, as shown below, set `global.certificate.useCertManager` and `global.certificate.useCertManagerUfm` to `true` so that `nico-api` requests its machine and UFM certificates through cert-manager, and set `nico-api.vault.enabled: false` when nothing else needs Vault; refer to [Running without Vault](README.md#running-without-vault).
 
 If you are using a different issuer (for example, self-signed or Let's Encrypt), update the issuer reference in your values file:
 
@@ -353,7 +371,7 @@ Several NICo services require direct network connectivity to bare metal hosts. E
 - **nico-dns** must be reachable by managed machines for DNS resolution. Configure your network so that provisioned hosts use the `nico-dns` service as their DNS server.
 - **NTP**: Managed machines require access to an NTP server for time synchronization. Provide NTP through your existing infrastructure (e.g., datacenter NTP servers, host-level `chronyd`, or a cloud time source). Configure the NTP server address in your DHCP settings (`nico-ntpserver` in the Kea config).
 - **Recursive DNS**: Managed machines need a recursive DNS resolver that can forward internal queries (e.g., `*.nico.local`) to `nico-dns` and external queries to upstream DNS. You can either configure your existing resolver with the appropriate forwarding rules, or enable the bundled `unbound` subchart (`unbound.enabled: true`) which comes pre-configured for this layered DNS architecture.
-- **`.nico` DNS zone**: DPU agents, host PXE loaders, and other in-band components resolve a set of well-known hostnames in the `.nico` zone at runtime. Several of these — including `nico-pxe.nico`, `nico-ntp.nico`, and `socks.nico` — are compiled into DPU agent binaries and cannot be changed without rebuilding. All `.nico` records must resolve from the OOB/admin management network before NICo services are started. Refer to [DNS Service Endpoints](../docs/configuration/dns-service-endpoints.md) for the full list of hostnames, ports, and configuration instructions.
+- **Service DNS zones**: DPU agents, host PXE loaders, and other in-band components resolve a set of well-known hostnames in the `.forge` and `.nico` zones at runtime. Several of these are compiled into DPU agent binaries and cannot be changed without rebuilding. Stock agents query `carbide-pxe.forge`, `carbide-ntp.forge`, and `socks.forge`, and connect to the API at `carbide-api.forge` by default; the `nico-pxe.nico`, `nico-ntp.nico`, `socks.nico`, and `nico-api.nico` names apply only to images rebuilt with the rebranded names. The names the deployed agents query must resolve from the OOB/admin management network before NICo services are started. Refer to [DNS Service Endpoints](../docs/configuration/dns-service-endpoints.md) for the full list of hostnames, ports, and configuration instructions.
 - If you are using **MetalLB** or a similar load balancer for bare metal environments, configure `LoadBalancer` services via the `externalService` settings in each subchart's values. For example:
 
 ```yaml

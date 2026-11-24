@@ -42,3 +42,13 @@ pub(crate) enum Cmd {
     #[clap(about = "Show instances using an extension service")]
     ShowInstances(show_instances::Args),
 }
+
+impl Cmd {
+    /// Rejects create options that do not apply to the selected service type before CLI setup.
+    pub(crate) fn validate_create_arguments(&self) -> Result<(), clap::Error> {
+        match self {
+            Self::Create(args) => args.validate(),
+            _ => Ok(()),
+        }
+    }
+}

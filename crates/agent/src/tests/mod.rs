@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 mod bootstrap_ca;
-mod common;
+pub(crate) mod common;
 pub(crate) use common::{respond, respond_then_stall_before_trailers};
 mod full;
 mod lldp_collector;
@@ -23,3 +23,19 @@ mod metrics;
 mod polling;
 mod test_network_monitor;
 mod upgrade;
+
+#[test]
+fn pretty_cmd_preserves_empty_and_multiple_arguments() {
+    carbide_test_support::value_scenarios!(run = |arguments: &[&str]| {
+        let mut command = std::process::Command::new("program");
+        command.args(arguments);
+        crate::pretty_cmd(&command)
+    };
+        "no arguments retains the trailing space" {
+            &[][..] => "program ".to_string(),
+        }
+        "multiple arguments are separated by spaces" {
+            &["first", "two words"][..] => "program first two words".to_string(),
+        }
+    );
+}

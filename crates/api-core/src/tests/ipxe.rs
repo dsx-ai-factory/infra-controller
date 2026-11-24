@@ -24,7 +24,9 @@ use common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_test_env, create_test_env_with_overrides, get_config,
 };
 use config_version::ConfigVersion;
-use db::{self};
+use db::{
+    TransactionVending as _, {self},
+};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
 use model::firmware::FirmwareComponentType;
@@ -49,7 +51,7 @@ async fn move_machine_to_needed_state(
     pool: &sqlx::PgPool,
 ) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
     let machine = db::machine::find_one(
@@ -73,11 +75,9 @@ async fn get_pxe_instructions(
     arch: rpc::forge::MachineArchitecture,
     product: Option<String>,
 ) -> rpc::forge::PxeInstructions {
-    let mut txn = env.pool.begin().await.unwrap();
-    let iface = db::machine_interface::find_one(txn.as_mut(), interface_id)
+    let iface = db::machine_interface::find_one(&env.pool, interface_id)
         .await
         .unwrap();
-    txn.commit().await.unwrap();
     let client_ip = iface
         .addresses
         .first()
@@ -102,16 +102,10 @@ async fn test_pxe_dpu_ready(pool: sqlx::PgPool) {
     let (_host_id, dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
     move_machine_to_needed_state(dpu_id.into(), &ManagedHostState::Ready, &env.pool).await;
 
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    let dpu_interface_id = db::machine_interface::find_by_machine_ids(&mut txn, &[dpu_id])
+    let dpu_interface_id = db::machine_interface::find_by_machine_ids(&env.pool, &[dpu_id])
         .await
         .unwrap()[&dpu_id][0]
         .id;
-    txn.commit().await.unwrap();
 
     let instructions = get_pxe_instructions(
         &env,
@@ -140,9 +134,7 @@ async fn test_pxe_dpu_waiting_for_network_install(pool: sqlx::PgPool) {
     )
     .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     assert_eq!(
         machine.current_state(),
@@ -308,16 +300,10 @@ async fn test_pxe_when_dpu_is_not_ingested(pool: sqlx::PgPool) -> eyre::Result<(
 async fn test_pxe_host(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let (host_id, _dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    let host_interface_id = db::machine_interface::find_by_machine_ids(&mut txn, &[host_id])
+    let host_interface_id = db::machine_interface::find_by_machine_ids(&env.pool, &[host_id])
         .await
         .unwrap()[&host_id][0]
         .id;
-    txn.commit().await.unwrap();
     move_machine_to_needed_state(
         host_id.into(),
         &ManagedHostState::HostInit {
@@ -490,14 +476,7 @@ async fn test_pxe_instance(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env
-        .pool
-        .clone()
-        .begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    txn.commit().await.unwrap();
+    let host_interface = mh.host().first_interface(&env.pool.clone()).await;
 
     mh.instance_builer(&env)
         .single_interface_network_config(segment_id)
@@ -563,9 +542,8 @@ async fn test_cloud_init_when_machine_is_not_created(pool: sqlx::PgPool) {
         .into_inner();
 
     // Interface is created. Let's fetch interface id.
-    let mut txn = env.pool.begin().await.unwrap();
     let interfaces = db::machine_interface::find_by_mac_address(
-        txn.as_mut(),
+        &env.pool,
         mac_address.parse::<MacAddress>().unwrap(),
     )
     .await
@@ -606,14 +584,12 @@ async fn test_cloud_init_uses_configured_dpu_provisioning_values(pool: sqlx::PgP
         .unwrap();
 
     // Look up the allocated IP address to request cloud-init instructions.
-    let mut txn = env.pool.begin().await.unwrap();
     let interfaces = db::machine_interface::find_by_mac_address(
-        txn.as_mut(),
+        &env.pool,
         mac_address.parse::<MacAddress>().unwrap(),
     )
     .await
     .unwrap();
-    txn.commit().await.unwrap();
 
     let cloud_init_cfg = env
         .api
@@ -690,18 +666,16 @@ async fn preallocate_external_interface(
     let mac_address: MacAddress = mac.parse().unwrap();
     let ip_addr: std::net::IpAddr = ip.parse().unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine_interface::preallocate_machine_interface(&mut txn, mac_address, ip_addr, None)
         .await
         .unwrap();
     txn.commit().await.unwrap();
 
     // Look up the interface ID that was created.
-    let mut txn = env.pool.begin().await.unwrap();
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), mac_address)
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, mac_address)
         .await
         .unwrap();
-    txn.commit().await.unwrap();
 
     assert_eq!(
         interfaces.len(),
@@ -875,12 +849,10 @@ async fn test_pxe_url_overrides_none_for_internal_host(pool: sqlx::PgPool) {
     // Create a normal managed host -- its interface is on the admin segment, not
     // static-assignments.
     let (host_id, _dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
-    let mut txn = env.pool.begin().await.unwrap();
-    let host_interface_id = db::machine_interface::find_by_machine_ids(&mut txn, &[host_id])
+    let host_interface_id = db::machine_interface::find_by_machine_ids(&env.pool, &[host_id])
         .await
         .unwrap()[&host_id][0]
         .id;
-    txn.commit().await.unwrap();
 
     let instructions = get_pxe_instructions(
         &env,
@@ -919,14 +891,12 @@ async fn test_cloud_init_url_overrides_none_for_internal_host(pool: sqlx::PgPool
         .unwrap();
 
     // Look up the actual allocated IP for this interface.
-    let mut txn = env.pool.begin().await.unwrap();
     let interfaces = db::machine_interface::find_by_mac_address(
-        txn.as_mut(),
+        &env.pool,
         mac_address.parse::<MacAddress>().unwrap(),
     )
     .await
     .unwrap();
-    txn.commit().await.unwrap();
 
     assert_eq!(interfaces.len(), 1);
     let allocated_ip = interfaces[0].addresses[0].to_string();

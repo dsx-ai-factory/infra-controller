@@ -18,14 +18,15 @@
 use std::sync::Arc;
 
 use carbide_redfish::libredfish::RedfishClientPool as _;
-use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_redfish::libredfish::test_support::{RedfishSimAction, RedfishSimPlatformAction};
+use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, ManagedHostConfigExt as _,
 };
 use carbide_utils::redfish::BmcAccessInfo;
 use model::machine::{
-    DpuInitState, DpuInitStates, MachineMaintenanceOperation, ManagedHostState,
+    DpuInitState, DpuInitStates, MachineMaintenanceOperation, MachineState, ManagedHostState,
     PerformPowerOperation,
 };
 use model::power_manager::PowerState;
@@ -33,7 +34,7 @@ use model::test_support::ManagedHostConfig;
 use rpc::forge::{
     MaintenanceOperation, MaintenanceRequest, PowerOptionRequest, PowerOptionUpdateRequest,
 };
-use tonic::Request;
+use tonic::{IntoRequest, Request};
 
 use crate::env::Env;
 
@@ -106,30 +107,19 @@ impl TestManagedHostPowerExt for TestManagedHost {
     async fn bmc_access_info(&self) -> BmcAccessInfo {
         let machine = self.host.machine().await;
         let bmc_address = machine.bmc_addr().expect("host should have a BMC address");
-        let mut txn = self
-            .api
-            .database_connection
-            .begin()
-            .await
-            .expect("database transaction should start");
-        let bmc_access_info = db::machine_interface::lookup_bmc_access_info(
-            txn.as_mut(),
+        db::machine_interface::lookup_bmc_access_info(
+            &self.api.database_connection,
             bmc_address.ip(),
             Some(bmc_address.port()),
         )
         .await
-        .expect("host BMC access information should exist");
-        txn.commit()
-            .await
-            .expect("database transaction should commit");
-        bmc_access_info
+        .expect("host BMC access information should exist")
     }
 
     async fn set_next_power_poll_now(&self) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         sqlx::query("UPDATE power_options SET last_fetched_next_try_at = now() WHERE host_id = $1")
@@ -144,7 +134,7 @@ impl TestManagedHostPowerExt for TestManagedHost {
 }
 
 #[sqlx_test]
-async fn dpu_init_power_cycle_waits_for_observed_host_power_off(
+async fn dpu_init_power_cycle_and_uefi_restart_wait_for_observations(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let TestContext { mut env, mh } = TestContext::from_env_with_config(
@@ -257,6 +247,112 @@ async fn dpu_init_power_cycle_waits_for_observed_host_power_off(
             .is_empty(),
     );
 
+    let mut txn = env.test_harness.db_txn().await;
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.host.id.into()).await?;
+    txn.commit().await?;
+    mh.report_dpu_network_status().await;
+    env.redfish_sim
+        .seed_credential(
+            &CredentialKey::dpu_uefi_site_default(0),
+            &Credentials::UsernamePassword {
+                username: String::new(),
+                password: "uefi-v0".to_string(),
+            },
+        )
+        .await;
+    env.redfish_sim.set_uefi_setup_job_id(Some(String::new()));
+    env.run_single_iteration().await;
+    env.run_single_iteration().await;
+    let waiting_for_uefi = dpu_init_state(DpuInitState::WaitingForUefiRestart);
+    assert_eq!(mh.host.machine().await.current_state(), &waiting_for_uefi);
+    let dpu = mh.first_dpu().machine().await;
+    let restart = dpu.status.last_reboot_requested.unwrap().time;
+    let older = restart - chrono::Duration::seconds(1);
+    let newer = restart + chrono::Duration::microseconds(1);
+
+    for (case, network_time, health_time) in [
+        ("old reports", older, Some(older)),
+        ("reports at restart boundary", restart, Some(restart)),
+        ("old network report", older, Some(newer)),
+        ("old health report", newer, Some(older)),
+        ("missing health timestamp", newer, None),
+    ] {
+        let mut txn = env.test_harness.db_txn().await;
+        sqlx::query("UPDATE machines SET network_status_observation = jsonb_set(network_status_observation::jsonb, '{observed_at}', $2), health_reports = jsonb_set(health_reports, '{merges,forge-dpu-agent,observed_at}', $3) WHERE id = $1")
+            .bind(dpu.id)
+            .bind(sqlx::types::Json(network_time))
+            .bind(sqlx::types::Json(health_time))
+            .execute(txn.as_mut()).await?;
+        txn.commit().await?;
+        env.run_single_iteration().await;
+        assert_eq!(
+            mh.host.machine().await.current_state(),
+            &waiting_for_uefi,
+            "{case}"
+        );
+        assert_eq!(
+            mh.first_dpu()
+                .machine()
+                .await
+                .status
+                .last_reboot_requested
+                .unwrap()
+                .time,
+            restart,
+            "{case}"
+        );
+    }
+
+    let status = mh.first_dpu().network_status().build().await;
+    mh.api
+        .record_dpu_network_status(status.into_request())
+        .await
+        .expect("DPU network status should be recorded");
+    env.run_single_iteration().await;
+    let first_dpu_ready = ManagedHostState::DPUInit {
+        dpu_states: DpuInitStates {
+            states: mh
+                .dpus
+                .iter()
+                .map(|dpu| {
+                    (
+                        dpu.id,
+                        if dpu.id == mh.first_dpu().id {
+                            DpuInitState::WaitingForNetworkConfig
+                        } else {
+                            DpuInitState::WaitingForUefiRestart
+                        },
+                    )
+                })
+                .collect(),
+        },
+    };
+    assert_eq!(mh.host.machine().await.current_state(), &first_dpu_ready);
+    // A network-ready DPU must let the dispatcher finish the other DPU.
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &first_dpu_ready);
+    mh.report_dpu_network_status().await;
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &dpu_init_state(DpuInitState::WaitingForNetworkConfig)
+    );
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::EnableIpmiOverLan
+        }
+    );
+    assert_eq!(
+        env.redfish_sim
+            .platform_actions()
+            .iter()
+            .filter(|action| matches!(action, RedfishSimPlatformAction::UefiSetup { dpu: true }))
+            .count(),
+        mh.dpus.len()
+    );
+
     Ok(())
 }
 
@@ -264,13 +360,11 @@ async fn dpu_init_power_cycle_waits_for_observed_host_power_off(
 async fn desired_on_polls_powered_off_machine(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let TestContext { mut env, mh } = TestContext::init(pool).await;
+    let TestContext { mut env, mh } = TestContext::init(pool.clone()).await;
 
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::On);
-    txn.rollback().await?;
     let bmc_access_info = mh.bmc_access_info().await;
 
     let sim = env.redfish_sim.client_by_info(&bmc_access_info).await?;
@@ -280,27 +374,21 @@ async fn desired_on_polls_powered_off_machine(
 
     env.run_single_iteration().await;
     // Since delay is set to 0 for test, db must be updated immediately.
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::Off);
-    txn.rollback().await?;
 
     // Wait for one cycle.
     env.run_single_iteration().await;
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::Off);
-    txn.rollback().await?;
 
     // State machine should power on the host.
     env.run_single_iteration().await;
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::Off);
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -309,13 +397,11 @@ async fn desired_on_polls_powered_off_machine(
 async fn desired_on_limits_power_on_attempts(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let TestContext { mut env, mh } = TestContext::init(pool).await;
+    let TestContext { mut env, mh } = TestContext::init(pool.clone()).await;
 
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::On);
-    txn.rollback().await?;
     let bmc_access_info = mh.bmc_access_info().await;
 
     let sim = env.redfish_sim.client_by_info(&bmc_access_info).await?;
@@ -326,22 +412,18 @@ async fn desired_on_limits_power_on_attempts(
     // Run a iteration.
     // Since delay is set to 0 for test, db must be updated immediately.
     env.run_single_iteration().await;
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::Off);
-    txn.rollback().await?;
 
     for _ in 1..10 {
         // Keep power off
         sim.power(libredfish::SystemPowerControl::ForceOff).await?;
         env.run_single_iteration().await;
 
-        let mut txn = env.test_harness.db_txn().await;
-        let power_options = db::power_options::get_all(&mut txn).await?;
+        let power_options = db::power_options::get_all(&pool).await?;
         assert_eq!(power_options[0].desired_power_state, PowerState::On);
         assert_eq!(power_options[0].last_fetched_power_state, PowerState::Off);
-        txn.rollback().await?;
     }
 
     let response = env
@@ -361,13 +443,11 @@ async fn desired_on_limits_power_on_attempts(
 async fn desired_off_persists_observed_off_state(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let TestContext { mut env, mh } = TestContext::init(pool).await;
+    let TestContext { mut env, mh } = TestContext::init(pool.clone()).await;
 
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::On);
-    txn.rollback().await?;
     let bmc_access_info = mh.bmc_access_info().await;
 
     // Set maintenance mode (required before setting desired=Off).
@@ -389,10 +469,8 @@ async fn desired_off_persists_observed_off_state(
         }))
         .await?;
 
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::Off);
-    txn.rollback().await?;
 
     // Simulate the host being powered off via BMC.
     let sim = env.redfish_sim.client_by_info(&bmc_access_info).await?;
@@ -400,10 +478,8 @@ async fn desired_off_persists_observed_off_state(
     assert_eq!(sim.get_power_state().await?, libredfish::PowerState::Off);
 
     // Record timestamps before the state controller iteration.
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     let updated_at_before_poll = power_options[0].last_fetched_updated_at;
-    txn.rollback().await?;
 
     // Advance next_try_at so the state controller will poll BMC.
     mh.set_next_power_poll_now().await;
@@ -411,12 +487,10 @@ async fn desired_off_persists_observed_off_state(
     // Run state controller iteration — should poll BMC, see Off, and persist the update.
     env.run_single_iteration().await;
 
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&pool).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::Off);
     assert_eq!(power_options[0].last_fetched_power_state, PowerState::Off);
     assert!(power_options[0].last_fetched_updated_at > updated_at_before_poll);
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -463,10 +537,9 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
         }))
         .await?;
 
-    let mut txn = env.test_harness.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options =
+        db::power_options::get_all(&env.test_harness.api().database_connection).await?;
     assert_eq!(power_options[0].desired_power_state, PowerState::Off);
-    txn.rollback().await?;
 
     // Queue the PowerOff maintenance request, as the state-controller power path does.
     let mut txn = env.test_harness.db_txn().await;

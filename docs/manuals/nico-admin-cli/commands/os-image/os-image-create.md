@@ -15,9 +15,9 @@ nico-admin-cli os-image create <-i|--id>
 <-t|--tenant-org-id> [-v|--create-volume]
 [-s|--capacity] [-n|--name]
 [-d|--description] [-y|--auth-type]
-[-p|--auth-token] [-f|--rootfs-id]
-[-l|--rootfs-label] [-b|--boot-disk]
-[--bootfs-id] [--extended] [--efifs-id]
+[--extended] [-p|--auth-token]
+[-f|--rootfs-id] [-l|--rootfs-label]
+[-b|--boot-disk] [--bootfs-id] [--efifs-id]
 [--sort-by] [-h|--help]
 ```
 
@@ -69,6 +69,14 @@ Description of the OS image entry.
 
 Authentication type, usually Bearer.
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `-p, --auth-token <AUTH_TOKEN>`
 
 Authentication token, usually in base64.
@@ -83,26 +91,18 @@ Label of the root filesystem of the OS image.
 
 `-b, --boot-disk <BOOT_DISK>`
 
-Whole-disk target that the image overwrites. Accepts smallest,
+Whole-disk target that the image overwrites. Accepts 'smallest',
 /dev/nvme`<controller>`n`<namespace>`, /dev/sd`<letters>`,
 /dev/vd`<letters>`, or /dev/disk/by-id/`<identifier>`. If omitted or
 empty, selection prefers a disk with an EFI partition, then the first
 /dev/nvme`<controller>`n`<namespace>`, /dev/sd`<letters>`, or
 /dev/vd`<letters>` whole disk in device-name order. If the device scan
-reports no whole disk, selection fails with Boot drive not detected or
-specified.
+reports no whole disk, selection fails with 'Boot drive not detected or
+specified'.
 
 `--bootfs-id <BOOTFS_ID>`
 
 UUID of the image boot filesystem (/boot)
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--efifs-id <EFIFS_ID>`
 
@@ -120,7 +120,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

@@ -15,9 +15,19 @@
  * limitations under the License.
  */
 
+use chrono::{DateTime, Utc};
 use rpc::site_explorer::SiteExplorerLastRun;
 
+use super::state_history::format_history_time;
+
 const GENERIC_RUN_FAILURE_MESSAGE: &str = "Site Explorer run failed";
+
+/// Shortens an RFC 3339 timestamp to whole seconds in UTC; other text is kept as is.
+fn display_time(time: &str) -> String {
+    DateTime::parse_from_rfc3339(time)
+        .map(|time| format_history_time(time.with_timezone(&Utc)))
+        .unwrap_or_else(|_| time.to_string())
+}
 
 fn display_error(run: &SiteExplorerLastRun) -> String {
     match run.failure_category.as_deref() {
@@ -54,20 +64,20 @@ impl From<&SiteExplorerLastRun> for SiteExplorerLastRunDisplay {
         Self {
             status_label,
             status_class,
-            started_at: run.started_at.clone(),
-            finished_at: run.finished_at.clone(),
+            started_at: display_time(&run.started_at),
+            finished_at: display_time(&run.finished_at),
             endpoint_explorations: run.endpoint_explorations,
             endpoint_explorations_success: run.endpoint_explorations_success,
             endpoint_explorations_failed: run.endpoint_explorations_failed,
             failure_category: run.failure_category.clone().unwrap_or_default(),
             last_successful_finished_at: run
                 .last_successful_finished_at
-                .clone()
-                .unwrap_or_else(|| "Never".to_string()),
+                .as_deref()
+                .map_or_else(|| "Never".to_string(), display_time),
             last_failed_finished_at: run
                 .last_failed_finished_at
-                .clone()
-                .unwrap_or_else(|| "Never".to_string()),
+                .as_deref()
+                .map_or_else(|| "Never".to_string(), display_time),
             error: display_error(run),
         }
     }
@@ -117,6 +127,19 @@ mod tests {
             display.error,
             "Site Explorer credentials are missing or invalid"
         );
+    }
+
+    #[test]
+    fn display_time_shortens_rfc3339_to_utc_seconds() {
+        assert_eq!(
+            display_time("2026-11-15T21:12:05.756384+00:00"),
+            "2026-11-15 21:12:05 UTC"
+        );
+        assert_eq!(
+            display_time("2026-11-15T16:12:05-05:00"),
+            "2026-11-15 21:12:05 UTC"
+        );
+        assert_eq!(display_time("not a time"), "not a time");
     }
 
     #[test]

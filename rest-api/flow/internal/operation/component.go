@@ -281,7 +281,7 @@ func (c ComponentsByType) SortedComponentTypes() []devicetypes.ComponentType {
 // caller input should be deduplicated first.
 func (c ComponentsByType) Validate() error {
 	if len(c) == 0 {
-		return fmt.Errorf("Non-empty ComponentsByType is required")
+		return fmt.Errorf("non-empty ComponentsByType is required")
 	}
 
 	seenComponents := make(map[uuid.UUID]devicetypes.ComponentType)
@@ -456,9 +456,10 @@ func UniqueComponentUUIDs(ids []uuid.UUID) []uuid.UUID {
 	return unique
 }
 
-// SortComponentUUIDs sorts UUIDs lexicographically for stable JSON and tests.
+// SortComponentUUIDs sorts UUIDs by bytes, matching canonical UUID string order,
+// for stable JSON and tests.
 func SortComponentUUIDs(ids []uuid.UUID) {
 	slices.SortFunc(ids, func(a, b uuid.UUID) int {
-		return strings.Compare(a.String(), b.String())
+		return bytes.Compare(a[:], b[:])
 	})
 }

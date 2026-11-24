@@ -43,11 +43,11 @@ pub(super) async fn completed(
 }
 
 async fn get_system_manufacturer_name() -> String {
-    let command_string = "dmidecode -s system-sku-number".to_string();
+    let command_string = "dmidecode -s system-sku-number";
 
     match Command::new("sh")
         .arg("-c")
-        .arg(&command_string)
+        .arg(command_string)
         .output()
         .await
     {
@@ -55,14 +55,11 @@ async fn get_system_manufacturer_name() -> String {
             if output.stdout.is_empty() {
                 "default".to_string()
             } else {
-                let sku = String::from_utf8_lossy(&output.stdout)
-                    .to_string()
-                    .replace('\n', "");
+                let sku = String::from_utf8_lossy(&output.stdout).replace('\n', "");
 
                 let re = Regex::new(r"[ =;:@#\!?\-]").unwrap();
-                re.replace_all(&sku, "_").to_string().to_ascii_lowercase()
+                re.replace_all(&sku, "_").to_ascii_lowercase()
             }
-            // let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
         }
         Err(_) => "default".to_string(),
     }
@@ -74,6 +71,7 @@ pub(super) async fn run(
     validation_id: MachineValidationId,
     context: String,
     machine_validation_filter: machine_validation::MachineValidationFilter,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), CarbideClientError> {
     let platform_name = get_system_manufacturer_name().await;
     let options = machine_validation::MachineValidationOptions {
@@ -90,6 +88,7 @@ pub(super) async fn run(
         context,
         validation_id,
         machine_validation_filter,
+        instrumentation,
     )
     .await
     .map_err(|e| CarbideClientError::GenericError(format!("{e}")))?;

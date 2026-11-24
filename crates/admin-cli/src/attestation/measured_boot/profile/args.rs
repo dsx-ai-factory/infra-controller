@@ -421,11 +421,9 @@ impl TryFrom<Show> for ShowMeasurementSystemProfileRequest {
     type Error = CarbideCliError;
     fn try_from(show: Show) -> Result<Self, Self::Error> {
         let identifier_type = get_identifier(&show)?;
-        let identifier = show
-            .identifier
-            .ok_or(CarbideCliError::GenericError(String::from(
-                "identifier expected to be set here",
-            )))?;
+        let identifier = show.identifier.ok_or_else(|| {
+            CarbideCliError::GenericError(String::from("identifier expected to be set here"))
+        })?;
         let selector = match identifier_type {
             IdentifierType::ForId => {
                 let profile_id = MeasurementSystemProfileId::from_str(&identifier)

@@ -93,10 +93,10 @@ pub(crate) enum FirmwareUpdatePhase {
 /// finish. The `dpu_nic` and `super_nic` targets emit `started` only --
 /// completion shows in their own state flows -- and a SuperNIC re-counts one
 /// `started` per scout pass while a device stays mismatched, since each pass
-/// issues a real apply command. Both phases are at-least-once on transient
-/// database errors: the update manager's batch transaction can roll back
-/// after an emit, and the next pass re-counts -- the same repeat-on-retry
-/// the log lines always had.
+/// issues a real apply command. Host starts and completions emit only after
+/// the transaction that records the request or clears its markers commits.
+/// A crash between commit and emit can lose that count; these events are not
+/// durably queued or replayed.
 #[derive(carbide_instrument::Event)]
 #[event(
     event_name = "firmware_update_progress",
@@ -165,6 +165,17 @@ pub(crate) struct FirmwareUpdateFailed {
     pub(crate) firmware_version: String,
 }
 
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "machine_update_manager_completed_pass",
+    metric_name = "carbide_machine_update_manager_completed_passes_total",
+    component = "nico-api",
+    log = off,
+    metric = counter,
+    describe = "Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes"
+)]
+pub(super) struct CompletedPass;
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr as _;
@@ -191,9 +202,9 @@ mod tests {
     /// target and phase.
     #[test]
     fn firmware_update_progress_logs_info_and_counts() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            carbide_instrument::emit(FirmwareUpdateProgress {
+            metrics.instrumentation().emit(FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::SuperNic,
                 phase: FirmwareUpdatePhase::Started,
                 machine_id: machine_id().into(),
@@ -229,10 +240,10 @@ mod tests {
     /// same target: one update crossing both phases moves each counter once.
     #[test]
     fn firmware_update_progress_counts_each_phase_separately() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         capture_logs(|| {
             for phase in [FirmwareUpdatePhase::Started, FirmwareUpdatePhase::Completed] {
-                carbide_instrument::emit(FirmwareUpdateProgress {
+                metrics.instrumentation().emit(FirmwareUpdateProgress {
                     target: FirmwareUpdateTarget::Host,
                     phase,
                     machine_id: machine_id().into(),
@@ -258,9 +269,9 @@ mod tests {
     /// independent series.
     #[test]
     fn firmware_update_failed_logs_warn_and_counts_by_cause() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            carbide_instrument::emit(FirmwareUpdateFailed {
+            metrics.instrumentation().emit(FirmwareUpdateFailed {
                 target: FirmwareUpdateTarget::DpuNic,
                 cause: FirmwareUpdateFailureCause::NoUpdateMatch,
                 machine_id: machine_id().into(),
@@ -268,7 +279,7 @@ mod tests {
                     "fm100ptrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0".to_string(),
                 firmware_version: String::new(),
             });
-            carbide_instrument::emit(FirmwareUpdateFailed {
+            metrics.instrumentation().emit(FirmwareUpdateFailed {
                 target: FirmwareUpdateTarget::DpuNic,
                 cause: FirmwareUpdateFailureCause::WrongVersionAfterUpdate,
                 machine_id: machine_id().into(),

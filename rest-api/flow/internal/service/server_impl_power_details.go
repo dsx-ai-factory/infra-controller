@@ -5,62 +5,23 @@ package service
 
 import (
 	"context"
-	"encoding/base32"
-	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
-	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
-
-const (
-	// powerDetailsReadTimeout leaves ten seconds in the proxy's 40-second
-	// activity budget for transport and response encoding.
-	powerDetailsReadTimeout = 30 * time.Second
-	// powerDetailsResponseReserve leaves assembly time before a shorter caller
-	// deadline. The entry deadline applies to inventory and both data sources.
-	powerDetailsResponseReserve = time.Second
-	// powerDetailsResponseBytes bounds this method's encoded proxy result below
-	// Temporal's 2 MiB payload ceiling. It uses the numeric allowance from
-	// site-workflow/pkg/activity/inventory.go, applied here to the encoded proxy
-	// wrapper rather than inventory's batching calculation.
-	// The task count bound alone cannot limit recorded target arrays.
-	powerDetailsResponseBytes = 1945 * 1024
-)
-
-// componentPowerReader borrows the provider's existing connection; power detail
-// requests neither create a Core client nor take ownership of its lifetime.
-type componentPowerReader interface {
-	GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error)
-}
-
-// powerReaderFromRegistry permits deployments without the NICo provider to keep
-// serving Flow task details. A configured provider lends its existing client.
-func powerReaderFromRegistry(registry *providerapi.ProviderRegistry) componentPowerReader {
-	provider, ok := registry.Get(nicoprovider.ProviderName).(*nicoprovider.Provider)
-	if !ok || provider == nil {
-		return nil
-	}
-	return provider.Client()
-}
 
 // GetTrayPowerDetails resolves public tray identity before independently reading
 // Core facts and Flow tasks. Neither failure cancels the other source; caller
@@ -69,12 +30,7 @@ func (rs *FlowServerImpl) GetTrayPowerDetails(
 	ctx context.Context,
 	req *pb.GetTrayPowerDetailsRequest,
 ) (*pb.GetTrayPowerDetailsResponse, error) {
-	deadline := time.Now().Add(powerDetailsReadTimeout)
-	callerDeadline, hasDeadline := ctx.Deadline()
-	if hasDeadline && callerDeadline.Add(-powerDetailsResponseReserve).Before(deadline) {
-		deadline = callerDeadline.Add(-powerDetailsResponseReserve)
-	}
-	readCtx, cancel := context.WithDeadline(ctx, deadline)
+	readCtx, cancel := detailsReadContext(ctx)
 	defer cancel()
 
 	if ctx.Err() != nil {
@@ -104,9 +60,7 @@ func (rs *FlowServerImpl) GetTrayPowerDetails(
 			return nil, status.Error(code, "tray inventory could not be read")
 		}
 	}
-	if tray.Type != devicetypes.ComponentTypeCompute &&
-		tray.Type != devicetypes.ComponentTypeNVSwitch &&
-		tray.Type != devicetypes.ComponentTypePowerShelf {
+	if !supportsComponentDetails(tray.Type) {
 		return nil, status.Error(codes.InvalidArgument, "component type does not support power details")
 	}
 
@@ -170,21 +124,7 @@ func (rs *FlowServerImpl) readCorePowerDetails(
 		return unavailableCorePowerDetails(pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_CONFIGURED)
 	}
 
-	request := &corev1.GetComponentPowerDetailsRequest{}
-	switch tray.Type {
-	case devicetypes.ComponentTypeCompute:
-		request.Target = &corev1.GetComponentPowerDetailsRequest_MachineIds{
-			MachineIds: &corev1.MachineIdList{MachineIds: []*corev1.MachineId{{Id: tray.ComponentID}}},
-		}
-	case devicetypes.ComponentTypeNVSwitch:
-		request.Target = &corev1.GetComponentPowerDetailsRequest_SwitchIds{
-			SwitchIds: &corev1.SwitchIdList{Ids: []*corev1.SwitchId{{Id: tray.ComponentID}}},
-		}
-	case devicetypes.ComponentTypePowerShelf:
-		request.Target = &corev1.GetComponentPowerDetailsRequest_PowerShelfIds{
-			PowerShelfIds: &corev1.PowerShelfIdList{Ids: []*corev1.PowerShelfId{{Id: tray.ComponentID}}},
-		}
-	}
+	request := corePowerDetailsRequest(tray.Type, []string{tray.ComponentID})
 	response, err := rs.powerReader.GetComponentPowerDetails(ctx, request)
 	if ctx.Err() != nil {
 		return unavailableCorePowerDetails(powerDetailsReadError(ctx.Err()))
@@ -195,13 +135,46 @@ func (rs *FlowServerImpl) readCorePowerDetails(
 		return unavailableCorePowerDetails(powerDetailsReadError(err))
 	}
 	entries := response.GetEntries()
-	if len(entries) != 1 || !sameCorePowerIdentity(tray.ComponentID, entries[0].GetComponentId()) {
+	if len(entries) != 1 || !sameCoreComponentIdentity(tray.ComponentID, entries[0].GetComponentId()) {
 		log.Warn().Str("component_id", tray.Info.ID.String()).
 			Int("entry_count", len(entries)).Msg("Power details Core response did not match the requested component")
 		return unavailableCorePowerDetails(pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_INVALID_RESPONSE)
 	}
 
-	entry := entries[0]
+	return corePowerDetailsSections(entries[0])
+}
+
+// corePowerDetailsRequest groups managed IDs without changing the target kind.
+// Callers must supply a compute, NVLink switch or power shelf component type and
+// a nonempty list of unique, nonempty managed IDs.
+func corePowerDetailsRequest(componentType devicetypes.ComponentType, ids []string) *corev1.GetComponentPowerDetailsRequest {
+	request := &corev1.GetComponentPowerDetailsRequest{}
+	switch componentType {
+	case devicetypes.ComponentTypeCompute:
+		machines := &corev1.MachineIdList{}
+		for _, id := range ids {
+			machines.MachineIds = append(machines.MachineIds, &corev1.MachineId{Id: id})
+		}
+		request.Target = &corev1.GetComponentPowerDetailsRequest_MachineIds{MachineIds: machines}
+	case devicetypes.ComponentTypeNVSwitch:
+		switches := &corev1.SwitchIdList{}
+		for _, id := range ids {
+			switches.Ids = append(switches.Ids, &corev1.SwitchId{Id: id})
+		}
+		request.Target = &corev1.GetComponentPowerDetailsRequest_SwitchIds{SwitchIds: switches}
+	case devicetypes.ComponentTypePowerShelf:
+		shelves := &corev1.PowerShelfIdList{}
+		for _, id := range ids {
+			shelves.Ids = append(shelves.Ids, &corev1.PowerShelfId{Id: id})
+		}
+		request.Target = &corev1.GetComponentPowerDetailsRequest_PowerShelfIds{PowerShelfIds: shelves}
+	}
+	return request
+}
+
+// corePowerDetailsSections preserves independently available sections after the
+// caller has checked that Core returned the requested identity.
+func corePowerDetailsSections(entry *corev1.ComponentPowerDetails) (*pb.PowerActualDetails, *pb.PowerDesiredDetails, *pb.PowerActionDetails) {
 	actual, desired, actions := unavailableCorePowerDetails(pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_INVALID_RESPONSE)
 	if entry.GetActual().GetOutcome() != nil {
 		actual.Result = &pb.PowerActualDetails_Value{Value: entry.Actual}
@@ -215,27 +188,6 @@ func (rs *FlowServerImpl) readCorePowerDetails(
 		actions.Result = &pb.PowerActionDetails_Value{Value: entry.Actions}
 	}
 	return actual, desired, actions
-}
-
-// sameCorePowerIdentity accepts Core's canonical lowercase hardware hash while
-// preserving its seven-byte typed prefix. Flow can store an uppercase hash from
-// ingestion; Core parses that Base32Hex suffix case-insensitively. Exact matches
-// also support identifiers outside this 59-byte representation.
-func sameCorePowerIdentity(expected, observed string) bool {
-	if expected == observed {
-		return true
-	}
-	if len(expected) != 59 || len(observed) != 59 || expected[:7] != observed[:7] {
-		return false
-	}
-	hash := strings.ToUpper(expected[7:])
-	if hash != strings.ToUpper(observed[7:]) {
-		return false
-	}
-	encoding := base32.HexEncoding.WithPadding(base32.NoPadding)
-	decoded, err := encoding.DecodeString(hash)
-	// Round-tripping rejects unused trailing bits that DecodeString discards.
-	return err == nil && len(decoded) == 32 && encoding.EncodeToString(decoded) == hash
 }
 
 // unavailableCorePowerDetails initializes three failed section slots. A caller
@@ -273,8 +225,8 @@ func (rs *FlowServerImpl) readFlowPowerTasks(ctx context.Context, tray *componen
 }
 
 // readRackPowerTasks converts one bounded rack read and attaches waiting context.
-// Domain records and protobuf entries retain matching order so the tray caller
-// can apply relevance without reconstructing targets from protobuf values.
+// Domain records and protobuf entries retain matching order, so rack and tray
+// views can apply relevance without reconstructing targets from protobuf values.
 func (rs *FlowServerImpl) readRackPowerTasks(ctx context.Context, rackID uuid.UUID) ([]taskdef.PowerTaskDetails, *pb.PowerTaskDetailsList) {
 	result := &pb.PowerTaskDetailsList{}
 	if rackID == uuid.Nil {
@@ -332,6 +284,15 @@ func powerTaskDetailsToProto(task taskdef.PowerTaskDetails) (*pb.PowerTaskDetail
 
 // powerDetailsReadError exposes a bounded category instead of dependency text.
 func powerDetailsReadError(err error) pb.PowerDetailsReadError {
+	switch {
+	case errors.Is(err, errTaskIdentityNotLinked):
+		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED
+	case errors.Is(err, errTaskIdentityInvalid):
+		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_INVALID_RESPONSE
+	case errors.Is(err, errTaskIdentityLimit):
+		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED
+	}
+
 	if errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded {
 		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED
 	}
@@ -348,30 +309,15 @@ func powerDetailsReadError(err error) pb.PowerDetailsReadError {
 // its HTML escaping can expand strings beyond protojson's size.
 func boundPowerDetailsResponse(response *pb.GetTrayPowerDetailsResponse) error {
 	for attempt := range 4 {
-		message, err := protojson.Marshal(response)
-		if err != nil {
-			return status.Error(codes.Internal, "power details could not be encoded")
-		}
-		encoded, err := json.Marshal(grpcproxy.Response{ResponseJSON: message})
-		if err != nil {
-			return status.Error(codes.Internal, "power details could not be encoded")
-		}
-		if len(encoded) <= powerDetailsResponseBytes {
-			return nil
+		fits, err := detailsResponseFits(response)
+		if err != nil || fits {
+			return err
 		}
 		code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED
 		switch attempt {
 		case 0:
-			// Keep the primary tasks while removing optional references. Empty
-			// contexts and earlier read failures still mean what they did before.
-			for _, task := range response.GetDetails().GetOperations().GetTasks().GetEntries() {
-				waitingContext := task.GetWaitingContext()
-				if waitingContext == nil || waitingContext.Error != nil ||
-					(len(waitingContext.ActiveConflicts) == 0 && len(waitingContext.EarlierWaiting) == 0) {
-					continue
-				}
-				task.WaitingContext = &pb.PowerTaskWaitingContext{Error: &code}
-			}
+			// Keep the primary tasks while removing optional references.
+			limitPowerTaskWaitingContexts(response.GetDetails().GetOperations().GetTasks().GetEntries())
 		case 1:
 			// Retain original task records before giving up on the whole section.
 			// Preserve absent support and existing identity lookup failures.
@@ -387,4 +333,19 @@ func boundPowerDetailsResponse(response *pb.GetTrayPowerDetailsResponse) error {
 		}
 	}
 	return status.Error(codes.ResourceExhausted, "power details exceed the response size limit")
+}
+
+// limitPowerTaskWaitingContexts replaces populated waiting-context lists with
+// LimitExceeded and keeps each task. Absent and empty contexts and earlier read
+// failures still mean what they did before.
+func limitPowerTaskWaitingContexts(tasks []*pb.PowerTaskDetails) {
+	code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED
+	for _, task := range tasks {
+		waitingContext := task.GetWaitingContext()
+		if waitingContext == nil || waitingContext.Error != nil ||
+			(len(waitingContext.ActiveConflicts) == 0 && len(waitingContext.EarlierWaiting) == 0) {
+			continue
+		}
+		task.WaitingContext = &pb.PowerTaskWaitingContext{Error: &code}
+	}
 }

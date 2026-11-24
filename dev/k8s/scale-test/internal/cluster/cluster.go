@@ -2,15 +2,45 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package cluster holds the Kubernetes reads and writes the runner needs. v1
-// uses the Lease in the run's own namespace for the site lock; ConfigMap,
-// Service and Pod calls arrive with their first users in later changes.
+// uses the Lease in the run's own namespace for the site lock; ConfigMap
+// calls arrive with their first user in a later change. MAT inventory reads
+// the Pods and the MAT Services.
 package cluster
 
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"time"
 )
+
+// MatService is a Service the MAT controller made for one simulated device.
+type MatService struct {
+	Name        string
+	MachineType string
+	// MachineID is label nvidia-infra-controller/mat-machine-id. Missing on
+	// per-pod Services.
+	MachineID    string
+	MatID        string
+	BmcIP        netip.Addr
+	HardwareType string
+	ExternalIPs  []netip.Addr
+}
+
+// PodInfo is one Pod as the readers need it.
+type PodInfo struct {
+	Name        string
+	UID         string // a pod recreated under its name has a new one
+	Labels      map[string]string
+	Annotations map[string]string
+	Phase       string
+	Ready       bool
+	// CreatedAt is metadata.creationTimestamp, else the Unix epoch.
+	CreatedAt time.Time
+	// Restarts sums every container and init container, saturating.
+	Restarts uint32
+	IP       string
+}
 
 // Lease is a Lease as the site lock sees it. Empty strings and zero times
 // are unset.
@@ -96,3 +126,8 @@ type Cluster interface {
 	// the stored Lease does not have, also when no Lease is stored.
 	ReplaceLease(ctx context.Context, l Lease) (LeaseReplaced, error)
 }
+
+// ListMatServices and ListPods are the MAT inventory reads. They are methods
+// of the concrete *Kube, not of the Cluster interface: the inventory package
+// depends on its own narrow interface, so adding them here would force every
+// Cluster implementation (such as a test fake) to carry them.

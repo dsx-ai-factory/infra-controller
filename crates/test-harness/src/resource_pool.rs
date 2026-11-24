@@ -27,6 +27,7 @@ pub struct ResourcePoolBuilder {
     loopback_ip_v6: Option<IpNetwork>,
     vlan_id_ranges: Option<Vec<(u32, u32)>>,
     vni_ranges: Option<Vec<(u32, u32)>>,
+    integer_pools: HashMap<String, (u32, u32)>,
 }
 
 impl ResourcePoolBuilder {
@@ -58,6 +59,16 @@ impl ResourcePoolBuilder {
         self
     }
 
+    /// Adds or replaces an automatically allocated integer pool with an inclusive range.
+    pub fn with_integer_pool(mut self, name: impl Into<String>, start: u32, end: u32) -> Self {
+        assert!(
+            start <= end,
+            "integer pool range start must be less than or equal to end"
+        );
+        self.integer_pools.insert(name.into(), (start, end));
+        self
+    }
+
     pub fn build(self) -> HashMap<String, ResourcePoolDef> {
         let int_range_pool = |ranges: &[(u32, u32)]| resource_pool::ResourcePoolDef {
             pool_type: resource_pool::ResourcePoolType::Integer,
@@ -75,7 +86,7 @@ impl ResourcePoolBuilder {
         let vlan_id_ranges = self.vlan_id_ranges.unwrap_or_else(|| vec![(1, 2)]);
         let vni_ranges = self.vni_ranges.unwrap_or_else(|| vec![(10001, 10002)]);
 
-        [
+        let mut pools: HashMap<_, _> = [
             (
                 resource_pool::common::LOOPBACK_IP.to_string(),
                 resource_pool::ResourcePoolDef {
@@ -112,6 +123,12 @@ impl ResourcePoolBuilder {
             )
         })))
         .flatten()
-        .collect()
+        .collect();
+        pools.extend(
+            self.integer_pools
+                .into_iter()
+                .map(|(name, range)| (name, int_range_pool(&[range]))),
+        );
+        pools
     }
 }

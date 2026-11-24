@@ -15,24 +15,26 @@
  * limitations under the License.
  */
 
+use bmc_platform::{PowerState, ResetType};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use chrono::Utc;
-use libredfish::SystemPowerControl;
 use model::machine::ManagedHostStateSnapshot;
 use model::power_manager::{
-    PowerHandlingOutcome, PowerOptions, PowerState, are_all_dpus_up_after_power_operation,
-    get_updated_power_options_for_desired_on_state_off,
+    PowerHandlingOutcome, PowerOptions, PowerState as DesiredPowerState,
+    are_all_dpus_up_after_power_operation, get_updated_power_options_for_desired_on_state_off,
     update_power_options_for_desired_on_state_on,
 };
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
 use crate::context::MachineStateHandlerContextObjects;
-use crate::handler::{PowerOptionConfig, handler_host_power_control, host_power_state};
+use crate::handler::{PowerOptionConfig, handler_host_power_control};
+use crate::redfish::{power_state, power_state_name};
 
 // If power state is Paused and Reset, state machine can't take any decision on it.
 // Ignore power manager with a log and moved to state machine.
 enum UsablePowerState {
-    Usable(PowerState),
-    NotUsable(libredfish::PowerState),
+    Usable(DesiredPowerState),
+    NotUsable(String),
 }
 
 // Handle power related stuff and return updated power options.
@@ -87,7 +89,7 @@ pub(super) async fn handle_power_desired_on(
         updated_power_options.last_fetched_next_try_at =
             now + power_options_config.next_try_duration_on_success;
         match power_state {
-            UsablePowerState::Usable(PowerState::Off) => {
+            UsablePowerState::Usable(DesiredPowerState::Off) => {
                 let (ret_val, try_power_on) = get_updated_power_options_for_desired_on_state_off(
                     updated_power_options,
                     power_options_config.next_try_duration_on_failure,
@@ -97,12 +99,12 @@ pub(super) async fn handle_power_desired_on(
                 );
                 if try_power_on {
                     // Try power on here.
-                    handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::On).await?;
+                    handler_host_power_control(mh_snapshot, ctx, ResetType::On).await?;
                 }
 
                 return Ok(ret_val);
             }
-            UsablePowerState::Usable(PowerState::On) => {
+            UsablePowerState::Usable(DesiredPowerState::On) => {
                 update_power_options_for_desired_on_state_on(
                     &mut updated_power_options,
                     power_options_config.next_try_duration_on_success,
@@ -110,7 +112,7 @@ pub(super) async fn handle_power_desired_on(
                 );
                 update_done = true;
             }
-            UsablePowerState::Usable(PowerState::PowerManagerDisabled) => {
+            UsablePowerState::Usable(DesiredPowerState::PowerManagerDisabled) => {
                 tracing::warn!("Unexpected PowerManagerDisabled state from BMC poll");
             }
             UsablePowerState::NotUsable(s) => {
@@ -145,7 +147,7 @@ pub(super) async fn handle_power_desired_on(
         }
 
         // all DPUs are UP or don't wait for the DPUs. Reboot the host;
-        handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
+        handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
 
         updated_power_options.wait_until_time_before_performing_next_power_action = now;
         return Ok(PowerHandlingOutcome::new(
@@ -181,12 +183,12 @@ pub(super) async fn get_updated_power_options_desired_off(
         match power_state {
             UsablePowerState::Usable(power_state) => {
                 updated_power_options.last_fetched_power_state = power_state;
-                let cause = if let PowerState::On = power_state {
+                let cause = if let DesiredPowerState::On = power_state {
                     "Power state is On while expected is Off. Since desired state is Off, not processing any event.".to_string()
                 } else {
                     "Desired state is Off and actual state is Off.".to_string()
                 };
-                if let PowerState::On = power_state {
+                if let DesiredPowerState::On = power_state {
                     tracing::warn!(reason = %cause, "Skipping host power handling");
                 }
                 return Ok(PowerHandlingOutcome::new(
@@ -221,20 +223,23 @@ async fn get_power_state(
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<UsablePowerState, StateHandlerError> {
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-    let power_state = host_power_state(redfish_client.as_ref()).await?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+    let power_state = power_state(&bmc)
+        .await
+        .map_err(|e| platform_error("get_power_state", e))?;
     Ok(match power_state {
-        libredfish::PowerState::Off | libredfish::PowerState::PoweringOff => {
-            UsablePowerState::Usable(PowerState::Off)
+        Some(PowerState::Off) | Some(PowerState::PoweringOff) => {
+            UsablePowerState::Usable(DesiredPowerState::Off)
         }
-        libredfish::PowerState::On | libredfish::PowerState::PoweringOn => {
-            UsablePowerState::Usable(PowerState::On)
+        Some(PowerState::On) | Some(PowerState::PoweringOn) => {
+            UsablePowerState::Usable(DesiredPowerState::On)
         }
-        libredfish::PowerState::Paused
-        | libredfish::PowerState::Reset
-        | libredfish::PowerState::Unknown => UsablePowerState::NotUsable(power_state),
+        Some(
+            PowerState::Paused
+            | PowerState::Sleeping
+            | PowerState::Hibernating
+            | PowerState::UnsupportedValue,
+        )
+        | None => UsablePowerState::NotUsable(power_state_name(power_state)),
     })
 }

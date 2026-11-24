@@ -33,7 +33,7 @@ impl LiteOnPowerShelf<'_> {
             vendor: redfish::oem::BmcVendor::LiteOn,
             product: None,
             redfish_version: "1.9.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: false,
         }
     }
 
@@ -81,7 +81,7 @@ impl LiteOnPowerShelf<'_> {
         let system_id = "system";
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
@@ -103,7 +103,7 @@ impl LiteOnPowerShelf<'_> {
                 ),
                 serial_console: Some(hw::openbmc::enabled_serial_console()),
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

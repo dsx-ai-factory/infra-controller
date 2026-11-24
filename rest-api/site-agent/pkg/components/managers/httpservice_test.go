@@ -29,7 +29,7 @@ func TestHandleSiteStatusRequest(t *testing.T) {
 
 	const (
 		siteID   = "d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77"
-		credsURL = "https://sitemgr.nico-system.svc/v1/sitecreds"
+		credsURL = "https://nico-rest-site-manager.nico-system.svc/v1/sitecreds"
 		otp      = "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A="
 	)
 	enabledBootstrap := `{"enabled": true, "message": null,

@@ -954,7 +954,9 @@ mod tests {
                 CollectorEvent::MetricCollectionStart
                 | CollectorEvent::MetricCollectionEnd
                 | CollectorEvent::CollectorRemoved
-                | CollectorEvent::Firmware(_) => {}
+                | CollectorEvent::Firmware(_)
+                | CollectorEvent::ResourceStatusObservation(_)
+                | CollectorEvent::ResourceStatus(_) => {}
             }
             Ok(())
         }

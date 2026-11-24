@@ -4,11 +4,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -140,7 +140,7 @@ func (f bmcCredentialHandlerFixture) request(t *testing.T, target string, apiReq
 	require.NoError(t, err)
 
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPut, target, strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPut, target, bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)

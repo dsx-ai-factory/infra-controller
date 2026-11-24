@@ -111,11 +111,15 @@ func TestPostgresStore_GetRackByID(t *testing.T) {
 	assert.Equal(t, *rackDAO.RackProfileID, protobuf.RackTo(byID).GetRackProfileId())
 	assert.Empty(t, byID.Components)
 	assert.Equal(t, types.PhaseInitializing, byID.OperationStatus)
+	wantDetails := &types.RackOperationStatusDetails{TrayCountsByType: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}, NVSwitch: types.TrayStatusCounts{Initializing: 1}}}
+	assert.Equal(t, wantDetails, byID.OperationStatusDetails)
+	assert.Equal(t, wantDetails.ToProto(), protobuf.RackTo(byID).GetOperationStatusDetails())
 
 	byIDWithComponents, err := store.GetRackByID(ctx, rackDAO.ID, true)
 	require.NoError(t, err)
 	require.Len(t, byIDWithComponents.Components, 2)
 	assert.Equal(t, byID.OperationStatus, byIDWithComponents.OperationStatus)
+	assert.Equal(t, wantDetails, byIDWithComponents.OperationStatusDetails)
 
 	listed, total, err := store.GetListOfRacks(
 		ctx,
@@ -132,6 +136,7 @@ func TestPostgresStore_GetRackByID(t *testing.T) {
 	require.Len(t, listed, 1)
 	assert.Empty(t, listed[0].Components)
 	assert.Equal(t, byID.OperationStatus, listed[0].OperationStatus)
+	assert.Equal(t, wantDetails, listed[0].OperationStatusDetails)
 }
 
 func TestPostgresStore_PatchRack(t *testing.T) {
@@ -303,6 +308,58 @@ func TestPostgresStore_DetachRacksFromNVLDomain(t *testing.T) {
 	assert.Equal(t, rackDAO.RackGroupID, got.RackGroupID)
 	assert.Equal(t, rackDAO.Status, got.Status)
 	assert.Equal(t, rackDAO.Health, got.Health)
+}
+
+// TestPostgresStore_GetRackByExternalID proves expanded membership omits persisted
+// soft-deleted components without losing a live sibling.
+func TestPostgresStore_GetRackByExternalID(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("Skipping integration test: no DB environment specified")
+	}
+
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "excludes soft-deleted components",
+			run: func(t *testing.T) {
+				ctx := t.Context()
+				dbConf, err := cdb.ConfigFromEnv()
+				require.NoError(t, err)
+				pool, err := dbtestutil.CreateTestDB(ctx, t, dbConf)
+				require.NoError(t, err)
+				t.Cleanup(pool.Close)
+				require.NoError(t, migrations.MigrateWithDB(ctx, pool.DB, migrations.MigrateOptions{}))
+				store := NewPostgres(pool)
+
+				rackDAO := model.Rack{Name: "aggregate-rack", ExternalID: stringPtr("rack-01")}
+				require.NoError(t, rackDAO.Create(ctx, pool.DB))
+				components := []model.Component{
+					{Name: "live", Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute), RackID: rackDAO.ID},
+					{Name: "deleted", Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch), RackID: rackDAO.ID},
+				}
+				for i := range components {
+					require.NoError(t, components[i].Create(ctx, pool.DB))
+				}
+
+				// Keep a live sibling so omitting the `Components` relation cannot
+				// satisfy the check that deleted members are absent.
+				require.NoError(t, components[1].Delete(ctx, pool.DB))
+				deleted, err := components[1].GetIncludingDeleted(ctx, pool.DB)
+				require.NoError(t, err)
+				require.NotNil(t, deleted.DeletedAt)
+
+				got, err := store.GetRackByExternalID(ctx, *rackDAO.ExternalID, true)
+				require.NoError(t, err)
+				require.Len(t, got.Components, 1)
+				assert.Equal(t, components[0].ID, got.Components[0].Info.ID)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
 }
 
 func TestPostgresStore_GetListOfComponents(t *testing.T) {

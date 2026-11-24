@@ -26,8 +26,10 @@
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::fmt::Write;
 
     use carbide_uuid::measured_boot::MeasurementReportId;
+    use db::TransactionVending as _;
     use db::db_read::PgPoolReader;
     use db::measured_boot::interface::common::pcr_register_values_to_map;
     use db::measured_boot::interface::report::{
@@ -49,7 +51,7 @@ mod tests {
     // sure the records themselves are correct.
     #[crate::sqlx_test]
     async fn test_report_crudl(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = create_test_machine(
             &mut txn,
             "fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530",
@@ -226,7 +228,7 @@ mod tests {
     // sure the journal gets updated.
     #[crate::sqlx_test]
     async fn test_report_journal(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = create_test_machine(
             &mut txn,
             "fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530",
@@ -285,16 +287,18 @@ mod tests {
         let report = db::measured_boot::report::new(&mut txn, machine.machine_id, &values).await?;
 
         txn.commit().await?;
-        let mut txn = pool.begin().await?;
 
         // And NOW there should be a profile.
-        let optional_profile =
-            db::measured_boot::profile::load_from_attrs(&mut txn, &attrs).await?;
+        let optional_profile = db::measured_boot::profile::load_from_attrs(
+            &mut PgPoolReader::from(pool.clone()),
+            &attrs,
+        )
+        .await?;
         assert!(optional_profile.is_some());
         let profile = optional_profile.unwrap();
 
         let journals =
-            db::measured_boot::journal::get_all_for_machine_id(&mut txn, report.machine_id).await?;
+            db::measured_boot::journal::get_all_for_machine_id(&pool, report.machine_id).await?;
         assert_eq!(journals.len(), 1);
 
         let journal = &journals[0];
@@ -313,7 +317,7 @@ mod tests {
     async fn test_report_to_active_bundle(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = create_test_machine(
             &mut txn,
             "fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530",
@@ -487,7 +491,7 @@ mod tests {
     async fn test_report_to_revoked_bundle(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = create_test_machine(
             &mut txn,
             "fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530",
@@ -574,7 +578,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn test_max_reports_limit(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let env = create_test_env(pool.clone()).await;
         let machine_1 = create_test_machine(
             &mut txn,
@@ -602,7 +606,7 @@ mod tests {
                 .map(char::from)
                 .collect();
 
-            random_str.push_str(&i.to_string());
+            write!(random_str, "{i}").unwrap();
 
             let values: Vec<PcrRegisterValue> = vec![
                 PcrRegisterValue {

@@ -7,9 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/stretchr/testify/require"
 )
 
 func TestOperation_Clone(t *testing.T) {

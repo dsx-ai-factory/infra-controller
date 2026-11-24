@@ -367,6 +367,8 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
     };
 
     MachineSnapshotPgJson {
+        maintenance_action_id: None,
+        hardware_dispatch: None,
         machine_maintenance_requested: None,
         spx_multiplane: None,
         decommission_requested: false,
@@ -410,6 +412,8 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
                 agent_version_superseded_at: None,
                 instance_network_observation: None,
                 fabric_interfaces: vec![],
+                accepted_lldp_snapshot_fingerprint: None,
+                service_vpc_network_observation: None,
             }
         }),
         infiniband_status_observation: Some(MachineInfinibandStatusObservation {

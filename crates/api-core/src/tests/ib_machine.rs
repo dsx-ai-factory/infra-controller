@@ -244,7 +244,7 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
         Some(HashSet::from_iter([guid2.clone()]))
     );
 
-    let ufm_change_metrics = MetricsCapture::start();
+    let ufm_change_metrics = MetricsCapture::for_registry(env.test_meter.registry());
     env.ib_fabric_monitor.run_single_iteration().await.unwrap();
     let successful_unbinds = ufm_change_metrics.counter_delta(
         "carbide_ib_monitor_ufm_changes_applied_total",
@@ -254,9 +254,7 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
             ("status", "ok"),
         ],
     );
-    // Other API tests can drive the same process-global Event concurrently.
-    // The Event-level test pins exact counts; this check proves the monitor's
-    // reconciliation path reaches the UFM change Event.
+    // The reconciliation path must reach the UFM change Event for each stale binding.
     assert!(
         successful_unbinds >= 3.0,
         "expected three successful UFM unbinds, observed {successful_unbinds}"

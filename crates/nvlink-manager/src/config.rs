@@ -15,8 +15,11 @@
  * limitations under the License.
  */
 
+use std::path::PathBuf;
+
 use carbide_utils::config::as_std_duration;
 use duration_str::deserialize_duration;
+use libnmxc::{NmxcClientIdentity, NmxcTlsConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -38,10 +41,12 @@ pub struct NvLinkConfig {
     /// PEM file path: extra CA bundle for verifying the NMX-C server over HTTPS (optional).
     #[serde(default)]
     pub nmx_c_tls_ca_cert_path: Option<String>,
-    /// PEM file path: client certificate for mTLS to NMX-C (optional; pair with `nmx_c_tls_client_key_path`).
+    /// PEM file path: client certificate for mTLS to NMX-C (optional). Set it together with
+    /// `nmx_c_tls_client_key_path`; nico-api refuses to start when only one of them is set.
     #[serde(default)]
     pub nmx_c_tls_client_cert_path: Option<String>,
-    /// PEM file path: client private key for mTLS to NMX-C (optional; pair with `nmx_c_tls_client_cert_path`).
+    /// PEM file path: client private key for mTLS to NMX-C (optional). Set it together with
+    /// `nmx_c_tls_client_cert_path`; nico-api refuses to start when only one of them is set.
     #[serde(default)]
     pub nmx_c_tls_client_key_path: Option<String>,
     /// TLS server name for NMX-C HTTPS: a DNS name or bare IP address.
@@ -84,6 +89,131 @@ pub struct NvLinkConfig {
         serialize_with = "as_std_duration"
     )]
     pub partition_monitor_full_check_interval: std::time::Duration,
+
+    /// Consecutive iterations a rack's NMX-C must be unusable before the
+    /// monitor raises the rack's `NmxcUnreachable` health alert. A single
+    /// failed pass is common under load and is not reported; the alert is
+    /// cleared on the first pass that reaches NMX-C again. Defaults to 3.
+    /// Must be non-zero; deserialization rejects 0.
+    #[serde(default = "NvLinkConfig::default_partition_monitor_unreachable_alert_after")]
+    pub partition_monitor_unreachable_alert_after: std::num::NonZeroU32,
+
+    /// Periodic TCP reachability checks of ready switches, raising debounced
+    /// `SwitchUnreachable` and `NmxtUnreachable` switch health alerts.
+    #[serde(default)]
+    pub switch_reachability: SwitchReachabilityConfig,
+}
+
+/// Settings for the switch reachability monitor.
+///
+/// The monitor probes every switch in the `ready` controller state: a TCP
+/// connection to the NVOS management address on `nvos_port` for every switch,
+/// and one to `nmx_t_port` on primary switches, which host NMX-T. After
+/// `unreachable_alert_after` consecutive failed checks of one service the
+/// switch receives the matching alert; the first successful check clears it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchReachabilityConfig {
+    /// Runs the monitor. Unset follows `nvlink_config.enabled`, so sites that
+    /// partition over NMX-C get the checks without further configuration; set
+    /// it to run or stop the monitor independently.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// Interval between checks. Defaults to 1 minute.
+    #[serde(
+        default = "SwitchReachabilityConfig::default_run_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub run_interval: std::time::Duration,
+
+    /// Consecutive failed checks of one service before its alert is raised.
+    /// Defaults to 3. Must be non-zero; deserialization rejects 0.
+    #[serde(default = "SwitchReachabilityConfig::default_unreachable_alert_after")]
+    pub unreachable_alert_after: std::num::NonZeroU32,
+
+    /// Timeout for each TCP connection attempt. Defaults to 10 seconds.
+    #[serde(
+        default = "SwitchReachabilityConfig::default_probe_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub probe_timeout: std::time::Duration,
+
+    /// TCP port probed on every switch's NVOS management address. Defaults to
+    /// the NVOS REST port, 443.
+    #[serde(default = "SwitchReachabilityConfig::default_nvos_port")]
+    pub nvos_port: u16,
+
+    /// TCP port probed on primary switches for the NMX-T telemetry listener.
+    /// Defaults to 9352.
+    #[serde(default = "SwitchReachabilityConfig::default_nmx_t_port")]
+    pub nmx_t_port: u16,
+
+    /// Maximum number of switches probed at the same time in one pass. Each
+    /// switch in flight holds at most one open connection attempt, so this
+    /// bounds the pass's sockets and timeout waiters on large sites.
+    /// Defaults to 32. Deserialization rejects 0 and values above the Tokio
+    /// semaphore limit that bounds the admission.
+    #[serde(
+        default = "SwitchReachabilityConfig::default_max_concurrent_switches",
+        deserialize_with = "deserialize_max_concurrent_switches"
+    )]
+    pub max_concurrent_switches: std::num::NonZeroUsize,
+}
+
+impl SwitchReachabilityConfig {
+    pub const fn default_run_interval() -> std::time::Duration {
+        std::time::Duration::from_secs(60)
+    }
+
+    pub const fn default_unreachable_alert_after() -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::MIN.saturating_add(2)
+    }
+
+    pub const fn default_probe_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(10)
+    }
+
+    pub const fn default_nvos_port() -> u16 {
+        443
+    }
+
+    pub const fn default_nmx_t_port() -> u16 {
+        9352
+    }
+
+    pub const fn default_max_concurrent_switches() -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::MIN.saturating_add(31)
+    }
+}
+
+impl Default for SwitchReachabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            run_interval: Self::default_run_interval(),
+            unreachable_alert_after: Self::default_unreachable_alert_after(),
+            probe_timeout: Self::default_probe_timeout(),
+            nvos_port: Self::default_nvos_port(),
+            nmx_t_port: Self::default_nmx_t_port(),
+            max_concurrent_switches: Self::default_max_concurrent_switches(),
+        }
+    }
+}
+
+/// An NMX-C client certificate or key configured without the other half of the pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum NmxCTlsConfigError {
+    #[error(
+        "nmx_c_tls_client_cert_path is set without nmx_c_tls_client_key_path; set both or neither"
+    )]
+    CertificateWithoutKey,
+    #[error(
+        "nmx_c_tls_client_key_path is set without nmx_c_tls_client_cert_path; set both or neither"
+    )]
+    KeyWithoutCertificate,
 }
 
 /// Outcome of [`NvLinkConfig::apply_default_nmx_c_tls`].
@@ -133,6 +263,43 @@ impl NvLinkConfig {
         self.nmx_c_certificate_rotation
             .enabled
             .unwrap_or(self.enabled)
+    }
+
+    /// NMX-C TLS settings for [`libnmxc::NmxcClientPool`], or `None` when no `nmx_c_tls_*` key is
+    /// set.
+    ///
+    /// The client certificate and key form one identity and must be set together. CA-only and
+    /// authority-only settings are kept and authenticate the server without a client certificate.
+    pub fn nmx_c_tls_config(&self) -> Result<Option<NmxcTlsConfig>, NmxCTlsConfigError> {
+        let client_identity = match (
+            &self.nmx_c_tls_client_cert_path,
+            &self.nmx_c_tls_client_key_path,
+        ) {
+            (Some(cert_path), Some(key_path)) => Some(NmxcClientIdentity {
+                cert_path: PathBuf::from(cert_path),
+                key_path: PathBuf::from(key_path),
+            }),
+            (None, None) => None,
+            (Some(_), None) => return Err(NmxCTlsConfigError::CertificateWithoutKey),
+            (None, Some(_)) => return Err(NmxCTlsConfigError::KeyWithoutCertificate),
+        };
+        if self.nmx_c_tls_ca_cert_path.is_none()
+            && client_identity.is_none()
+            && self.nmx_c_tls_authority.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(NmxcTlsConfig {
+            ca_cert_path: self.nmx_c_tls_ca_cert_path.as_ref().map(PathBuf::from),
+            client_identity,
+            authority: self.nmx_c_tls_authority.clone(),
+        }))
+    }
+
+    /// Whether the switch reachability monitor runs: `switch_reachability.enabled`
+    /// when set, otherwise `enabled`.
+    pub fn switch_reachability_enabled(&self) -> bool {
+        self.switch_reachability.enabled.unwrap_or(self.enabled)
     }
 
     /// Whether NMX-C is reached over HTTPS rather than plain HTTP.
@@ -216,6 +383,10 @@ impl NvLinkConfig {
     /// Upper end of the documented `partition_monitor_max_concurrent_groups` range.
     pub(crate) const MAX_DOCUMENTED_PARTITION_MONITOR_CONCURRENT_GROUPS: usize = 256;
 
+    pub const fn default_partition_monitor_unreachable_alert_after() -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(3).expect("3 is non-zero")
+    }
+
     pub const fn default_partition_monitor_full_check_interval() -> std::time::Duration {
         std::time::Duration::from_secs(10 * 60)
     }
@@ -295,13 +466,17 @@ impl Default for NvLinkConfig {
                 Self::default_partition_monitor_max_concurrent_groups(),
             partition_monitor_full_check_interval:
                 Self::default_partition_monitor_full_check_interval(),
+            partition_monitor_unreachable_alert_after:
+                Self::default_partition_monitor_unreachable_alert_after(),
+            switch_reachability: SwitchReachabilityConfig::default(),
         }
     }
 }
 
-/// Rejects 0 and values the monitor's semaphore cannot represent.
-fn deserialize_partition_monitor_max_concurrent_groups<'de, D>(
+/// Rejects 0 and values a Tokio semaphore cannot represent, naming `field`.
+fn deserialize_semaphore_permits<'de, D>(
     deserializer: D,
+    field: &str,
 ) -> Result<std::num::NonZeroUsize, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -309,13 +484,30 @@ where
     let value = usize::deserialize(deserializer)?;
     if value > tokio::sync::Semaphore::MAX_PERMITS {
         return Err(serde::de::Error::custom(format!(
-            "partition_monitor_max_concurrent_groups must be at most {}, got {value}",
+            "{field} must be at most {}, got {value}",
             tokio::sync::Semaphore::MAX_PERMITS
         )));
     }
-    std::num::NonZeroUsize::new(value).ok_or_else(|| {
-        serde::de::Error::custom("partition_monitor_max_concurrent_groups must be at least 1")
-    })
+    std::num::NonZeroUsize::new(value)
+        .ok_or_else(|| serde::de::Error::custom(format!("{field} must be at least 1")))
+}
+
+fn deserialize_partition_monitor_max_concurrent_groups<'de, D>(
+    deserializer: D,
+) -> Result<std::num::NonZeroUsize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_semaphore_permits(deserializer, "partition_monitor_max_concurrent_groups")
+}
+
+fn deserialize_max_concurrent_switches<'de, D>(
+    deserializer: D,
+) -> Result<std::num::NonZeroUsize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_semaphore_permits(deserializer, "max_concurrent_switches")
 }
 
 #[cfg(test)]
@@ -323,6 +515,84 @@ mod test {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    #[test]
+    fn switch_reachability_defaults_and_rejects_zero_threshold() {
+        let defaults = NvLinkConfig::default().switch_reachability;
+        assert_eq!(defaults.enabled, None);
+        assert_eq!(defaults.run_interval, std::time::Duration::from_secs(60));
+        assert_eq!(defaults.unreachable_alert_after.get(), 3);
+        assert_eq!(defaults.probe_timeout, std::time::Duration::from_secs(10));
+        assert_eq!((defaults.nvos_port, defaults.nmx_t_port), (443, 9352));
+        assert_eq!(defaults.max_concurrent_switches.get(), 32);
+
+        value_scenarios!(
+            run = |json: &str| {
+                serde_json::from_str::<NvLinkConfig>(json)
+                    .ok()
+                    .map(|config| config.switch_reachability.unreachable_alert_after.get())
+            };
+            "omitted section uses defaults" {
+                r#"{"enabled": true}"# => Some(3),
+            }
+
+            "explicit threshold is accepted" {
+                r#"{"switch_reachability": {"enabled": true, "unreachable_alert_after": 1}}"# => Some(1),
+            }
+
+            "zero is rejected" {
+                r#"{"switch_reachability": {"unreachable_alert_after": 0}}"# => None,
+            }
+
+            "zero concurrency is rejected" {
+                r#"{"switch_reachability": {"max_concurrent_switches": 0}}"# => None,
+            }
+
+            "concurrency above the semaphore limit is rejected" {
+                &format!(
+                    r#"{{"switch_reachability": {{"max_concurrent_switches": {}}}}}"#,
+                    tokio::sync::Semaphore::MAX_PERMITS + 1
+                ) => None,
+            }
+
+            "concurrency at the semaphore limit is accepted" {
+                &format!(
+                    r#"{{"switch_reachability": {{"max_concurrent_switches": {}}}}}"#,
+                    tokio::sync::Semaphore::MAX_PERMITS
+                ) => Some(3),
+            }
+
+            "unknown keys are rejected" {
+                r#"{"switch_reachability": {"nmxt_port": 1}}"# => None,
+            }
+        );
+    }
+
+    #[test]
+    fn switch_reachability_follows_partitioning_unless_set() {
+        value_scenarios!(
+            run = |(enabled, reachability): (bool, Option<bool>)| {
+                NvLinkConfig {
+                    enabled,
+                    switch_reachability: SwitchReachabilityConfig {
+                        enabled: reachability,
+                        ..SwitchReachabilityConfig::default()
+                    },
+                    ..NvLinkConfig::default()
+                }
+                .switch_reachability_enabled()
+            };
+            "unset follows partitioning" {
+                (true, None) => true,
+                (false, None) => false,
+            }
+
+            "explicit value wins" {
+                (true, Some(false)) => false,
+                (false, Some(true)) => true,
+            }
+        );
+    }
 
     #[test]
     fn deserialize_serialize_nvlink_config() {
@@ -346,6 +616,28 @@ mod test {
                     NvLinkConfig::default_partition_monitor_max_concurrent_groups(),
                 partition_monitor_full_check_interval:
                     NvLinkConfig::default_partition_monitor_full_check_interval(),
+                partition_monitor_unreachable_alert_after:
+                    NvLinkConfig::default_partition_monitor_unreachable_alert_after(),
+                switch_reachability: SwitchReachabilityConfig::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn unreachable_alert_after_defaults_to_three_and_rejects_zero() {
+        value_scenarios!(run = |json: &str| {
+            serde_json::from_str::<NvLinkConfig>(json)
+                .map(|config| config.partition_monitor_unreachable_alert_after.get())
+                .ok()
+        };
+            "default" {
+                r#"{"allow_insecure":false}"# => Some(3),
+            }
+            "explicit" {
+                r#"{"allow_insecure":false,"partition_monitor_unreachable_alert_after":1}"# => Some(1),
+            }
+            "rejected" {
+                r#"{"allow_insecure":false,"partition_monitor_unreachable_alert_after":0}"# => None,
             }
         );
     }
@@ -376,6 +668,66 @@ mod test {
         assert!(!config.enabled);
         assert!(!config.allow_insecure);
         assert!(!config.certificate_rotation_enabled());
+    }
+
+    #[test]
+    fn nmx_c_tls_config_requires_the_client_certificate_and_key_together() {
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
+
+        let identity = || {
+            Some(NmxcClientIdentity {
+                cert_path: PathBuf::from("/tls/tls.crt"),
+                key_path: PathBuf::from("/tls/tls.key"),
+            })
+        };
+        scenarios!(run = |(ca, cert, key, authority): (
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        )| {
+            NvLinkConfig {
+                nmx_c_tls_ca_cert_path: ca.map(str::to_owned),
+                nmx_c_tls_client_cert_path: cert.map(str::to_owned),
+                nmx_c_tls_client_key_path: key.map(str::to_owned),
+                nmx_c_tls_authority: authority.map(str::to_owned),
+                ..NvLinkConfig::default()
+            }
+            .nmx_c_tls_config()
+        };
+            "no NMX-C TLS setting" {
+                (None, None, None, None) => Yields(None),
+            }
+            "server verification without a client certificate" {
+                (Some("/tls/ca.crt"), None, None, None) => Yields(Some(NmxcTlsConfig {
+                    ca_cert_path: Some(PathBuf::from("/tls/ca.crt")),
+                    ..NmxcTlsConfig::default()
+                })),
+                (None, None, None, Some("nmxc.example")) => Yields(Some(NmxcTlsConfig {
+                    authority: Some("nmxc.example".to_string()),
+                    ..NmxcTlsConfig::default()
+                })),
+            }
+            "complete client identity" {
+                (None, Some("/tls/tls.crt"), Some("/tls/tls.key"), None) => Yields(Some(NmxcTlsConfig {
+                    client_identity: identity(),
+                    ..NmxcTlsConfig::default()
+                })),
+                (Some("/tls/ca.crt"), Some("/tls/tls.crt"), Some("/tls/tls.key"), Some("nmxc.example")) =>
+                    Yields(Some(NmxcTlsConfig {
+                        ca_cert_path: Some(PathBuf::from("/tls/ca.crt")),
+                        client_identity: identity(),
+                        authority: Some("nmxc.example".to_string()),
+                    })),
+            }
+            "half-set client identity" {
+                (Some("/tls/ca.crt"), Some("/tls/tls.crt"), None, None) =>
+                    FailsWith(NmxCTlsConfigError::CertificateWithoutKey),
+                (None, None, Some("/tls/tls.key"), Some("nmxc.example")) =>
+                    FailsWith(NmxCTlsConfigError::KeyWithoutCertificate),
+            }
+        );
     }
 
     #[test]

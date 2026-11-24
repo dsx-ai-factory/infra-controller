@@ -90,37 +90,21 @@ struct MetadataDetail {
     metadata_version: String,
 }
 
-/// Reusable template for rendering aggregate health details in entity detail
-/// pages. Render with `{{ health_detail|safe }}`.
-#[derive(Template)]
-#[template(path = "health_detail.html")]
+/// Aggregate health for a detail page's status bar (`ui::health_stat`). The
+/// full reports render in the Health tab from `health::HealthPanel`.
 struct HealthDetail {
-    health_reports_url: String,
-    health_reports_link_text: &'static str,
     health: health_report::HealthReport,
-    health_sources: Vec<String>,
 }
 
 impl HealthDetail {
-    fn new(
-        health_reports_url: String,
-        health_reports_link_text: &'static str,
-        health: Option<rpc::health::HealthReport>,
-        health_sources: Vec<rpc::forge::HealthSourceOrigin>,
-    ) -> Self {
+    fn new(health: Option<rpc::health::HealthReport>) -> Self {
         HealthDetail {
-            health_reports_url,
-            health_reports_link_text,
             health: health
                 .map(|health| {
                     health_report::HealthReport::try_from(health)
                         .unwrap_or_else(health_report::HealthReport::malformed_report)
                 })
                 .unwrap_or_else(health_report::HealthReport::missing_report),
-            health_sources: health_sources
-                .into_iter()
-                .map(|source| source.source)
-                .collect(),
         }
     }
 }
@@ -163,7 +147,7 @@ struct StateSlaDetail {
     state_reason: Option<rpc::forge::ControllerStateReason>,
 }
 
-/// Reusable template for rendering lifecycle fields.
+/// Reusable Lifecycle card for detail pages.
 /// Render with `{{ lifecycle_detail|safe }}`.
 #[derive(Template)]
 #[template(path = "lifecycle_detail.html")]
@@ -176,6 +160,8 @@ struct LifecycleDetail {
     state_sla: String,
     time_in_state_above_sla: bool,
     state_reason: Option<rpc::forge::ControllerStateReason>,
+    /// Shown as an extra row for objects that report reboots.
+    last_reboot: Option<String>,
 }
 
 impl LifecycleDetail {
@@ -202,6 +188,7 @@ impl LifecycleDetail {
             state_sla: format_state_sla(sla.as_ref()),
             time_in_state_above_sla,
             state_reason,
+            last_reboot: None,
         }
     }
 }
@@ -246,6 +233,7 @@ mod tests;
 mod action_status;
 mod attestation;
 mod auth;
+mod browser_response;
 mod compute_allocation;
 mod configuration;
 mod console_logs;
@@ -472,7 +460,9 @@ fn routes_with_auth_mode(
                 .set_token_uri(TokenUrl::new(token_endpoint)?)
                 .set_redirect_uri(RedirectUrl::new(format!(
                     "https://{}/admin/{}",
-                    env::var(CARBIDE_WEB_HOSTNAME_ENV).unwrap_or("localhost:1079".to_string()),
+                    env::var(CARBIDE_WEB_HOSTNAME_ENV)
+                        .as_deref()
+                        .unwrap_or("localhost:1079"),
                     AUTH_CALLBACK_ROOT,
                 ))?);
 
@@ -929,6 +919,10 @@ fn routes_with_auth_mode(
                 "/machinevalidation/tests",
                 get(machine_validation::show_tests_html),
             )
+            .route(
+                "/machinevalidation/attempts/{attempt_id}/logs",
+                get(machine_validation::attempt_logs),
+            )
             .route("/machinevalidation", get(machine_validation::runs))
             .route(
                 "/machinevalidation/tests/{test_id}",
@@ -1005,8 +999,8 @@ async fn web_auth_middleware_fn(
     }
 
     // If it exists, do we still want to accept it?
-    if let Some(c) = cookiejar.get("sid").map(|cookie| cookie.value().to_owned())
-        && let Ok(expiraton_timestamp) = c.parse::<u64>()
+    if let Some(cookie) = cookiejar.get("sid")
+        && let Ok(expiraton_timestamp) = cookie.value().parse::<u64>()
     {
         let now_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)

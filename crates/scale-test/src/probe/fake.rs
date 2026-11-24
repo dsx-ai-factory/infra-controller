@@ -259,12 +259,15 @@ impl FakeProbe {
     fn sweep_info(&self, stored: &Stored) -> SweepInfo {
         let now = self.clock.now();
         SweepInfo {
+            firmware_config: None,
             snapshot_id: stored.snapshot_id.clone(),
             family: stored.sweep.family,
             sweep_start: stored.sweep.sweep_start,
             read_at: stored.sweep.read_at,
             sweep_age_seconds: seconds(now - stored.sweep.read_at),
             sweep_interval_seconds: stored.sweep.interval.as_secs_f64(),
+            last_attempt_succeeded: None,
+            last_attempt_error: None,
         }
     }
 
@@ -628,10 +631,10 @@ async fn reply<T: Serialize>(result: Result<T, ProbeError>) -> Response {
 
 /// Sets `Retry-After` as the probe does: whole seconds, only when given.
 fn with_retry_after(mut response: Response, retry_after: Option<Duration>) -> Response {
-    if let Some(wait) = retry_after
-        && let Ok(value) = HeaderValue::from_str(&wait.as_secs().to_string())
-    {
-        response.headers_mut().insert(header::RETRY_AFTER, value);
+    if let Some(wait) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(wait.as_secs()));
     }
     response
 }
@@ -668,6 +671,8 @@ pub fn unit(unit_type: UnitType, id: &str, done: bool) -> Unit {
         dpu: None,
         instance: None,
         expected: None,
+        controller_instance_id: None,
+        rest_machine: None,
     }
 }
 

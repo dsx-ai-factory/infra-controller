@@ -74,12 +74,12 @@ use axum::extract::State;
 use axum::middleware::from_fn_with_state;
 use axum::response::IntoResponse;
 use axum::routing::any;
-use carbide_instrument::emit;
-use forge_tls::client_config::ClientCert;
+use carbide_instrument::Instrumentation;
+use carbide_tls::client_config::ClientCert;
 use http::{Method, Request, Response, StatusCode};
 use moka::future::Cache as MokaCache;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use trace_propagation::set_span_parent_from_headers;
@@ -95,7 +95,7 @@ use crate::proxy::credentials::{
 };
 use crate::proxy::guard::{authorize_proxy_request, cert_description_layer, reject_ambiguous_path};
 use crate::proxy::ingress::{BmcProxy, RefreshableTlsAcceptor};
-use crate::proxy::response::{BmcOrigins, build_response, prepare_response_body};
+use crate::proxy::response::{BmcOrigins, ResponseContext, build_response, prepare_response_body};
 use crate::proxy::target::{
     IP_CACHE_TTL, LookupToIpCache, forwarded_header_value, ip_for_forwarded_target,
 };
@@ -123,13 +123,15 @@ pub(crate) enum BmcProxyError {
 }
 
 pub(crate) struct BmcProxyParams {
+    pub(crate) instrumentation: Instrumentation,
     pub(crate) config: Arc<crate::Config>,
 }
 
 #[derive(Clone)]
 struct BmcProxyState {
+    instrumentation: Instrumentation,
     config: Arc<crate::Config>,
-    api_client: ForgeApiClient,
+    api_client: CarbideApiClient,
     credential_cache: CredentialCache,
     upstream_clients: Arc<UpstreamClients>,
     ip_cache: LookupToIpCache,
@@ -180,7 +182,10 @@ pub(crate) async fn start(
     join_set: &mut JoinSet<()>,
 ) -> Result<(), BmcProxyError> {
     // Destructure params to save typing
-    let BmcProxyParams { config } = params;
+    let BmcProxyParams {
+        config,
+        instrumentation,
+    } = params;
 
     tracing::info!(
         listen_address = config.listen.to_string(),
@@ -195,7 +200,7 @@ pub(crate) async fn start(
         .await
         .map_err(BmcProxyError::Listen)?;
 
-    let client_config = ForgeClientConfig::new(
+    let client_config = CarbideClientConfig::new(
         config.carbide_api.root_ca.clone(),
         Some(ClientCert {
             cert_path: config.carbide_api.client_cert.clone(),
@@ -203,32 +208,39 @@ pub(crate) async fn start(
         }),
     );
     let api_config = ApiConfig::new(config.carbide_api.api_url.as_str(), &client_config);
-    let api_client = ForgeApiClient::new(&api_config);
+    let api_client = CarbideApiClient::new(&api_config, instrumentation.clone());
 
     let admission = Admission::start(
         &config.classes,
         &config.admission,
         cancel_token.clone(),
         join_set,
+        instrumentation.clone(),
     );
     let state = BmcProxyState {
+        instrumentation: instrumentation.clone(),
         upstream_clients: Arc::new(UpstreamClients::new(
             config.redirects.mode,
             config.tls.switch.as_ref(),
+            instrumentation.clone(),
         )?),
         config,
         api_client,
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         ip_cache: bounded_cache(IP_CACHE_TTL),
         admission,
-        switch_probe: Arc::new(SwitchProbe::default()),
+        switch_probe: Arc::new(SwitchProbe::new(instrumentation.clone())),
     };
 
     let app = proxy_routes(state.clone())
         .layer(from_fn_with_state(state.clone(), authorize_proxy_request))
-        .layer(cert_description_layer::<()>(&state.config.auth)?);
+        .layer(cert_description_layer::<()>(
+            &state.config.auth,
+            &state.instrumentation,
+        )?);
 
-    let tls_acceptor = RefreshableTlsAcceptor::new(state.config.tls.clone()).await?;
+    let tls_acceptor =
+        RefreshableTlsAcceptor::new(state.config.tls.clone(), instrumentation).await?;
 
     let bmc_proxy = BmcProxy {
         app,
@@ -275,6 +287,10 @@ fn root_url() -> &'static str {
 /// A returned same-BMC redirect can legitimately name `/`; a request carrying
 /// `Forwarded` must therefore enter the proxy path and receive normal ACL
 /// handling. Malformed `Forwarded` values also fail closed in that path.
+#[expect(
+    clippy::result_large_err,
+    reason = "both outcomes carry an HTTP response directly into Axum"
+)]
 async fn root_or_proxy(
     State(state): State<BmcProxyState>,
     request: Request<Body>,
@@ -299,12 +315,15 @@ async fn root_or_proxy(
     Ok(response)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "both outcomes carry an HTTP response directly into Axum"
+)]
 async fn proxy_request(
     State(state): State<BmcProxyState>,
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let request_span = bmc_proxy_request_span(&request);
-
     let result = proxy_request_inner(state, request)
         .instrument(request_span.clone())
         .await;
@@ -320,6 +339,7 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
     let request_span = tracing::info_span!(
         parent: None,
         "bmc_proxy_request",
+        otel.kind = "server",
         http.request.method = %request.method(),
         url.path = %request.uri().path(),
         http.response.status_code = tracing::field::Empty,
@@ -347,12 +367,16 @@ fn span_status(status: StatusCode) -> &'static str {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "both outcomes carry an HTTP response directly into Axum"
+)]
 async fn proxy_request_inner(
     state: BmcProxyState,
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let arrived = tokio::time::Instant::now();
-    if let Some(response) = reject_ambiguous_path(&request) {
+    if let Some(response) = reject_ambiguous_path(&request, &state.instrumentation) {
         return Ok(response);
     }
 
@@ -483,7 +507,7 @@ async fn proxy_request_inner(
     let attempt = if stale && upstream_body.is_replayable() {
         evict_cached_credentials(target_ip, &state.credential_cache).await;
         if attempt.is_ok() {
-            emit(UpstreamAuthRetried {
+            state.instrumentation.emit(UpstreamAuthRetried {
                 method: MethodLabel::from(&parts.method),
                 bmc_ip_address: target_ip.to_string(),
             });
@@ -534,10 +558,13 @@ async fn proxy_request_inner(
         status,
         &headers,
         body,
-        &origins,
-        &parts.method,
-        state.config.redirects.mode,
-        &sensitive_values,
+        ResponseContext {
+            origins: &origins,
+            method: &parts.method,
+            redirect_mode: state.config.redirects.mode,
+            sensitive_values: &sensitive_values,
+            instrumentation: &state.instrumentation,
+        },
     )
     .map(|body| slot.hold_until_sent(body)))
 }
@@ -570,7 +597,7 @@ fn answer_failed_attempt(
     if let Some(ended) = ended {
         report(slot, class, ended);
     }
-    failed.response
+    *failed.response
 }
 
 /// Counts an exchange that ended as `ended` against `class`'s breaker at the
@@ -638,7 +665,10 @@ mod tests {
 
     #[tokio::test]
     async fn root_dispatches_targeted_requests_to_the_proxy() {
-        let state = test_state_with_config(ROOT_ROUTE_TEST_CONFIG);
+        let state = test_state_with_config(
+            ROOT_ROUTE_TEST_CONFIG,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let app = proxy_routes(state);
 
         let banner = Request::builder()
@@ -742,6 +772,7 @@ mod tests {
             TraceId::from(inbound_trace)
         );
         assert_eq!(request.parent_span_id, SpanId::from(inbound_span));
+        assert_eq!(request.span_kind, opentelemetry::trace::SpanKind::Server);
     }
 
     #[test]

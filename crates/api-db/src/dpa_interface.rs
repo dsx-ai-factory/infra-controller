@@ -45,11 +45,11 @@ pub async fn persist(
     let state = DpaInterfaceControllerState::Provisioning;
     let description = value.device_description.unwrap_or_default();
 
-    let query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING row_to_json(dpa_interfaces.*)";
+    let query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type, interface_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING row_to_json(dpa_interfaces.*)";
 
     sqlx::query_as(query)
-        .bind(value.machine_id.to_string())
+        .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(network_config_version)
         .bind(sqlx::types::Json(&network_config))
@@ -59,6 +59,7 @@ pub async fn persist(
         .bind(value.pci_name)
         .bind(description)
         .bind(value.interface_type)
+        .bind(value.interface_name)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -88,14 +89,14 @@ pub async fn ensure(
         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b':' | b'.'))
         && PciBdfOrderingKey::from_bdf(&value.pci_name).is_ok();
 
-    let insert_query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    let insert_query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type, interface_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (machine_id, mac_address) DO UPDATE SET pci_name = EXCLUDED.pci_name
-            WHERE dpa_interfaces.deleted IS NULL AND dpa_interfaces.pci_name LIKE '/dev/mst/%' AND $11
+            WHERE dpa_interfaces.deleted IS NULL AND dpa_interfaces.pci_name LIKE '/dev/mst/%' AND $12
             RETURNING row_to_json(dpa_interfaces.*)";
 
     let result: Option<DpaInterface> = sqlx::query_as(insert_query)
-        .bind(value.machine_id.to_string())
+        .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(network_config_version)
         .bind(sqlx::types::Json(&network_config))
@@ -105,6 +106,7 @@ pub async fn ensure(
         .bind(value.pci_name)
         .bind(description)
         .bind(value.interface_type)
+        .bind(value.interface_name)
         .bind(is_canonical_pci_name)
         .fetch_optional(&mut *txn)
         .await
@@ -287,7 +289,7 @@ pub async fn update_card_state(
 
     sqlx::query_as(query)
         .bind(sqlx::types::Json(&value.card_state))
-        .bind(value.id.to_string())
+        .bind(value.id)
         .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -511,7 +513,7 @@ pub async fn find_by_ids(
 // Given a DPA Interface ID, return a vector of the DPA Interface structures
 // of all the DPAs in the same host machine.
 pub async fn get_dpas_in_machine(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: DpaInterfaceId,
 ) -> Result<Vec<DpaInterface>, DatabaseError> {
     // let query = "SELECT * row_to_json(m.*) from (select * from dpa_interfaces e
@@ -525,7 +527,7 @@ pub async fn get_dpas_in_machine(
     let results: Vec<DpaInterface> = {
         sqlx::query_as(query)
             .bind(id)
-            .fetch_all(&mut *txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?
     };
@@ -539,9 +541,9 @@ pub async fn get_dpas_in_machine(
 // to be in the same state before we move to the next state).
 pub async fn all_dpa_states_in_sync(
     value: &DpaInterface,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<bool, DatabaseError> {
-    let dpas_vec = get_dpas_in_machine(txn, value.id).await?;
+    let dpas_vec = get_dpas_in_machine(conn, value.id).await?;
 
     for dpa in &dpas_vec {
         if dpa.controller_state.value != value.controller_state.value {
@@ -607,17 +609,17 @@ pub async fn delete(value: DpaInterface, txn: &mut PgConnection) -> Result<(), D
 }
 
 pub async fn is_machine_dpa_capable(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: HostMachineId,
 ) -> Result<bool, DatabaseError> {
-    let result = batch_is_machine_dpa_capable(txn, &[machine_id]).await?;
+    let result = batch_is_machine_dpa_capable(conn, &[machine_id]).await?;
     Ok(result.contains(&machine_id))
 }
 
 /// Batch check which machines are DPA capable.
 /// Returns a HashSet of machine IDs that have DPA interfaces.
 pub async fn batch_is_machine_dpa_capable(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
 ) -> Result<HashSet<HostMachineId>, DatabaseError> {
     if machine_ids.is_empty() {
@@ -629,7 +631,7 @@ pub async fn batch_is_machine_dpa_capable(
 
     Ok(sqlx::query_scalar(query)
         .bind(machine_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?
         .into_iter()
@@ -693,7 +695,7 @@ mod test {
     use model::machine::ManagedHostState;
 
     use super::{DpaNetworkConfigNotCurrent, try_update_network_config};
-    use crate::{ConditionalWrite, machine};
+    use crate::{ConditionalWrite, TransactionVending as _, machine};
 
     /// The observation loader must return only this host's SVPC cards in ID
     /// order. Fixed IDs keep insertion order from accidentally proving sorting.
@@ -708,7 +710,7 @@ mod test {
             .try_into()
             .unwrap()
         });
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for host in hosts {
             machine::create(&mut txn, None, &host, ManagedHostState::Ready, None, 2)
                 .await
@@ -737,7 +739,7 @@ mod test {
         }
         txn.commit().await.unwrap();
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let cards = super::find_svpc_by_machine_id_for_update(&mut txn, hosts[0])
             .await
             .unwrap();
@@ -771,7 +773,7 @@ mod test {
             n: usize,
         ) -> Result<Vec<MachineId>, Box<dyn std::error::Error>> {
             let mut ids = Vec::with_capacity(n);
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             for i in offset..(offset + n) {
                 let mut hash = [0u8; 32];
                 hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
@@ -798,6 +800,7 @@ mod test {
                         pci_name: format!("{i:02x}:00.0"),
                         device_description: None,
                         interface_type: DpaInterfaceType::Svpc,
+                        interface_name: None,
                     },
                     &mut txn,
                 )
@@ -947,7 +950,7 @@ mod test {
     async fn network_config_requires_current_interface(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         machine::create(
@@ -967,6 +970,7 @@ mod test {
                 pci_name: "0000:cc:00.0".to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -978,7 +982,7 @@ mod test {
             use_admin_network: Some(false),
             ..Default::default()
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             try_update_network_config(&mut txn, &interface.id, old_version, &desired).await?,
             ConditionalWrite::Applied(interface.id)
@@ -989,7 +993,7 @@ mod test {
             ("stale snapshot", interface.id),
             ("missing interface", DpaInterfaceId::nil()),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             assert_eq!(
                 try_update_network_config(
                     &mut txn,
@@ -1018,7 +1022,7 @@ mod test {
 
     #[crate::sqlx_test]
     async fn test_find_interfaces(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
@@ -1032,6 +1036,7 @@ mod test {
             pci_name: "5e:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
 
         let intf = crate::dpa_interface::persist(new_intf, &mut txn).await?;
@@ -1053,7 +1058,7 @@ mod test {
     async fn deleting_interface_retains_state_history(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         machine::create(
@@ -1074,6 +1079,7 @@ mod test {
                 pci_name: "5e:00.0".to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -1141,7 +1147,7 @@ mod test {
     async fn deleting_machine_retains_dpa_interface_state_history(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         machine::create(
@@ -1162,6 +1168,7 @@ mod test {
                 pci_name: "5e:00.0".to_string(),
                 device_description: None,
                 interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
             },
             &mut txn,
         )
@@ -1203,7 +1210,7 @@ mod test {
     // both times without error, ensuring that ensure ensures as ensured!
     #[crate::sqlx_test]
     async fn test_ensure_idempotent(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
@@ -1224,6 +1231,7 @@ mod test {
             pci_name: "01:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
 
         // First call should insert a new interface.
@@ -1244,6 +1252,7 @@ mod test {
             pci_name: "01:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
         let second = crate::dpa_interface::ensure(second_intf, &mut txn).await?;
         assert_eq!(second.id, first.id);
@@ -1260,7 +1269,7 @@ mod test {
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
                 .unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         machine::create(
             &mut txn,
             None,
@@ -1296,7 +1305,7 @@ mod test {
                 "0000:dd:00.0",
             ),
         ] {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let mut card = super::persist(
                 NewDpaInterface {
                     machine_id,
@@ -1305,6 +1314,7 @@ mod test {
                     pci_name: saved_locator.into(),
                     device_description: Some("retained description".into()),
                     interface_type,
+                    interface_name: None,
                 },
                 &mut txn,
             )
@@ -1355,7 +1365,7 @@ mod test {
                 .await
                 .unwrap();
 
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let reported = super::ensure(
                 NewDpaInterface {
                     machine_id,
@@ -1364,6 +1374,7 @@ mod test {
                     pci_name: reported_locator.into(),
                     device_description: Some("replacement description".into()),
                     interface_type: DpaInterfaceType::Svpc,
+                    interface_name: None,
                 },
                 &mut txn,
             )
@@ -1394,7 +1405,7 @@ mod test {
     async fn test_device_info_roundtrip(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
@@ -1416,6 +1427,7 @@ mod test {
             pci_name: pci_name.to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         };
 
         crate::dpa_interface::persist(new_intf, &mut txn).await?;

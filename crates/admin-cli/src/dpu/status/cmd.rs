@@ -81,15 +81,18 @@ impl From<Machine> for DpuStatus {
                                 alerts.push('\n');
                             }
                             if let Some(target) = &alert.target {
-                                alerts += &format!("{} [Target: {}]", alert.id, target);
+                                alerts.push_str(alert.id.as_str());
+                                alerts.push_str(" [Target: ");
+                                alerts.push_str(target);
+                                alerts.push(']');
                             } else {
-                                alerts += &alert.id.to_string();
+                                alerts += alert.id.as_str();
                             }
                         }
                         alerts
                     }
                 })
-                .unwrap_or("Unknown".to_string()),
+                .unwrap_or_else(|| "Unknown".to_string()),
             version_status: None,
         }
     }

@@ -45,7 +45,7 @@ impl<B: Bmc> ExploredNetworkAdapterCollection<B> {
             Ok(None) => Ok(Self { members: vec![] }),
             Err(err) => Err(Error::NvRedfish {
                 context: "chassis network adapters",
-                err,
+                err: Box::new(err),
             }),
         }
     }

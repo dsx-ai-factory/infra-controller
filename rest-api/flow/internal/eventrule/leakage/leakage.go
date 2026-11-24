@@ -4,7 +4,7 @@
 package leakage
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -137,7 +137,7 @@ func affectedComponentIDs(resolvedRack *rack.Rack, sourceID uuid.UUID) ([]uuid.U
 	}
 
 	slices.SortFunc(ids, func(a, b uuid.UUID) int {
-		return cmp.Compare(a.String(), b.String())
+		return bytes.Compare(a[:], b[:])
 	})
 	return ids, nil
 }
@@ -157,7 +157,8 @@ func DefaultRule() *eventrule.Rule {
 					Name: "power_off_affected_components",
 					Spec: &eventrule.SubmitTask{
 						Operation: &operations.PowerControlTaskInfo{
-							Operation: operations.PowerOperationForcePowerOff,
+							Operation:              operations.PowerOperationForcePowerOff,
+							OverrideReadinessCheck: true,
 						},
 						TargetStrategy:   eventrule.TargetStrategyAffectedComponents,
 						ConflictStrategy: eventrule.ConflictStrategyQueue,

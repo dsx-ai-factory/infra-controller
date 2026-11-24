@@ -98,6 +98,7 @@ impl VerifyQuoteState {
 /// log, and will check to see if things are good (or if an
 /// error needs to be returned + the event log dumped to log).
 pub(crate) fn verify_quote_state(
+    instrumentation: &carbide_instrument::Instrumentation,
     signature_valid: bool,
     pcr_hash_matches: bool,
     event_log: &Option<Vec<u8>>,
@@ -106,7 +107,7 @@ pub(crate) fn verify_quote_state(
     match quote_state {
         VerifyQuoteState::Success => Ok(()),
         VerifyQuoteState::SignatureInvalid => {
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::SignatureInvalid,
                 event_log: event_log_to_string(event_log),
                 error: String::new(),
@@ -116,7 +117,7 @@ pub(crate) fn verify_quote_state(
             ))
         }
         VerifyQuoteState::VerifyHashNoMatch => {
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::HashMismatch,
                 event_log: event_log_to_string(event_log),
                 error: String::new(),
@@ -126,7 +127,7 @@ pub(crate) fn verify_quote_state(
             ))
         }
         VerifyQuoteState::CompleteFailure => {
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::SignatureAndHashMismatch,
                 event_log: event_log_to_string(event_log),
                 error: String::new(),
@@ -169,12 +170,9 @@ pub(crate) fn cli_make_cred(
     let ak_name_hex = hex::encode(ak_name_serialized);
 
     let session_key_path = tmp_dir_path.join("session_key.dat");
-    let session_key_path_str =
-        session_key_path
-            .to_str()
-            .ok_or(CarbideError::AttestBindKeyError(
-                "could not join seession_key_path".to_string(),
-            ))?;
+    let session_key_path_str = session_key_path.to_str().ok_or_else(|| {
+        CarbideError::AttestBindKeyError("could not join seession_key_path".to_string())
+    })?;
 
     let mut session_key_file = File::create(session_key_path.clone()).map_err(|e| {
         CarbideError::AttestBindKeyError(format!("could not create file for session key: {e}"))
@@ -184,18 +182,14 @@ pub(crate) fn cli_make_cred(
     })?;
 
     // construct the command to execute make_credential
-    let ek_file_path_str = ek_file_path
-        .to_str()
-        .ok_or(CarbideError::AttestBindKeyError(
-            "could not convert ek_file_path to str".to_string(),
-        ))?;
+    let ek_file_path_str = ek_file_path.to_str().ok_or_else(|| {
+        CarbideError::AttestBindKeyError("could not convert ek_file_path to str".to_string())
+    })?;
 
     let cred_out_path = tmp_dir_path.join("mkcred.out");
-    let cred_out_path_str = cred_out_path
-        .to_str()
-        .ok_or(CarbideError::AttestBindKeyError(
-            "could not join cred_out_path".to_string(),
-        ))?;
+    let cred_out_path_str = cred_out_path.to_str().ok_or_else(|| {
+        CarbideError::AttestBindKeyError("could not join cred_out_path".to_string())
+    })?;
 
     let cmd_str = format!(
         "tpm2 makecredential -u {ek_file_path_str} -s {session_key_path_str} -n {ak_name_hex} -o {cred_out_path_str} -G rsa -V --tcti=none"
@@ -323,9 +317,9 @@ pub(crate) fn event_log_to_string(event_log: &Option<Vec<u8>>) -> String {
         .as_ref()
         .map(|log_utf8| {
             String::from_utf8(log_utf8.to_vec())
-                .unwrap_or(String::from("<event log failed utf8 conversion>"))
+                .unwrap_or_else(|_| String::from("<event log failed utf8 conversion>"))
         })
-        .unwrap_or(String::from("<event log empty>"))
+        .unwrap_or_else(|| String::from("<event log empty>"))
 }
 
 #[cfg_attr(not(feature = "linux-build"), allow(unused_variables))]
@@ -552,16 +546,15 @@ mod tests {
     fn verification_failure_logs_and_counts_by_cause() {
         let event_log = Some(b"tpm event log".to_vec());
 
-        // The quote-failure DB tests each drive one cause once, from
-        // seconds-long flows that do not hold the capture lock -- the odds of
-        // one landing inside this capture window are negligible.
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
-            assert!(verify_quote_state(true, true, &event_log).is_ok());
-            assert!(verify_quote_state(false, true, &event_log).is_err());
-            assert!(verify_quote_state(true, false, &event_log).is_err());
-            assert!(verify_quote_state(false, false, &event_log).is_err());
-            carbide_instrument::emit(MeasuredBootVerificationFailed {
+            assert!(verify_quote_state(&instrumentation, true, true, &event_log).is_ok());
+            assert!(verify_quote_state(&instrumentation, false, true, &event_log).is_err());
+            assert!(verify_quote_state(&instrumentation, true, false, &event_log).is_err());
+            assert!(verify_quote_state(&instrumentation, false, false, &event_log).is_err());
+            instrumentation.emit(MeasuredBootVerificationFailed {
                 cause: MeasuredBootVerificationFailureCause::VerificationError,
                 event_log: event_log_to_string(&event_log),
                 error: "PCR signature verification failed: bad AK".to_string(),

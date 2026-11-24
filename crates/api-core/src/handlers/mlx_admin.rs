@@ -22,6 +22,8 @@ use carbide_uuid::machine::MachineId;
 use libmlx::profile::serialization::SerializableProfile;
 use tonic::{Request, Response, Status};
 
+pub(super) mod dispatch;
+
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::handlers::utils::convert_and_log_machine_id;
@@ -277,16 +279,7 @@ async fn handle_profile_sync(
     );
 
     // And now send the request off to the scout agent and wait for a response.
-    let response = api
-        .scout_stream_registry
-        .send_request(machine_id, request)
-        .await
-        .map_err(|status| CarbideError::Internal {
-            message: format!(
-                "error while attempting to sync profile to scout: {}",
-                status.message()
-            ),
-        })?;
+    let response = dispatch::send(api, machine_id, request).await?;
 
     // And now extract the response from the scout agent and
     // pass it back along to the administrative caller.
@@ -531,16 +524,7 @@ async fn handle_lockdown_lock(
     );
 
     // And now send the request off to the scout agent and wait for a response.
-    let response = api
-        .scout_stream_registry
-        .send_request(machine_id, request)
-        .await
-        .map_err(|status| CarbideError::Internal {
-            message: format!(
-                "error while attempting to lockdown::lock via scout: {}",
-                status.message()
-            ),
-        })?;
+    let response = dispatch::send(api, machine_id, request).await?;
     match response.payload {
         Some(scout_stream_api_bound_message::Payload::MlxDeviceLockdownResponse(
             lockdown_response,
@@ -602,16 +586,7 @@ async fn handle_lockdown_unlock(
     );
 
     // And now send the request off to the scout agent and wait for a response.
-    let response = api
-        .scout_stream_registry
-        .send_request(machine_id, request)
-        .await
-        .map_err(|status| CarbideError::Internal {
-            message: format!(
-                "error while attempting to lockdown::unlock via scout: {}",
-                status.message()
-            ),
-        })?;
+    let response = dispatch::send(api, machine_id, request).await?;
 
     match response.payload {
         Some(scout_stream_api_bound_message::Payload::MlxDeviceLockdownResponse(
@@ -1090,16 +1065,7 @@ async fn handle_config_set(
     );
 
     // And now send the request off to the scout agent and wait for a response.
-    let response = api
-        .scout_stream_registry
-        .send_request(machine_id, request)
-        .await
-        .map_err(|status| CarbideError::Internal {
-            message: format!(
-                "error while attempting to set config via scout: {}",
-                status.message()
-            ),
-        })?;
+    let response = dispatch::send(api, machine_id, request).await?;
 
     match response.payload {
         Some(scout_stream_api_bound_message::Payload::MlxDeviceConfigSetResponse(
@@ -1161,16 +1127,7 @@ async fn handle_config_sync(
     );
 
     // And now send the request off to the scout agent and wait for a response.
-    let response = api
-        .scout_stream_registry
-        .send_request(machine_id, request)
-        .await
-        .map_err(|status| CarbideError::Internal {
-            message: format!(
-                "error while attempting to sync config via scout: {}",
-                status.message()
-            ),
-        })?;
+    let response = dispatch::send(api, machine_id, request).await?;
 
     match response.payload {
         Some(scout_stream_api_bound_message::Payload::MlxDeviceConfigSyncResponse(
@@ -1324,18 +1281,11 @@ async fn get_device_lockdown_key(
     // promote convergence, so it must not silently migrate a card: unlock uses
     // the IKM the card is actually locked under, and lock re-locks at that same
     // version rather than the (possibly advanced) site-wide target.
-    let mut conn = api.database_connection.acquire().await.map_err(|e| {
-        CarbideError::Internal {
-            message: format!(
-                "failed to acquire connection to resolve lockdown IKM version (machine_id={machine_id}, device_id={device_id}): {e}"
-            ),
-        }
-    })?;
     // Versions are DB-native `i32` (Postgres has no unsigned int); convert to
     // `u32` once for the derivation call. No row / no tracked version falls back
     // to the seed version.
     let version = db::credential_rotation::device_rotation_operation_state(
-        &mut *conn,
+        &api.database_connection,
         db::credential_rotation::CredentialRotationType::LockdownIkm,
         dpa_interface.mac_address,
     )
@@ -1352,7 +1302,6 @@ async fn get_device_lockdown_key(
             "lockdown IKM version {version} is negative (machine_id={machine_id}, device_id={device_id}): {e}"
         ),
     })?;
-    drop(conn);
 
     let key = crate::dpa::lockdown::build_supernic_lockdown_key(
         &api.database_connection,

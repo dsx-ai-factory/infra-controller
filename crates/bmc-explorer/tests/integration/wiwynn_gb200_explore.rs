@@ -21,6 +21,112 @@ use tokio::test;
 use crate::common;
 
 #[test]
+async fn chassis_assemblies_preserve_board_and_tray_serials_on_new_firmware() {
+    let h = test_support::wiwynn_gb200_bmc().await;
+    let chassis = h.service_root.chassis().await.unwrap().unwrap();
+    let members = chassis.members().await.unwrap();
+    let chassis = members
+        .iter()
+        .find(|chassis| chassis.raw().id == "Chassis_0")
+        .unwrap();
+    let board_serial = chassis.hardware_id().serial_number.unwrap().to_string();
+    let assembly = chassis.assembly().await.unwrap().unwrap();
+    let assemblies = assembly.assemblies().await.unwrap();
+    assert_eq!(
+        assemblies[0].hardware_id().model.unwrap().into_inner(),
+        "Titania-Bianca Compute Tray PDB"
+    );
+    let tray_serial = assemblies[0]
+        .hardware_id()
+        .serial_number
+        .unwrap()
+        .to_string();
+    assert_ne!(tray_serial, board_serial);
+    assert_eq!(
+        assemblies[1]
+            .hardware_id()
+            .serial_number
+            .unwrap()
+            .to_string(),
+        board_serial
+    );
+
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
+    assert_eq!(
+        report
+            .systems
+            .iter()
+            .find(|system| system.id == "System_0")
+            .unwrap()
+            .serial_number
+            .as_deref(),
+        Some(board_serial.as_str())
+    );
+    // This is the serde representation written to explored_endpoints.exploration_report.
+    let json = serde_json::to_value(&report).unwrap();
+    let saved = json["Chassis"].as_array().unwrap();
+    let chassis = saved
+        .iter()
+        .find(|chassis| chassis["Id"] == "Chassis_0")
+        .unwrap();
+    assert_eq!(chassis["SerialNumber"], board_serial);
+    assert_eq!(
+        chassis["Assemblies"],
+        serde_json::json!([
+            {"MemberId": "0", "Name": "PDB Chassis FRU Assembly0",
+             "Model": "Titania-Bianca Compute Tray PDB", "SerialNumber": tray_serial},
+            {"MemberId": "1", "Name": "PDB Board FRU Assembly1",
+             "Model": "P5859 B01", "SerialNumber": board_serial}
+        ])
+    );
+    assert!(
+        saved
+            .iter()
+            .filter(|c| c["Id"] != "Chassis_0")
+            .all(|c| c.get("Assemblies").is_none())
+    );
+}
+
+#[test]
+async fn chassis_assemblies_follow_the_configured_chassis_ids() {
+    use bmc_mock::injection::{Action, Rule, Selector};
+
+    // Advertise the same Assembly on two chassis so the report identifies which link was followed.
+    const ASSEMBLY: &str = "/redfish/v1/Chassis/Chassis_0/Assembly";
+    for assembly_chassis_ids in [&["BMC_0"][..], &[]] {
+        let h = test_support::wiwynn_gb200_bmc().await;
+        h.state.injection.upsert(Rule {
+            id: "bmc-assembly-link".into(),
+            selector: Selector::OdataId("/redfish/v1/Chassis/BMC_0".into()),
+            action: Action::JsonMerge(serde_json::json!({"Assembly": {"@odata.id": ASSEMBLY}})),
+            remaining: None,
+        });
+        let config = bmc_explorer::Config {
+            assembly_chassis_ids,
+            ..common::explorer_config()
+        };
+        let root = h.service_root.as_ref().clone().restrict_expand().into();
+        let report = nv_generate_exploration_report(root, &config).await.unwrap();
+        let collected: Vec<_> = report
+            .chassis
+            .iter()
+            .filter(|chassis| !chassis.assemblies.is_empty())
+            .map(|chassis| chassis.id.as_str())
+            .collect();
+        assert_eq!(collected, assembly_chassis_ids);
+        let assembly_reads = h
+            .http_client
+            .take_requests()
+            .iter()
+            .filter(|req| req.uri.contains(ASSEMBLY))
+            .count();
+        assert_eq!(assembly_reads, assembly_chassis_ids.len());
+    }
+}
+
+#[test]
 async fn chassis_position_remains_the_source_for_gb200() {
     let h = test_support::wiwynn_gb200_bmc_at_rack_position(11).await;
     let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())

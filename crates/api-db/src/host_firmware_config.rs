@@ -98,7 +98,7 @@ pub async fn upsert(
 }
 
 pub async fn get(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vendor: &str,
     model: &str,
 ) -> DatabaseResult<Option<HostFirmwareConfigRow>> {
@@ -114,7 +114,7 @@ pub async fn get(
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vendor)
         .bind(model)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -190,6 +190,8 @@ mod tests {
     };
     use regex::Regex;
 
+    use crate::TransactionVending as _;
+
     fn test_config(version: &str) -> HostFirmwareConfig {
         HostFirmwareConfig {
             vendor: "nvidia".into(),
@@ -220,7 +222,7 @@ mod tests {
     async fn upsert_replaces_existing_row(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let first = super::upsert(&mut txn, &test_config("28.43.2026")).await?;
         let second = super::upsert(&mut txn, &test_config("28.47.2682")).await?;
@@ -247,7 +249,7 @@ mod tests {
     async fn list_and_summary_reflect_persisted_rows(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let empty_summary = super::summary(txn.as_mut()).await?;
         assert_eq!(empty_summary.row_count, 0);
@@ -281,7 +283,7 @@ mod tests {
     async fn delete_removes_existing_row_case_insensitively(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         super::upsert(&mut txn, &test_config("28.47.2682")).await?;
 
@@ -297,7 +299,7 @@ mod tests {
     async fn delete_returns_not_found_when_row_does_not_exist(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let error = super::delete(&mut txn, "Nvidia", "DGXH100")
             .await

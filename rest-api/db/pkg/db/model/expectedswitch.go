@@ -55,6 +55,8 @@ type ExpectedSwitch struct {
 	SwitchSerialNumber string    `bun:"switch_serial_number,notnull"`
 	BmcIpAddress       *string   `bun:"bmc_ip_address"`
 	NvosMacAddresses   []string  `bun:"nvos_mac_addresses,array"`
+	// NvosIpAddress is the optional static address for a single NVOS port.
+	NvosIpAddress *string `bun:"nvos_ip_address"`
 	// NvosPrimaryMacAddress is the NVOS MAC the operator designates as the primary
 	// (eth0) management port. Nil makes the first stored port the REST/Core wire
 	// default.
@@ -88,6 +90,8 @@ func NormalizeMacAddress(mac string) string {
 type NvosInterface struct {
 	MacAddress string
 	IsPrimary  bool
+	// IPAddress is present only when this is the switch's sole NVOS port.
+	IPAddress *string
 }
 
 // effectiveNvosPrimary returns the normalized MAC that should be treated as the
@@ -118,6 +122,9 @@ func (es *ExpectedSwitch) NvosInterfaces() []NvosInterface {
 			MacAddress: mac,
 			IsPrimary:  NormalizeMacAddress(mac) == primary,
 		})
+	}
+	if len(interfaces) == 1 {
+		interfaces[0].IPAddress = es.NvosIpAddress
 	}
 	return interfaces
 }
@@ -176,6 +183,7 @@ func (es *ExpectedSwitch) ToProto(creds ExpectedSwitchCredentials) *corev1.Expec
 		BmcMacAddress:      es.BmcMacAddress,
 		SwitchSerialNumber: es.SwitchSerialNumber,
 		NvosInterfaces:     es.nvosInterfacesProto(),
+		NvosIpAddress:      es.NvosIpAddress,
 	}
 
 	if es.BmcIpAddress != nil {
@@ -257,6 +265,7 @@ func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	es.BmcMacAddress = proto.BmcMacAddress
 	es.SwitchSerialNumber = proto.SwitchSerialNumber
 	es.setNvosInterfacesFromProto(proto.NvosInterfaces)
+	es.NvosIpAddress = cutil.GetPtrIfNotZero(proto.GetNvosIpAddress())
 	if proto.BmcIpAddress != "" {
 		addr := proto.BmcIpAddress
 		es.BmcIpAddress = &addr
@@ -288,6 +297,7 @@ type ExpectedSwitchCreateInput struct {
 	BmcIpAddress          *string
 	NvosMacAddresses      []string
 	NvosPrimaryMacAddress *string
+	NvosIpAddress         *string
 	RackID                *string
 	Name                  *string
 	Manufacturer          *string
@@ -308,6 +318,7 @@ type ExpectedSwitchUpdateInput struct {
 	BmcIpAddress          *string
 	NvosMacAddresses      []string
 	NvosPrimaryMacAddress *string
+	NvosIpAddress         *string
 	RackID                *string
 	Name                  *string
 	Manufacturer          *string
@@ -325,6 +336,7 @@ type ExpectedSwitchClearInput struct {
 	BmcIpAddress          bool
 	NvosMacAddresses      bool
 	NvosPrimaryMacAddress bool
+	NvosIpAddress         bool
 	RackID                bool
 	Name                  bool
 	Manufacturer          bool
@@ -395,6 +407,8 @@ type ExpectedSwitchDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedSwitch, int, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedSwitch, error)
 }
@@ -423,6 +437,7 @@ func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ex
 		BmcIpAddress:          input.BmcIpAddress,
 		NvosMacAddresses:      input.NvosMacAddresses,
 		NvosPrimaryMacAddress: input.NvosPrimaryMacAddress,
+		NvosIpAddress:         input.NvosIpAddress,
 		RackID:                input.RackID,
 		Name:                  input.Name,
 		Manufacturer:          input.Manufacturer,
@@ -467,13 +482,24 @@ func (essd ExpectedSwitchSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, 
 	ids := make([]uuid.UUID, 0, len(inputs))
 	for _, input := range inputs {
 		expectedSwitches = append(expectedSwitches, ExpectedSwitch{
-			ID: input.ExpectedSwitchID, SiteID: input.SiteID, BmcMacAddress: input.BmcMacAddress,
-			SwitchSerialNumber: input.SwitchSerialNumber, BmcIpAddress: input.BmcIpAddress,
-			NvosMacAddresses: input.NvosMacAddresses, NvosPrimaryMacAddress: input.NvosPrimaryMacAddress,
-			RackID: input.RackID, Name: input.Name,
-			Manufacturer: input.Manufacturer, Model: input.Model, Description: input.Description,
-			SlotID: input.SlotID, TrayIdx: input.TrayIdx, HostID: input.HostID,
-			Labels: input.Labels, CreatedBy: input.CreatedBy,
+			ID:                    input.ExpectedSwitchID,
+			SiteID:                input.SiteID,
+			BmcMacAddress:         input.BmcMacAddress,
+			SwitchSerialNumber:    input.SwitchSerialNumber,
+			BmcIpAddress:          input.BmcIpAddress,
+			NvosMacAddresses:      input.NvosMacAddresses,
+			NvosPrimaryMacAddress: input.NvosPrimaryMacAddress,
+			NvosIpAddress:         input.NvosIpAddress,
+			RackID:                input.RackID,
+			Name:                  input.Name,
+			Manufacturer:          input.Manufacturer,
+			Model:                 input.Model,
+			Description:           input.Description,
+			SlotID:                input.SlotID,
+			TrayIdx:               input.TrayIdx,
+			HostID:                input.HostID,
+			Labels:                input.Labels,
+			CreatedBy:             input.CreatedBy,
 		})
 		ids = append(ids, input.ExpectedSwitchID)
 	}
@@ -628,6 +654,35 @@ func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter E
 	return expectedSwitches, expectedSwitchPaginator.Total, nil
 }
 
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedSwitches matching the filter,
+// ordered by creation time, then ID
+// The returned slice is empty but not nil when no ExpectedSwitches match
+func (essd ExpectedSwitchSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.GetAllIDsAndUpdated")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
+
+	if filter.ExpectedSwitchIDs != nil && len(filter.ExpectedSwitchIDs) == 0 {
+		return idsAndUpdated, nil
+	}
+
+	query := db.GetIDB(tx, essd.dbSession).NewSelect().Model((*ExpectedSwitch)(nil)).Column("id", "updated")
+
+	query, err := essd.setQueryWithFilter(filter, query, expectedSwitchDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("es.created", "es.id").Scan(ctx, &idsAndUpdated)
+	if err != nil {
+		return nil, err
+	}
+
+	return idsAndUpdated, nil
+}
+
 // Update updates specified fields of an existing ExpectedSwitch
 // The updated fields are assumed to be set to non-null values
 // For setting to null values, use: Clear
@@ -664,6 +719,10 @@ func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ex
 	if input.NvosPrimaryMacAddress != nil {
 		es.NvosPrimaryMacAddress = input.NvosPrimaryMacAddress
 		columnsSet["nvos_primary_mac_address"] = true
+	}
+	if input.NvosIpAddress != nil {
+		es.NvosIpAddress = input.NvosIpAddress
+		columnsSet["nvos_ip_address"] = true
 	}
 	if input.RackID != nil {
 		es.RackID = input.RackID
@@ -753,6 +812,10 @@ func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Exp
 	if input.NvosPrimaryMacAddress {
 		es.NvosPrimaryMacAddress = nil
 		updatedFields = append(updatedFields, "nvos_primary_mac_address")
+	}
+	if input.NvosIpAddress {
+		es.NvosIpAddress = nil
+		updatedFields = append(updatedFields, "nvos_ip_address")
 	}
 	if input.RackID {
 		es.RackID = nil

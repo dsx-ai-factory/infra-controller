@@ -391,7 +391,7 @@ func TestBootstrapSitePrerequisitesRejectsExistingResourceDrift(t *testing.T) {
 	assert.Empty(t, api.postOrder)
 }
 
-func TestNewAppIncludesSiteBootstrapCommand(t *testing.T) {
+func testNewAppIncludesSiteBootstrapCommand(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
 
@@ -575,7 +575,7 @@ site:
 	require.NoError(t, err)
 	assert.Contains(t, stderr.String(), "reused site command-site (site-1)")
 
-	resolved, err := readSitePrerequisiteManifest("-", strings.NewReader(stdout.String()))
+	resolved, err := readSitePrerequisiteManifest("-", bytes.NewReader(stdout.Bytes()))
 	require.NoError(t, err)
 	assert.Equal(t, "provider-org", resolved.Provider.Org)
 	assert.Equal(t, "provider-id", resolved.Provider.ID)

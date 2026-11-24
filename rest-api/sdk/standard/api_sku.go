@@ -48,6 +48,8 @@ Create a SKU.
 
 The Org must have an Infrastructure Provider that owns the Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
 
+HTTP 409 covers an existing SKU ID or a concurrent REST mutation that prevents saving the local record. The error message identifies when Core has already created the SKU. If REST has not saved that record, GET can return HTTP 404 until inventory reconciliation discovers the SKU. Refresh the SKU before retrying.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateSkuRequest
@@ -147,6 +149,17 @@ func (a *SKUAPIService) CreateSkuExecute(r ApiCreateSkuRequest) (*Sku, *http.Res
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -180,6 +193,10 @@ DeleteSku Delete SKU
 Delete an unused SKU. The Site is determined from the saved SKU record.
 
 The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+Requires a `Registered` Site. Returns `400` if the SKU is associated with a Machine or referenced by an Expected Machine, including an in-flight batch create. Expected Machine requests that attach this SKU wait for deletion to finish, while concurrent SKU changes return `409`. Returns `204` once the SKU is deleted, including when it was already absent on the Site.
+
+Requests time out with `504` after `50s` or the caller's earlier deadline. Returns `503` when Site communication is unavailable. Deletion on the Site can still finish after a timeout, so repeat the `DELETE` to join an in-flight call or clean up a SKU already removed on the Site. Avoid recreating the same SKU ID until an interrupted deletion completes. Inventory reconciliation also removes an unreferenced SKU once the Site stops reporting it. If an Expected Machine attaches to a retained SKU before cleanup, remove that reference before retrying `DELETE`.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -278,6 +295,83 @@ func (a *SKUAPIService) DeleteSkuExecute(r ApiDeleteSkuRequest) (*http.Response,
 			return localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -644,6 +738,8 @@ the schema version will be updated to the current version (5).
 
 The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
 
+HTTP 409 can occur after Core updates the SKU if a concurrent REST mutation prevents saving the local record. The error message identifies this condition. Refresh the SKU before retrying; inventory reconciliation can update the local record after the Core change.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@param skuId ID of the SKU
@@ -749,6 +845,17 @@ func (a *SKUAPIService) UpdateSkuExecute(r ApiUpdateSkuRequest) (*Sku, *http.Res
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

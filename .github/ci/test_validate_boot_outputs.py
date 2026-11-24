@@ -203,10 +203,10 @@ class ValidateBootOutputsTests(unittest.TestCase):
             "x86_64": {
                 "pxe/static/blobs/internal/x86_64/ipxe.efi",
                 "pxe/static/blobs/internal/x86_64/golan.efi",
-                "pxe/static/blobs/internal/apt/dists/focal/Release",
-                "pxe/static/blobs/internal/apt/dists/focal/main/binary-amd64/Packages",
-                "pxe/static/blobs/internal/apt/dists/focal/main/binary-amd64/Release",
-                "pxe/static/blobs/internal/apt/pool/base/f/forge-scout/forge-scout_*_amd64.deb",
+                "pxe/static/blobs/internal/x86_64/apt/dists/focal/Release",
+                "pxe/static/blobs/internal/x86_64/apt/dists/focal/main/binary-amd64/Packages",
+                "pxe/static/blobs/internal/x86_64/apt/dists/focal/main/binary-amd64/Release",
+                "pxe/static/blobs/internal/x86_64/apt/pool/base/f/forge-scout/forge-scout_*_amd64.deb",
                 "target/debs/forge-scout_*_amd64.deb",
             },
             "aarch64": {

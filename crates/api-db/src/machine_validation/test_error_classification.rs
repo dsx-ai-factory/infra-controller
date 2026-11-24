@@ -23,11 +23,14 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::db_read::PgPoolReader;
-use crate::{DatabaseError, machine, machine_validation_config, machine_validation_result};
+use crate::{
+    DatabaseError, TransactionVending as _, machine, machine_validation_config,
+    machine_validation_result,
+};
 
 #[crate::sqlx_test]
 async fn find_by_id_decodes_legacy_success_and_rejects_unknown_state(pool: PgPool) {
-    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let mut txn = pool.txn_begin().await.expect("begin fixture transaction");
     let machine_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x67; 32],
@@ -77,7 +80,7 @@ async fn find_by_id_decodes_legacy_success_and_rejects_unknown_state(pool: PgPoo
 
 #[crate::sqlx_test]
 async fn missing_external_config_returns_not_found(pool: PgPool) {
-    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let mut txn = pool.txn_begin().await.expect("begin fixture transaction");
     let name = "missing-config";
     let cases = [
         (
@@ -102,7 +105,7 @@ async fn missing_external_config_returns_not_found(pool: PgPool) {
 
 #[crate::sqlx_test]
 async fn malformed_external_config_preserves_decode_error(pool: PgPool) {
-    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let mut txn = pool.txn_begin().await.expect("begin fixture transaction");
     let name = "invalid-version";
     // Seed through SQL because `ConfigVersion` cannot represent malformed stored data.
     sqlx::query(

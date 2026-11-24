@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverSSHKeyGroupInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("SSHKeyGroup: Successfully registered DiscoverSSHKeyGroupInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

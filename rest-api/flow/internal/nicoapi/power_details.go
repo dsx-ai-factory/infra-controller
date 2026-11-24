@@ -10,7 +10,8 @@ import (
 )
 
 // GetComponentPowerDetails uses the shared client and keeps a shorter caller
-// deadline. A tray request selects one ID, within Core's 1–64 target contract.
+// deadline. Callers select one tray or a homogeneous batch within Core's
+// 1–64 target contract.
 func (c *grpcClient) GetComponentPowerDetails(ctx context.Context, request *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
 	defer cancel()

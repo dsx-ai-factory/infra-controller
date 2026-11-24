@@ -17,11 +17,12 @@
 
 use std::collections::HashMap;
 
-use ::db::resource_pool::ResourcePoolDatabaseError;
-use ::db::{ObjectColumnFilter, vpc_prefix as db};
+use ::db::{DatabaseError, ObjectColumnFilter, vpc_prefix as db};
 use ::rpc::forge as rpc;
 use ::rpc::forge::PrefixMatchType;
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::remote::RemoteResourcePoolError;
+use carbide_resource_pool::{AllocationStatus, ResourcePoolBackendError};
 use ipnetwork::IpNetwork;
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::NetworkSegmentType;
@@ -183,8 +184,10 @@ async fn validate_vpc_prefix_overlaps(
     Ok(())
 }
 
-/// A retained VNI may still carry routes from a previous profile. Overlap
-/// admission requires one owned allocation, not just a matching active VNI.
+/// Prefix reuse requires exactly one owned VNI matching the active VNI.
+/// An unfinished release in any generation can still leave old routes present;
+/// unused Pending or cancelling attempts do not change serving ownership.
+/// Remote attachment already checked its original accepted eligibility.
 /// The caller holds the VPC mutation lock until the prefix write completes.
 pub(super) async fn validate_overlap_vni(
     api: &Api,
@@ -192,38 +195,64 @@ pub(super) async fn validate_overlap_vni(
     vpc: &Vpc,
 ) -> CarbideResult<()> {
     let owner_id = vpc.id.to_string();
+    if api
+        .resource_pool_registry
+        .cleanup_status(txn, OwnerType::Vpc, &owner_id, super::vni::VNI_SLOT)
+        .await?
+        .release_requested
+    {
+        return Err(super::tenant_prefix_overlap::overlap_error());
+    }
     let mut allocation = None;
     for pool in [
         &api.common_pools.ethernet.pool_vpc_vni,
         &api.common_pools.ethernet.pool_external_vpc_vni,
     ] {
-        let owned = ::db::resource_pool::find_owned_allocation(pool, txn, OwnerType::Vpc, &owner_id)
+        for state in api
+            .resource_pool_registry
+            .inspect_allocations(pool, txn, OwnerType::Vpc, &owner_id, super::vni::VNI_SLOT)
             .await
-            .map_err(|error| {
-                let invalid_allocation = match &error {
-                    ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::Parse { .. }) => true,
-                    ResourcePoolDatabaseError::Database(error) => {
-                        matches!(error.as_ref(), ::db::DatabaseError::FailedPrecondition(_))
-                    }
-                    _ => false,
-                };
-                if invalid_allocation {
-                    tracing::warn!(vpc_id = %vpc.id, %error, "invalid VNI allocation for prefix overlap");
-                    super::tenant_prefix_overlap::overlap_error()
-                } else {
-                    error.into()
-                }
-            })?;
-        if let Some(owned) = owned
-            && allocation.replace(owned).is_some()
+            .map_err(|error| map_overlap_allocation_error(vpc.id, error))?
         {
-            return Err(super::tenant_prefix_overlap::overlap_error());
+            match state {
+                AllocationStatus::Attached { value } => {
+                    if allocation.replace(value).is_some() {
+                        return Err(super::tenant_prefix_overlap::overlap_error());
+                    }
+                }
+                AllocationStatus::ReleaseRequested { .. } => {
+                    return Err(super::tenant_prefix_overlap::overlap_error());
+                }
+                AllocationStatus::Pending | AllocationStatus::CancelRequested => {}
+            }
         }
     }
     if allocation.is_none() || allocation != vpc.status.vni {
         return Err(super::tenant_prefix_overlap::overlap_error());
     }
     Ok(())
+}
+
+/// Preserve ownership-corruption rejection without hiding binding or SQL failures.
+fn map_overlap_allocation_error(
+    vpc_id: carbide_uuid::vpc::VpcId,
+    error: ResourcePoolBackendError,
+) -> CarbideError {
+    let invalid_allocation = matches!(
+        &error,
+        ResourcePoolBackendError::Database(
+            DatabaseError::ResourcePoolError(ResourcePoolError::Parse { .. })
+                | DatabaseError::FailedPrecondition(_)
+        ) | ResourcePoolBackendError::Remote(
+            RemoteResourcePoolError::InvalidRecord(_) | RemoteResourcePoolError::Value(_)
+        ) | ResourcePoolBackendError::Value(_)
+    );
+    if invalid_allocation {
+        tracing::warn!(%vpc_id, %error, "invalid VNI allocation for prefix overlap");
+        super::tenant_prefix_overlap::overlap_error()
+    } else {
+        error.into()
+    }
 }
 
 /// `adoptable_segment_prefixes` returns direct Tenant prefixes the `VpcPrefix`
@@ -279,7 +308,7 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
-    ::db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     // Resolve and lock the exact SitePrefix before locking the VPC. The shared
     // row lock permits concurrent child creation but conflicts with retirement
@@ -365,15 +394,22 @@ pub(crate) async fn create(
     if let Some(ref site_prefix) = selected_site_prefix {
         validate_site_prefix_attachment(site_prefix, vpc, new_prefix.config.prefix)?;
         new_prefix.site_prefix_id = Some(site_prefix.id);
-    } else if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes {
-        // Preserve the mixed-version configured-root path. Production startup
-        // reconciles configured roots into SitePrefix rows; this fallback keeps
-        // feature-off sites and older writers behaviorally compatible while
-        // the nullable expand phase is deployed.
+    } else {
         let prefix = new_prefix.config.prefix;
-        if !site_prefixes.contains(prefix) {
+        if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes
+            && !site_prefixes.contains(prefix)
+        {
             return Err(CarbideError::InvalidArgument(format!(
                 "the VPC prefix {prefix} is not contained within the site fabric prefixes"
+            ))
+            .into());
+        }
+        // A replica can still have the old config after another replica
+        // retires its roots. Do not reopen that space as rootless, but preserve
+        // the preceding tenant-parent hint and configured-range validation.
+        if !api.runtime_config.site_fabric_prefixes.is_empty() {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "the VPC prefix {prefix} has no containing operator-managed SitePrefix"
             ))
             .into());
         }
@@ -519,10 +555,8 @@ pub(crate) async fn search(
         })
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-
     let vpc_prefix_ids = db::search(
-        &mut txn,
+        api.pg_pool(),
         vpc_prefix::VpcPrefixSearch {
             vpc_id,
             site_prefix_id,
@@ -532,8 +566,6 @@ pub(crate) async fn search(
         },
     )
     .await?;
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(rpc::VpcPrefixIdList {
         vpc_prefix_ids,
@@ -558,16 +590,12 @@ pub(crate) async fn get(
         return Err(CarbideError::InvalidArgument(msg).into());
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let vpc_prefixes = db::get_by_id(
-        &mut txn,
+        &mut api.db_reader(),
         ObjectColumnFilter::List(db::IdColumn, vpc_prefix_ids.as_slice()),
         model::DeletedFilter::from(deleted),
     )
     .await?;
-
-    txn.commit().await?;
 
     let vpc_prefixes: Vec<_> = vpc_prefixes.into_iter().map(rpc::VpcPrefix::from).collect();
     Ok(tonic::Response::new(rpc::VpcPrefixList { vpc_prefixes }))
@@ -595,9 +623,8 @@ pub(crate) async fn find_state_histories(
     }
 
     // Fetch state-history rows through the generic state-history DB API.
-    let mut txn = api.txn_begin().await?;
     let results = ::db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         ::db::state_history::StateHistoryTableId::VpcPrefix,
         &vpc_prefix_ids,
     )
@@ -614,7 +641,6 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    txn.commit().await?;
     Ok(tonic::Response::new(response))
 }
 
@@ -683,4 +709,27 @@ pub(crate) async fn delete(
     txn.commit().await?;
 
     Ok(tonic::Response::new(rpc::VpcPrefixDeletionResult {}))
+}
+
+#[cfg(test)]
+mod allocation_error_tests {
+    use carbide_resource_pool::ResourcePoolRegistryError;
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    /// Binding failures stay actionable; malformed ownership remains ineligible.
+    #[test]
+    fn prefix_allocation_errors_preserve_configuration_failures() {
+        let id = carbide_uuid::vpc::VpcId::new();
+        value_scenarios!(run = |error| Status::from(map_overlap_allocation_error(id, error)).code();
+            "distinct error sources" {
+                ResourcePoolBackendError::Registry(ResourcePoolRegistryError::UnsupportedAuthority {
+                    name: "vpc-vni".into(),
+                }) => tonic::Code::FailedPrecondition,
+                ResourcePoolBackendError::Remote(RemoteResourcePoolError::InvalidRecord("missing assignment"))
+                    => tonic::Code::InvalidArgument,
+            }
+        );
+    }
 }

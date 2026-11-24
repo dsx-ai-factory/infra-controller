@@ -709,28 +709,8 @@ pub fn convert_pci_name_to_address(pci_name: &str) -> Result<String, String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-
-    // A sibling test's fork must not inherit a writable executable descriptor.
     #[cfg(target_os = "linux")]
-    async fn write_fixture_executable(path: &Path, script: &str) {
-        let status = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(path)
-                .arg(script)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer must finish within its watchdog")
-        .expect("start isolated fixture writer");
-        assert!(status.success(), "fixture writer failed: {status}");
-    }
+    use crate::runner::write_fixture_executables;
 
     #[cfg(unix)]
     const DEVICE_XML: &str = r#"<Devices><Device pciName="ab:01.0" type="BlueField3" partNumber="part" psid="PSID"><Versions><FW current="32.43.1014"/></Versions></Device></Devices>"#;
@@ -905,27 +885,20 @@ mod tests {
             std::fs::create_dir_all(&rdma_device).unwrap();
             std::fs::write(rdma_device.join("fw_ver"), "32.42.1000\n").unwrap();
 
-            // Write executables in a short-lived process so another test's fork
-            // cannot inherit a writable descriptor and cause ETXTBSY.
-            let status = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::process::Command::new("/bin/sh")
-                    .args([
-                        "-c",
-                        "set -eu; umask 077; while [ \"$#\" -gt 0 ]; do printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"; shift 2; done",
-                        "fixture-writer",
-                    ])
-                    .arg(directory.path().join("mlxfwmanager"))
-                    .arg("#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > query-arguments\ncat inventory.xml\nexit 1\n")
-                    .arg(directory.path().join("mst"))
-                    .arg("#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > mst-arguments\ncat mst-status\n")
-                    .kill_on_drop(true)
-                    .status(),
+            write_fixture_executables(
+                directory.path(),
+                &[
+                    (
+                        "mlxfwmanager",
+                        "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > query-arguments\ncat inventory.xml\nexit 1\n",
+                    ),
+                    (
+                        "mst",
+                        "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > mst-arguments\ncat mst-status\n",
+                    ),
+                ],
             )
-            .await
-            .expect("fixture writer must finish within its watchdog")
-            .unwrap();
-            assert!(status.success(), "{}: fixture writer", case.scenario);
+            .await;
 
             let devices = tokio::time::timeout(
                 Duration::from_secs(5),
@@ -1060,13 +1033,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("mlxfwmanager");
         let locator = "/dev/mst/mt41692_pciconf0";
-        write_fixture_executable(
-            &program,
-            &format!(
-                "#!/bin/sh\ncd -- \"${{0%/*}}\"\nprintf '%s\\n' \"$@\" > arguments\n\
-                 printf '%s' '<Devices><Device pciName=\"{locator}\" type=\"BlueField3\"/></Devices>'\n\
-                 exit 1\n"
-            ),
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "mlxfwmanager",
+                &format!(
+                    "#!/bin/sh\ncd -- \"${{0%/*}}\"\nprintf '%s\\n' \"$@\" > arguments\n\
+                     printf '%s' '<Devices><Device pciName=\"{locator}\" type=\"BlueField3\"/></Devices>'\n\
+                     exit 1\n"
+                ),
+            )],
         )
         .await;
 
@@ -1095,15 +1071,18 @@ mod tests {
     async fn bounded_inventory_preserves_all_devices() {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("mlxfwmanager");
-        write_fixture_executable(
-            &program,
-            concat!(
-                "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > arguments\n",
-                "printf '%s' '<Devices>",
-                "<Device pciName=\"0000:ab:01.0\" type=\"BlueField3\"/>",
-                "<Device pciName=\"0001:ab:01.0\" type=\"BlueField3\"/>",
-                "</Devices>'\nexit 1\n",
-            ),
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "mlxfwmanager",
+                concat!(
+                    "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > arguments\n",
+                    "printf '%s' '<Devices>",
+                    "<Device pciName=\"0000:ab:01.0\" type=\"BlueField3\"/>",
+                    "<Device pciName=\"0001:ab:01.0\" type=\"BlueField3\"/>",
+                    "</Devices>'\nexit 1\n",
+                ),
+            )],
         )
         .await;
         let devices = tokio::time::timeout(
@@ -1137,9 +1116,12 @@ mod tests {
     async fn bounded_inventory_reaps_a_stalled_query() {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("mlxfwmanager");
-        write_fixture_executable(
-            &program,
-            "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s' \"$$\" > pid\nexec /bin/sleep 30\n",
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "mlxfwmanager",
+                "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s' \"$$\" > pid\nexec /bin/sleep 30\n",
+            )],
         )
         .await;
         let error = tokio::time::timeout(

@@ -5,6 +5,13 @@
 # build context, so other builds download every module from the proxy.
 FROM scratch AS gomodcache
 
+FROM nvcr.io/nvidia/distroless/go:v4.1.8@sha256:676c150ccfb5987f58bbee9accfa506d5519d4acf4252f799d311476a0a7f1b5 AS runtime
+
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS ca-bundle
+COPY --from=runtime /etc/ssl/certs/ca-certificates.crt /ca-certificates.crt
+RUN --mount=type=bind,source=docker/production/distrusted-roots.sh,target=/distrusted-roots.sh \
+    sh /distrusted-roots.sh /ca-certificates.crt
+
 # Build stage
 FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
@@ -44,7 +51,6 @@ COPY ipam/ ./ipam/
 COPY site-workflow/ ./site-workflow/
 COPY proto/ ./proto/
 COPY site-manager/ ./site-manager/
-COPY cert-manager/ ./cert-manager/
 
 # Create Temporal certs directory
 RUN mkdir -p /var/secrets/temporal/certs
@@ -54,12 +60,14 @@ WORKDIR /workspace/workflow
 RUN VERSION=${VERSION} && \
     BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S") && \
     go build \
-        -ldflags "-extldflags '-static' -w -s" \
+        -ldflags "-extldflags '-static' -w -s \
+                  -X 'github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}'" \
         -o /app/workflow \
         ./cmd/workflow
 
 # Final stage
-FROM nvcr.io/nvidia/distroless/go:v4.0.8 AS final
+FROM runtime AS final
+COPY --from=ca-bundle /ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /app
 

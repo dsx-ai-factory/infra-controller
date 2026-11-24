@@ -60,7 +60,7 @@ type InstanceUpdateRequest struct {
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
 	// Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance's individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Removing attachments from a running Instance immediately stops SpectrumX traffic on the detached NICs, but the guest may retain their IPv4 addresses and routes until the DHCP lease issued by the DOCA Weave DHCP agent expires (1 hour by default). NICo does not set this lease duration. Addresses and routes may remain longer if the guest DHCP client does not honor lease expiry. Replacing attachments on a running Instance, such as moving a NIC to a Partition with a different VNI, may leave the guest using its old address until DHCP renewal. Renew DHCP or restart networking on the affected NICs after replacing attachments.
 	SpectrumXAttachments []InstanceSpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments,omitempty"`
-	// Update NVLink Interfaces of the Instance. A subset of GPUs may be specified. Each item references a GPU index (`deviceInstance`) and an NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions. Partial updates are not allowed; specified interfaces will delete or replace existing Interfaces. Updating is not allowed if the Instance's VPC has the `nvLinkLogicalPartitionId` attribute set.
+	// Update NVLink Interfaces of the Instance. Omission or `null` leaves interfaces unchanged; an explicit list replaces them entirely, detaching any not included. An empty list (`[]`) removes all existing interfaces. If the owning VPC has `nvLinkLogicalPartitionId` set, changes to an Instance that already has live interfaces will return 400.
 	NvLinkInterfaces []NVLinkInterfaceCreateOrUpdateRequest `json:"nvLinkInterfaces,omitempty"`
 	// Updated set of DPU Extension Services to deploy to the DPUs of this Instance
 	DpuExtensionServiceDeployments []DpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments,omitempty"`
@@ -834,9 +834,9 @@ func (o *InstanceUpdateRequest) SetSpectrumXAttachments(v []InstanceSpectrumXAtt
 	o.SpectrumXAttachments = v
 }
 
-// GetNvLinkInterfaces returns the NvLinkInterfaces field value if set, zero value otherwise.
+// GetNvLinkInterfaces returns the NvLinkInterfaces field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceUpdateRequest) GetNvLinkInterfaces() []NVLinkInterfaceCreateOrUpdateRequest {
-	if o == nil || IsNil(o.NvLinkInterfaces) {
+	if o == nil {
 		var ret []NVLinkInterfaceCreateOrUpdateRequest
 		return ret
 	}
@@ -965,7 +965,7 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if o.SpectrumXAttachments != nil {
 		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
 	}
-	if !IsNil(o.NvLinkInterfaces) {
+	if o.NvLinkInterfaces != nil {
 		toSerialize["nvLinkInterfaces"] = o.NvLinkInterfaces
 	}
 	if !IsNil(o.DpuExtensionServiceDeployments) {

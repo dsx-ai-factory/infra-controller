@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Then codegen them.
     tonic_prost_build::configure()
         .build_server(true)
-        .build_client(false) // we're using ForgeApiClient from rpc crate
+        .build_client(false) // we're using CarbideApiClient from rpc crate
         .extern_path(".common.MachineId", "::carbide_uuid::machine::MachineId")
         .extern_path(
             ".common.DpuMachineId",

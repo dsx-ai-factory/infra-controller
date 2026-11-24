@@ -33,12 +33,10 @@ pub struct FirmwareGlobal {
     /// background firmware manager.
     #[serde(default)]
     pub autoupdate: bool,
-    /// Host model names to force-enable autoupdate on,
-    /// regardless of the global `autoupdate` setting.
+    /// Legacy field. Automatic host selection does not read it.
     #[serde(default)]
     pub host_enable_autoupdate: Vec<String>,
-    /// Host model names to force-disable autoupdate on,
-    /// regardless of the global `autoupdate` setting.
+    /// Host machine IDs excluded from automatic host selection.
     #[serde(default)]
     pub host_disable_autoupdate: Vec<String>,
     /// Frequency at which the firmware manager checks for
@@ -54,8 +52,11 @@ pub struct FirmwareGlobal {
     /// Default is 4.
     #[serde(default = "FirmwareGlobal::max_uploads_default")]
     pub max_uploads: usize,
-    /// Maximum concurrent firmware flashing operations
-    /// across all machines.
+    /// Maximum number of pre-ingestion endpoint tasks running concurrently
+    /// within one pass. Use 1 through [`tokio::sync::Semaphore::MAX_PERMITS`].
+    /// Zero stalls a nonempty pass; values above that maximum panic when
+    /// the pass starts.
+    /// Separate from Machine Update Manager capacity for managed hosts.
     /// Default is 16.
     #[serde(default = "FirmwareGlobal::concurrency_limit_default")]
     pub concurrency_limit: usize,
@@ -96,8 +97,13 @@ pub struct FirmwareGlobal {
         serialize_with = "as_duration"
     )]
     pub host_firmware_upgrade_retry_interval: Duration,
-    /// Requires manual tagging of instances before
-    /// firmware updates are applied.
+    /// Restricts automatic host candidate discovery to top-level `Ready`
+    /// when `true`. When `false`, discovery skips this state filter and
+    /// still sorts `Ready` first. Other admission and execution gates apply.
+    /// Core merges base, site, and `CARBIDE_API_` configuration before
+    /// applying defaults: `true` if the merged `firmware_global` table
+    /// omits this field, or `false` if that table is absent. A
+    /// `[firmware_global.downloads]` section also creates the parent table.
     #[serde(default = "FirmwareGlobal::instance_updates_manual_tagging_default")]
     pub instance_updates_manual_tagging: bool,
     /// Disables retry logic after BMC resets during

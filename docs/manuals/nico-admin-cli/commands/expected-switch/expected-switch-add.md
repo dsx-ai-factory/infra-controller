@@ -13,9 +13,9 @@ nico-admin-cli expected-switch add <-a|--bmc-mac-address>
 <-u|--bmc-username> <-p|--bmc-password>
 <-s|--switch-serial-number> <--nvos-interface>
 [--nvos-username] [--nvos-password] [--meta-name]
-[--meta-description] [--label] [--rack_id]
-[--bmc-ip-address] [--nvos-ip-address]
-[--bmc-retain-credentials] [--extended] [--sort-by]
+[--meta-description] [--extended] [--label]
+[--rack_id] [--bmc-ip-address] [--nvos-ip-address]
+[--bmc-retain-credentials] [--sort-by]
 [-h|--help]
 ```
 
@@ -44,8 +44,8 @@ Chassis serial number of the expected switch
 `--nvos-interface <MAC[,primary]>`
 
 An NVOS ethernet port of the expected switch. Repeat for each port.
-Append ,primary to mark the primary port (eth0); when none is marked the
-first is primary and a single port is always primary
+Append ',primary' to mark the primary port (eth0); when none is marked
+the first is primary and a single port is always primary
 
 `--nvos-username <NVOS_USERNAME>`
 
@@ -64,6 +64,14 @@ Switches. If empty, the SwitchId will be used
 
 The description that should be used as part of the Metadata for newly
 created Machines
+
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
 
 `--label <LABEL>`
 
@@ -94,17 +102,9 @@ factory-default credentials in Vault as-is
 
 *Possible values:*
 
-- true
-
-- false
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
+> - true
+>
+> - false
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -112,13 +112,13 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

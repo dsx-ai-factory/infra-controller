@@ -22,6 +22,8 @@ pub(super) mod args;
 #[cfg(test)]
 mod tests;
 
+use std::fmt::Write;
+
 use args::Args;
 use model::attestation::profile::ANY_HARDWARE_CLASS;
 use prettytable::{Table, row};
@@ -135,11 +137,14 @@ fn attester_counts(sets: &[AttesterSetView]) -> String {
     let mut counts: Vec<_> = sets.iter().map(|set| set.attesters).collect();
     counts.sort_unstable();
     counts.dedup();
-    counts
-        .iter()
-        .map(i32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut output = String::new();
+    for (index, count) in counts.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        write!(output, "{count}").expect("writing to a String cannot fail");
+    }
+    output
 }
 
 /// One recorded set of attesters, how many it holds, and how many of the
@@ -217,15 +222,15 @@ async fn write_coverage(
             view.hardware_class.as_deref().unwrap_or(NO_CLASS_RECORDED),
             view.explored_endpoints
                 .map(|count| count.to_string())
-                .unwrap_or(NOT_APPLICABLE.to_string()),
+                .unwrap_or_else(|| NOT_APPLICABLE.to_string()),
             view.attester_sets
                 .as_deref()
                 .map(attester_counts)
-                .unwrap_or(NOT_APPLICABLE.to_string()),
+                .unwrap_or_else(|| NOT_APPLICABLE.to_string()),
             view.attester_sets
                 .as_ref()
                 .map(|sets| sets.len().to_string())
-                .unwrap_or(NOT_APPLICABLE.to_string()),
+                .unwrap_or_else(|| NOT_APPLICABLE.to_string()),
             view.own_profile,
             view.would_use,
         ]);

@@ -3,9 +3,10 @@
 
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use sqlx::{Acquire, PgPool};
+use sqlx::PgPool;
 
 use super::{IgnoringMissing, MIGRATION_LAYOUT, Migrator, migrate_before};
+use crate::TransactionVending as _;
 
 const VERSION: i64 = 20260922070926;
 const MIGRATION: &str =
@@ -178,7 +179,7 @@ async fn scope_migration_preserves_rows_and_old_writers(pool: PgPool) {
 async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPool) {
     migrate_before(&pool, CUTOVER_VERSION).await;
     seed_prefix_rows(&pool).await;
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE network_vpc_prefixes SET overlap_vpc_id = vpc_id WHERE id = $1::uuid")
         .bind(PARENT)
         .execute(&mut *txn)
@@ -222,7 +223,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
             "network_vpc_prefixes_overlap_scope_check",
         ),
     ] {
-        let mut attempt = txn.begin().await.unwrap();
+        let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
         let error = query.execute(&mut *attempt).await.expect_err(scenario);
         assert_eq!(
             error.as_database_error().and_then(|e| e.constraint()),
@@ -252,7 +253,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
             "network_prefixes_overlap_scope_fkey",
         ),
     ] {
-        let mut attempt = txn.begin().await.unwrap();
+        let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
         let error = query.execute(&mut *attempt).await.expect_err(scenario);
         assert_eq!(
             error.as_database_error().and_then(|e| e.constraint()),
@@ -265,7 +266,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
     let other_parent = VpcPrefixId::new();
     let insert_parent = "INSERT INTO network_vpc_prefixes (id, prefix, name, vpc_id, site_prefix_id, overlap_vpc_id)
                          VALUES ($1, '10.123.1.0/24', 'overlapping parent', $2::uuid, $3::uuid, $2::uuid)";
-    let mut attempt = txn.begin().await.unwrap();
+    let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
     let error = sqlx::query(insert_parent)
         .bind(other_parent)
         .bind(OTHER_VPC)
@@ -302,7 +303,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
     .unwrap();
     let insert_child = "INSERT INTO network_prefixes (segment_id, prefix, vpc_prefix_id, vpc_prefix, overlap_vpc_id)
                         VALUES ($1, '10.123.1.0/31', $2, '10.123.1.0/24', $3::uuid)";
-    let mut attempt = txn.begin().await.unwrap();
+    let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
     let error = sqlx::query(insert_child)
         .bind(segment)
         .bind(other_parent)
@@ -371,7 +372,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
             "network_prefixes_scoped_prefix_excl",
         ),
     ] {
-        let mut attempt = txn.begin().await.unwrap();
+        let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
         let error = query.execute(&mut *attempt).await.expect_err(scenario);
         assert_eq!(error.as_database_error().and_then(|e| e.constraint()), Some(expected), "{scenario}");
         attempt.rollback().await.unwrap();
@@ -381,7 +382,7 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
         ("fd00:3891::/64", None),
         ("10.123.1.0/24", Some(VPC.parse::<VpcId>().unwrap())),
     ] {
-        let mut attempt = txn.begin().await.unwrap();
+        let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
         let error = crate::vpc_prefix::persist(
             model::vpc_prefix::NewVpcPrefix {
                 id: VpcPrefixId::new(),

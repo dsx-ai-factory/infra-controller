@@ -5,7 +5,10 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/labstack/echo/v4"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	apiHandler "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler"
@@ -53,6 +56,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"infiniband-interface":      2,
 		"infiniband-partition":      5,
 		"spectrumx-partition":       4,
+		"dhcp-option-set":           5,
 		"nvlink-interface":          2,
 		"nvlink-logical-partition":  4,
 		"expected-machine":          11,
@@ -79,9 +83,9 @@ func TestNewAPIRoutes(t *testing.T) {
 		"task":                      3,
 		"rule":                      5,
 		"run":                       8,
-		"domain":                    6,
-		"rack":                      16,
-		"tray":                      13,
+		"domain":                    7,
+		"rack":                      18,
+		"tray":                      15,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
@@ -114,6 +118,15 @@ func TestNewAPIRoutes(t *testing.T) {
 			got := NewAPIRoutes(tt.args.dbSession, tt.args.tc, tt.args.tnc, tt.args.scp, tt.args.cfg, nil)
 
 			assert.Equal(t, totalRouteCount, len(got))
+			for _, resource := range []string{"machine", "tray"} {
+				assertRouteExists(t, got, http.MethodPost, "/org/:orgName/"+cfg.GetAPIName()+"/"+resource+"/:id/decommission")
+			}
+
+			for _, resource := range []string{"switch", "power-shelf"} {
+				for _, route := range got {
+					assert.NotEqual(t, "/org/:orgName/"+cfg.GetAPIName()+"/"+resource+"/:id/decommission", route.Path)
+				}
+			}
 
 			for _, route := range got {
 				assert.Contains(t, route.Path, "/org/:orgName/"+cfg.GetAPIName())
@@ -161,7 +174,53 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, rackHealthReportPath)
 			assertRouteExists(t, got, http.MethodPut, rackHealthReportPath)
 			assertRouteExists(t, got, http.MethodDelete, rackHealthReportPath+"/:source")
+			rackPowerPath := "/org/:orgName/" + cfg.GetAPIName() + "/rack/:id/power"
+			assertRouteExists(t, got, http.MethodGet, rackPowerPath)
+			assertRouteExists(t, got, http.MethodPatch, rackPowerPath)
+			rackTaskPowerPath := "/org/:orgName/" + cfg.GetAPIName() + "/rack/task/power"
+			assertRouteExists(t, got, http.MethodGet, rackTaskPowerPath)
+			assertRouteBefore(t, got, http.MethodGet, rackTaskPowerPath, http.MethodGet, "/org/:orgName/"+cfg.GetAPIName()+"/rack/task/:id")
+			assertRouteBefore(t, got, http.MethodGet, rackTaskPowerPath, http.MethodGet, rackPowerPath)
+
+			// Exercise Echo's selection among the actual routes. An inventory ID
+			// may equal the static task prefix; ordinary task UUIDs must still work.
+			router := echo.New()
+			for _, route := range got {
+				router.Add(route.Method, route.Path, route.Handler.Handle)
+			}
+			for _, selection := range []struct {
+				name   string
+				method string
+				path   string
+				want   RequestHandler
+			}{
+				// A normal external ID follows the new parameterized power route.
+				{"rack power", http.MethodGet, "/rack/rack-01/power", apiHandler.NewGetRackPowerStateHandler(tt.args.dbSession, scp)},
+				// The existing task route must not capture a valid rack inventory ID.
+				{"rack named task", http.MethodGet, "/rack/task/power", apiHandler.NewGetRackPowerStateHandler(tt.args.dbSession, scp).ForRack("task")},
+				// PATCH retains its existing parameterized handler for the same rack ID.
+				{"power control rack named task", http.MethodPatch, "/rack/task/power", apiHandler.NewUpdateRackPowerStateHandler(tt.args.dbSession, tc, scp, cfg)},
+				// A valid task lookup continues to reach the original task handler.
+				{"rack task lookup", http.MethodGet, "/rack/task/00000000-0000-4000-8000-000000000001", apiHandler.NewGetTaskHandler(tt.args.dbSession, tc, scp, cfg)},
+			} {
+				t.Run(selection.name, func(t *testing.T) {
+					request := httptest.NewRequest(selection.method, "/org/test-org/"+cfg.GetAPIName()+selection.path, nil)
+					ctx := router.NewContext(request, httptest.NewRecorder())
+
+					router.Router().Find(request.Method, request.URL.Path, ctx)
+
+					var selected RequestHandler
+					for _, route := range got {
+						if route.Method == request.Method && route.Path == ctx.Path() {
+							selected = route.Handler
+						}
+					}
+					assert.Equal(t, selection.want, selected)
+				})
+			}
 			trayPowerPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/power"
+			assertRouteExists(t, got, http.MethodPost, "/org/:orgName/"+cfg.GetAPIName()+"/tray/:id/factory-reset")
+			assertRouteExists(t, got, http.MethodPost, "/org/:orgName/"+cfg.GetAPIName()+"/domain/nvlink/:id/factory-reset")
 			assertRouteExists(t, got, http.MethodGet, trayPowerPath)
 			assertRouteExists(t, got, http.MethodPatch, trayPowerPath)
 			// Verify the read route uses the power-state handler, not the power mutation handler.
@@ -191,6 +250,12 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, spectrumXPartitionPath)
 			assertRouteExists(t, got, http.MethodGet, spectrumXPartitionPath+"/:id")
 			assertRouteExists(t, got, http.MethodDelete, spectrumXPartitionPath+"/:id")
+			dhcpOptionSetPath := "/org/:orgName/" + cfg.GetAPIName() + "/dhcp-option-set"
+			assertRouteExists(t, got, http.MethodPost, dhcpOptionSetPath)
+			assertRouteExists(t, got, http.MethodGet, dhcpOptionSetPath)
+			assertRouteExists(t, got, http.MethodGet, dhcpOptionSetPath+"/:id")
+			assertRouteExists(t, got, http.MethodPatch, dhcpOptionSetPath+"/:id")
+			assertRouteExists(t, got, http.MethodDelete, dhcpOptionSetPath+"/:id")
 			taskPath := "/org/:orgName/" + cfg.GetAPIName() + "/task"
 			assertRouteExists(t, got, http.MethodGet, taskPath)
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")

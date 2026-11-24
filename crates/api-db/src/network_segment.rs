@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_instrument::emit;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
@@ -26,11 +25,12 @@ use futures::StreamExt;
 use ipnetwork::IpNetwork;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
     NetworkDefinition, NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig,
     NetworkSegmentType, NewNetworkSegment,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
@@ -124,19 +124,6 @@ pub async fn persist(
     txn: &mut PgConnection,
     initial_state: NetworkSegmentControllerState,
 ) -> Result<NetworkSegment, DatabaseError> {
-    // The DNS views publish records under the segment's subdomain_id. VPC
-    // domains only record ownership, so reject them here even when the
-    // segment belongs to the same VPC.
-    if let Some(domain_id) = value.subdomain_id
-        && crate::dns::domain::find_by_uuid(&mut *txn, domain_id)
-            .await?
-            .is_some_and(|domain| domain.vpc_id.is_some())
-    {
-        return Err(DatabaseError::InvalidArgument(format!(
-            "domain {domain_id} is VPC-owned and cannot be used by a network segment"
-        )));
-    }
-
     let version = ConfigVersion::initial();
 
     let query = "INSERT INTO network_segments (
@@ -223,10 +210,10 @@ pub async fn for_vpc(
 /// Exact DHCPv6 link-address matches win over prefix containment, matching the
 /// candidate ordering used by `for_relay_all`.
 pub async fn for_relay(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     relay: IpAddr,
 ) -> DatabaseResult<Option<NetworkSegment>> {
-    let mut results = for_relay_all(txn, std::slice::from_ref(&relay)).await?;
+    let mut results = for_relay_all(conn, std::slice::from_ref(&relay)).await?;
 
     match results.len() {
         0 | 1 => Ok(results.pop()),
@@ -256,7 +243,7 @@ pub async fn for_relay(
 /// This intentionally ignores `dhcpv6_link_address`: that field is DHCP relay
 /// routing context and may be outside the segment prefix.
 pub async fn for_prefix_containing_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     address: IpAddr,
 ) -> DatabaseResult<Option<NetworkSegment>> {
     static QUERY: &str = concat!(
@@ -273,7 +260,7 @@ pub async fn for_prefix_containing_address(
     );
     let mut results: Vec<NetworkSegment> = sqlx::query_as(QUERY)
         .bind(IpNetwork::from(address))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))?;
 
@@ -292,11 +279,11 @@ pub async fn for_prefix_containing_address(
 /// `static-assignments`. ExpectedInterface declarations using an explicit
 /// allocation policy or a DPU role use this stricter lookup.
 pub async fn for_managed_static_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     address: IpAddr,
     expected_segment_type: Option<NetworkSegmentType>,
 ) -> DatabaseResult<NetworkSegment> {
-    let segment = for_prefix_containing_address(&mut *txn, address)
+    let segment = for_prefix_containing_address(conn, address)
         .await?
         .ok_or_else(|| {
             DatabaseError::InvalidArgument(match expected_segment_type {
@@ -324,19 +311,22 @@ pub async fn for_managed_static_address(
 /// Resolve the segment that owns a configured static address.
 ///
 /// Addresses outside managed prefixes use `static-assignments`.
-pub async fn for_static_address(
-    txn: &mut PgConnection,
+pub async fn for_static_address<DB>(
+    conn: &mut DB,
     address: IpAddr,
-) -> DatabaseResult<NetworkSegment> {
-    match for_prefix_containing_address(&mut *txn, address).await? {
+) -> DatabaseResult<NetworkSegment>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match for_prefix_containing_address(&mut *conn, address).await? {
         Some(segment) => Ok(segment),
-        None => static_assignments(&mut *txn).await,
+        None => static_assignments(&mut *conn).await,
     }
 }
 
 /// Returns all network segments that contain at least one relay/gateway IP.
 pub async fn for_relay_all(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     relays: &[IpAddr],
 ) -> DatabaseResult<Vec<NetworkSegment>> {
     static QUERY: &str = concat!(
@@ -373,7 +363,7 @@ pub async fn for_relay_all(
                 .map(|v| IpNetwork::from(v.to_owned()))
                 .collect::<Vec<IpNetwork>>(),
         )
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))?;
 
@@ -383,7 +373,7 @@ pub async fn for_relay_all(
 /// Accepts a set of relay/gateway IPs and a segment type and returns
 /// all network segments that match.
 pub async fn for_segment_type_all(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     relays: &[IpAddr],
     segment_type: NetworkSegmentType,
 ) -> DatabaseResult<Vec<NetworkSegment>> {
@@ -425,7 +415,7 @@ pub async fn for_segment_type_all(
                 .collect::<Vec<IpNetwork>>(),
         )
         .bind(segment_type)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(QUERY, e))?;
 
@@ -435,16 +425,16 @@ pub async fn for_segment_type_all(
 /// Retrieves the IDs of all network segments.
 /// If `segment_type` is specified, only IDs of segments that match the specific type are returned.
 pub async fn list_segment_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
     let (query, mut segment_id_stream) = if let Some(segment_type) = segment_type {
         let query = "SELECT id FROM network_segments where network_segment_type=$1";
-        let stream = sqlx::query_as(query).bind(segment_type).fetch(txn);
+        let stream = sqlx::query_as(query).bind(segment_type).fetch(conn);
         (query, stream)
     } else {
         let query = "SELECT id FROM network_segments";
-        let stream = sqlx::query_as(query).fetch(txn);
+        let stream = sqlx::query_as(query).fetch(conn);
         (query, stream)
     };
 
@@ -514,11 +504,11 @@ pub async fn insert_network_def(
     Ok(())
 }
 
-pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, DatabaseError> {
+pub async fn segment_exists(conn: impl DbReader<'_>, name: &str) -> Result<bool, DatabaseError> {
     let query = "SELECT EXISTS(SELECT 1 FROM network_segments WHERE name = $1)";
     sqlx::query_scalar(query)
         .bind(name)
-        .fetch_one(&mut *txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -543,9 +533,11 @@ pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, 
 /// Config-declared networks that have neither a segment row nor a snapshot,
 /// in unspecified order. The caller must create the segment and write the
 /// snapshot in the same transaction.
+/// Drift Events use `instrumentation`; retain its provider until reconciliation finishes.
 pub async fn reconcile_network_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, NetworkDefinition>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Vec<(String, NetworkDefinition)>, DatabaseError> {
     let stored = all_stored_defs(&mut *txn).await?;
     let mut to_create: Vec<(String, NetworkDefinition)> = Vec::new();
@@ -557,7 +549,7 @@ pub async fn reconcile_network_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                emit(ConfigDefinitionDrifted {
+                instrumentation.emit(ConfigDefinitionDrifted {
                     resource_kind: ConfigResourceKind::NetworkDefinition,
                     drift_kind: ConfigDriftKind::Changed,
                     name: name.clone(),
@@ -610,7 +602,7 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            emit(ConfigDefinitionDrifted {
+            instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::NetworkDefinition,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: name.clone(),
@@ -681,11 +673,11 @@ where
 
 /// Find network segments attached to a machine through machine_interfaces, optionally of a certain type
 pub async fn find_ids_by_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &HostMachineId,
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
-    let result = batch_find_ids_by_machine_ids(txn, &[*machine_id], network_segment_type).await?;
+    let result = batch_find_ids_by_machine_ids(conn, &[*machine_id], network_segment_type).await?;
 
     Ok(result.get(machine_id).cloned().unwrap_or_default())
 }
@@ -693,7 +685,7 @@ pub async fn find_ids_by_machine_id(
 /// Batch find network segments attached to multiple machines through machine_interfaces.
 /// Returns a HashMap mapping each machine ID to its list of segment IDs.
 pub async fn batch_find_ids_by_machine_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<HashMap<HostMachineId, Vec<NetworkSegmentId>>, DatabaseError> {
@@ -725,7 +717,7 @@ pub async fn batch_find_ids_by_machine_ids(
 
     let rows: Vec<(String, NetworkSegmentId)> = query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
@@ -773,10 +765,10 @@ where
         let allocator = IpAllocator::new(
             &mut *conn,
             record,
-            Box::new(UsedOverlayNetworkIpResolver {
+            UsedOverlayNetworkIpResolver {
                 segment_id: record.id,
                 busy_ips,
-            }),
+            },
             AddressSelectionStrategy::NextAvailableIp,
         )
         .await
@@ -860,6 +852,54 @@ pub async fn set_vpc_id_and_can_stretch(
     Ok(())
 }
 
+/// Appends a validated prefix and advances its segment's config version and
+/// `updated` timestamp. A stale version or deleted row returns
+/// `ConcurrentModificationError`; the version-checked update locks the live row
+/// against deletion. The savepoint keeps that update and insertion together on
+/// failure. The caller holds `lock_checks` and commits reverse DNS in its outer
+/// transaction; controller state and the initial network definition are unchanged.
+pub async fn add_prefix(
+    value: &NetworkSegment,
+    prefix: &NewNetworkPrefix,
+    txn: &mut PgConnection,
+) -> Result<NetworkSegment, DatabaseError> {
+    let mut txn = crate::Transaction::begin_inner(txn).await?;
+    let query = "UPDATE network_segments SET version=$1, updated=NOW()
+                 WHERE id=$2 AND version=$3 AND deleted IS NULL RETURNING id";
+    let updated_id: NetworkSegmentId = sqlx::query_as(query)
+        .bind(value.version.increment())
+        .bind(value.id)
+        .bind(value.version)
+        .fetch_optional(txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| {
+            DatabaseError::ConcurrentModificationError("network_segment", value.version.to_string())
+        })?;
+    crate::network_prefix::create_for(
+        txn.as_mut(),
+        &updated_id,
+        std::slice::from_ref(prefix),
+        None,
+    )
+    .await?;
+    let segment = find_by(
+        &mut txn,
+        ObjectColumnFilter::One(IdColumn, &updated_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| {
+        DatabaseError::new(
+            "finding network segment after adding prefix",
+            sqlx::Error::RowNotFound,
+        )
+    })?;
+    txn.commit().await?;
+    Ok(segment)
+}
+
 pub async fn attach_to_vpc(
     value: &NetworkSegment,
     txn: &mut PgConnection,
@@ -909,21 +949,21 @@ pub async fn mark_as_deleted(
     // deleting the segment. However it gives the user some early feedback for
     // the commmon case, which allows them to free resources
     let num_machine_interfaces =
-        crate::machine_interface::count_by_segment_id(txn, &value.id).await?;
+        crate::machine_interface::count_by_segment_id(&mut *txn, &value.id).await?;
     if num_machine_interfaces > 0 {
         return DatabaseResult::Err(DatabaseError::NetworkSegmentDelete(
             "Network Segment can't be deleted with associated MachineInterface".to_string(),
         ));
     }
     let num_instance_addresses =
-        crate::instance_address::count_by_segment_id(txn, &value.id).await?;
+        crate::instance_address::count_by_segment_id(&mut *txn, &value.id).await?;
     if num_instance_addresses > 0 {
         return DatabaseResult::Err(DatabaseError::NetworkSegmentDelete(
             "Network Segment can't be deleted while addresses on the segment are allocated to instances".to_string(),
         ));
     }
     let num_referencing_instances =
-        crate::instance::count_network_segment_references(txn, &value.id).await?;
+        crate::instance::count_network_segment_references(&mut *txn, &value.id).await?;
     if num_referencing_instances > 0 {
         return DatabaseResult::Err(DatabaseError::NetworkSegmentDelete(format!(
             "network segment can't be deleted while referenced by network configurations; referencing instance count: {num_referencing_instances}"
@@ -947,7 +987,7 @@ pub async fn mark_as_deleted(
 /// `instance_addresses`.
 pub async fn final_delete(
     segment_id: NetworkSegmentId,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<NetworkSegmentId, DatabaseError> {
     // Recheck inside the delete transaction. The table lock serializes this
     // read against the allocator's exclusive lock on `instance_addresses`,
@@ -972,13 +1012,13 @@ pub async fn final_delete(
 }
 
 pub async fn find_by_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     name: &str,
 ) -> Result<NetworkSegment, DatabaseError> {
     static QUERY: &str = concat!(network_segment_snapshot_query!(), " WHERE name = $1");
     sqlx::query_as(QUERY)
         .bind(name)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
@@ -989,18 +1029,18 @@ pub const STATIC_ASSIGNMENTS_SEGMENT_NAME: &str = "static-assignments";
 
 /// Returns the static-assignments anchor segment, used for external
 /// static IP assignments that don't fall within any managed network prefix.
-pub async fn static_assignments(txn: &mut PgConnection) -> Result<NetworkSegment, DatabaseError> {
-    find_by_name(txn, STATIC_ASSIGNMENTS_SEGMENT_NAME).await
+pub async fn static_assignments(conn: impl DbReader<'_>) -> Result<NetworkSegment, DatabaseError> {
+    find_by_name(conn, STATIC_ASSIGNMENTS_SEGMENT_NAME).await
 }
 
 /// Returns all admin network segments.
-pub async fn admin(txn: &mut PgConnection) -> Result<Vec<NetworkSegment>, DatabaseError> {
+pub async fn admin(conn: impl DbReader<'_>) -> Result<Vec<NetworkSegment>, DatabaseError> {
     static QUERY: &str = concat!(
         network_segment_snapshot_query!(),
         " WHERE network_segment_type = 'admin' ORDER BY ns.id",
     );
     let segments: Vec<NetworkSegment> = sqlx::query_as(QUERY)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))?;
 
@@ -1061,7 +1101,7 @@ pub async fn mark_as_deleted_no_validation(
 /// across all DPUs via VRR.
 pub async fn allocate_svi_ip(
     value: &NetworkSegment,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<IpAddr, DatabaseError> {
     let mut first_svi_ip = None;
 
@@ -1129,47 +1169,7 @@ mod tests {
     use model::network_segment::NetworkDefinitionSegmentType;
 
     use super::*;
-
-    #[crate::sqlx_test]
-    async fn rejects_vpc_owned_subdomain_before_inserting_segment(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.expect("begin fixture transaction");
-        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "dns-owner").await;
-        let domain = crate::dns::domain::persist(
-            model::dns::NewDomain {
-                vpc_id: Some(vpc_id),
-                ..model::dns::NewDomain::new("tenant.example")
-            },
-            txn.as_mut(),
-        )
-        .await
-        .expect("create VPC-owned domain");
-        let segment = NewNetworkSegment {
-            subdomain_id: Some(domain.id),
-            vpc_id: Some(vpc_id),
-            segment_type: NetworkSegmentType::Tenant,
-            ..crate::test_support::network_segment::admin_segment(
-                "tenant-dns",
-                "192.0.2.0/24",
-                "192.0.2.1",
-                1,
-            )
-        };
-        let segment_id = segment.id;
-
-        let result = persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready).await;
-        assert!(
-            matches!(result, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("VPC-owned")),
-            "{result:?}"
-        );
-        let segments = find_by(
-            txn.as_mut(),
-            ObjectColumnFilter::One(IdColumn, &segment_id),
-            NetworkSegmentSearchConfig::default(),
-        )
-        .await
-        .expect("the rejected creation leaves the transaction usable");
-        assert!(segments.is_empty(), "the rejected segment was not inserted");
-    }
+    use crate::TransactionVending as _;
 
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;
@@ -1193,7 +1193,7 @@ mod tests {
         gateway: Option<&str>,
         dhcpv6_link_address: Option<&str>,
     ) -> Result<NetworkSegmentId, Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = NewNetworkSegment {
             id: uuid::Uuid::new_v4().into(),
             name: name.to_string(),
@@ -1224,7 +1224,7 @@ mod tests {
     async fn admin_dual_stack_free_counts_follow_host_allocation(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = persist(
             NewNetworkSegment {
                 id: uuid::Uuid::new_v4().into(),
@@ -1348,7 +1348,7 @@ mod tests {
             (NetworkSegmentType::Tenant, 1),
             (NetworkSegmentType::HostInband, 0),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let segment = persist(
                 NewNetworkSegment {
                     segment_type,
@@ -1389,7 +1389,7 @@ mod tests {
     async fn tenant_free_counts_preserve_allocated_prefix_width(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "tenant-free-counts").await;
         let segment = persist(
             NewNetworkSegment {
@@ -1448,7 +1448,7 @@ mod tests {
     async fn admin_free_counts_include_parked_and_other_segment_owners(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let static_assignments = persist(
             NewNetworkSegment {
                 name: STATIC_ASSIGNMENTS_SEGMENT_NAME.to_string(),
@@ -1553,7 +1553,7 @@ mod tests {
             Some(link_address),
         )
         .await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = for_prefix_containing_address(&mut txn, link_address.parse()?).await?;
         assert!(segment.is_none());
         txn.rollback().await?;
@@ -1562,7 +1562,7 @@ mod tests {
         // ownership follows the prefix, not the link-address equality branch.
         let owner_segment =
             persist_test_segment(&pool, "prefix-owner", "2001:db8:ffff::/64", None, None).await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = for_prefix_containing_address(&mut txn, link_address.parse()?)
             .await?
             .expect("prefix-containing segment should resolve");
@@ -1586,7 +1586,7 @@ mod tests {
             persist_test_segment(&pool, "link-owner", "2001:db8:a::/64", None, Some(relay)).await?;
 
         // The exact link-address match should disambiguate the relay lookup.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = for_relay(&mut txn, relay.parse()?)
             .await?
             .expect("relay should resolve to exact link-address segment");
@@ -1616,12 +1616,17 @@ mod tests {
             vpc_name: None,
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let declared: HashMap<String, NetworkDefinition> = [("brand-new".to_string(), def.clone())]
             .into_iter()
             .collect();
 
-        let to_create = reconcile_network_defs(&mut txn, &declared).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
 
         // reconcile must not have written a snapshot for a brand-new network.
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
@@ -1677,11 +1682,15 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         minimum_segment_data(&pool, "pre-existing").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("pre-existing", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("pre-existing", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1700,12 +1709,16 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "stable").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "stable", segment_id, &def).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("stable", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("stable", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1730,13 +1743,17 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "drifty").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let original = def("192.168.1.0/24", "192.168.168.1");
         let drifted = def("10.0.0.0/24", "10.0.0.1");
         insert_network_def(&mut txn, "drifty", segment_id, &original).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("drifty", drifted.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("drifty", drifted.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1761,12 +1778,17 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "abandoned").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "abandoned", segment_id, &def).await?;
 
         let empty: HashMap<String, NetworkDefinition> = HashMap::new();
-        let to_create = reconcile_network_defs(&mut txn, &empty).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &empty,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1796,16 +1818,16 @@ mod tests {
 
         // Seed the snapshot in its own committed transaction so it
         // survives into the next one where we run `final_delete`.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "doomed", segment_id, &def).await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         final_delete(segment_id, &mut txn).await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(
             stored_def(txn.as_mut(), "doomed").await?.is_none(),
             "deleting a segment must cascade-delete its network_def snapshot",
@@ -1827,7 +1849,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "still-referenced").await?;
         let machine_id = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
             .execute(txn.as_mut())
@@ -1868,7 +1890,7 @@ mod tests {
     async fn tenant_svi_allocation_locks_before_mixed_prefix_updates(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut setup_txn = pool.begin().await?;
+        let mut setup_txn = pool.txn_begin().await?;
         let mut segment = persist(
             NewNetworkSegment {
                 id: NetworkSegmentId::new(),
@@ -1911,7 +1933,7 @@ mod tests {
         assert_eq!(segment.prefixes[0].num_reserved, 3);
         assert_eq!(segment.prefixes[1].num_reserved, 0);
 
-        let mut deletion_txn = pool.begin().await?;
+        let mut deletion_txn = pool.txn_begin().await?;
         let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(deletion_txn.as_mut())
             .await?;
@@ -1922,7 +1944,7 @@ mod tests {
         let allocation_pool = pool.clone();
         let segment_id = segment.id;
         let allocation_task = tokio::spawn(async move {
-            let mut txn = allocation_pool.begin().await.unwrap();
+            let mut txn = allocation_pool.txn_begin().await.unwrap();
             let result = allocate_svi_ip(&segment, &mut txn).await;
             if result.is_ok() {
                 txn.commit().await.unwrap();
@@ -1988,11 +2010,15 @@ mod tests {
         minimum_segment_data(&pool, "ambiguous").await?;
         minimum_segment_data(&pool, "ambiguous").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("ambiguous", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("ambiguous", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"

@@ -17,9 +17,8 @@
 
 use std::collections::HashSet;
 
+use ::rpc::carbide_api_client::{EXPECTED_SWITCH_UPDATE_MASK_HEADER, ExpectedSwitchUpdateField};
 use ::rpc::forge as rpc;
-use ::rpc::forge_api_client::{EXPECTED_SWITCH_UPDATE_MASK_HEADER, ExpectedSwitchUpdateField};
-use carbide_instrument::emit;
 use db::{DatabaseError, expected_switch as db_expected_switch};
 use mac_address::MacAddress;
 use model::expected_switch::{
@@ -33,10 +32,8 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
-use crate::handlers::static_address_metrics::{
-    PreallocationSuccess, StaticAddressPreallocationCompleted,
-};
+use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 fn parse_expected_switch_update_mask(
     request: &Request<rpc::ExpectedSwitch>,
@@ -196,13 +193,9 @@ pub(crate) async fn add_expected_switch(
 
     validate_expected_switch(&mut switch, true)?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_switch::create(&mut txn, switch)
         .await
@@ -227,13 +220,9 @@ pub(crate) async fn delete_expected_switch(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_switch::delete(&mut txn, &req)
         .await
@@ -250,6 +239,10 @@ pub(crate) async fn update_expected_switch(
     api: &Api,
     request: Request<rpc::ExpectedSwitch>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let update_mask = parse_expected_switch_update_mask(&request)?;
     let patch = request.into_inner();
     let validate_nvos_interfaces = update_mask.as_ref().map_or_else(
@@ -257,13 +250,9 @@ pub(crate) async fn update_expected_switch(
         |fields| fields.contains(&ExpectedSwitchUpdateField::NvosInterfaces),
     );
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let mut switch: ExpectedSwitch = if let Some(update_mask) = update_mask {
         let lookup: ExpectedSwitchRequest = rpc::ExpectedSwitchRequest {
@@ -304,7 +293,7 @@ pub(crate) async fn update_expected_switch(
         &mut txn,
         &mut switch,
         validate_nvos_interfaces,
-        api.runtime_config.retained_boot_interface_window,
+        &preallocator,
     )
     .await?;
 
@@ -312,9 +301,7 @@ pub(crate) async fn update_expected_switch(
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
-    for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocations);
 
     Ok(Response::new(()))
 }
@@ -323,6 +310,10 @@ pub(crate) async fn patch_expected_switch(
     api: &Api,
     request: Request<rpc::PatchExpectedSwitchRequest>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let request = request.into_inner();
     let fields = UpdateMask::parse(
         request.update_mask.map(|mask| mask.paths),
@@ -419,13 +410,11 @@ pub(crate) async fn patch_expected_switch(
         &mut txn,
         &mut switch,
         fields.contains(UpdateField::NvosInterfaces),
-        api.runtime_config.retained_boot_interface_window,
+        &preallocator,
     )
     .await?;
     txn.commit().await?;
-    for preallocation in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
-    }
+    preallocator.record_committed(preallocations);
     Ok(Response::new(()))
 }
 
@@ -433,7 +422,7 @@ async fn update_switch_in_transaction(
     txn: &mut sqlx::PgConnection,
     switch: &mut ExpectedSwitch,
     validate_nvos_interfaces: bool,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
     validate_expected_switch(switch, validate_nvos_interfaces)?;
 
@@ -446,20 +435,17 @@ async fn update_switch_in_transaction(
     let mut preallocations = Vec::with_capacity(2);
     if let Some(bmc_ip) = switch.bmc_ip_address {
         preallocations.push(
-            update_preallocated_machine_interface(
-                &mut *txn,
-                switch.bmc_mac_address,
-                bmc_ip,
-                retained_window,
-            )
-            .await?,
+            preallocator
+                .update_interface(&mut *txn, switch.bmc_mac_address, bmc_ip)
+                .await?,
         );
     }
     if let Some(nvos_ip) = switch.nvos_ip_address {
         // Pairing already validated above; there is exactly one NVOS port.
         let nvos_mac = switch.nvos_interfaces[0].mac_address;
         preallocations.push(
-            update_preallocated_machine_interface(&mut *txn, nvos_mac, nvos_ip, retained_window)
+            preallocator
+                .update_interface(&mut *txn, nvos_mac, nvos_ip)
                 .await?,
         );
     }
@@ -479,15 +465,7 @@ pub(crate) async fn get_expected_switch(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
-
-    let expected_switch = db_expected_switch::find(&mut txn, &req)
+    let expected_switch = db_expected_switch::find(api.pg_pool(), &req)
         .await
         .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
@@ -499,10 +477,6 @@ pub(crate) async fn get_expected_switch(
                 .unwrap_or_default(),
         })?;
 
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
-
     let response = rpc::ExpectedSwitch::from(expected_switch);
     Ok(Response::new(response))
 }
@@ -511,21 +485,9 @@ pub(crate) async fn get_all_expected_switches(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedSwitchList>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
-
-    let expected_switches = db_expected_switch::find_all(&mut txn)
+    let expected_switches = db_expected_switch::find_all(api.pg_pool())
         .await
         .map_err(CarbideError::from)?;
-
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
 
     let expected_switches: Vec<rpc::ExpectedSwitch> = expected_switches
         .into_iter()
@@ -556,13 +518,9 @@ pub(crate) async fn replace_all_expected_switches(
         switches.push(switch);
     }
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     // Clear all existing expected switches
     db_expected_switch::clear(&mut txn)
@@ -587,13 +545,9 @@ pub(crate) async fn delete_all_expected_switches(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<()>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_switch::clear(&mut txn)
         .await
@@ -610,21 +564,9 @@ pub(crate) async fn get_all_expected_switches_linked(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::LinkedExpectedSwitchList>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
-
-    let linked_expected_switches = db_expected_switch::find_all_linked(&mut txn)
+    let linked_expected_switches = db_expected_switch::find_all_linked(api.pg_pool())
         .await
         .map_err(CarbideError::from)?;
-
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
 
     let linked_expected_switches: Vec<rpc::LinkedExpectedSwitch> = linked_expected_switches
         .into_iter()
@@ -642,15 +584,8 @@ pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<model::expected_switch::ExpectedSwitch>, CarbideError> {
-    let mut txn = api.database_connection.begin().await.map_err(|e| {
-        CarbideError::from(DatabaseError::new("begin find_many_by_bmc_mac_address", e))
-    })?;
-
-    let mut expected = db_expected_switch::find_many_by_bmc_mac_address(&mut txn, &[mac]).await?;
-
-    txn.commit().await.map_err(|e| {
-        CarbideError::from(DatabaseError::new("commit find_many_by_bmc_mac_address", e))
-    })?;
+    let mut expected =
+        db_expected_switch::find_many_by_bmc_mac_address(api.pg_pool(), &[mac]).await?;
 
     Ok(expected.remove(&mac))
 }

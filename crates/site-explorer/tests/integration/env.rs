@@ -83,12 +83,14 @@ pub(super) fn test_site_explorer(
         test_harness.test_meter.meter(),
         endpoint_exploration_service,
         endpoint_explorer.clone(),
+        Default::default(),
         api.common_pools().clone(),
         api.work_lock_manager_handle(),
         api.runtime_config.rack_profiles.clone(),
         None,
         api.credential_manager().clone(),
         false,
+        api.instrumentation().clone(),
     );
     TestSiteExplorer::new(site_explorer, endpoint_explorer)
 }

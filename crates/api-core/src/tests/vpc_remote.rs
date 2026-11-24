@@ -1,19 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! VPC creation and deletion against remote VNI pools, injected below the
-//! production selection gate.
+//! VPC creation, routing, retained release and recovery against remote VNI pools.
+//! Providers are injected below the production selection gate.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_resource_pool::PoolDefinitionSource;
 use carbide_resource_pool_api::v1;
+use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::vpc::VpcId;
+use db::TransactionVending as _;
 use db::resource_pool::remote;
-use db::test_support::postgres::wait_for_blocked_queries;
+use model::instance::config::network::{InstanceInterfaceRoutingProfile, InstanceNetworkConfig};
+use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
 use model::resource_pool::allocation::{
     AllocationSource, AllocationState, AssignmentMode, ResourcePoolAllocation, ResourcePoolValue,
@@ -28,8 +32,10 @@ use rpc::forge::forge_server::Forge;
 use sqlx::PgPool;
 use tonic::{Code, Request};
 
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::resource_pool::{RemotePool, RemotePoolFixture};
 use crate::tests::common::rpc_builder::{VpcCreationRequest, VpcDeletionRequest};
+use crate::tests::wait_for_blocked_queries;
 
 /// `VPC_POOLS` moves both VNI pools to the provider: internal VPCs draw
 /// automatic values, while external VPCs request manual ones.
@@ -462,7 +468,7 @@ async fn remote_vpc_cancels_after_admission_changes_or_shutdown(
                 assert!(
                     error
                         .message()
-                        .contains("unfinished request for slot `vni`"),
+                        .contains("already has an allocation or unfinished request for slot `vni`"),
                     "{error}"
                 );
                 assert_eq!(receipt(&fixture, vpc_id).await?, pending);
@@ -710,7 +716,7 @@ async fn configured_vpcs_converge_on_one_name(database: PgPool) -> eyre::Result<
             vni: None,
         },
     )]);
-    let mut blocker = fixture.env.pool.begin().await?;
+    let mut blocker = fixture.env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -735,6 +741,12 @@ async fn configured_vpcs_converge_on_one_name(database: PgPool) -> eyre::Result<
     second?;
     let created = db::vpc::find_by_name(&fixture.env.pool, "concurrent-initial").await?;
     assert_eq!(created.len(), 1);
+    // Neither the winner nor the discarded startup ID needs an unfinished
+    // creation record after the name conflict has been resolved.
+    let requests: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests")
+        .fetch_one(&fixture.env.pool)
+        .await?;
+    assert_eq!(requests, 0);
     let created = &created[0];
     uuid::Uuid::parse_str(&created.config.tenant_organization_id)?;
     assert_eq!(
@@ -938,7 +950,7 @@ async fn configured_vpc_name_wait_is_bounded_and_cancellable(database: PgPool) -
                 vni: None,
             },
         )]);
-        let mut blocker = fixture.env.pool.begin().await?;
+        let mut blocker = fixture.env.pool.txn_begin().await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
@@ -990,5 +1002,2028 @@ async fn configured_vpc_name_wait_is_bounded_and_cancellable(database: PgPool) -
         );
         assert_eq!(fixture.provider.local.provisioned_count(), 0);
     }
+    fixture.stop().await
+}
+
+/// A routing switch retains both issuing identities and rejects duplicate-ID creation.
+/// Switching back makes no allocation or recovery call; release waits for confirmation.
+#[crate::sqlx_test]
+async fn remote_routing_retains_assignments_until_confirmed_release(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_with(database, &VPC_POOLS, None).await?;
+    let mut config = (*fixture.env.config).clone();
+    config.tenant_prefix_overlap_enabled = true;
+    config.vpc_isolation_behavior = crate::cfg::file::VpcIsolationBehaviorType::MutualIsolation;
+    config.site_fabric_prefixes = vec!["10.0.0.0/8".parse()?];
+    config
+        .fnn
+        .as_mut()
+        .expect("FNN config")
+        .routing_profiles
+        .get_mut("INTERNAL")
+        .expect("internal profile")
+        .tenant_prefix_overlap_eligible = true;
+    fixture.env.config = std::sync::Arc::new(config);
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    create_tenant(&fixture, "remote-routing", "INTERNAL").await?;
+    let created = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("remote-routing")
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("EXTERNAL")
+                .vni(50_001_u32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let id = created.id.expect("VPC ID");
+    let original = receipt(&fixture, id).await?;
+    // Another pool can retain an assignment for this owner during routing.
+    // Creation must reject the existing ID before using that shared capability.
+    let allocations_before = fixture.provider.allocations.load(Ordering::SeqCst);
+    let duplicate = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("remote-routing")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL")
+                .tonic_request(),
+        )
+        .await
+        .expect_err("an existing VPC cannot reserve in another pool");
+    assert_eq!(duplicate.code(), Code::AlreadyExists);
+    assert_eq!(
+        fixture.provider.allocations.load(Ordering::SeqCst),
+        allocations_before
+    );
+    assert_eq!(receipt(&fixture, id).await?, original);
+    let unchanged = fixture
+        .env
+        .api
+        .find_vpcs_by_ids(Request::new(forge::VpcsByIdsRequest { vpc_ids: vec![id] }))
+        .await?
+        .into_inner();
+    assert_eq!(unchanged.vpcs.as_slice(), std::slice::from_ref(&created));
+    let change = |version: String, profile: &str, vni| forge::VpcChangeRoutingProfileRequest {
+        id: Some(id),
+        if_version_match: Some(version),
+        routing_profile_type: profile.into(),
+        vni,
+    };
+    // Exact selection must accept this automatic value, unlike creation's
+    // requested selection, which is limited to the manual partition.
+    let forward = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(change(
+            created.version,
+            "INTERNAL",
+            Some(20_001),
+        )))
+        .await?
+        .into_inner();
+    let internal = receipt(&fixture, id).await?;
+    assert_eq!(internal.state, AllocationState::Attached);
+    let AllocationSource::Remote {
+        request,
+        result: Some(AllocationResult::Allocated(assignment)),
+        ..
+    } = &internal.source
+    else {
+        panic!("internal VNI must retain its assignment");
+    };
+    assert_eq!(
+        request.selection,
+        AllocationSelection::Exact(ResourcePoolValue::Integer(20_001))
+    );
+    assert_eq!(assignment.assignment_mode, AssignmentMode::Automatic);
+    assert_eq!(
+        forward
+            .retained_allocation
+            .as_ref()
+            .expect("retained external")
+            .vni,
+        50_001
+    );
+    assert_eq!(
+        fixture.provider.allocations.load(Ordering::SeqCst),
+        2,
+        "creation and exact transition contacted the provider"
+    );
+    let recoveries = fixture.provider.recoveries.load(Ordering::SeqCst);
+    let describes = fixture.provider.describes.load(Ordering::SeqCst);
+    let releases = fixture.provider.releases.load(Ordering::SeqCst);
+    fixture
+        .provider
+        .allocation_unavailable
+        .store(true, Ordering::SeqCst);
+    let reverse = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(change(forward.version, "EXTERNAL", None)))
+        .await?
+        .into_inner();
+    assert_eq!(reverse.active_vni, 50_001);
+    let restored = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(change(reverse.version, "INTERNAL", None)))
+        .await?
+        .into_inner();
+    fixture
+        .provider
+        .allocation_unavailable
+        .store(false, Ordering::SeqCst);
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.provider.recoveries.load(Ordering::SeqCst),
+        recoveries
+    );
+    assert_eq!(
+        restored
+            .retained_allocation
+            .as_ref()
+            .expect("retained external")
+            .pool_name,
+        EXTERNAL_VPC_VNI
+    );
+    assert_eq!(restored.active_vni, 20_001);
+    assert_eq!(fixture.provider.describes.load(Ordering::SeqCst), describes);
+    assert_eq!(fixture.provider.releases.load(Ordering::SeqCst), releases);
+    assert_eq!(receipt(&fixture, id).await?, internal);
+    assert_eq!(
+        remote::load(&fixture.env.pool, original.allocation_id).await?,
+        Some(original.clone())
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 2);
+
+    // A second internal VPC can reuse this tenant's exact prefix only after the
+    // old external assignment has been drained and its provider release confirmed.
+    let candidate = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("remote-routing")
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner()
+        .id
+        .expect("candidate VPC ID");
+    let root = super::vpc_prefix::seed_tenant_managed_site_prefix(
+        &fixture.env,
+        "remote-routing",
+        "10.107.0.0/16",
+        model::site_prefix::SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let prefix = |vpc_id| forge::VpcPrefixCreationRequest {
+        id: Some(carbide_uuid::vpc::VpcPrefixId::new()),
+        vpc_id: Some(vpc_id),
+        site_prefix_id: Some(root),
+        config: Some(forge::VpcPrefixConfig {
+            prefix: "10.107.1.0/24".into(),
+        }),
+        metadata: Some(rpc::Metadata {
+            name: "remote overlap".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    fixture
+        .env
+        .api
+        .create_vpc_prefix(Request::new(prefix(id)))
+        .await?;
+    let candidate_request = prefix(candidate);
+    let error = fixture
+        .env
+        .api
+        .create_vpc_prefix(Request::new(candidate_request.clone()))
+        .await
+        .expect_err("retained remote VNI prevents overlap");
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    // Prefix attachment also advances the VPC version. Observe the release
+    // only after that attachment, just as an operator must before submitting it.
+    let before_release = fixture
+        .env
+        .api
+        .get_vpc_routing_state(Request::new(forge::VpcRoutingStateRequest { id: Some(id) }))
+        .await?
+        .into_inner();
+    let request = forge::VpcReleaseInactiveVniRequest {
+        id: Some(id),
+        if_version_match: Some(before_release.version.clone()),
+        expected_inactive_vni: Some(50_001),
+    };
+    // A blocked release must observe shutdown before it can commit intent.
+    // This API owns its own token; the serving fixture remains usable afterward.
+    let cancelled_api = crate::test_support::builder::TestApiBuilder::new(
+        fixture.env.pool.clone(),
+        fixture.env.common_pools.clone(),
+        fixture.env.api.work_lock_manager_handle.clone(),
+    )
+    .with_resource_pool_registry(fixture.env.api.resource_pool_registry.clone())
+    .with_runtime_config(fixture.env.config.clone())
+    .build();
+    let mut blocker = fixture.env.pool.txn_begin().await?;
+    sqlx::query(
+        "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
+    )
+    .bind(original.allocation_id)
+    .fetch_one(&mut *blocker)
+    .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let blocked_release = cancelled_api.release_vpc_inactive_vni(Request::new(request.clone()));
+    tokio::pin!(blocked_release);
+    tokio::select! {
+        result = &mut blocked_release => panic!("release passed locked ownership: {result:?}"),
+        _ = wait_for_blocked_queries(&fixture.env.pool, pid, "resource_pool_allocations", 1) => {},
+    }
+    cancelled_api.cancel_token.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(5), blocked_release)
+        .await?
+        .expect_err("shutdown stops release admission");
+    assert_eq!(error.code(), Code::Cancelled);
+    blocker.rollback().await?;
+    assert_eq!(
+        remote::load(&fixture.env.pool, original.allocation_id).await?,
+        Some(original.clone())
+    );
+    assert_eq!(
+        fixture
+            .env
+            .api
+            .get_vpc_routing_state(Request::new(forge::VpcRoutingStateRequest { id: Some(id) }))
+            .await?
+            .into_inner(),
+        before_release
+    );
+    let pause = fixture.provider.release_pause.clone();
+    pause.pause_next.store(true, Ordering::SeqCst);
+    let api = fixture.env.api.clone();
+    let release = api.release_vpc_inactive_vni(Request::new(request.clone()));
+    tokio::pin!(release);
+    tokio::select! {
+        result = &mut release => panic!("release completed without provider confirmation: {result:?}"),
+        result = tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()) => result?,
+    }
+    let releasing = remote::load(&fixture.env.pool, original.allocation_id)
+        .await?
+        .expect("original release intent");
+    assert_eq!(releasing.state, AllocationState::ReleaseRequested);
+    assert_eq!(releasing.source, original.source);
+    assert_eq!(
+        receipt(&fixture, id).await?,
+        internal,
+        "newer active identity is unchanged"
+    );
+    let observed = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture
+            .env
+            .api
+            .get_vpc_routing_state(Request::new(forge::VpcRoutingStateRequest { id: Some(id) })),
+    )
+    .await??
+    .into_inner();
+    assert_eq!(observed.active_vni, restored.active_vni);
+    assert_eq!(
+        observed.retained_allocation, restored.retained_allocation,
+        "inspection preserves the original release assignment"
+    );
+    let current = observed.version;
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture
+            .env
+            .api
+            .create_vpc_prefix(Request::new(candidate_request.clone())),
+    )
+    .await?
+    .expect_err("older pending release prevents overlap");
+    assert_eq!(error.code(), Code::InvalidArgument);
+    pause.resume.notify_one();
+    let released = tokio::time::timeout(Duration::from_secs(5), release)
+        .await??
+        .into_inner();
+    assert_eq!(released.released_inactive_vni, 50_001);
+    assert_eq!(released.vpc.expect("release VPC").version, current);
+    assert_eq!(
+        remote::load(&fixture.env.pool, original.allocation_id)
+            .await?
+            .expect("released identity")
+            .state,
+        AllocationState::Released
+    );
+    fixture
+        .env
+        .api
+        .create_vpc_prefix(Request::new(candidate_request))
+        .await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(
+            &mut txn,
+            &fixture.env.common_pools.ethernet.pool_external_vpc_vni,
+        )
+        .await?
+        .expect("external pool");
+    txn.commit().await?;
+    let unused = selected
+        .prepare_exact_allocation(
+            &fixture.env.pool,
+            OwnerType::Vpc,
+            &id.to_string(),
+            "vni",
+            50_002,
+            &fixture.cancel,
+        )
+        .await?;
+    crate::handlers::tenant_prefix_overlap::validate_retained_state(&fixture.env.api).await?;
+    unused.cancel(&fixture.env.pool).await?;
+    let cancelling = receipt(&fixture, id).await?;
+    assert_eq!(cancelling.state, AllocationState::CancelRequested);
+    crate::handlers::tenant_prefix_overlap::validate_retained_state(&fixture.env.api).await?;
+    assert_eq!(
+        fixture
+            .env
+            .api
+            .get_vpc_routing_state(Request::new(forge::VpcRoutingStateRequest { id: Some(id) }))
+            .await?
+            .into_inner()
+            .retained_allocation,
+        None
+    );
+    fixture
+        .remote(EXTERNAL_VPC_VNI)
+        .reconcile(cancelling.allocation_id, &fixture.cancel)
+        .await?;
+    let error = fixture
+        .env
+        .api
+        .release_vpc_inactive_vni(Request::new(request))
+        .await
+        .expect_err("the original release version cannot be replayed");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(error.message().contains("expected version"), "{error}");
+    fixture.stop().await
+}
+
+/// Final admission must run after provider preparation without holding the VPC
+/// or tenant locks. An unused reservation remains recoverable after each failure.
+#[crate::sqlx_test]
+async fn remote_routing_failed_completion_keeps_active_and_cancels_unused(
+    database: PgPool,
+) -> eyre::Result<()> {
+    #[derive(Clone, Copy, Debug)]
+    enum Failure {
+        TenantRevoked,
+        FinalWrite,
+        TenantPrefixAttached,
+        InterfaceOverride,
+        MembershipExpanded,
+    }
+    let fixture = vpc_fixture(database, None).await?;
+    for failure in [
+        Failure::TenantRevoked,
+        Failure::FinalWrite,
+        Failure::TenantPrefixAttached,
+        Failure::InterfaceOverride,
+        // Acknowledged growth is persistent, so this is the final case.
+        Failure::MembershipExpanded,
+    ] {
+        let tenant = format!("remote-routing-{failure:?}");
+        create_tenant(&fixture, &tenant, "INTERNAL").await?;
+        let before = fixture
+            .env
+            .api
+            .create_vpc(
+                VpcCreationRequest::builder(&tenant)
+                    .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                    .routing_profile_type("EXTERNAL")
+                    .vni(50_001_u32)
+                    .tonic_request(),
+            )
+            .await?
+            .into_inner();
+        let id = before.id.expect("VPC ID");
+        let original = receipt(&fixture, id).await?;
+        let pause = fixture.provider.allocate_pause.clone();
+        pause.pause_next.store(true, Ordering::SeqCst);
+        let change = fixture.env.api.change_vpc_routing_profile(Request::new(
+            forge::VpcChangeRoutingProfileRequest {
+                id: Some(id),
+                if_version_match: Some(before.version.clone()),
+                routing_profile_type: "INTERNAL".into(),
+                vni: None,
+            },
+        ));
+        tokio::pin!(change);
+        tokio::select! {
+            result = &mut change => panic!("routing change passed the paused provider: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()) => result?,
+        }
+        let late_machine = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x85; 32],
+            MachineType::Host,
+        );
+        let (expected_code, expected_message) = match failure {
+            Failure::TenantRevoked => {
+                let query = "UPDATE tenants SET routing_profile_type = 'EXTERNAL' WHERE organization_id = $1";
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    sqlx::query(query).bind(&tenant).execute(&fixture.env.pool),
+                )
+                .await??;
+                (Code::FailedPrecondition, Some("access tier"))
+            }
+            Failure::TenantPrefixAttached => {
+                // Prefix attachment needs the overlap lock and advances the VPC
+                // version. It must finish during provider I/O, then the original
+                // routing observation must fail the version check first.
+                let root = super::vpc_prefix::seed_tenant_managed_site_prefix(
+                    &fixture.env,
+                    &tenant,
+                    "10.109.0.0/16",
+                    model::site_prefix::SitePrefixLifecycleState::Ready,
+                )
+                .await;
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    fixture.env.api.create_vpc_prefix(Request::new(
+                        forge::VpcPrefixCreationRequest {
+                            id: Some(carbide_uuid::vpc::VpcPrefixId::new()),
+                            vpc_id: Some(id),
+                            site_prefix_id: Some(root),
+                            config: Some(forge::VpcPrefixConfig {
+                                prefix: "10.109.1.0/24".into(),
+                            }),
+                            metadata: Some(rpc::Metadata {
+                                name: "late attachment".into(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    )),
+                )
+                .await??;
+                (Code::FailedPrecondition, Some("expected version"))
+            }
+            Failure::InterfaceOverride => {
+                // An instance update does not advance the VPC version, so only
+                // completion's attachment scan can reject this new constraint.
+                let mut txn = fixture.env.pool.txn_begin().await?;
+                db::machine::create(
+                    &mut txn,
+                    None,
+                    &late_machine,
+                    ManagedHostState::Ready,
+                    None,
+                    CURRENT_STATE_MODEL_VERSION,
+                )
+                .await?;
+                let mut network = InstanceNetworkConfig::for_vpc_prefix_id(
+                    carbide_uuid::vpc::VpcPrefixId::new(),
+                    Some(id),
+                );
+                network.interfaces[0].network_details = None;
+                network.interfaces[0].routing_profile = Some(InstanceInterfaceRoutingProfile {
+                    allowed_anycast_prefixes: vec!["198.51.100.0/24".parse()?],
+                });
+                sqlx::query("INSERT INTO instances (machine_id, tenant_org, network_config, nvlink_config) VALUES ($1, $2, $3, '{\"gpu_configs\": []}'::jsonb)")
+                    .bind(late_machine).bind(&tenant).bind(sqlx::types::Json(network))
+                    .execute(&mut *txn).await?;
+                txn.commit().await?;
+                (Code::FailedPrecondition, Some("interface routing override"))
+            }
+            Failure::MembershipExpanded => {
+                let selected = fixture
+                    .env
+                    .api
+                    .resource_pool_registry
+                    .get(VPC_VNI)
+                    .expect("internal binding");
+                let definition = carbide_resource_pool::registration::latest_accepted(
+                    &fixture.env.pool,
+                    &selected.binding,
+                )
+                .await?
+                .expect("accepted eligibility");
+                let revision = definition.eligibility_revision.parse()?;
+                let mut eligibility = carbide_resource_pool::value::ResourcePoolEligibility {
+                    domain: model::resource_pool::ResourcePoolValueDomain::Integer,
+                    entries: definition.eligibility,
+                };
+                eligibility.entries.push(v1::Eligibility {
+                    assignment_mode: v1::AssignmentMode::Manual as i32,
+                    entries: Some(v1::eligibility::Entries::Value(50_002_i64.into())),
+                });
+                carbide_resource_pool::registration::define(
+                    &fixture.env.pool,
+                    fixture.remote(VPC_VNI).provider(),
+                    &selected.binding,
+                    Some(revision),
+                    &eligibility,
+                )
+                .await?;
+                (
+                    Code::FailedPrecondition,
+                    Some("pools overlap at VNI `50002`"),
+                )
+            }
+            Failure::FinalWrite => {
+                let query = "ALTER TABLE vpcs ADD CONSTRAINT reject_remote_routing CHECK (routing_profile_type <> 'INTERNAL') NOT VALID";
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    sqlx::query(query).execute(&fixture.env.pool),
+                )
+                .await??;
+                (Code::Internal, None)
+            }
+        };
+        pause.resume.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(5), change)
+            .await?
+            .expect_err("final admission or entity write must fail");
+        assert_eq!(error.code(), expected_code, "{failure:?}: {error}");
+        if let Some(message) = expected_message {
+            assert!(error.message().contains(message), "{failure:?}: {error}");
+        } else {
+            let source = std::error::Error::source(&error)
+                .expect("database status source")
+                .source()
+                .expect("original database error")
+                .downcast_ref::<db::DatabaseError>()
+                .expect("typed database error");
+            assert!(
+                source.violates_constraint("reject_remote_routing"),
+                "{source}"
+            );
+        }
+        let after = fixture
+            .env
+            .api
+            .find_vpcs_by_ids(Request::new(forge::VpcsByIdsRequest { vpc_ids: vec![id] }))
+            .await?
+            .into_inner()
+            .vpcs
+            .pop()
+            .expect("existing VPC");
+        if matches!(failure, Failure::TenantPrefixAttached) {
+            assert_eq!(after.config, before.config, "{failure:?}");
+            assert_eq!(after.status, before.status, "{failure:?}");
+        } else {
+            assert_eq!(after, before, "{failure:?}");
+        }
+        assert_eq!(
+            remote::load(&fixture.env.pool, original.allocation_id).await?,
+            Some(original.clone())
+        );
+        let unused = receipt(&fixture, id).await?;
+        assert_eq!(unused.state, AllocationState::CancelRequested);
+        if matches!(failure, Failure::FinalWrite) {
+            let error = fixture
+                .env
+                .api
+                .delete_vpc(VpcDeletionRequest::builder().id(id).tonic_request())
+                .await
+                .expect_err("unfinished cancellation blocks deletion");
+            assert!(
+                error.message().contains("unfinished VNI cleanup"),
+                "{error}"
+            );
+            assert_eq!(receipt(&fixture, id).await?, unused);
+        }
+        fixture
+            .remote(VPC_VNI)
+            .reconcile(unused.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(
+            receipt(&fixture, id).await?.state,
+            AllocationState::Cancelled
+        );
+        match failure {
+            Failure::FinalWrite => {
+                sqlx::query("ALTER TABLE vpcs DROP CONSTRAINT reject_remote_routing")
+                    .execute(&fixture.env.pool)
+                    .await?;
+            }
+            Failure::TenantPrefixAttached => {
+                sqlx::query("DELETE FROM network_vpc_prefixes WHERE vpc_id = $1")
+                    .bind(id)
+                    .execute(&fixture.env.pool)
+                    .await?;
+            }
+            Failure::InterfaceOverride => {
+                sqlx::query("DELETE FROM instances WHERE machine_id = $1")
+                    .bind(late_machine)
+                    .execute(&fixture.env.pool)
+                    .await?;
+            }
+            Failure::TenantRevoked | Failure::MembershipExpanded => {}
+        }
+        fixture
+            .env
+            .api
+            .delete_vpc(VpcDeletionRequest::builder().id(id).tonic_request())
+            .await?;
+        fixture
+            .remote(EXTERNAL_VPC_VNI)
+            .reconcile(original.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    }
+    fixture.stop().await
+}
+
+/// The Integrated pool includes values added after startup in mixed comparisons;
+/// checking just assigned VNIs or the original definition would miss this clash.
+#[crate::sqlx_test]
+async fn remote_routing_checks_integrated_growth_against_accepted_eligibility(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_with(database, &VPC_POOLS[..1], None).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    create_tenant(&fixture, "mixed-routing", "INTERNAL").await?;
+    let before = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("mixed-routing")
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let id = before.id.expect("VPC ID");
+    let original = receipt(&fixture, id).await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    db::resource_pool::populate(
+        &fixture.env.common_pools.ethernet.pool_external_vpc_vni,
+        &mut txn,
+        vec![20_002],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    let request = forge::VpcChangeRoutingProfileRequest {
+        id: Some(id),
+        if_version_match: Some(before.version.clone()),
+        routing_profile_type: "EXTERNAL".into(),
+        vni: Some(50_001),
+    };
+    let error = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(request.clone()))
+        .await
+        .expect_err("an unassigned accepted remote value overlaps grown local inventory");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("pools overlap at VNI `20002`"),
+        "{error}"
+    );
+    assert_eq!(receipt(&fixture, id).await?, original);
+    let current = fixture
+        .env
+        .api
+        .find_vpcs_by_ids(Request::new(forge::VpcsByIdsRequest { vpc_ids: vec![id] }))
+        .await?
+        .into_inner();
+    assert_eq!(current.vpcs, vec![before]);
+    let free: bool = sqlx::query_scalar(
+        "SELECT state = $2 FROM resource_pool WHERE name = $1 AND value = '50001'",
+    )
+    .bind(EXTERNAL_VPC_VNI)
+    .bind(sqlx::types::Json(
+        model::resource_pool::ResourcePoolEntryState::Free,
+    ))
+    .fetch_one(&fixture.env.pool)
+    .await?;
+    assert!(
+        free,
+        "rejected membership must not allocate the destination"
+    );
+    sqlx::query("DELETE FROM resource_pool WHERE name = $1 AND value = '20002'")
+        .bind(EXTERNAL_VPC_VNI)
+        .execute(&fixture.env.pool)
+        .await?;
+    let switched = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(request))
+        .await?
+        .into_inner();
+    assert_eq!(switched.active_vni, 50_001);
+    assert_eq!(
+        switched
+            .retained_allocation
+            .as_ref()
+            .expect("retained remote assignment")
+            .pool_name,
+        VPC_VNI
+    );
+    assert_eq!(
+        switched
+            .retained_allocation
+            .expect("retained remote assignment")
+            .vni,
+        20_001
+    );
+    fixture
+        .env
+        .api
+        .release_vpc_inactive_vni(Request::new(forge::VpcReleaseInactiveVniRequest {
+            id: Some(id),
+            if_version_match: Some(switched.version),
+            expected_inactive_vni: Some(20_001),
+        }))
+        .await?;
+    assert_eq!(
+        remote::load(&fixture.env.pool, original.allocation_id)
+            .await?
+            .expect("released original")
+            .state,
+        AllocationState::Released
+    );
+    fixture.stop().await
+}
+
+/// Admission expiry includes an actual VPC lock wait and dispatches no provider work.
+#[crate::sqlx_test]
+async fn remote_routing_admission_deadline_precedes_provider_work(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "admission-deadline", "INTERNAL").await?;
+    let before = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("admission-deadline")
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("EXTERNAL")
+                .vni(50_001_u32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let id = before.id.expect("VPC ID");
+    let original = receipt(&fixture, id).await?;
+    let calls = fixture.provider.allocations.load(Ordering::SeqCst);
+    let mut blocker = fixture.env.pool.txn_begin().await?;
+    sqlx::query("SELECT id FROM vpcs WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_one(&mut *blocker)
+        .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let api = fixture.env.api.clone();
+    let change =
+        api.change_vpc_routing_profile(Request::new(forge::VpcChangeRoutingProfileRequest {
+            id: Some(id),
+            if_version_match: Some(before.version.clone()),
+            routing_profile_type: "INTERNAL".into(),
+            vni: None,
+        }));
+    tokio::pin!(change);
+    tokio::select! {
+        result = &mut change => panic!("admission passed a locked VPC: {result:?}"),
+        _ = wait_for_blocked_queries(&fixture.env.pool, pid, "vpcs", 1) => {},
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    tokio::time::resume();
+    let error = tokio::time::timeout(Duration::from_secs(5), change)
+        .await?
+        .expect_err("admission deadline stops the blocked query");
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    blocker.rollback().await?;
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), calls);
+    assert_eq!(receipt(&fixture, id).await?, original);
+    let current = fixture
+        .env
+        .api
+        .find_vpcs_by_ids(Request::new(forge::VpcsByIdsRequest { vpc_ids: vec![id] }))
+        .await?
+        .into_inner();
+    assert_eq!(current.vpcs, vec![before]);
+    fixture.stop().await
+}
+
+/// Routing rejects provider policy at its caller boundary, then recovers the unused value.
+#[crate::sqlx_test]
+async fn remote_routing_rejects_provider_policy_before_attachment(
+    database: PgPool,
+) -> eyre::Result<()> {
+    // Only the destination is remote, so creating the source remains supported.
+    let mut fixture = RemotePoolFixture::start_with(
+        database,
+        &VPC_POOLS[..1],
+        Some(v1::RouteTargetPolicy {
+            mode: v1::RouteTargetMode::PreserveGenerated as i32,
+            ..Default::default()
+        }),
+    )
+    .await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    create_tenant(&fixture, "routing-policy", "INTERNAL").await?;
+    let before = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("routing-policy")
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("EXTERNAL")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let id = before.id.expect("VPC ID");
+    let source_vni = i32::try_from(
+        before
+            .status
+            .as_ref()
+            .expect("source VPC status")
+            .vni
+            .expect("source VPC VNI"),
+    )?;
+    let error = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(forge::VpcChangeRoutingProfileRequest {
+            id: Some(id),
+            if_version_match: Some(before.version.clone()),
+            routing_profile_type: "INTERNAL".into(),
+            vni: None,
+        }))
+        .await
+        .expect_err("routing cannot apply provider policy");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("provider route-target policy is not supported"),
+        "{error}"
+    );
+    let current = fixture
+        .env
+        .api
+        .find_vpcs_by_ids(Request::new(forge::VpcsByIdsRequest { vpc_ids: vec![id] }))
+        .await?
+        .into_inner();
+    assert_eq!(current.vpcs, vec![before]);
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    assert_eq!(
+        db::resource_pool::find_owned_allocation(
+            &fixture.env.common_pools.ethernet.pool_external_vpc_vni,
+            &mut txn,
+            OwnerType::Vpc,
+            &id.to_string()
+        )
+        .await?,
+        Some(source_vni)
+    );
+    txn.commit().await?;
+    let unused = receipt(&fixture, id).await?;
+    assert_eq!(unused.state, AllocationState::CancelRequested);
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(unused.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    fixture.stop().await
+}
+
+/// Cancellation and expiry during completion drop the VPC lock wait before
+/// saving cancellation of the unused request; the active VPC stays unchanged.
+#[crate::sqlx_test]
+async fn remote_routing_cancellation_drops_final_admission(database: PgPool) -> eyre::Result<()> {
+    let mut fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "blocked-completion", "INTERNAL").await?;
+    for (scenario, deadline) in [("cancellation", false), ("deadline", true)] {
+        let before = fixture
+            .env
+            .api
+            .create_vpc(
+                VpcCreationRequest::builder("blocked-completion")
+                    .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                    .routing_profile_type("EXTERNAL")
+                    .vni(50_001_u32)
+                    .tonic_request(),
+            )
+            .await?
+            .into_inner();
+        let id = before.id.expect("VPC ID");
+        let original = receipt(&fixture, id).await?;
+        let pause = fixture.provider.allocate_pause.clone();
+        pause.pause_next.store(true, Ordering::SeqCst);
+        let api = fixture.env.api.clone();
+        let change =
+            api.change_vpc_routing_profile(Request::new(forge::VpcChangeRoutingProfileRequest {
+                id: Some(id),
+                if_version_match: Some(before.version.clone()),
+                routing_profile_type: "INTERNAL".into(),
+                vni: None,
+            }));
+        tokio::pin!(change);
+        tokio::select! {
+            result = &mut change => panic!("routing change passed paused allocation: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()) => result?,
+        }
+        let pending = receipt(&fixture, id).await?;
+        if !deadline {
+            let metrics = MetricsCapture::start();
+            let (competing, logs) = capture_logs_async(fixture.env.api.change_vpc_routing_profile(
+                Request::new(forge::VpcChangeRoutingProfileRequest {
+                    id: Some(id),
+                    if_version_match: Some(before.version.clone()),
+                    routing_profile_type: "INTERNAL".into(),
+                    vni: Some(20_002),
+                }),
+            ))
+            .await;
+            let error =
+                competing.expect_err("another foreground request cannot replace pending work");
+            assert_eq!(error.code(), Code::FailedPrecondition);
+            assert!(
+                error
+                    .message()
+                    .contains("already has an allocation or unfinished request for slot `vni`"),
+                "{error}"
+            );
+            assert_eq!(receipt(&fixture, id).await?, pending);
+            let failure_metric = "carbide_resource_pool_lifecycle_failures_total";
+            assert!(
+                logs.iter()
+                    .all(|log| log.field("metric_name") != Some(failure_metric)),
+                "remote slot rejection is not Integrated inventory failure: {logs:?}"
+            );
+            assert_eq!(
+                metrics.counter_delta(
+                    failure_metric,
+                    &[
+                        ("operation", "allocate"),
+                        ("failure", "requested_value_unavailable"),
+                        ("failure_policy", "required"),
+                        ("allocation_mode", "requested"),
+                        ("value_type", "integer"),
+                    ]
+                ),
+                0.0
+            );
+            drop(metrics);
+        }
+        let mut blocker = fixture.env.pool.txn_begin().await?;
+        sqlx::query("SELECT id FROM vpcs WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *blocker)
+            .await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        pause.resume.notify_one();
+        tokio::select! {
+            result = &mut change => panic!("completion passed locked VPC: {result:?}"),
+            _ = wait_for_blocked_queries(&fixture.env.pool, pid, "vpcs", 1) => {},
+        }
+        if deadline {
+            // The server is really blocked; only Tokio's whole-phase deadline moves.
+            // Resume wall time before cancellation persistence performs database I/O.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(6)).await;
+            tokio::time::resume();
+        } else {
+            fixture.env.api.cancel_token.cancel();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(5), change)
+            .await?
+            .expect_err("owning cancellation stops final SQL");
+        assert_eq!(
+            error.code(),
+            if deadline {
+                Code::DeadlineExceeded
+            } else {
+                Code::Cancelled
+            },
+            "{scenario}: {error}"
+        );
+        blocker.rollback().await?;
+        let unused = receipt(&fixture, id).await?;
+        assert_eq!(unused.state, AllocationState::CancelRequested);
+        assert_eq!(
+            remote::load(&fixture.env.pool, original.allocation_id).await?,
+            Some(original.clone())
+        );
+        let current = fixture
+            .env
+            .api
+            .find_vpcs_by_ids(Request::new(forge::VpcsByIdsRequest { vpc_ids: vec![id] }))
+            .await?
+            .into_inner()
+            .vpcs
+            .pop()
+            .expect("source VPC");
+        assert_eq!(current, before);
+        fixture.initialize(PoolDefinitionSource::ListenOnly).await?;
+        fixture
+            .remote(VPC_VNI)
+            .reconcile(unused.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(
+            receipt(&fixture, id).await?.state,
+            AllocationState::Cancelled
+        );
+        // Confirmed cancellation unblocks deletion of this same serving VPC.
+        fixture
+            .env
+            .api
+            .delete_vpc(VpcDeletionRequest::builder().id(id).tonic_request())
+            .await?;
+        fixture
+            .remote(EXTERNAL_VPC_VNI)
+            .reconcile(original.allocation_id, &fixture.cancel)
+            .await?;
+    }
+    fixture.stop().await
+}
+
+/// A failed wait can follow committed release intent and an advanced version.
+/// The original request remains recoverable without losing the serving VNI.
+#[crate::sqlx_test]
+async fn interrupted_inactive_release_preserves_intent_and_mutation_guards(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "interrupted-release", "INTERNAL").await?;
+    let created = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("interrupted-release")
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("EXTERNAL")
+                .vni(50_001_u32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let id = created.id.expect("VPC ID");
+    let original = receipt(&fixture, id).await?;
+    let switched = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(forge::VpcChangeRoutingProfileRequest {
+            id: Some(id),
+            if_version_match: Some(created.version),
+            routing_profile_type: "INTERNAL".into(),
+            vni: None,
+        }))
+        .await?
+        .into_inner();
+    let active = receipt(&fixture, id).await?;
+    let AllocationSource::Remote { request, .. } = &active.source else {
+        panic!("remote active assignment");
+    };
+    assert_eq!(request.selection, AllocationSelection::Automatic);
+    let pause = fixture.provider.release_pause.clone();
+    pause.pause_next.store(true, Ordering::SeqCst);
+    let request = forge::VpcReleaseInactiveVniRequest {
+        id: Some(id),
+        if_version_match: Some(switched.version.clone()),
+        expected_inactive_vni: Some(50_001),
+    };
+    let api = fixture.env.api.clone();
+    let release = api.release_vpc_inactive_vni(Request::new(request.clone()));
+    tokio::pin!(release);
+    tokio::select! {
+        result = &mut release => panic!("release passed paused confirmation: {result:?}"),
+        result = tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()) => result?,
+    }
+    fixture.env.api.cancel_token.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(5), release)
+        .await?
+        .expect_err("release wait interrupted");
+    assert_eq!(error.code(), Code::Cancelled);
+    let pending = remote::load(&fixture.env.pool, original.allocation_id)
+        .await?
+        .expect("original release intent");
+    assert_eq!(pending.state, AllocationState::ReleaseRequested);
+    assert_eq!(pending.source, original.source);
+    assert_eq!(receipt(&fixture, id).await?, active);
+    tokio::time::timeout(Duration::from_secs(5), pause.dropped.cancelled()).await?;
+    fixture.initialize(PoolDefinitionSource::ListenOnly).await?;
+    let observed = fixture
+        .env
+        .api
+        .get_vpc_routing_state(Request::new(forge::VpcRoutingStateRequest { id: Some(id) }))
+        .await?
+        .into_inner();
+    assert_ne!(observed.version, switched.version);
+    assert_eq!(observed.active_vni, switched.active_vni);
+    assert_eq!(observed.retained_allocation, switched.retained_allocation);
+    let error = fixture
+        .env
+        .api
+        .release_vpc_inactive_vni(Request::new(request))
+        .await
+        .expect_err("committed version excludes replay");
+    assert!(error.message().contains("expected version"), "{error}");
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.env.api.change_vpc_routing_profile(Request::new(
+            forge::VpcChangeRoutingProfileRequest {
+                id: Some(id),
+                if_version_match: Some(observed.version),
+                routing_profile_type: "EXTERNAL".into(),
+                vni: None,
+            },
+        )),
+    )
+    .await?
+    .expect_err("cleanup alone blocks routing with no attached prefix");
+    assert!(
+        error.message().contains("unfinished VNI cleanup"),
+        "{error}"
+    );
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture
+            .env
+            .api
+            .delete_vpc(VpcDeletionRequest::builder().id(id).tonic_request()),
+    )
+    .await?
+    .expect_err("cleanup alone blocks deletion");
+    assert!(
+        error.message().contains("unfinished VNI cleanup"),
+        "{error}"
+    );
+    fixture
+        .remote(EXTERNAL_VPC_VNI)
+        .reconcile(original.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        remote::load(&fixture.env.pool, original.allocation_id)
+            .await?
+            .expect("confirmed release")
+            .state,
+        AllocationState::Released
+    );
+    assert_eq!(receipt(&fixture, id).await?, active);
+    let after = fixture
+        .env
+        .api
+        .get_vpc_routing_state(Request::new(forge::VpcRoutingStateRequest { id: Some(id) }))
+        .await?
+        .into_inner();
+    assert_eq!(after.retained_allocation, None);
+    fixture
+        .env
+        .api
+        .delete_vpc(VpcDeletionRequest::builder().id(id).tonic_request())
+        .await?;
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(active.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    fixture.stop().await
+}
+
+/// Pending growth and unavailable Stats cannot replace acknowledged membership.
+/// Only acknowledgement of the same free collision makes the transition invalid.
+#[crate::sqlx_test]
+async fn routing_membership_uses_acknowledged_remote_eligibility(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "acknowledged-membership", "INTERNAL").await?;
+    let before = fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("acknowledged-membership")
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("EXTERNAL")
+                .vni(50_001_u32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let id = before.id.expect("VPC ID");
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .get(VPC_VNI)
+        .expect("internal binding");
+    let definition =
+        carbide_resource_pool::registration::latest_accepted(&fixture.env.pool, &selected.binding)
+            .await?
+            .expect("accepted eligibility");
+    let revision = definition.eligibility_revision.parse()?;
+    let mut eligibility = carbide_resource_pool::value::ResourcePoolEligibility {
+        domain: model::resource_pool::ResourcePoolValueDomain::Integer,
+        entries: definition.eligibility,
+    };
+    eligibility.entries.push(v1::Eligibility {
+        assignment_mode: v1::AssignmentMode::Manual as i32,
+        entries: Some(v1::eligibility::Entries::Value(50_002_i64.into())),
+    });
+    fixture
+        .provider
+        .stats_unavailable
+        .store(true, Ordering::SeqCst);
+    fixture.provider.reject_define_call.store(
+        fixture.provider.defines.load(Ordering::SeqCst) + 1,
+        Ordering::SeqCst,
+    );
+    carbide_resource_pool::registration::define(
+        &fixture.env.pool,
+        fixture.remote(VPC_VNI).provider(),
+        &selected.binding,
+        Some(revision),
+        &eligibility,
+    )
+    .await
+    .expect_err("pending definition is not yet acknowledged");
+    let switched = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(forge::VpcChangeRoutingProfileRequest {
+            id: Some(id),
+            if_version_match: Some(before.version),
+            routing_profile_type: "INTERNAL".into(),
+            vni: None,
+        }))
+        .await?
+        .into_inner();
+    fixture
+        .provider
+        .reject_define_call
+        .store(0, Ordering::SeqCst);
+    carbide_resource_pool::registration::define(
+        &fixture.env.pool,
+        fixture.remote(VPC_VNI).provider(),
+        &selected.binding,
+        Some(revision),
+        &eligibility,
+    )
+    .await?;
+    let held = receipt(&fixture, id).await?;
+    let error = fixture
+        .env
+        .api
+        .change_vpc_routing_profile(Request::new(forge::VpcChangeRoutingProfileRequest {
+            id: Some(id),
+            if_version_match: Some(switched.version.clone()),
+            routing_profile_type: "EXTERNAL".into(),
+            vni: Some(50_001),
+        }))
+        .await
+        .expect_err("acknowledged collision rejects routing between remote pools");
+    assert!(
+        error.message().contains("pools overlap at VNI `50002`"),
+        "{error}"
+    );
+    assert_eq!(receipt(&fixture, id).await?, held);
+    assert_eq!(
+        fixture
+            .env
+            .api
+            .get_vpc_routing_state(Request::new(forge::VpcRoutingStateRequest { id: Some(id) }))
+            .await?
+            .into_inner(),
+        switched
+    );
+    fixture.stop().await
+}
+
+/// Cancellation before dispatch reserves the ID without allocating anything.
+/// Existing tenant contention must not inherit the new five-second creation
+/// statement cap. Once the lock is released, Integrated creation still succeeds.
+#[crate::sqlx_test]
+async fn vpc_creation_admission_preserves_database_waits(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    let tenant = "admission-wait";
+    create_fixture_tenant(&env, tenant).await?;
+    let id = VpcId::new();
+    let mut blocker = env.pool.txn_begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await?;
+    db::tenant::find(tenant, true, blocker.as_pgconn()).await?;
+    let creation = env.api.create_vpc(
+        VpcCreationRequest::builder(tenant)
+            .id(id)
+            .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+            .tonic_request(),
+    );
+    tokio::pin!(creation);
+    // Observe the real row-lock wait before measuring elapsed time. Advancing
+    // Tokio's clock would not exercise PostgreSQL's statement timeout.
+    tokio::select! {
+        result = &mut creation => panic!("creation bypassed tenant admission: {result:?}"),
+        _ = wait_for_blocked_queries(&env.pool, pid, "tenants", 1) => {},
+    }
+    tokio::select! {
+        result = &mut creation => panic!("tenant admission ended before its lock was released: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(6)) => {},
+    }
+    blocker.rollback().await?;
+    tokio::time::timeout(Duration::from_secs(10), creation).await??;
+
+    // Prove creation completed, rather than merely avoiding the timeout error.
+    let saved = db::vpc::find_by_id_including_deleted(&env.pool, id)
+        .await?
+        .expect("VPC was committed after tenant admission");
+    assert_eq!(saved.config.tenant_organization_id, tenant);
+    assert!(saved.deleted.is_none());
+    Ok(())
+}
+
+/// Failed native allocation must not leave a saved attempt for an ID that the
+/// caller never received. A retry without an ID must not accumulate those rows.
+#[crate::sqlx_test]
+async fn vpc_creation_integrated_failure_leaves_no_unfinished_request(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    for _ in 0..2 {
+        let request = VpcCreationRequest::builder("failed-native-request")
+            .vni(100u32)
+            .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+            .tonic_request();
+        assert!(request.get_ref().id.is_none());
+        let error = env
+            .api
+            .create_vpc(request)
+            .await
+            .expect_err("VNI is outside the configured inventory");
+        assert!(error.message().contains("cannot be requested"), "{error}");
+        let unfinished: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests")
+            .fetch_one(&env.pool)
+            .await?;
+        assert_eq!(unfinished, 0);
+    }
+    Ok(())
+}
+
+/// A delayed Integrated create must not revive a request REST already removed.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_before_dispatch(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    let id = VpcId::new();
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: "cancel-before-dispatch".into(),
+    };
+    assert!(
+        env.api
+            .cancel_vpc_creation(Request::new(cancellation.clone()))
+            .await?
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+
+    // The original create can arrive after cancellation's reply, including
+    // after REST has removed its own row and dependencies.
+    let error = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("cancel-before-dispatch")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+                .tonic_request(),
+        )
+        .await
+        .expect_err("cancelled ID cannot be created later");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(error.message().contains("was cancelled; use a new VPC ID"));
+    // This path uses Integrated inventory: absence of remote work alone would
+    // not catch an accidental native reservation before the cancellation check.
+    let owned: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE state->>'owner' = $1")
+            .bind(id.to_string())
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(owned, 0);
+    let saved: (String, bool) = sqlx::query_as(
+        "SELECT tenant_organization_id, cancelled FROM vpc_creation_requests WHERE vpc_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(saved, ("cancel-before-dispatch".to_owned(), true));
+    assert!(
+        db::vpc::find_by_id_including_deleted(&env.pool, id)
+            .await?
+            .is_none()
+    );
+    assert!(
+        remote::latest_for_owner_slot(&env.pool, OwnerType::Vpc, &id.to_string(), "vni")
+            .await?
+            .is_none()
+    );
+    assert!(
+        env.api
+            .cancel_vpc_creation(Request::new(cancellation))
+            .await?
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+    Ok(())
+}
+
+/// A committed VPC wins cancellation and keeps its allocation and metadata.
+/// Tenant mismatches must fail without modifying that VPC.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_after_commit(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    let id = VpcId::new();
+    let created = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("committed-before-cancel")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Flat as i32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let before = db::vpc::find_by_id_including_deleted(&env.pool, id)
+        .await?
+        .expect("committed VPC");
+    let allocation_query = "SELECT to_jsonb(a) FROM resource_pool_allocations AS a WHERE owner_id = $1 ORDER BY allocation_id";
+    let allocations_before: Vec<serde_json::Value> = sqlx::query_scalar(allocation_query)
+        .bind(id.to_string())
+        .fetch_all(&env.pool)
+        .await?;
+    assert_eq!(allocations_before.len(), 1);
+    assert_eq!(allocations_before[0]["state"], "attached");
+    let unfinished: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests WHERE vpc_id = $1")
+            .bind(id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(
+        unfinished, 0,
+        "successful creation removes its temporary request"
+    );
+
+    for (tenant, permitted) in [
+        // The original tenant learns the committed result instead of deleting it.
+        ("committed-before-cancel", true),
+        // Another tenant cannot settle this VPC or release its allocation.
+        ("another-tenant", false),
+    ] {
+        let result = env
+            .api
+            .cancel_vpc_creation(Request::new(forge::CancelVpcCreationRequest {
+                id: Some(id),
+                tenant_organization_id: tenant.into(),
+            }))
+            .await;
+        if permitted {
+            assert_eq!(
+                result?.into_inner().result,
+                Some(forge::cancel_vpc_creation_response::Result::CreatedVpc(
+                    created.clone()
+                ))
+            );
+        } else {
+            assert_eq!(
+                result.expect_err("different tenant").code(),
+                Code::FailedPrecondition
+            );
+        }
+        let after = db::vpc::find_by_id_including_deleted(&env.pool, id)
+            .await?
+            .expect("VPC remains present");
+        assert_eq!(after, before);
+        let allocations_after: Vec<serde_json::Value> = sqlx::query_scalar(allocation_query)
+            .bind(id.to_string())
+            .fetch_all(&env.pool)
+            .await?;
+        assert_eq!(allocations_after, allocations_before);
+    }
+    Ok(())
+}
+
+/// An allocation-row timeout must roll back cancellation without racing the
+/// provider's own timeout. Prepare its result first and leave attachment pending.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_allocation_write_is_bounded(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    let id = VpcId::new();
+    let tenant = "cancel-allocation-write";
+    create_tenant(&fixture, tenant, "INTERNAL").await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    db::vpc::creation::lock(&mut txn, id).await?;
+    db::vpc::creation::begin(&mut txn, id, tenant).await?;
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(&mut txn, &fixture.env.common_pools.ethernet.pool_vpc_vni)
+        .await?
+        .expect("VNI pool");
+    txn.commit().await?;
+    let prepared = selected
+        .prepare_allocation(
+            &fixture.env.pool,
+            OwnerType::Vpc,
+            &id.to_string(),
+            "vni",
+            None,
+            &fixture.cancel,
+        )
+        .await?;
+    let pending = receipt(&fixture, id).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: tenant.into(),
+    };
+    // The creation lock is free, but another writer can still hold the allocation.
+    // Its SQL deadline must retain retry guidance and roll back the decision.
+    let mut blocker = fixture.env.pool.begin().await?;
+    sqlx::query(
+        "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
+    )
+    .bind(pending.allocation_id)
+    .fetch_one(&mut *blocker)
+    .await?;
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        fixture
+            .env
+            .api
+            .cancel_vpc_creation(Request::new(cancellation.clone())),
+    )
+    .await?
+    .expect_err("allocation row is locked");
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    assert!(
+        error
+            .message()
+            .contains("VPC creation cancellation database operation timed out"),
+        "{error}"
+    );
+    blocker.rollback().await?;
+    let cancelled: bool =
+        sqlx::query_scalar("SELECT cancelled FROM vpc_creation_requests WHERE vpc_id = $1")
+            .bind(id)
+            .fetch_one(&fixture.env.pool)
+            .await?;
+    assert!(
+        !cancelled,
+        "failed write must roll back the creation decision"
+    );
+    assert_eq!(receipt(&fixture, id).await?, pending);
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // After the SQL blocker leaves, REST needs a confirmed cancellation before
+    // it can remove its Pending VPC, even when the reservation is already gone.
+    let response = fixture
+        .env
+        .api
+        .cancel_vpc_creation(Request::new(cancellation))
+        .await?
+        .into_inner();
+    assert_eq!(
+        response.result,
+        Some(forge::cancel_vpc_creation_response::Result::Cancelled(()))
+    );
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    drop(prepared);
+    fixture.stop().await
+}
+
+/// Cancel a real allocation while its reply is held, then let creation resume.
+/// The saved decision must prevent attachment and survive API reconstruction;
+/// another tenant must not be able to cancel that unfinished allocation first.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_during_provider_work(database: PgPool) -> eyre::Result<()> {
+    let mut fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "cancel-in-flight", "INTERNAL").await?;
+    let id = VpcId::new();
+    let request = VpcCreationRequest::builder("cancel-in-flight")
+        .id(id)
+        .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+        .tonic_request()
+        .into_inner();
+    let pause = fixture.provider.allocate_pause.clone();
+    pause.pause_next.store(true, Ordering::SeqCst);
+    let api = fixture.env.api.clone();
+    let late_request = request.clone();
+    let creation = tokio::spawn(async move { api.create_vpc(Request::new(late_request)).await });
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()).await?;
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+    let pending = receipt(&fixture, id).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+
+    // Tenant identity is saved before provider I/O, even though there is no
+    // VPC row yet for an ordinary ownership lookup.
+    let error = fixture
+        .env
+        .api
+        .cancel_vpc_creation(Request::new(forge::CancelVpcCreationRequest {
+            id: Some(id),
+            tenant_organization_id: "different-tenant".into(),
+        }))
+        .await
+        .expect_err("cannot cancel another tenant's pending create");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(receipt(&fixture, id).await?.state, AllocationState::Pending);
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: "cancel-in-flight".into(),
+    };
+    let api = fixture.env.api.clone();
+    let original = cancellation.clone();
+    let cancelled =
+        tokio::spawn(async move { api.cancel_vpc_creation(Request::new(original)).await });
+    // Observe the committed cancellation before releasing the provider reply.
+    // This orders the race without guessing how long the handler takes to start.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let requested: bool =
+                sqlx::query_scalar("SELECT cancelled FROM vpc_creation_requests WHERE vpc_id = $1")
+                    .bind(id)
+                    .fetch_one(&fixture.env.pool)
+                    .await?;
+            if requested {
+                return Ok::<_, eyre::Report>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    pause.resume.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(10), creation)
+        .await??
+        .expect_err("cancelled allocation cannot attach");
+    assert!(
+        matches!(error.code(), Code::FailedPrecondition | Code::Aborted),
+        "{error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(15), cancelled)
+            .await???
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+    let terminal = receipt(&fixture, id).await?;
+    assert_eq!(terminal.allocation_id, pending.allocation_id);
+    assert_eq!(terminal.state, AllocationState::Cancelled);
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    assert!(
+        db::vpc::find_by_id_including_deleted(&fixture.env.pool, id)
+            .await?
+            .is_none()
+    );
+
+    // Reconstruct Core after a lost reply. Cancellation is safe to repeat, and
+    // neither this request nor a delayed first create can reserve another VNI.
+    fixture.initialize(PoolDefinitionSource::ListenOnly).await?;
+    assert!(
+        fixture
+            .env
+            .api
+            .cancel_vpc_creation(Request::new(cancellation))
+            .await?
+            .into_inner()
+            .result
+            .is_some_and(|result| matches!(
+                result,
+                forge::cancel_vpc_creation_response::Result::Cancelled(())
+            ))
+    );
+    let allocations = fixture.provider.allocations.load(Ordering::SeqCst);
+    assert_eq!(
+        fixture
+            .env
+            .api
+            .create_vpc(Request::new(request))
+            .await
+            .expect_err("ID remains cancelled")
+            .code(),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        fixture.provider.allocations.load(Ordering::SeqCst),
+        allocations
+    );
+    fixture.stop().await
+}
+
+/// The VPC's cancellation fence must stop attachment even when the allocator
+/// still has a valid assignment. Remote cleanup cannot mask a missing recheck.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_rechecks_before_attachment(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "cancel-attachment", "INTERNAL").await?;
+    let id = VpcId::new();
+    let pause = fixture.provider.allocate_pause.clone();
+    pause.pause_next.store(true, Ordering::SeqCst);
+    let api = fixture.env.api.clone();
+    let creation = tokio::spawn(async move {
+        api.create_vpc(
+            VpcCreationRequest::builder("cancel-attachment")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()).await?;
+    let pending = receipt(&fixture, id).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // Save only the consumer decision, leaving allocation eligible to attach.
+    // This is the same creation fence used by Integrated, whose allocation
+    // has no separate remote cancellation state to reject attachment for it.
+    let mut txn = fixture.env.pool.begin().await?;
+    db::vpc::creation::lock(&mut txn, id).await?;
+    db::vpc::creation::cancel(&mut txn, id, "cancel-attachment").await?;
+    txn.commit().await?;
+    assert_eq!(receipt(&fixture, id).await?.state, AllocationState::Pending);
+    pause.resume.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(10), creation)
+        .await??
+        .expect_err("creation cancellation must prevent attachment");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("was cancelled; use a new VPC ID"),
+        "{error}"
+    );
+    assert!(
+        db::vpc::find_by_id_including_deleted(&fixture.env.pool, id)
+            .await?
+            .is_none()
+    );
+
+    // The failed attachment must now hand its unused assignment to cleanup.
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::CancelRequested
+    );
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(pending.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    fixture.stop().await
+}
+
+/// Cancellation must stop while waiting for another creation transaction,
+/// without returning a cleanup acknowledgement or saving a decision it never made.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_wait_is_bounded(database: PgPool) -> eyre::Result<()> {
+    let env = crate::tests::common::api_fixtures::create_test_env(database).await;
+    for (scenario, shutdown, sql_deadline) in [
+        // Advancing Tokio proves the RPC budget independently of PostgreSQL.
+        ("RPC deadline", false, false),
+        // A real blocked statement must preserve timeout status when SQL fires first.
+        ("SQL deadline", false, true),
+        // Service shutdown must wake the same blocked operation.
+        ("shutdown", true, false),
+    ] {
+        let id = VpcId::new();
+        let mut blocker = env.pool.begin().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        db::vpc::creation::lock(&mut blocker, id).await?;
+        let cancellation =
+            env.api
+                .cancel_vpc_creation(Request::new(forge::CancelVpcCreationRequest {
+                    id: Some(id),
+                    tenant_organization_id: scenario.into(),
+                }));
+        tokio::pin!(cancellation);
+        tokio::select! {
+            result = &mut cancellation => panic!("cancellation bypassed the creation lock: {result:?}"),
+            _ = wait_for_blocked_queries(&env.pool, pid, "vpc-creation:", 1) => {},
+        }
+        if shutdown {
+            // Shutdown must wake a live blocked request, not just reject a new one.
+            env.api.cancel_token.cancel();
+        } else if !sql_deadline {
+            // Paused time keeps the test quick. The outer timeout below must
+            // expire after the handler's deadline, so a longer handler wait fails.
+            tokio::time::pause();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(36), cancellation)
+            .await
+            .expect("Core must stop waiting before the test's 36-second bound")
+            .expect_err("unfinished cancellation");
+        if !shutdown && !sql_deadline {
+            tokio::time::resume();
+        }
+        assert_eq!(
+            error.code(),
+            if shutdown {
+                Code::Cancelled
+            } else {
+                Code::DeadlineExceeded
+            }
+        );
+        if sql_deadline {
+            assert!(
+                error
+                    .message()
+                    .contains("VPC creation cancellation database operation timed out"),
+                "the SQL deadline must fire before the RPC timer: {error}"
+            );
+        } else if !shutdown {
+            assert!(
+                error
+                    .message()
+                    .contains("VPC creation cancellation timed out"),
+                "the RPC deadline must fire before PostgreSQL stops waiting: {error}"
+            );
+        }
+        blocker.rollback().await?;
+        let saved: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests WHERE vpc_id = $1")
+                .bind(id)
+                .fetch_one(&env.pool)
+                .await?;
+        assert_eq!(
+            saved, 0,
+            "{scenario} must not claim a cancellation decision"
+        );
+    }
+    Ok(())
+}
+
+/// A terminal newer attempt cannot acknowledge cleanup of an older assignment.
+/// REST must retain dependent resources until that assignment is released.
+#[crate::sqlx_test]
+async fn vpc_creation_cancellation_checks_older_releases(database: PgPool) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    create_tenant(&fixture, "older-release", "INTERNAL").await?;
+    let id = VpcId::new();
+    fixture
+        .env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("older-release")
+                .id(id)
+                .network_virtualization_type(forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await?;
+    let attached = receipt(&fixture, id).await?;
+
+    // An unused routing change leaves a newer cancelled generation while the
+    // original assignment remains attached. Use the actual allocation lifecycle.
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(
+            &mut txn,
+            &fixture.env.common_pools.ethernet.pool_external_vpc_vni,
+        )
+        .await?
+        .expect("external pool");
+    txn.commit().await?;
+    let unused = selected
+        .prepare_exact_allocation(
+            &fixture.env.pool,
+            OwnerType::Vpc,
+            &id.to_string(),
+            "vni",
+            50_001,
+            &fixture.cancel,
+        )
+        .await?;
+    unused.cancel(&fixture.env.pool).await?;
+    let newer = receipt(&fixture, id).await?;
+    fixture
+        .remote(EXTERNAL_VPC_VNI)
+        .reconcile(newer.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        receipt(&fixture, id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // Delete saves release intent for the original assignment. Cancellation must
+    // not treat the latest Cancelled generation as proof that all cleanup finished.
+    fixture
+        .env
+        .api
+        .delete_vpc(VpcDeletionRequest::builder().id(id).tonic_request())
+        .await?;
+    let cancellation = forge::CancelVpcCreationRequest {
+        id: Some(id),
+        tenant_organization_id: "older-release".into(),
+    };
+    let error = fixture
+        .env
+        .api
+        .cancel_vpc_creation(Request::new(cancellation.clone()))
+        .await
+        .expect_err("older release still needs provider confirmation");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("unfinished VNI cleanup"),
+        "{error}"
+    );
+    assert_eq!(
+        remote::load(&fixture.env.pool, attached.allocation_id)
+            .await?
+            .expect("original allocation")
+            .state,
+        AllocationState::ReleaseRequested
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+
+    // Once recovery confirms that exact release, the same cancellation is safe
+    // to acknowledge without dispatching another allocation.
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(attached.allocation_id, &fixture.cancel)
+        .await?;
+    assert!(matches!(
+        fixture
+            .env
+            .api
+            .cancel_vpc_creation(Request::new(cancellation))
+            .await?
+            .into_inner()
+            .result,
+        Some(forge::cancel_vpc_creation_response::Result::Cancelled(()))
+    ));
+    assert_eq!(
+        remote::load(&fixture.env.pool, attached.allocation_id)
+            .await?
+            .expect("released allocation")
+            .state,
+        AllocationState::Released
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
     fixture.stop().await
 }

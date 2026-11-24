@@ -14,9 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::fmt::Write;
 use std::sync::Arc;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use axum::Router;
@@ -25,14 +26,14 @@ use axum::http::header::HeaderMap;
 use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
-use carbide_host_support::agent_config::MachineIdentityConfig;
-use carbide_uuid::machine::DpuMachineId;
-use eyre::eyre;
-use forge_dpu_agent_utils::utils::create_forge_client;
-use forge_dpu_fmds_shared::machine_identity::{
+use carbide_dpu_agent_utils::utils::create_forge_client;
+use carbide_dpu_fmds_shared::machine_identity::{
     self, MetaDataIdentityOutcome, MetaDataIdentitySigner, forward_sign_proxy_if_ready,
     sign_machine_identity_with_forge, wait_identity_rate_limit_permit,
 };
+use carbide_host_support::agent_config::MachineIdentityConfig;
+use carbide_uuid::machine::DpuMachineId;
+use eyre::eyre;
 use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter, clock};
@@ -89,11 +90,12 @@ pub(super) trait InstanceMetadataRouterState: Sync + Send {
 }
 
 pub(super) struct InstanceMetadataRouterStateImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     latest_instance_data: ArcSwapOption<InstanceMetadata>,
     latest_network_config: ArcSwapOption<ManagedHostNetworkConfigResponse>,
     machine_id: DpuMachineId,
     forge_api: String,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     outbound_governor:
         Arc<RateLimiter<NotKeyed, InMemoryState, clock::DefaultClock, NoOpMiddleware>>,
     /// Rate limits, Forge/sign-proxy timeouts, and optional HTTP sign-proxy client for
@@ -124,7 +126,7 @@ impl InstanceMetadataRouterState for InstanceMetadataRouterStateImpl {
             Err(e) => return Err(eyre!("rate limit exceeded for phone_home; {}\n", e)),
         };
 
-        let mut client = create_forge_client(&self.forge_api, &self.forge_client_config).await?;
+        let mut client = create_forge_client(&self.forge_api, &self.carbide_client_config).await?;
 
         let timestamp = phone_home(&mut client, &self.machine_id).await?;
 
@@ -143,7 +145,7 @@ impl InstanceMetadataRouterState for InstanceMetadataRouterStateImpl {
     ) -> Result<forge::MachineIdentityResponse, tonic::Status> {
         sign_machine_identity_with_forge(
             &self.forge_api,
-            &self.forge_client_config,
+            &self.carbide_client_config,
             self.identity_serving.forge_call_timeout,
             audiences,
         )
@@ -172,6 +174,7 @@ impl MetaDataIdentitySigner for InstanceMetadataRouterStateImpl {
             self.identity_serving.sign_proxy_http_client.as_ref(),
             uri,
             headers,
+            &self.instrumentation,
         )
         .await
         {
@@ -201,8 +204,9 @@ impl InstanceMetadataRouterStateImpl {
     pub(super) fn new(
         machine_id: DpuMachineId,
         forge_api: String,
-        forge_client_config: Arc<ForgeClientConfig>,
+        carbide_client_config: Arc<CarbideClientConfig>,
         machine_identity: MachineIdentityConfig,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, String> {
         let params = machine_identity::MachineIdentityParams::try_from_limits(
             machine_identity.requests_per_second,
@@ -216,11 +220,12 @@ impl InstanceMetadataRouterStateImpl {
             params,
         )?);
         Ok(Self {
+            instrumentation,
             latest_instance_data: ArcSwapOption::new(None),
             latest_network_config: ArcSwapOption::new(None),
             machine_id,
             forge_api,
-            forge_client_config,
+            carbide_client_config,
             outbound_governor: Arc::new(RateLimiter::direct(PHONE_HOME_RATE_LIMIT)),
             identity_serving: serving,
         })
@@ -331,7 +336,7 @@ fn extract_metadata(
             },
             SITENAME_CATEGORY => (
                 StatusCode::OK,
-                metadata.sitename.clone().unwrap_or(String::new()),
+                metadata.sitename.clone().unwrap_or_default(),
             ),
             USER_DATA_CATEGORY => (StatusCode::OK, metadata.user_data.clone()),
             ASN_CATEGORY => (StatusCode::OK, network_config.asn.to_string()),
@@ -429,7 +434,8 @@ async fn get_devices(
     let mut response = String::new();
     if let Some(devices) = &metadata.ib_devices {
         for (index, device) in devices.iter().enumerate() {
-            response.push_str(&format!("{}={}\n", index, device.pf_guid));
+            writeln!(response, "{index}={}", device.pf_guid)
+                .expect("writing to a String cannot fail");
         }
 
         (StatusCode::OK, response)
@@ -464,7 +470,9 @@ async fn get_instances(
         let mut response = String::new();
         for (index, instance) in dev.instances.iter().enumerate() {
             match &instance.ib_guid {
-                Some(guid) => response.push_str(&format!("{index}={guid}\n")),
+                Some(guid) => {
+                    writeln!(response, "{index}={guid}").expect("writing to a String cannot fail");
+                }
                 None => continue,
             }
         }
@@ -511,10 +519,12 @@ async fn get_instance_attributes(
         let mut response = String::new();
 
         if let Some(_ib_guid) = &inst.ib_guid {
-            response += &(GUID.to_owned() + "\n")
+            response.push_str(GUID);
+            response.push('\n');
         }
         if let Some(_ib_partition_id) = &inst.ib_partition_id {
-            response += &(IB_PARTITION.to_owned() + "\n")
+            response.push_str(IB_PARTITION);
+            response.push('\n');
         }
         response.push_str(LID);
 

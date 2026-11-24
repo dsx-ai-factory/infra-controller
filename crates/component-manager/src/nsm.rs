@@ -24,6 +24,7 @@ use crate::types::parse_mac;
 
 #[derive(Debug)]
 pub struct NsmSwitchBackend {
+    instrumentation: carbide_instrument::Instrumentation,
     client: nsm::nv_switch_manager_client::NvSwitchManagerClient<TraceInjectService<Channel>>,
 }
 
@@ -31,12 +32,16 @@ impl NsmSwitchBackend {
     pub const BACKEND_NAME: &str = "nsm";
     const PASSTHROUGH_CERT_JOB_ID: &str = "nsm-switch-cert-passthrough";
 
+    /// Connects to the backend using the supplied RED metric destination.
+    /// Retain its provider while backend calls can run.
     pub async fn connect(
         url: &str,
         tls: Option<&BackendTlsConfig>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, ComponentManagerError> {
         let channel = crate::tls::build_channel(url, tls, "NSM").await?;
         Ok(Self {
+            instrumentation,
             client: nsm::nv_switch_manager_client::NvSwitchManagerClient::new(channel),
         })
     }
@@ -107,6 +112,7 @@ fn build_registration(ep: &SwitchEndpoint) -> nsm::RegisterNvSwitchRequest {
 /// registration once NSM includes a correlation key (e.g. BMC MAC) in
 /// RegisterNVSwitchResponse.
 async fn register_and_map(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &mut nsm::nv_switch_manager_client::NvSwitchManagerClient<TraceInjectService<Channel>>,
     endpoints: &[SwitchEndpoint],
 ) -> Result<(HashMap<MacAddress, String>, HashMap<String, MacAddress>), ComponentManagerError> {
@@ -116,6 +122,7 @@ async fn register_and_map(
     for ep in endpoints {
         let req = build_registration(ep);
         let response = red::instrumented(
+            instrumentation,
             "nsm",
             "register_nv_switches",
             client.register_nv_switches(nsm::RegisterNvSwitchesRequest {
@@ -140,7 +147,7 @@ async fn register_and_map(
         }
 
         mac_to_uuid.insert(ep.bmc_mac, reg_resp.uuid.clone());
-        uuid_to_mac.insert(reg_resp.uuid.clone(), ep.bmc_mac);
+        uuid_to_mac.insert(reg_resp.uuid, ep.bmc_mac);
     }
 
     if mac_to_uuid.is_empty() && !endpoints.is_empty() {
@@ -165,7 +172,7 @@ impl NvSwitchManager for NsmSwitchBackend {
         action: PowerAction,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
         let (mac_to_uuid, uuid_to_mac) =
-            register_and_map(&mut self.client.clone(), endpoints).await?;
+            register_and_map(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let mut results: Vec<SwitchComponentResult> = Vec::new();
         let mut uuids: Vec<String> = Vec::new();
@@ -199,6 +206,7 @@ impl NvSwitchManager for NsmSwitchBackend {
             };
 
             let response = red::instrumented(
+                &self.instrumentation,
                 "nsm",
                 "power_control",
                 self.client.clone().power_control(request),
@@ -236,7 +244,7 @@ impl NvSwitchManager for NsmSwitchBackend {
         _options: &crate::types::FirmwareUpdateOptions,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
         let (mac_to_uuid, uuid_to_mac) =
-            register_and_map(&mut self.client.clone(), endpoints).await?;
+            register_and_map(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let mut results: Vec<SwitchComponentResult> = Vec::new();
         let mut uuids: Vec<String> = Vec::new();
@@ -267,6 +275,7 @@ impl NvSwitchManager for NsmSwitchBackend {
             };
 
             let response = red::instrumented(
+                &self.instrumentation,
                 "nsm",
                 "queue_updates",
                 self.client.clone().queue_updates(request),
@@ -301,7 +310,7 @@ impl NvSwitchManager for NsmSwitchBackend {
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<SwitchFirmwareUpdateStatus>, ComponentManagerError> {
         let (mac_to_uuid, uuid_to_mac) =
-            register_and_map(&mut self.client.clone(), endpoints).await?;
+            register_and_map(&self.instrumentation, &mut self.client.clone(), endpoints).await?;
 
         let mut statuses = Vec::new();
 
@@ -320,6 +329,7 @@ impl NvSwitchManager for NsmSwitchBackend {
                 switch_uuid: uuid.clone(),
             };
             let response = red::instrumented(
+                &self.instrumentation,
                 "nsm",
                 "get_updates_for_switch",
                 self.client.clone().get_updates_for_switch(request),
@@ -349,10 +359,14 @@ impl NvSwitchManager for NsmSwitchBackend {
 
     #[instrument(skip(self), fields(backend = "nsm"))]
     async fn list_firmware_bundles(&self) -> Result<Vec<String>, ComponentManagerError> {
-        let response =
-            red::instrumented("nsm", "list_bundles", self.client.clone().list_bundles(()))
-                .await?
-                .into_inner();
+        let response = red::instrumented(
+            &self.instrumentation,
+            "nsm",
+            "list_bundles",
+            self.client.clone().list_bundles(()),
+        )
+        .await?
+        .into_inner();
 
         Ok(response.bundles.into_iter().map(|b| b.version).collect())
     }
@@ -432,6 +446,7 @@ mod tests {
     async fn power_getter_stub_is_not_a_passive_capability() {
         let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
         let backend = NsmSwitchBackend {
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             client: nsm::nv_switch_manager_client::NvSwitchManagerClient::new(
                 TraceInjectService::new(channel),
             ),
@@ -545,13 +560,14 @@ mod tests {
         let channel = Channel::from_shared(format!("http://{refused_addr}"))
             .expect("endpoint")
             .connect_lazy();
+        let metrics = MetricsCapture::owned();
         let backend = NsmSwitchBackend {
+            instrumentation: metrics.instrumentation().clone(),
             client: nsm::nv_switch_manager_client::NvSwitchManagerClient::new(
                 TraceInjectService::new(channel),
             ),
         };
 
-        let metrics = MetricsCapture::start();
         backend
             .list_firmware_bundles()
             .await

@@ -27,7 +27,7 @@ use carbide_test_harness::test_support::fixture_config::{
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::{MachineLocationObservation, TestMachineInfoProvider};
-use db::ObjectFilter;
+use db::{ObjectFilter, TransactionVending as _};
 use model::expected_machine::{ExpectedMachineData, HostDpuPolicy};
 use model::expected_rack::ExpectedRack;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -50,6 +50,7 @@ async fn test_machine_location_reconciler_preserves_existing_values(
         Arc::new(machine_info_rack_profiles()),
         Some(provider.clone()),
         env.api().credential_manager().clone(),
+        env.api().instrumentation().clone(),
     );
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let expected_rack = ExpectedRack {
@@ -59,7 +60,7 @@ async fn test_machine_location_reconciler_preserves_existing_values(
         metadata: Default::default(),
     };
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_rack::create(txn.as_mut(), &expected_rack).await?;
     txn.commit().await?;
     let managed_host =
@@ -96,7 +97,7 @@ async fn test_machine_location_reconciler_preserves_existing_values(
         .find(|machine| !machine.is_dpu())
         .ok_or_else(|| std::io::Error::other("created host machine was not found"))?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine::update_slot_and_tray(txn.as_mut(), &host.id, Some(7), None).await?;
     txn.commit().await?;
 
@@ -145,6 +146,7 @@ async fn test_machine_location_reconciler_retries_after_failure(
         Arc::new(machine_info_rack_profiles()),
         Some(provider.clone()),
         env.api().credential_manager().clone(),
+        env.api().instrumentation().clone(),
     );
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let expected_rack = ExpectedRack {
@@ -154,7 +156,7 @@ async fn test_machine_location_reconciler_retries_after_failure(
         metadata: Default::default(),
     };
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_rack::create(txn.as_mut(), &expected_rack).await?;
     txn.commit().await?;
 
@@ -262,7 +264,7 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
     let fixture = explored_host_fixture(&env, &managed_host).await;
     let host_bmc_ip = fixture.host.host_bmc_ip;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_rack::create(
         txn.as_mut(),
         &ExpectedRack {
@@ -290,12 +292,14 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
                 Arc::new(env.api().runtime_config.get_firmware_config()),
             )),
             endpoint_explorer.clone(),
+            Default::default(),
             env.api().common_pools().clone(),
             env.api().work_lock_manager_handle(),
             machine_info_rack_profiles(),
             Some(provider.clone()),
             env.api().credential_manager().clone(),
             false,
+            env.api().instrumentation().clone(),
         ),
         endpoint_explorer,
     );

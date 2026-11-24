@@ -98,7 +98,7 @@ create_service_certs() {
     kubectl create secret generic site-registration \
         --from-literal=site-uuid="00000000-0000-4000-8000-000000000001" \
         --from-literal=otp="local-dev-otp-token" \
-        --from-literal=creds-url="http://nico-rest-site-manager:8100/v1/site/credentials" \
+        --from-literal=creds-url="https://nico-rest-site-manager:8100/v1/sitecreds" \
         --from-literal=cacert="$CA_CERT" \
         -n "$NAMESPACE" \
         --dry-run=client -o yaml | kubectl apply -f -

@@ -24,6 +24,7 @@ use db::work_lock_manager::WorkLock;
 use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
 
+use super::metrics::FirmwareUpdateProgress;
 use crate::CarbideResult;
 
 /// Used by [MachineUpdateManager](crate::machine_update_manager::MachineUpdateManager) to initiate
@@ -52,7 +53,12 @@ pub(crate) trait MachineUpdateModule: Send + Sync + fmt::Display {
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<HostMachineId>>;
 
-    async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()>;
+    /// Clear completed update markers and return progress events for the
+    /// manager to emit only after the cleanup transaction commits.
+    async fn clear_completed_updates(
+        &self,
+        txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>>;
 
     async fn update_metrics(
         &self,

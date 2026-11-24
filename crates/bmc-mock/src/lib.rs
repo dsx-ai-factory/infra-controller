@@ -113,9 +113,10 @@ pub use machine_info::{
     MachineInfo,
 };
 pub use mock_machine_router::{
-    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_extension,
+    machine_router_with_injection_store,
 };
-pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
+pub use nv_redfish::schema::resource::{PowerState, ResetType as ResourceResetType};
 /// A switch's NVUE REST API, served at its NVOS address, and the simulation
 /// controls over what it reports.
 pub use nvue::{
@@ -133,7 +134,8 @@ pub use redfish::update_service::{
     BmcTaskState, DpuOsImage, DpuOsStatus, DpuOsStatusSource, UnknownBmcTaskState,
 };
 pub use redfish::virtual_media::{
-    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaUpdate,
+    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaDrive,
+    VirtualMediaGuard, VirtualMediaUpdate,
 };
 pub use sse::StreamStep;
 
@@ -251,6 +253,29 @@ impl HardwareType {
             Self::GenericAmi => None,
             Self::HpeProliantDl380aGen11 => None,
             Self::GenericSupermicro => None,
+        }
+    }
+
+    /// Whether the BMC answers 403 outside AccountService while the
+    /// credentials used are still the factory default, as BMCs that force a
+    /// password change on first use do. HPE iLO and the power shelves serve
+    /// every resource with their factory credentials. The other profiles keep
+    /// the stricter behavior.
+    pub(crate) fn bmc_requires_factory_password_change(&self) -> bool {
+        match self {
+            Self::HpeProliantDl380aGen11 | Self::LiteOnPowerShelf | Self::DeltaPowerShelf => false,
+            Self::DellPowerEdgeR750
+            | Self::DellPowerEdgeR760Bf4
+            | Self::WiwynnGB200Nvl
+            | Self::LenovoGB300Nvl
+            | Self::NvidiaDgxGb300
+            | Self::SupermicroGb300Nvl
+            | Self::NvidiaDgxVr
+            | Self::NvidiaSwitchNd5200Ld
+            | Self::NvidiaSwitchN5700Ld
+            | Self::NvidiaDgxH100
+            | Self::GenericAmi
+            | Self::GenericSupermicro => true,
         }
     }
 }

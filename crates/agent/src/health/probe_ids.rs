@@ -23,6 +23,7 @@ lazy_static::lazy_static! {
     pub static ref ServiceRunning: HealthProbeId = "ServiceRunning".parse().unwrap();
     pub static ref DhcpRelay: HealthProbeId = "DhcpRelay".parse().unwrap();
     pub static ref DhcpServer: HealthProbeId = "DhcpServer".parse().unwrap();
+    pub static ref Fmds: HealthProbeId = "Fmds".parse().unwrap();
     pub static ref BgpStats: HealthProbeId = HealthProbeId::bgp_stats();
     pub static ref BgpPeeringTor: HealthProbeId = HealthProbeId::bgp_peering_tor();
     pub static ref BgpPeeringRouteServer: HealthProbeId = "BgpPeeringRouteServer".parse().unwrap();

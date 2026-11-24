@@ -185,6 +185,7 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
 				NvosMacAddresses:      nvosMacAddresses,
 				NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
+				NvosIpAddress:         nvosInterfaces.IPAddress(),
 				RackID:                apiRequest.RackID,
 				Name:                  apiRequest.Name,
 				Manufacturer:          apiRequest.Manufacturer,
@@ -264,7 +265,7 @@ func NewGetAllExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) 
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "ID of Site (optional, filters results to specific site)"
 // @Param pageNumber query integer false "Page number of results returned"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} []model.APIExpectedSwitch
@@ -428,7 +429,7 @@ func NewGetExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) Get
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Expected Switch"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch/{id} [get]
 func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
@@ -466,7 +467,7 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)
@@ -586,7 +587,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)
@@ -661,6 +662,8 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	nvosPrimaryMacAddress := nvosInterfaces.PrimaryMacAddress()
 	nvosInterfacesPresent := apiRequest.NvosInterfaces != nil
 	clearNvosPrimaryMacAddress := nvosInterfacesPresent && nvosPrimaryMacAddress == nil
+	nvosIPAddress := nvosInterfaces.IPAddress()
+	clearNvosIPAddress := nvosInterfacesPresent && nvosIPAddress == nil
 
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
 		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
@@ -676,6 +679,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
 				NvosMacAddresses:      nvosMacAddresses,
 				NvosPrimaryMacAddress: nvosPrimaryMacAddress,
+				NvosIpAddress:         nvosIPAddress,
 				RackID:                apiRequest.RackID,
 				Name:                  apiRequest.Name,
 				Manufacturer:          apiRequest.Manufacturer,
@@ -692,11 +696,12 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 		}
 
-		if clearBmcIPAddress || clearNvosPrimaryMacAddress {
+		if clearBmcIPAddress || clearNvosPrimaryMacAddress || clearNvosIPAddress {
 			es, err = esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
 				ExpectedSwitchID:      expectedSwitch.ID,
 				BmcIpAddress:          clearBmcIPAddress,
 				NvosPrimaryMacAddress: clearNvosPrimaryMacAddress,
+				NvosIpAddress:         clearNvosIPAddress,
 			})
 			if err != nil {
 				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch fields in DB")
@@ -788,7 +793,7 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	expectedSwitch, err := esDAO.Get(ctx, nil, expectedSwitchID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Switch with ID: %s", expectedSwitchID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Switch from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Switch due to DB error", nil)
@@ -907,13 +912,24 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 		nvosInterfaces := expectedSwitch.NvosInterfaces
 		credentials[id] = cdbm.ExpectedSwitchCredentials{BmcUsername: expectedSwitch.DefaultBmcUsername, BmcPassword: expectedSwitch.DefaultBmcPassword, NvosUsername: expectedSwitch.NvOsUsername, NvosPassword: expectedSwitch.NvOsPassword}
 		inputs = append(inputs, cdbm.ExpectedSwitchCreateInput{
-			ExpectedSwitchID: id, SiteID: site.ID, BmcMacAddress: expectedSwitch.BmcMacAddress,
-			SwitchSerialNumber: expectedSwitch.SwitchSerialNumber, BmcIpAddress: expectedSwitch.BmcIpAddress,
-			NvosMacAddresses: nvosInterfaces.MacAddresses(), NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
-			RackID: expectedSwitch.RackID,
-			Name:   expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
-			Description: expectedSwitch.Description, SlotID: expectedSwitch.SlotID, TrayIdx: expectedSwitch.TrayIdx,
-			HostID: expectedSwitch.HostID, Labels: expectedSwitch.Labels, CreatedBy: dbUser.ID,
+			ExpectedSwitchID:      id,
+			SiteID:                site.ID,
+			BmcMacAddress:         expectedSwitch.BmcMacAddress,
+			SwitchSerialNumber:    expectedSwitch.SwitchSerialNumber,
+			BmcIpAddress:          expectedSwitch.BmcIpAddress,
+			NvosMacAddresses:      nvosInterfaces.MacAddresses(),
+			NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
+			NvosIpAddress:         nvosInterfaces.IPAddress(),
+			RackID:                expectedSwitch.RackID,
+			Name:                  expectedSwitch.Name,
+			Manufacturer:          expectedSwitch.Manufacturer,
+			Model:                 expectedSwitch.Model,
+			Description:           expectedSwitch.Description,
+			SlotID:                expectedSwitch.SlotID,
+			TrayIdx:               expectedSwitch.TrayIdx,
+			HostID:                expectedSwitch.HostID,
+			Labels:                expectedSwitch.Labels,
+			CreatedBy:             dbUser.ID,
 		})
 	}
 	stc, err := h.scp.GetClientByID(site.ID)

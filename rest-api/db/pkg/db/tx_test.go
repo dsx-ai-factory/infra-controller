@@ -4,22 +4,31 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/extra/bundebug"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func testTxGetTestSession(t *testing.T) *Session {
@@ -62,61 +71,166 @@ func testTxSetupSchema(t *testing.T, dbSession *Session) {
 	assert.Nil(t, err)
 }
 
-func TestTxBase(t *testing.T) {
-	dbSession := testTxGetTestSession(t)
-	defer dbSession.Close()
-	testTxSetupSchema(t, dbSession)
-	badSession, err := NewSession(context.Background(), "localhost", 1234, "postgres", "postgres", "postgres", "")
-	assert.Nil(t, err)
-	ctx := context.Background()
-	txOpts := sql.TxOptions{Isolation: sql.LevelRepeatableRead}
-	tests := []struct {
-		name      string
-		dbSession *Session
-		expectErr bool
-		commit    bool
-		rollback  bool
-	}{
-		{
-			name:      "error when bun's begintx fails",
-			dbSession: badSession,
-			expectErr: true,
-		},
-		{
-			name:      "success case with rollback",
-			dbSession: dbSession,
-			expectErr: false,
-			rollback:  true,
-		},
-		{
-			name:      "success case with commit",
-			dbSession: dbSession,
-			expectErr: false,
-			commit:    true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tx, err := BeginTx(ctx, tc.dbSession, &txOpts)
-			assert.Equal(t, tc.expectErr, err != nil)
-			if !tc.expectErr {
-				_, err := GetIDB(tx, tc.dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: "test"}).Exec(ctx)
-				assert.Nil(t, err)
-				if tc.commit {
-					assert.Nil(t, tx.Commit())
-					tt := &TestTable{}
-					err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
-					assert.Nil(t, err)
-				}
-				if tc.rollback {
-					assert.Nil(t, tx.Rollback())
-					tt := &TestTable{}
-					err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
-					assert.NotNil(t, err)
-				}
+func TestBeginTx(t *testing.T) {
+	t.Run("cancellation interrupts setup and releases the connection", func(t *testing.T) {
+		entered := make(chan struct{})
+		var notified sync.Once
+		matcher := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+			if !strings.HasPrefix(actual, expected) {
+				return errors.New("unexpected transaction setup query")
 			}
+			notified.Do(func() { close(entered) })
+			return nil
 		})
-	}
+		sqlDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+		require.NoError(t, err)
+		sqlDB.SetMaxOpenConns(1)
+		bdb := bun.NewDB(sqlDB, pgdialect.New())
+		ctx, cancel := context.WithCancel(context.Background())
+		var workers sync.WaitGroup
+		defer func() {
+			cancel()
+			workers.Wait()
+			// Cancellation can discard the mock connection rather than reuse it.
+			// Either way, wait for rollback to release the pool's only connection.
+			assert.Eventually(t, func() bool { return sqlDB.Stats().InUse == 0 }, time.Second, time.Millisecond)
+			assert.NoError(t, bdb.Close())
+			assert.NoError(t, mock.ExpectationsWereMet())
+		}()
+		mock.ExpectBegin()
+		mock.ExpectExec("SET LOCAL lock_timeout").WillDelayFor(2 * time.Second).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectRollback()
+		mock.ExpectClose()
+		type result struct {
+			tx  *Tx
+			err error
+		}
+		done := make(chan result, 1)
+		workers.Go(func() {
+			tx, err := BeginTx(ctx, &Session{DB: bdb}, nil)
+			if tx != nil {
+				_ = tx.Rollback()
+			}
+			done <- result{tx: tx, err: err}
+		})
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("transaction setup did not enter the driver")
+		}
+		cancel()
+		select {
+		case got := <-done:
+			require.Error(t, got.err)
+			require.Nil(t, got.tx)
+		case <-time.After(time.Second):
+			t.Fatal("transaction setup did not stop after cancellation")
+		}
+	})
+
+	t.Run("transaction lifecycle", func(t *testing.T) {
+		dbSession := testTxGetTestSession(t)
+		defer dbSession.Close()
+		testTxSetupSchema(t, dbSession)
+		badSession, err := NewSession(context.Background(), "localhost", 1234, "postgres", "postgres", "postgres", "")
+		assert.Nil(t, err)
+		ctx := context.Background()
+		txOpts := sql.TxOptions{Isolation: sql.LevelRepeatableRead}
+		tests := []struct {
+			name      string
+			dbSession *Session
+			expectErr bool
+			commit    bool
+			rollback  bool
+		}{
+			{
+				name:      "error when bun's begintx fails",
+				dbSession: badSession,
+				expectErr: true,
+			},
+			{
+				name:      "success case with rollback",
+				dbSession: dbSession,
+				expectErr: false,
+				rollback:  true,
+			},
+			{
+				name:      "success case with commit",
+				dbSession: dbSession,
+				expectErr: false,
+				commit:    true,
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				tx, err := BeginTx(ctx, tc.dbSession, &txOpts)
+				assert.Equal(t, tc.expectErr, err != nil)
+				if !tc.expectErr {
+					_, err := GetIDB(tx, tc.dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: "test"}).Exec(ctx)
+					assert.Nil(t, err)
+					if tc.commit {
+						assert.Nil(t, tx.Commit())
+						tt := &TestTable{}
+						err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
+						assert.Nil(t, err)
+					}
+					if tc.rollback {
+						assert.Nil(t, tx.Rollback())
+						tt := &TestTable{}
+						err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
+						assert.NotNil(t, err)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("setup failure cleanup", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			rollbackErr error
+			wantLog     bool
+		}{
+			{name: "setup error is preserved"},
+			{name: "rollback failure is logged without replacing setup error", rollbackErr: errors.New("rollback connection failure"), wantLog: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sqlDB, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				bdb := bun.NewDB(sqlDB, pgdialect.New())
+				t.Cleanup(func() {
+					mock.ExpectClose()
+					require.NoError(t, bdb.Close())
+				})
+				setupErr := errors.New("lock timeout setup failed")
+				mock.ExpectBegin()
+				mock.ExpectExec("SET LOCAL lock_timeout").WillReturnError(setupErr)
+				mock.ExpectRollback().WillReturnError(tc.rollbackErr)
+				var logs bytes.Buffer
+				original := log.Logger
+				log.Logger = zerolog.New(&logs)
+				t.Cleanup(func() { log.Logger = original })
+				spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+					TraceID: trace.TraceID{3},
+					SpanID:  trace.SpanID{4},
+				})
+				ctx := trace.ContextWithSpanContext(context.Background(), spanContext)
+				tx, err := BeginTx(ctx, &Session{DB: bdb}, nil)
+				require.ErrorIs(t, err, setupErr)
+				assert.Nil(t, tx)
+				if tc.wantLog {
+					assert.Contains(t, logs.String(), tc.rollbackErr.Error())
+					var record map[string]any
+					require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+					assert.Equal(t, spanContext.TraceID().String(), record["trace_id"])
+					assert.Equal(t, spanContext.SpanID().String(), record["span_id"])
+				} else {
+					assert.Empty(t, logs.String())
+				}
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+		}
+	})
 }
 
 func TestTxGetIDB(t *testing.T) {
@@ -376,6 +490,115 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				assert.NoError(t, tx2.Rollback())
 			}
+		})
+	}
+}
+
+// testTxCancelAfterQueryHook cancels the retry context after Bun scans the
+// contended lock result. It counts queries before database/sql can reject a
+// canceled context without reaching the mock driver.
+type testTxCancelAfterQueryHook struct {
+	query    string
+	cancel   context.CancelFunc
+	attempts int
+	queryErr error
+}
+
+func (h *testTxCancelAfterQueryHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if event.Query == h.query {
+		h.attempts++
+	}
+	return ctx
+}
+
+func (h *testTxCancelAfterQueryHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if event.Query == h.query {
+		h.queryErr = event.Err
+		h.cancel()
+	}
+}
+
+// Check final-error selection through both public methods. The existing
+// PostgreSQL tests cover lock ownership; these mocks control the failure order.
+func TestTx_tryAcquireAdvisoryLock(t *testing.T) {
+	queryErr := errors.New("lock query failed")
+	tests := []struct {
+		name          string
+		acquire       func(*Tx, context.Context, uint64, *LockRetryOptions) error
+		query         string
+		attemptErrors []error // nil returns a successfully scanned, contended lock
+		cancel        bool
+		wantErr       error
+	}{
+		{
+			name: "database error after contention", acquire: (*Tx).TryAcquireAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock(1)",
+			attemptErrors: []error{nil, queryErr}, wantErr: queryErr,
+		},
+		{
+			name: "contention remains contention", acquire: (*Tx).TryAcquireSharedAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock_shared(1)",
+			attemptErrors: []error{nil, nil}, wantErr: ErrXactAdvisoryLockFailed,
+		},
+		{
+			name: "cancellation after contention", acquire: (*Tx).TryAcquireSharedAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock_shared(1)",
+			attemptErrors: []error{nil}, cancel: true, wantErr: context.Canceled,
+		},
+		{
+			name: "last database error replaces earlier errors", acquire: (*Tx).TryAcquireAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock(1)",
+			attemptErrors: []error{nil, queryErr, sql.ErrTxDone}, wantErr: sql.ErrTxDone,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Virtual time makes a lost cancellation fail promptly even with a long backoff.
+			synctest.Test(t, func(t *testing.T) {
+				sqlDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+				require.NoError(t, err)
+				t.Cleanup(func() { assert.NoError(t, mock.ExpectationsWereMet()) })
+				db := bun.NewDB(sqlDB, pgdialect.New())
+				t.Cleanup(func() { assert.NoError(t, db.Close()) })
+				mock.ExpectBegin()
+				bunTx, err := db.BeginTx(context.Background(), nil)
+				require.NoError(t, err)
+				tx := &Tx{tx: bunTx}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				for _, attemptErr := range tc.attemptErrors {
+					query := mock.ExpectQuery(tc.query)
+					if attemptErr == nil {
+						query.WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(false))
+					} else {
+						query.WillReturnError(attemptErr)
+					}
+				}
+				hook := &testTxCancelAfterQueryHook{query: tc.query, cancel: cancel}
+				attempts := len(tc.attemptErrors)
+				delay := time.Duration(0)
+				if tc.cancel {
+					db.AddQueryHook(hook)
+					attempts = 2
+					delay = time.Hour
+				}
+				mock.ExpectRollback()
+				mock.ExpectClose()
+				t.Cleanup(func() { assert.NoError(t, tx.Rollback()) })
+
+				// RandomDelay requires positive jitter; 1ns makes its random contribution zero.
+				options := &LockRetryOptions{Retries: &attempts, Delay: &delay, Jitter: cutil.GetPtr(time.Nanosecond)}
+				start := time.Now()
+				err = tc.acquire(tx, ctx, 1, options)
+
+				assert.Same(t, tc.wantErr, err)
+				if tc.cancel {
+					assert.Equal(t, 1, hook.attempts)
+					assert.NoError(t, hook.queryErr)
+					assert.Zero(t, time.Since(start), "cancellation must interrupt backoff")
+				}
+			})
 		})
 	}
 }
@@ -754,4 +977,112 @@ func TestGetBunTx(t *testing.T) {
 	assert.Nil(t, err)
 	buntxp := tx1.GetBunTx()
 	assert.NotNil(t, buntxp)
+}
+
+func TestRollbackTx(t *testing.T) {
+	rollbackErr := errors.New("rollback connection failure")
+	for _, tc := range []struct {
+		name          string
+		rollbackErr   error
+		committed     bool
+		nilFlag       bool
+		alreadyClosed bool
+		canceled      bool
+		wantLog       bool
+	}{
+		{name: "successful rollback"},
+		{name: "rollback failure is logged with trace fields", rollbackErr: rollbackErr, wantLog: true},
+		{name: "canceled context suppresses a non-context rollback error", rollbackErr: rollbackErr, canceled: true},
+		{name: "committed transaction is skipped", committed: true},
+		{name: "nil flag is skipped", nilFlag: true},
+		{name: "already closed transaction is quiet", alreadyClosed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			bdb := bun.NewDB(sqlDB, pgdialect.New())
+			t.Cleanup(func() {
+				mock.ExpectClose()
+				require.NoError(t, bdb.Close())
+			})
+			mock.ExpectBegin()
+			btx, err := bdb.BeginTx(context.Background(), nil)
+			require.NoError(t, err)
+			tx := &Tx{tx: btx}
+			if tc.alreadyClosed || (!tc.committed && !tc.nilFlag) {
+				mock.ExpectRollback().WillReturnError(tc.rollbackErr)
+			}
+			if tc.alreadyClosed {
+				require.NoError(t, tx.Rollback())
+			}
+			var logs bytes.Buffer
+			original := log.Logger
+			log.Logger = zerolog.New(&logs)
+			t.Cleanup(func() { log.Logger = original })
+			committed := &tc.committed
+			if tc.nilFlag {
+				committed = nil
+			}
+			spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: trace.TraceID{1},
+				SpanID:  trace.SpanID{2},
+			})
+			ctx, cancel := context.WithCancel(trace.ContextWithSpanContext(context.Background(), spanContext))
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			// The mock transaction uses Background so database/sql's cancellation
+			// goroutine cannot race this check of cleanup's logging policy.
+			RollbackTx(ctx, tx, committed)
+			if tc.wantLog {
+				assert.Contains(t, logs.String(), rollbackErr.Error())
+				assert.Contains(t, logs.String(), "failed to rollback transaction")
+				var record map[string]any
+				require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+				assert.Equal(t, spanContext.TraceID().String(), record["trace_id"])
+				assert.Equal(t, spanContext.SpanID().String(), record["span_id"])
+			} else {
+				assert.Empty(t, logs.String())
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+			if tc.committed || tc.nilFlag {
+				mock.ExpectRollback()
+				require.NoError(t, tx.Rollback())
+			}
+		})
+	}
+}
+
+func TestTx_RollbackWithLog(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	bdb := bun.NewDB(sqlDB, pgdialect.New())
+	t.Cleanup(func() {
+		mock.ExpectClose()
+		require.NoError(t, bdb.Close())
+	})
+	mock.ExpectBegin()
+	btx, err := bdb.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	rollbackErr := errors.New("rollback connection failure")
+	mock.ExpectRollback().WillReturnError(rollbackErr)
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).With().Str("MachineID", "machine-1").Logger()
+	tx := &Tx{tx: btx}
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{5},
+		SpanID:  trace.SpanID{6},
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), spanContext)
+	tx.RollbackWithLog(ctx, logger)
+	var record map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+	assert.Equal(t, "machine-1", record["MachineID"])
+	assert.Equal(t, spanContext.TraceID().String(), record["trace_id"])
+	assert.Equal(t, spanContext.SpanID().String(), record["span_id"])
+	assert.Equal(t, "error", record["level"])
+	assert.Equal(t, rollbackErr.Error(), record["error"])
+	assert.Equal(t, "failed to rollback transaction", record["message"])
+	require.NoError(t, mock.ExpectationsWereMet())
 }

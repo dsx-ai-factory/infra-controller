@@ -16,12 +16,15 @@
  */
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use nv_redfish::bmc_http::reqwest::{
     BmcError, Client as ReqwestClient, ClientParams as ReqwestClientParams,
 };
 use prometheus::{Gauge, GaugeVec, Opts};
+use tokio::task::{JoinError, JoinHandle};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub mod api_client;
@@ -54,16 +57,16 @@ use crate::endpoint::{
     ClusterEndpointSource, CompositeEndpointSource, EndpointSource, StaticEndpointSource,
 };
 use crate::limiter::{BucketLimiter, NoopLimiter, RateLimiter};
-use crate::metrics::{BmcLatencyMetrics, MetricsManager, run_metrics_server};
+use crate::metrics::{BmcLatencyMetrics, MetricsManager, spawn_metrics_server};
 use crate::processor::{
     BmcIntrusionEventProcessor, EventProcessingPipeline, EventProcessor, HealthReportProcessor,
-    LeakEventProcessor, NmxcDomainStateProcessor, RackLeakProcessor,
+    LeakEventProcessor, NmxcDomainStateProcessor, RackLeakProcessor, ResourceStatusProcessor,
 };
 use crate::sharding::ShardManager;
 use crate::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
 use crate::sink::{
     CompositeDataSink, DataSink, HealthReportSink, LogFileSink, NvLinkDomainHealthReportSink,
-    OtlpSink, PowerShelfHealthReportSink, PrometheusSink, RackHealthReportSink,
+    OtlpSink, PowerShelfHealthReportSink, PrometheusSink, RackHealthReportSink, SinkWorkers,
     SwitchHealthReportSink, TracingSink,
 };
 
@@ -133,6 +136,11 @@ pub enum HealthError {
     /// Client TLS material could not be read, validated, or applied.
     #[error("TLS profile error: {0}")]
     Tls(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The metrics listener, which also serves `/livez`, could not start or
+    /// stopped without a shutdown signal.
+    #[error("metrics listener failed: {0}")]
+    MetricsListener(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<String> for HealthError {
@@ -166,7 +174,10 @@ struct EndpointWiring {
 async fn build_endpoint_wiring(
     config: &Config,
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Result<EndpointWiring, HealthError> {
+    let bmc_instrumentation =
+        crate::bmc::BmcInstrumentation::new(instrumentation.clone(), bmc_latency_metrics);
     let reqwest = ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
         .map_err(BmcError::ReqwestError)?;
     let mut sources: Vec<Arc<dyn EndpointSource>> = Vec::new();
@@ -183,7 +194,12 @@ async fn build_endpoint_wiring(
             })
             .collect();
         Some(Arc::new(
-            static_credentials::StaticCredentialProvider::new(path.clone(), targets).await?,
+            static_credentials::StaticCredentialProvider::new(
+                path.clone(),
+                targets,
+                instrumentation.clone(),
+            )
+            .await?,
         ))
     } else {
         None
@@ -205,7 +221,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
             file_provider.clone().ok_or_else(|| {
                 HealthError::GenericError(
                     "static endpoints require endpoint_sources.static_credentials_file".into(),
@@ -221,6 +237,7 @@ async fn build_endpoint_wiring(
             source_cfg.client_cert.clone(),
             source_cfg.client_key.clone(),
             &source_cfg.api_url,
+            instrumentation.clone(),
         ));
         let endpoint_source = Arc::new(ApiEndpointSource::new_with_request_concurrency(
             api_client,
@@ -228,7 +245,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.clone(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics.clone(),
+            bmc_instrumentation.clone(),
         ));
         sources.push(endpoint_source as Arc<dyn EndpointSource>);
     }
@@ -240,7 +257,7 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics,
+            bmc_instrumentation.clone(),
         );
         sources.push(Arc::new(cluster_source));
     }
@@ -258,9 +275,14 @@ async fn build_endpoint_wiring(
     })
 }
 
+/// Builds the configured sinks, registering their background workers with
+/// `sink_workers` for the shutdown flush.
 fn build_data_sink(
     config: &Config,
     metrics_manager: Arc<MetricsManager>,
+    sink_workers: &mut SinkWorkers,
+    meter: &opentelemetry::metrics::Meter,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Option<Arc<dyn DataSink>>, HealthError> {
     let mut sinks: Vec<Arc<dyn DataSink>> = Vec::new();
     let mut processors: Vec<Arc<dyn EventProcessor>> = Vec::new();
@@ -305,6 +327,10 @@ fn build_data_sink(
         )));
     }
 
+    if config.processors.resource_status.is_enabled() {
+        processors.push(Arc::new(ResourceStatusProcessor::new()));
+    }
+
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.log_file {
         sinks.push(Arc::new(
             LogFileSink::new(sink_cfg).map_err(HealthError::GenericError)?,
@@ -312,23 +338,43 @@ fn build_data_sink(
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.health_report {
-        sinks.push(Arc::new(HealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(HealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.rack_health_report {
-        sinks.push(Arc::new(RackHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(RackHealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.switch_health_report {
-        sinks.push(Arc::new(SwitchHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(SwitchHealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.nvlink_domain_health_report {
-        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.power_shelf_health_report {
-        sinks.push(Arc::new(PowerShelfHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(PowerShelfHealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+            instrumentation.clone(),
+        )?));
     }
 
     if let Configurable::Enabled(ref otlp_cfg) = config.sinks.otlp {
@@ -339,6 +385,9 @@ fn build_data_sink(
             mapper,
             &metrics_manager,
             &config.metrics.prefix,
+            sink_workers,
+            meter,
+            instrumentation,
         )?;
 
         for sink in otlp_sinks {
@@ -400,10 +449,117 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
         Ok(())
     }
 
-    async fn shutdown(&mut self) -> discovery::DiscoveryShutdown {
-        self.ctx
-            .drain_collectors(self.config.shutdown_timeout)
-            .await
+    async fn shutdown(&mut self, deadline: Instant) -> discovery::DiscoveryShutdown {
+        self.ctx.drain_collectors(deadline).await
+    }
+}
+
+/// Waits for cancellation or for the listener or discovery task to exit, then
+/// shuts down gracefully if cancellation has been observed by then.
+///
+/// The `shutdown_timeout` budget starts when this observes cancellation.
+/// Discovery completion, collector draining, and the sink flush share that one
+/// deadline; reaching it stops waiting but does not stop tasks still running.
+/// Exits without cancellation are logged and skip the graceful shutdown.
+///
+/// # Errors
+///
+/// Returns [`HealthError::MetricsListener`] when the listener stops without
+/// cancellation, because nothing answers `/livez` after that.
+async fn wait_for_service_exit<I: discovery::DiscoveryIteration>(
+    discovery: impl Future<Output = Result<I, JoinError>>,
+    listener: impl Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    cancel_token: &CancellationToken,
+    sink_workers: SinkWorkers,
+    shutdown_timeout: Duration,
+) -> Result<(), HealthError> {
+    let mut discovery = std::pin::pin!(discovery);
+    let mut discovery_result = None;
+    let mut listener_result = None;
+
+    tokio::select! {
+        // Cancellation is polled first so a signalled shutdown is not logged as
+        // a listener or discovery exit.
+        biased;
+
+        () = cancel_token.cancelled() => {}
+        res = listener => {
+            match &res {
+                Ok(()) => tracing::info!("Metrics listener shutdown"),
+                Err(error) => tracing::error!(%error, "Metrics listener failed"),
+            }
+
+            listener_result = Some(res);
+        }
+        res = &mut discovery => discovery_result = Some(res),
+    }
+
+    // A task can exit between the signal and the select observing it; that is
+    // still a graceful shutdown.
+    if !cancel_token.is_cancelled() {
+        match discovery_result {
+            Some(Ok(_)) => tracing::error!("Discovery loop ended unexpectedly"),
+            Some(Err(e)) => tracing::error!(error=?e, "Discovery loop join error"),
+            None => {}
+        }
+
+        return match listener_result {
+            Some(result) => {
+                Err(HealthError::MetricsListener(result.err().unwrap_or_else(
+                    || "listener returned without a shutdown signal".into(),
+                )))
+            }
+            None => Ok(()),
+        };
+    }
+
+    let now = Instant::now();
+
+    // A budget past the clock's range waits up to Tokio's far-future horizon
+    // instead of panicking.
+    let deadline = now
+        .checked_add(shutdown_timeout)
+        .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365 * 30));
+
+    tracing::info!("Shutdown signal received; draining collectors");
+
+    // The loop observes the same cancellation and returns its iteration.
+    match discovery_result {
+        Some(result) => drain_discovery(std::future::ready(result), deadline).await,
+        None => drain_discovery(discovery, deadline).await,
+    }
+
+    // Collectors abandoned at the deadline keep their sink references, so sink
+    // workers are told to flush instead of relying on drop.
+    sink_workers.flush(deadline).await;
+
+    Ok(())
+}
+
+/// Waits for the cancelled discovery loop to return, then drains its
+/// collectors; both phases are abandoned at `deadline`.
+async fn drain_discovery<I: discovery::DiscoveryIteration>(
+    discovery: impl Future<Output = Result<I, JoinError>>,
+    deadline: Instant,
+) {
+    let drained = tokio::time::timeout_at(deadline, async {
+        let mut iteration = discovery.await?;
+        Ok::<_, JoinError>(iteration.shutdown(deadline).await)
+    })
+    .await;
+
+    match drained {
+        Ok(Ok(shutdown)) => tracing::info!(
+            closed_collector_count = shutdown.closed,
+            timed_out_collector_count = shutdown.timed_out,
+            "Collectors drained"
+        ),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "Discovery loop join error during shutdown");
+        }
+        Err(_) => {
+            tracing::warn!("Collectors did not drain before the shutdown deadline");
+        }
     }
 }
 
@@ -413,12 +569,14 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
 /// tasks start, so invalid certificate configuration fails startup.
 ///
 /// `cancel_token` carries the shutdown signal: once cancelled, the service stops
-/// discovery and drains its collectors within the configured `shutdown_timeout`.
+/// discovery, drains its collectors, and then flushes queued sink records, all
+/// before one deadline, `shutdown_timeout` after the service observes the
+/// signal. Work still running at that deadline is abandoned, not awaited.
 ///
 /// # Errors
 ///
-/// Returns an error when startup validation or initialization fails, or when a
-/// long-running service task exits with an error.
+/// Returns an error when startup validation or initialization fails, or when
+/// the metrics listener cannot start or stops without a shutdown signal.
 pub async fn run_service(
     config: Config,
     cancel_token: CancellationToken,
@@ -464,10 +622,19 @@ pub async fn run_service(
     carbide_instrument::log_events::register(&framework_metrics.meter);
     metrics_manager.expose_framework_registry(framework_metrics.registry.clone());
 
-    let join_listener = tokio::spawn(run_metrics_server(
+    let prometheus_config = config
+        .sinks
+        .prometheus
+        .as_option()
+        .cloned()
+        .unwrap_or_default();
+
+    let listener = spawn_metrics_server(
         metrics_endpoint,
         metrics_manager.clone(),
-    ));
+        prometheus_config,
+        cancel_token.clone(),
+    );
 
     let registry = metrics_manager.global_registry();
     let active_endpoints_gauge = Gauge::new(
@@ -493,13 +660,25 @@ pub async fn run_service(
 
     let EndpointWiring {
         source: endpoint_source,
-    } = build_endpoint_wiring(&config, bmc_latency_metrics).await?;
+    } = build_endpoint_wiring(
+        &config,
+        bmc_latency_metrics,
+        framework_metrics.instrumentation.clone(),
+    )
+    .await?;
 
-    let data_sink = build_data_sink(&config, metrics_manager.clone())?;
+    let mut sink_workers = SinkWorkers::default();
+    let data_sink = build_data_sink(
+        &config,
+        metrics_manager.clone(),
+        &mut sink_workers,
+        &framework_metrics.meter,
+        &framework_metrics.instrumentation,
+    )?;
 
     let config_arc = Arc::new(config);
 
-    let mut join_discovery: tokio::task::JoinHandle<discovery::DiscoveryShutdown> = tokio::spawn({
+    let join_discovery: JoinHandle<ServiceDiscoveryIteration> = tokio::spawn({
         let config = config_arc.clone();
         let shard_manager = ShardManager {
             shard: config.shard,
@@ -522,6 +701,7 @@ pub async fn run_service(
             config.clone(),
             tls_config,
             nmxc_schema_override,
+            framework_metrics.instrumentation.clone(),
         )?;
 
         let collector_transition_notify = ctx.collector_transition_notify.clone();
@@ -543,56 +723,18 @@ pub async fn run_service(
             collector_transition_notify,
             cancel_token.clone(),
             iteration,
+            framework_metrics.instrumentation,
         )
     });
 
-    tokio::select! {
-        // Cancellation is polled first so a discovery loop that has already
-        // drained is reported as a graceful shutdown rather than an unexpected
-        // exit.
-        biased;
-
-        () = cancel_token.cancelled() => {
-            tracing::info!("Shutdown signal received; draining collectors");
-
-            // The loop observes the same cancellation and drains its collectors.
-            match join_discovery.await {
-                Ok(shutdown) => tracing::info!(
-                    closed_collector_count = shutdown.closed,
-                    timed_out_collector_count = shutdown.timed_out,
-                    "Collectors drained"
-                ),
-                Err(e) => {
-                    tracing::error!(error=?e, "Discovery loop join error during shutdown");
-                }
-            }
-        }
-        res = join_listener => {
-            match res {
-                Ok(Ok(_)) => {
-                    tracing::info!("Metrics listener shutdown");
-                }
-                 Ok(Err(e)) => {
-                    tracing::error!(error=?e, "Metrics listener failed");
-                }
-                Err(e) => {
-                    tracing::error!(error=?e, "Metrics listener join error");
-                }
-            }
-        }
-        res = &mut join_discovery => {
-            match res {
-                Ok(_) => {
-                    tracing::error!("Discovery loop ended unexpectedly");
-                }
-                Err(e) => {
-                    tracing::error!(error=?e, "Discovery loop join error");
-                }
-            }
-        }
-    };
-
-    Ok(())
+    wait_for_service_exit(
+        join_discovery,
+        listener,
+        &cancel_token,
+        sink_workers,
+        config_arc.shutdown_timeout,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -635,9 +777,15 @@ switch = { serial = "switch-host" }
         config.endpoint_sources.static_credentials_file = Some(file.path().into());
         config.validate().expect("test config should be valid");
 
-        let wiring = build_endpoint_wiring(&config, None)
-            .await
-            .expect("endpoint wiring should build");
+        let wiring = build_endpoint_wiring(
+            &config,
+            None,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .expect("endpoint wiring should build");
 
         let endpoints = wiring
             .source
@@ -702,7 +850,15 @@ mac = "aa:bb:cc:dd:ee:03"
             .unwrap();
         config.endpoint_sources.static_credentials_file = Some(path);
         config.validate().unwrap();
-        let wiring = build_endpoint_wiring(&config, None).await.unwrap();
+        let wiring = build_endpoint_wiring(
+            &config,
+            None,
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .unwrap();
         let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
         assert_eq!(endpoints.len(), 3);
         let providers = endpoints
@@ -764,9 +920,15 @@ mac = "aa:bb:cc:dd:ee:03"
                 .join("../..")
                 .join(&*path);
             config.endpoint_sources.carbide_api = Configurable::Disabled;
-            let wiring = build_endpoint_wiring(&config, None)
-                .await
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let wiring = build_endpoint_wiring(
+                &config,
+                None,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
             let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
             assert_eq!(
                 endpoints.len(),
@@ -782,6 +944,44 @@ mac = "aa:bb:cc:dd:ee:03"
                     .await
                     .unwrap_or_else(|error| panic!("{name}: {error}"));
             }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collector_drain_stops_waiting_at_the_shutdown_deadline() {
+        use carbide_instrument::testing::capture_logs_async;
+
+        struct HangingDrain;
+
+        #[async_trait]
+        impl discovery::DiscoveryIteration for HangingDrain {
+            async fn run_once(&mut self) -> Result<(), HealthError> {
+                Ok(())
+            }
+
+            async fn shutdown(&mut self, _deadline: Instant) -> discovery::DiscoveryShutdown {
+                std::future::pending().await
+            }
+        }
+
+        for (scenario, join_discovery) in [
+            (
+                "loop never returns",
+                tokio::spawn(std::future::pending::<HangingDrain>()),
+            ),
+            ("drain never finishes", tokio::spawn(async { HangingDrain })),
+        ] {
+            let deadline = Instant::now() + Duration::from_secs(20);
+
+            let ((), logs) = capture_logs_async(drain_discovery(join_discovery, deadline)).await;
+
+            assert_eq!(Instant::now(), deadline, "{scenario}");
+
+            assert!(
+                logs.iter().any(|log| log.level == tracing::Level::WARN
+                    && log.message == "Collectors did not drain before the shutdown deadline"),
+                "{scenario}"
+            );
         }
     }
 
@@ -817,7 +1017,14 @@ mac = "aa:bb:cc:dd:ee:03"
                     .unwrap()
                 })
                 .collect();
-            let (result, logs) = capture_logs_async(build_endpoint_wiring(&config, None)).await;
+            let (result, logs) = capture_logs_async(build_endpoint_wiring(
+                &config,
+                None,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            ))
+            .await;
             assert!(result.is_err(), "{scenario}");
             let errors = logs
                 .iter()

@@ -85,6 +85,8 @@ impl From<DpuConfig> for EndpointExplorationReport {
                     link_status: None,
                     uefi_device_path: None,
                 }],
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 id: "Bluefield".to_string(),
@@ -121,6 +123,7 @@ impl From<DpuConfig> for EndpointExplorationReport {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "Card1".to_string(),
@@ -128,6 +131,7 @@ impl From<DpuConfig> for EndpointExplorationReport {
                 model: Some("Bluefield 3 SmartNIC Main Card".to_string()),
                 part_number: Some("900-9D3B6-00CV-AA0".to_string()),
                 serial_number: Some(value.serial),
+                assemblies: Vec::new(),
                 network_adapters: vec![],
                 compute_tray_index: None,
                 physical_slot_number: None,
@@ -197,7 +201,6 @@ impl From<DpuConfig> for EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }
     }

@@ -17,11 +17,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
+use bmc_platform::{LockdownDesiredState, LockdownScope, OperationStatus, PowerState, ResetType};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
+};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
+use db::TransactionVending as _;
+use itertools::Itertools;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
-use libredfish::{EnabledDisabled, JobState, PowerState, RedfishError, SystemPowerControl};
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
@@ -37,7 +42,10 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
-use crate::redfish::{did_dpu_finish_booting, host_power_control};
+use crate::redfish::{
+    did_dpu_finish_booting, host_power_control, poll_idrac_job, power_state, power_state_name,
+    reset_bmc_to_factory_defaults,
+};
 
 fn deconfiguring_dpus_after_host_reset(state: &ManagedHostStateSnapshot) -> ManagedHostState {
     ManagedHostState::Decommissioning {
@@ -71,7 +79,12 @@ pub(super) async fn handle_suppressing_site_explorer(
         bmc_mac_addresses.push(bmc_mac_address(dpu)?);
     }
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let mut pending_macs = Vec::new();
     for bmc_mac_address in bmc_mac_addresses {
         let suppression = db::bmc_suppression::upsert(
@@ -98,11 +111,7 @@ pub(super) async fn handle_suppressing_site_explorer(
     } else {
         StateHandlerOutcome::wait(format!(
             "waiting for Site Explorer suppression acknowledgement: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         ))
     };
 
@@ -117,18 +126,14 @@ pub(super) async fn handle_deconfiguring_host(
     let machine = &state.host_snapshot;
     match deconfiguring_state {
         DeconfiguringHostState::DisableLockdown => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
-                Ok(()) | Err(RedfishError::NotSupported(_)) => {}
-                Err(error) => {
-                    return Err(StateHandlerError::GenericError(eyre::eyre!(
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+            bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
                         "failed to disable host BMC lockdown: {error}"
-                    )));
-                }
-            }
+                    ))
+                })?;
 
             let next = if machine.bmc_vendor().is_supermicro() {
                 DeconfiguringHostState::RebootAfterLockdown
@@ -144,22 +149,14 @@ pub(super) async fn handle_deconfiguring_host(
             ))
         }
         DeconfiguringHostState::RebootAfterLockdown => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            host_power_control(
-                redfish_client.as_ref(),
-                machine,
-                SystemPowerControl::ForceRestart,
-                ctx,
-            )
-            .await
-            .map_err(|error| {
-                StateHandlerError::GenericError(eyre::eyre!(
-                    "failed to reboot host after disabling BMC lockdown: {error}"
-                ))
-            })?;
+            let bmc = ctx.services.connect_bmc(machine).await?;
+            host_power_control(&bmc, machine, ResetType::ForceRestart, ctx)
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "failed to reboot host after disabling BMC lockdown: {error}"
+                    ))
+                })?;
             Ok(StateHandlerOutcome::transition(
                 ManagedHostState::Decommissioning {
                     decommissioning_state: DecommissioningState::DeconfiguringHost {
@@ -175,8 +172,6 @@ pub(super) async fn handle_deconfiguring_host(
                 ));
             }
 
-            let bmc_access_info = ctx.services.bmc_access_info_for_machine(machine).await?;
-
             let bmc_mac =
                 machine
                     .status
@@ -186,9 +181,8 @@ pub(super) async fn handle_deconfiguring_host(
                         object_id: machine.id.to_string(),
                         missing: "bmc_mac",
                     })?;
-            let mut conn = ctx.services.db_pool.acquire().await?;
             let status = db::credential_rotation::device_rotation_status(
-                &mut conn,
+                &ctx.services.db_pool,
                 db::credential_rotation::CredentialRotationType::HostUefi,
                 bmc_mac,
             )
@@ -208,13 +202,14 @@ pub(super) async fn handle_deconfiguring_host(
                     "invalid host UEFI credential version {version}: {error}"
                 ))
             })?;
-            drop(conn);
 
             let key = CredentialKey::host_uefi_site_default(version);
-            let credentials = ctx
+            let Credentials::UsernamePassword {
+                password: current_password,
+                ..
+            } = ctx
                 .services
-                .bmc_credential_ops
-                .credential_reader()
+                .credential_manager
                 .get_credentials(&key)
                 .await
                 .map_err(|error| {
@@ -228,20 +223,18 @@ pub(super) async fn handle_deconfiguring_host(
                     ))
                 })?;
 
-            let job_id = ctx
-                .services
-                .bmc_credential_ops
-                .clear_host_uefi_password(&bmc_access_info, credentials)
+            let bmc = ctx.services.connect_bmc(machine).await?;
+            let outcome = bmc
+                .bios()
+                .map_err(|error| platform_error("bios", error.into()))?
+                .clear_uefi_password(&current_password)
                 .await
-                .map_err(|error| match error {
-                    // Client creation failed (credential store, TCP, or the
-                    // vendor probe): propagate as-is so the framework
-                    // retries normally.
-                    carbide_redfish::libredfish::CredentialOpError::ClientCreation(e) => e.into(),
-                    error => StateHandlerError::GenericError(eyre::eyre!(
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
                         "failed to clear host UEFI password: {error}"
-                    )),
+                    ))
                 })?;
+            let job_id = crate::platform_config::vendor_job_id(&outcome).map(|id| id.to_string());
 
             let next = match job_id {
                 Some(job_id) => DeconfiguringHostState::WaitForUefiPasswordJobScheduled { job_id },
@@ -260,29 +253,20 @@ pub(super) async fn handle_deconfiguring_host(
             ))
         }
         DeconfiguringHostState::WaitForUefiPasswordJobScheduled { job_id } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            let job_state = redfish_client
-                .get_job_state(job_id)
-                .await
-                .map_err(|error| {
-                    StateHandlerError::GenericError(eyre::eyre!(
-                        "failed to read UEFI password job {job_id}: {error}"
-                    ))
-                })?;
-            let next = match job_state {
-                JobState::Scheduled => DeconfiguringHostState::RebootAfterUefiPassword {
+            let status = poll_idrac_job(ctx.services, machine, job_id).await?;
+            let next = match status {
+                OperationStatus::AwaitingReset => DeconfiguringHostState::RebootAfterUefiPassword {
                     job_id: job_id.clone(),
                 },
                 // Some platforms skip Scheduled.
-                JobState::Completed => DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
-                    job_id: job_id.clone(),
-                },
+                OperationStatus::Completed => {
+                    DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
+                        job_id: job_id.clone(),
+                    }
+                }
                 _ => {
                     return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for UEFI password job {job_id} to be scheduled or completed; current state: {job_state:?}"
+                        "waiting for UEFI password job {job_id} to be scheduled or completed; current state: {status:?}"
                     )));
                 }
             };
@@ -295,22 +279,14 @@ pub(super) async fn handle_deconfiguring_host(
             ))
         }
         DeconfiguringHostState::RebootAfterUefiPassword { job_id } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            host_power_control(
-                redfish_client.as_ref(),
-                machine,
-                SystemPowerControl::ForceRestart,
-                ctx,
-            )
-            .await
-            .map_err(|error| {
-                StateHandlerError::GenericError(eyre::eyre!(
-                    "failed to reboot host for UEFI password job {job_id}: {error}"
-                ))
-            })?;
+            let bmc = ctx.services.connect_bmc(machine).await?;
+            host_power_control(&bmc, machine, ResetType::ForceRestart, ctx)
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "failed to reboot host for UEFI password job {job_id}: {error}"
+                    ))
+                })?;
             Ok(StateHandlerOutcome::transition(
                 ManagedHostState::Decommissioning {
                     decommissioning_state: DecommissioningState::DeconfiguringHost {
@@ -323,24 +299,18 @@ pub(super) async fn handle_deconfiguring_host(
             ))
         }
         DeconfiguringHostState::WaitForUefiPasswordJobCompletion { job_id } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            let job_state = redfish_client
-                .get_job_state(job_id)
-                .await
-                .map_err(|error| {
-                    StateHandlerError::GenericError(eyre::eyre!(
-                        "failed to read UEFI password job {job_id}: {error}"
-                    ))
-                })?;
-            if !matches!(job_state, JobState::Completed) {
+            let status = poll_idrac_job(ctx.services, machine, job_id).await?;
+            if !matches!(status, OperationStatus::Completed) {
                 return Ok(StateHandlerOutcome::wait(format!(
-                    "waiting for UEFI password job {job_id} to complete; current state: {job_state:?}"
+                    "waiting for UEFI password job {job_id} to complete; current state: {status:?}"
                 )));
             }
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::machine::clear_bios_password_set_time(&machine.id, &mut txn).await?;
             Ok(
                 StateHandlerOutcome::transition(deconfiguring_dpus_after_host_reset(state))
@@ -366,7 +336,12 @@ pub(super) async fn handle_deconfiguring_host(
             // Observation merging locks the same rows by ID; match that order
             // so concurrent reports cannot reverse this multi-card lock sequence.
             super_nics.sort_by_key(|interface| interface.id);
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             for interface in super_nics {
                 db::dpa_interface::try_update_controller_state(
                     &mut txn,
@@ -406,7 +381,12 @@ pub(super) async fn handle_deconfiguring_host(
             }
             // Every NIC is now unlocked. Record the unlock against each
             // card's NIC-MAC-keyed lockdown_ikm row.
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             for interface in state
                 .dpa_interface_snapshots
                 .iter()
@@ -532,6 +512,15 @@ pub(super) async fn handle_deconfiguring_dpus(
                     "waiting for managed host DPF resources to be deleted".to_string(),
                 ));
             }
+            if !dpf_sdk
+                .delete_host_bmc_credential_secrets(&host_dpf_id, &dpu_dpf_ids)
+                .await
+                .map_err(|error| StateHandlerError::GenericError(error.into()))?
+            {
+                return Ok(StateHandlerOutcome::wait(
+                    "waiting for managed host BMC credential Secrets to be deleted".to_string(),
+                ));
+            }
             let next_states = dpu_states
                 .keys()
                 .map(|&id| (id, DeconfiguringDpuState::InstallingBfb))
@@ -601,8 +590,8 @@ pub(super) async fn handle_deconfiguring_dpus(
             }
         }
         DeconfiguringDpuState::WaitingForBootAfterBfbInstall => {
-            let redfish_client = ctx.services.create_redfish_client_from_machine(dpu).await?;
-            let (finished_booting, boot_progress) = did_dpu_finish_booting(redfish_client.as_ref())
+            let bmc = ctx.services.connect_bmc(dpu).await?;
+            let (finished_booting, boot_progress) = did_dpu_finish_booting(&bmc)
                 .await
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre::eyre!(
@@ -670,13 +659,13 @@ async fn oob_interface_mac_addresses(
     machine_id: MachineId,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
-    let mut conn = ctx.services.db_pool.acquire().await?;
-    let interfaces = db::machine_interface::find_by_machine_ids(&mut conn, &[machine_id]).await?;
+    let interfaces =
+        db::machine_interface::find_by_machine_ids(&ctx.services.db_pool, &[machine_id]).await?;
     Ok(interfaces
         .into_values()
         .flatten()
-        // Underlay can include BMC interface rows; keep those for the later
-        // SuppressingBmcDhcp step so BMC DHCP is not blocked before factory reset.
+        // Underlay can include BMC interface rows; keep those for the per-BMC
+        // factory-reset attempt so DHCP stays available through the power cycle.
         .filter(|interface| {
             interface.network_segment_type == Some(NetworkSegmentType::Underlay)
                 && interface.interface_type != InterfaceType::Bmc
@@ -702,7 +691,12 @@ pub(super) async fn handle_suppressing_oob_dhcp(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let oob_mac_addresses = all_oob_interface_mac_addresses(state, ctx).await?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     for mac_address in oob_mac_addresses {
         db::bmc_suppression::upsert(
             &mut txn,
@@ -734,22 +728,14 @@ pub(super) async fn handle_power_cycling_host(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let host = &state.host_snapshot;
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(host)
-        .await?;
-    host_power_control(
-        redfish_client.as_ref(),
-        host,
-        SystemPowerControl::ACPowercycle,
-        ctx,
-    )
-    .await
-    .map_err(|error| {
-        StateHandlerError::GenericError(eyre::eyre!(
-            "failed to power cycle host after suppressing OOB DHCP: {error}"
-        ))
-    })?;
+    let bmc = ctx.services.connect_bmc(host).await?;
+    host_power_control(&bmc, host, ResetType::FullPowerCycle, ctx)
+        .await
+        .map_err(|error| {
+            StateHandlerError::GenericError(eyre::eyre!(
+                "failed to power cycle host after suppressing OOB DHCP: {error}"
+            ))
+        })?;
     Ok(StateHandlerOutcome::transition(
         ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::PoweringOnHost,
@@ -777,32 +763,31 @@ pub(super) async fn handle_powering_on_host(
         )));
     }
 
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(host)
-        .await?;
-    let power_state = super::host_power_state(redfish_client.as_ref()).await?;
+    let bmc = ctx.services.connect_bmc(host).await?;
+    let power_state = power_state(&bmc)
+        .await
+        .map_err(|error| platform_error("get_power_state", error))?;
     match power_state {
-        PowerState::On => Ok(StateHandlerOutcome::transition(
+        Some(PowerState::On) => Ok(StateHandlerOutcome::transition(
             ManagedHostState::Decommissioning {
                 decommissioning_state: DecommissioningState::WaitingForOobDhcpAcknowledgement,
             },
         )),
-        PowerState::PoweringOff => Ok(StateHandlerOutcome::wait(format!(
-            "waiting for {host_id} to finish powering off before powering on; current power state: {power_state}",
+        Some(PowerState::PoweringOff) => Ok(StateHandlerOutcome::wait(format!(
+            "waiting for {host_id} to finish powering off before powering on; current power state: PoweringOff",
             host_id = host.id,
         ))),
-        PowerState::PoweringOn => Ok(StateHandlerOutcome::wait(format!(
-            "waiting for {host_id} to finish powering on; current power state: {power_state}",
+        Some(PowerState::PoweringOn) => Ok(StateHandlerOutcome::wait(format!(
+            "waiting for {host_id} to finish powering on; current power state: PoweringOn",
             host_id = host.id,
         ))),
         _ => {
             tracing::info!(
                 machine_id = %host.id,
-                %power_state,
+                power_state = power_state_name(power_state),
                 "Host not On after decommissioning power cycle; powering on"
             );
-            host_power_control(redfish_client.as_ref(), host, SystemPowerControl::On, ctx)
+            host_power_control(&bmc, host, ResetType::On, ctx)
                 .await
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre::eyre!(
@@ -812,6 +797,7 @@ pub(super) async fn handle_powering_on_host(
             Ok(StateHandlerOutcome::wait(format!(
                 "waiting for {host_id} to power on after decommissioning power cycle; current power state: {power_state}",
                 host_id = host.id,
+                power_state = power_state_name(power_state),
             )))
         }
     }
@@ -826,52 +812,17 @@ pub(super) async fn handle_waiting_for_oob_dhcp_acknowledgement(
     if !pending_macs.is_empty() {
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting for OOB DHCP suppression acknowledgement: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         )));
     }
 
     Ok(StateHandlerOutcome::transition(
         ManagedHostState::Decommissioning {
-            decommissioning_state: DecommissioningState::SuppressingBmcDhcp,
-        },
-    ))
-}
-
-pub(super) async fn handle_suppressing_bmc_dhcp(
-    state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
-    for bmc_mac_address in bmc_mac_addresses(state)? {
-        db::bmc_suppression::upsert(
-            &mut txn,
-            &NewBmcSuppression {
-                bmc_mac_address,
-                subsystem: BmcSuppressionSubsystem::Dhcp,
-                source: BmcSuppressionSource::Decommissioning,
-                reason: format!(
-                    "managed host {} is being decommissioned; suppressing BMC DHCP",
-                    state.host_snapshot.id
-                ),
-            },
-        )
-        .await?;
-    }
-    // Not deleting interface rows: bumps machine_interfaces_deletion so the
-    // DHCP server restarts, clears its cache, and honors the suppressions above.
-    db::machine_interface::record_deletion(&mut txn).await?;
-    Ok(
-        StateHandlerOutcome::transition(ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::FactoryResettingBmcs {
                 completed: HashSet::new(),
             },
-        })
-        .with_txn(txn),
-    )
+        },
+    ))
 }
 
 pub(super) async fn handle_factory_resetting_bmcs(
@@ -879,47 +830,99 @@ pub(super) async fn handle_factory_resetting_bmcs(
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let machine_id = if !completed.contains(&state.host_snapshot.id) {
-        factory_reset_bmc(&state.host_snapshot, ctx).await?
+    if !completed.contains(&state.host_snapshot.id) {
+        factory_reset_bmc(&state.host_snapshot, completed, state, ctx).await
     } else if let Some(dpu) = state
         .dpu_snapshots
         .iter()
         .find(|dpu| !completed.contains(&dpu.id))
     {
-        factory_reset_bmc(dpu, ctx).await?
+        factory_reset_bmc(dpu, completed, state, ctx).await
     } else {
-        return Ok(StateHandlerOutcome::transition(
+        Ok(StateHandlerOutcome::transition(
             ManagedHostState::Decommissioning {
                 decommissioning_state: DecommissioningState::WaitingForBmcDhcpAcknowledgement,
             },
-        ));
-    };
+        ))
+    }
+}
+
+async fn factory_reset_bmc(
+    machine: &Machine<impl MachineIdSubtypeTrait>,
+    completed: &HashSet<MachineId>,
+    state: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let mac = bmc_mac_address(machine)?;
+    let host_id = state.host_snapshot.id;
+    if db::bmc_suppression::find(
+        &ctx.services.db_pool,
+        mac,
+        BmcSuppressionSubsystem::Dhcp,
+        BmcSuppressionSource::Decommissioning,
+    )
+    .await?
+    .is_some()
+    {
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
+        // If there is a suppression present for a BMC not marked complete, that means
+        // we couldn't verify the factory reset request went through. Delete the
+        // suppression so we can retry.
+        db::bmc_suppression::delete(
+            &mut txn,
+            mac,
+            BmcSuppressionSubsystem::Dhcp,
+            BmcSuppressionSource::Decommissioning,
+        )
+        .await?;
+        // Trigger a DHCP server restart to clear its cache and restore DHCP for this BMC.
+        db::machine_interface::record_deletion(&mut txn).await?;
+        return Ok(StateHandlerOutcome::wait_and_requeue(format!(
+            "restoring DHCP after an unresolved factory reset for BMC {}",
+            machine.id
+        ))
+        .with_txn(txn));
+    }
+    // Connect first to ensure BMC is reachable before suppressing DHCP.
+    let bmc = ctx.services.connect_bmc(machine).await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: mac,
+            subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
+            reason: format!("managed host {host_id} is being decommissioned; suppressing BMC DHCP"),
+        },
+    )
+    .await?;
+    // Trigger a DHCP server restart to clear its cache so it honors the new suppression.
+    db::machine_interface::record_deletion(&mut txn).await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
+
+    reset_bmc_to_factory_defaults(&bmc)
+        .await
+        .map_err(|error| super::platform_error("bmc_reset_to_defaults", error))?;
 
     let mut completed = completed.clone();
-    completed.insert(machine_id);
+    completed.insert(machine.id.into());
     Ok(StateHandlerOutcome::transition(
         ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::FactoryResettingBmcs { completed },
         },
     ))
-}
-
-async fn factory_reset_bmc(
-    machine: &Machine<impl MachineIdSubtypeTrait>,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Result<MachineId, StateHandlerError> {
-    ctx.services
-        .create_redfish_client_from_machine(machine)
-        .await?
-        .bmc_reset_to_defaults()
-        .await
-        .map_err(|error| {
-            StateHandlerError::GenericError(eyre::eyre!(
-                "failed to factory reset BMC for {}: {error}",
-                machine.id
-            ))
-        })?;
-    Ok(machine.id.into())
 }
 
 pub(super) async fn handle_waiting_for_bmc_dhcp_acknowledgement(
@@ -930,11 +933,7 @@ pub(super) async fn handle_waiting_for_bmc_dhcp_acknowledgement(
     if !pending_macs.is_empty() {
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting for BMC DHCP suppression acknowledgement after factory reset: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         )));
     }
 
@@ -968,7 +967,12 @@ pub(super) async fn handle_deleting_managed_credentials(
         ));
     }
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     for (bmc_mac_address, credential_type) in rotation_cleanups {
         db::credential_rotation::delete_device_converged(
             &mut txn,

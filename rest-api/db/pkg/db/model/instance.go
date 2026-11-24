@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -440,11 +441,13 @@ type InstanceDAO interface {
 	//
 	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InstanceCreateInput) ([]Instance, error)
 	//
-	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Instance, error)
+	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, forUpdate bool) (*Instance, error)
 	//
 	GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, siteID *uuid.UUID) (InstanceCountByStatus, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter InstanceFilterInput, page paginator.PageInput, includeRelations []string) ([]Instance, int, error)
+	// GetAllIDs returns the IDs of all rows matching the filter
+	GetAllIDs(ctx context.Context, tx *db.Tx, filter InstanceFilterInput) ([]uuid.UUID, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input InstanceUpdateInput) (*Instance, error)
 	// UpdateMultiple applies a single shared update patch to every
@@ -487,7 +490,7 @@ func (isd InstanceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceC
 // "Site", "InstanceType", "Vpc", "Machine", "OperatingSystem", "NetworkSecurityGroup"
 // Allocation relations are intentionally omitted because direct instance-allocation linkage was removed.
 // returns db.ErrDoesNotExist error if the record is not found
-func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Instance, retErr error) {
+func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, forUpdate bool) (_ *Instance, retErr error) {
 	i := &Instance{}
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := cotel.StartSpan(ctx, "InstanceDAO.GetByID")
@@ -495,6 +498,12 @@ func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, 
 	cotel.SetAttribute(instanceDAOSpan, attribute.String("id", id.String()))
 
 	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model(i).Where("i.id = ?", id)
+
+	// Lock only the Instance row. Relations load through LEFT JOINs, and
+	// Postgres rejects FOR UPDATE on the nullable side of an outer join.
+	if forUpdate {
+		query = query.For("UPDATE OF i")
+	}
 
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)
@@ -702,6 +711,30 @@ func (isd InstanceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Instance
 	return instances, paginator.Total, nil
 }
 
+// GetAllIDs returns the IDs of all Instances matching the filter, ordered by ID
+// The returned slice is empty but not nil when no Instances match
+func (isd InstanceSQLDAO) GetAllIDs(ctx context.Context, tx *db.Tx, filter InstanceFilterInput) (_ []uuid.UUID, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, instanceDAOSpan := cotel.StartSpan(ctx, "InstanceDAO.GetAllIDs")
+	defer func() { cotel.EndSpan(instanceDAOSpan, retErr) }()
+
+	ids := []uuid.UUID{}
+
+	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model((*Instance)(nil)).Column("id")
+
+	query, err := isd.setQueryWithFilter(filter, query, instanceDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("i.id").Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
+}
+
 // GetCount returns total count of rows for specified filter
 func (isd InstanceSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter InstanceFilterInput) (count int, err error) {
 	// Create a child span and set the attributes for current request
@@ -811,7 +844,7 @@ func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceCl
 		}
 	}
 
-	nv, err := isd.GetByID(ctx, tx, i.ID, nil)
+	nv, err := isd.GetByID(ctx, tx, i.ID, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1046,12 +1079,12 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.AlwaysBootWithCustomIpxe != nil {
 		proto.AlwaysBootWithCustomIpxe = *c.AlwaysBootWithCustomIpxe
 		columns = append(columns, "always_boot_with_custom_ipxe")
-		trace("always_boot_with_custom_ipxe", fmt.Sprintf("%t", *c.AlwaysBootWithCustomIpxe))
+		trace("always_boot_with_custom_ipxe", strconv.FormatBool(*c.AlwaysBootWithCustomIpxe))
 	}
 	if c.PhoneHomeEnabled != nil {
 		proto.PhoneHomeEnabled = *c.PhoneHomeEnabled
 		columns = append(columns, "phone_home_enabled")
-		trace("phone_home_enabled", fmt.Sprintf("%t", *c.PhoneHomeEnabled))
+		trace("phone_home_enabled", strconv.FormatBool(*c.PhoneHomeEnabled))
 	}
 	if c.UserData != nil {
 		proto.UserData = c.UserData
@@ -1061,7 +1094,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.AutoNetwork != nil {
 		proto.AutoNetwork = *c.AutoNetwork
 		columns = append(columns, "auto_network")
-		trace("auto_network", fmt.Sprintf("%t", *c.AutoNetwork))
+		trace("auto_network", strconv.FormatBool(*c.AutoNetwork))
 	}
 	if c.Labels != nil {
 		proto.Labels = c.Labels
@@ -1070,7 +1103,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.IsUpdatePending != nil {
 		proto.IsUpdatePending = *c.IsUpdatePending
 		columns = append(columns, "is_update_pending")
-		trace("is_update_pending", fmt.Sprintf("%t", *c.IsUpdatePending))
+		trace("is_update_pending", strconv.FormatBool(*c.IsUpdatePending))
 	}
 	if c.InfinityRCRStatus != nil {
 		proto.InfinityRCRStatus = c.InfinityRCRStatus
@@ -1095,7 +1128,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.IsMissingOnSite != nil {
 		proto.IsMissingOnSite = *c.IsMissingOnSite
 		columns = append(columns, "is_missing_on_site")
-		trace("is_missing_on_site", fmt.Sprintf("%t", *c.IsMissingOnSite))
+		trace("is_missing_on_site", strconv.FormatBool(*c.IsMissingOnSite))
 	}
 	if c.NetworkSecurityGroupPropagationDetails != nil {
 		proto.NetworkSecurityGroupPropagationDetails = c.NetworkSecurityGroupPropagationDetails

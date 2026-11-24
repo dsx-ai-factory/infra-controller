@@ -31,7 +31,7 @@ use reqwest::StatusCode;
 
 use crate::config::ReaderConfig;
 use crate::framework::{ObservationRecorder, Probe};
-use crate::readers::{Attempt, Failure, incomplete};
+use crate::readers::{Attempt, Failure, Incomplete};
 use crate::rest::auth::Auth;
 use crate::rest::client::{RestClient, pagination_total};
 use crate::snapshot::{CensusView, Reader, SnapshotSink, SweepMeta, unix_millis};
@@ -83,6 +83,9 @@ pub(crate) struct Inventory {
     pub provider_auth: Arc<Auth>,
     pub provider_org: String,
     pub site_id: String,
+    pub tenant: Option<super::rest_instances::Fixture>,
+    /// Whether the machine, rack and tray totals are read.
+    pub totals: bool,
 }
 
 /// Reads site totals and the site check.
@@ -108,6 +111,23 @@ impl RestInventoryReader {
         sink: Arc<dyn SnapshotSink>,
         process_start: SystemTime,
     ) -> Self {
+        let families: &'static [Family] = match (target.totals, target.tenant.is_some()) {
+            (true, true) => &[
+                Family::RestTotals,
+                Family::RestSiteMatch,
+                Family::RestInstances,
+                Family::RestMachines,
+                Family::ConfigRest,
+            ],
+            (true, false) => &[Family::RestTotals, Family::RestSiteMatch],
+            (false, true) => &[
+                Family::RestSiteMatch,
+                Family::RestInstances,
+                Family::RestMachines,
+                Family::ConfigRest,
+            ],
+            (false, false) => &[Family::RestSiteMatch],
+        };
         Self {
             cfg,
             client,
@@ -116,10 +136,7 @@ impl RestInventoryReader {
             sink,
             process: unix_millis(process_start),
             seq: AtomicU64::new(0),
-            attempt: Attempt::new(
-                Reader::RestInventory,
-                &[Family::RestTotals, Family::RestSiteMatch],
-            ),
+            attempt: Attempt::new(Reader::RestInventory, families),
         }
     }
 
@@ -239,7 +256,36 @@ impl Probe for RestInventoryReader {
         let start = crate::clock::now();
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.attempt.begin();
-        let totals = self.totals(recorder).await;
+        let mut failed = Incomplete::default();
+        if let Some(tenant) = &self.target.tenant {
+            tenant
+                .read(
+                    &self.client,
+                    recorder,
+                    &self.target,
+                    super::rest_instances::Publication {
+                        meta: &SweepMeta {
+                            process: self.process,
+                            seq,
+                            reader: Reader::RestInventory,
+                            start,
+                            end: start,
+                        },
+                        attempt: &self.attempt,
+                        sink: self.sink.as_ref(),
+                    },
+                    &mut failed,
+                )
+                .await;
+        }
+        let totals_start = crate::clock::now();
+        let totals = if self.target.totals {
+            Some(self.totals(recorder).await)
+        } else {
+            None
+        };
+        let totals_end = crate::clock::now();
+        let site_start = crate::clock::now();
         let site_match = self.site_match(recorder).await;
         let meta = SweepMeta {
             process: self.process,
@@ -249,20 +295,34 @@ impl Probe for RestInventoryReader {
             end: crate::clock::now(),
         };
         let sink = self.sink.as_ref();
-        let mut failed = Vec::new();
-        if !self
-            .attempt
-            .deliver(sink, &meta, Family::RestTotals, totals)
-        {
-            failed.push(Family::RestTotals);
+        if let Some(totals) = totals {
+            let totals_kind = totals.as_ref().err().map(|f| f.kind);
+            if !self.attempt.deliver(
+                sink,
+                &SweepMeta {
+                    start: totals_start,
+                    end: totals_end,
+                    ..meta
+                },
+                Family::RestTotals,
+                totals,
+            ) {
+                failed.record(Family::RestTotals, totals_kind);
+            }
         }
-        if !self
-            .attempt
-            .deliver(sink, &meta, Family::RestSiteMatch, site_match)
-        {
-            failed.push(Family::RestSiteMatch);
+        let site_match_kind = site_match.as_ref().err().map(|f| f.kind);
+        if !self.attempt.deliver(
+            sink,
+            &SweepMeta {
+                start: site_start,
+                ..meta
+            },
+            Family::RestSiteMatch,
+            site_match,
+        ) {
+            failed.record(Family::RestSiteMatch, site_match_kind);
         }
-        incomplete(&failed)
+        failed.finish()
     }
 }
 
@@ -274,7 +334,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::framework::Outcome;
     use crate::rest::fake::FakeRest;
+    use crate::snapshot::FailureKind;
     use crate::snapshot::testing::FakeSink;
 
     /// A census that tests set directly.
@@ -312,7 +374,9 @@ mod tests {
             Inventory {
                 provider_auth: rest.auth(),
                 provider_org: "provider-org".to_string(),
+                tenant: None,
                 site_id: "site-1".to_string(),
+                totals: true,
             },
             census,
             Arc::clone(sink) as Arc<dyn SnapshotSink>,
@@ -375,6 +439,46 @@ mod tests {
             SiteMatch::Unknown,
             "the site check publishes"
         );
+    }
+
+    #[tokio::test]
+    async fn skipped_totals_are_not_read() {
+        let rest = FakeRest::start().await;
+        // A REST API that times out on racks and trays, as a large site's does.
+        rest.always_status("rack", StatusCode::GATEWAY_TIMEOUT);
+        rest.always_status("tray", StatusCode::GATEWAY_TIMEOUT);
+        let sink = Arc::new(FakeSink::default());
+        let reader = RestInventoryReader::new(
+            ReaderConfig {
+                enabled: true,
+                interval: Duration::from_secs(120),
+                timeout: Duration::from_secs(600),
+            },
+            rest.client(),
+            Inventory {
+                provider_auth: rest.auth(),
+                provider_org: "provider-org".to_string(),
+                tenant: None,
+                site_id: "site-1".to_string(),
+                totals: false,
+            },
+            None,
+            Arc::clone(&sink) as Arc<dyn SnapshotSink>,
+            SystemTime::now(),
+        );
+        reader
+            .run(&ObservationRecorder::default())
+            .await
+            .expect("a sweep without totals completes");
+        assert!(
+            rest.requests()
+                .iter()
+                .all(|(_, path, _)| path.ends_with("/machine")),
+            "only the site-check machine page is read: {:?}",
+            rest.requests()
+        );
+        assert_eq!(sink.count(Family::RestTotals), 0);
+        assert_eq!(sink.count(Family::RestSiteMatch), 1);
     }
 
     #[tokio::test]
@@ -603,6 +707,69 @@ mod tests {
                 pair[1] - pair[0]
             );
         }
+    }
+
+    /// Reads whose every retry times out before the sweep deadline keep the
+    /// last totals and site match and record them as timed out, and the
+    /// scheduler counts the run as a timeout, not a failure: a slow nico-rest
+    /// is a different incident from a down one.
+    #[tokio::test]
+    async fn exhausted_rest_timeouts_are_a_timeout_outcome() {
+        let rest = FakeRest::start().await;
+        rest.set_total("machine", 10);
+        rest.set_total("rack", 5);
+        rest.set_total("tray", 20);
+        let sink = Arc::new(FakeSink::default());
+        let reader: Arc<dyn Probe> = Arc::new(reader(&rest, &sink, Some(&["fm100a"])));
+
+        // A first sweep in real time publishes both families: the fake REST
+        // server answers over a loopback socket, which paused time cannot
+        // drive.
+        reader
+            .run(&ObservationRecorder::default())
+            .await
+            .expect("first sweep");
+        let totals = sink
+            .latest::<RestTotalsData>(Family::RestTotals)
+            .expect("totals");
+        let site = sink
+            .latest::<SiteMatchData>(Family::RestSiteMatch)
+            .expect("site match");
+
+        // Every request now outlasts the gate's call timeout. Pause time so
+        // the gate timeouts and retry backoffs do not spend real seconds: the
+        // reads time out and exhaust their retries before the sweep deadline.
+        rest.set_delay(Duration::from_secs(60));
+        tokio::time::pause();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut results, loops) =
+            crate::framework::start(vec![Arc::clone(&reader)], cancel.clone());
+
+        let result = results.recv().await.expect("result");
+        assert_eq!(result.outcome, Outcome::Timeout);
+
+        assert_eq!(
+            sink.latest::<RestTotalsData>(Family::RestTotals),
+            Some(totals),
+            "the last totals and their read time are kept",
+        );
+        assert_eq!(
+            sink.latest::<SiteMatchData>(Family::RestSiteMatch),
+            Some(site),
+            "the last site match and its read time are kept",
+        );
+        for family in [Family::RestTotals, Family::RestSiteMatch] {
+            assert_eq!(
+                sink.failure_kinds(family),
+                vec![FailureKind::Timeout],
+                "{family:?}",
+            );
+        }
+
+        cancel.cancel();
+        crate::framework::join_loops(loops)
+            .await
+            .expect("loops end");
     }
 
     #[test]

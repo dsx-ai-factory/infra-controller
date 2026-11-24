@@ -17,10 +17,9 @@
 
 //! Managed power-shelf decommissioning handlers.
 
-use carbide_credential_rotation::BmcEndpoint;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
-use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::power_shelf::PowerShelfId;
+use db::TransactionVending as _;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState};
 use state_controller::state_handler::{
@@ -69,7 +68,12 @@ async fn handle_suppressing_site_explorer(
             object_id: power_shelf_id.to_string(),
             missing: "bmc_mac",
         })?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let suppression = db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -107,7 +111,12 @@ async fn handle_suppressing_bmc_dhcp(
             object_id: power_shelf_id.to_string(),
             missing: "bmc_mac",
         })?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let suppression = db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -141,27 +150,8 @@ async fn handle_factory_reset_bmc(
     power_shelf: &PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
-    let endpoint = BmcEndpoint::from_power_shelf(power_shelf).ok_or_else(|| {
-        StateHandlerError::MissingData {
-            object_id: power_shelf_id.to_string(),
-            missing: "addressable_bmc",
-        }
-    })?;
-    let access = BmcAccessInfo {
-        host: endpoint.host,
-        port: endpoint.port,
-        mac_address: endpoint.device_mac,
-    };
-    ctx.services
-        .redfish_client_pool
-        .client_by_info(&access)
-        .await
-        .map_err(|error| {
-            StateHandlerError::GenericError(eyre::eyre!(
-                "failed to create redfish client for power shelf {power_shelf_id}: {error}"
-            ))
-        })?
-        .bmc_reset_to_defaults()
+    let bmc = ctx.services.connect_bmc(power_shelf).await?;
+    async { bmc.bmc_control()?.reset_to_factory_defaults().await }
         .await
         .map_err(|error| {
             StateHandlerError::GenericError(eyre::eyre!(
@@ -233,7 +223,12 @@ async fn handle_deleting_managed_credentials(
             ))
         })?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::credential_rotation::delete_device_converged(
         &mut txn,
         bmc_mac,

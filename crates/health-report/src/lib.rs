@@ -64,8 +64,10 @@ impl HealthReport {
     pub const DPU_AGENT_SOURCE: &str = "forge-dpu-agent";
     pub const MACHINE_VALIDATION_SOURCE: &str = "machine-validation";
     pub const SITE_EXPLORER_SOURCE: &str = "site-explorer";
+    pub const RACK_FIRMWARE_SOURCE: &str = "rack-firmware";
     pub const SKU_VALIDATION_SOURCE: &str = "sku-validation";
     pub const QUARANTINE_SOURCE: &str = "quarantine";
+    pub const ATTESTATION_SOURCE: &str = "attestation";
 
     /// Returns a health report with no successes or errors reported
     pub fn empty(source: String) -> Self {
@@ -224,17 +226,15 @@ impl HealthReport {
         if let Some(previous) = previous {
             for prev_alert in previous.alerts.iter() {
                 if let Some(timestamp) = prev_alert.in_alert_since {
-                    previous_in_alert_times.insert(
-                        (prev_alert.id.clone(), prev_alert.target.clone()),
-                        timestamp,
-                    );
+                    previous_in_alert_times
+                        .insert((&prev_alert.id, prev_alert.target.as_deref()), timestamp);
                 }
             }
         }
 
         for alert in self.alerts.iter_mut() {
             alert.in_alert_since = Some(
-                match previous_in_alert_times.get(&(alert.id.clone(), alert.target.clone())) {
+                match previous_in_alert_times.get(&(&alert.id, alert.target.as_deref())) {
                     Some(time) => *time,
                     None => chrono::Utc::now(),
                 },
@@ -519,6 +519,120 @@ impl HealthProbeAlert {
         }
     }
 
+    /// Creates a SwitchUnreachable alert for a switch whose NVOS management address did not
+    /// accept a connection for several consecutive checks. `target` is the probed
+    /// `address:port`, and `reason` is the last connection error. Carries `hardware` only: the
+    /// alert is a signal about the switch, not an allocation gate. `in_alert_since` is when the
+    /// outage was first observed, which precedes the write when the caller debounces.
+    pub fn switch_unreachable(
+        target: String,
+        reason: &str,
+        in_alert_since: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            id: HealthProbeId::switch_unreachable(),
+            message: format!(
+                "Switch NVOS management address {target} did not accept a connection ({reason})"
+            ),
+            target: Some(target),
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        }
+    }
+
+    /// Creates a NmxtUnreachable alert for a primary switch whose NMX-T telemetry listener did
+    /// not accept a connection for several consecutive checks. `target` is the probed
+    /// `address:port`, and `reason` is the last connection error. Carries `hardware` only.
+    pub fn nmxt_unreachable(
+        target: String,
+        reason: &str,
+        in_alert_since: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            id: HealthProbeId::nmxt_unreachable(),
+            message: format!("NMX-T at {target} did not accept a connection ({reason})"),
+            target: Some(target),
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        }
+    }
+
+    /// Creates a NmxcUnreachable alert for a rack whose NMX-C the partition monitor could not
+    /// use for several consecutive passes. `endpoint` is the NMX-C URL the monitor resolved for
+    /// the rack, absent when no switch yielded one, and `reason` names the failing step. Carries
+    /// `hardware` only: the alert is a signal about the controller, not an allocation gate.
+    /// `in_alert_since` is when the outage was first observed, which precedes the write when
+    /// the caller debounces.
+    pub fn nmxc_unreachable(
+        endpoint: Option<String>,
+        reason: &str,
+        in_alert_since: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let message = match &endpoint {
+            Some(endpoint) => format!(
+                "NMX-C at {endpoint} is unreachable for this rack's NVLink partition monitor ({reason})"
+            ),
+            None => format!(
+                "No NMX-C endpoint resolves for this rack's NVLink partition monitor ({reason})"
+            ),
+        };
+        Self {
+            id: HealthProbeId::nmxc_unreachable(),
+            message,
+            target: endpoint,
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        }
+    }
+
+    /// Creates a SpdmAttestationFailed alert for one attester.
+    ///
+    /// The target is the SPDM device ID the machine's BMC reports, such as
+    /// `HGX_ERoT_GPU_3`, so a machine carries one of these per failed attester.
+    pub fn spdm_attestation_failed(attester_id: String, message: String) -> Self {
+        Self {
+            id: HealthProbeId::spdm_attestation_failed(),
+            target: Some(attester_id),
+            in_alert_since: Some(chrono::Utc::now()),
+            message,
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::prevent_allocations()],
+        }
+    }
+
+    /// Creates an AttestationNoAttesters alert.
+    ///
+    /// The target is the machine's hardware class, and is `None` when
+    /// exploration has recorded none.
+    pub fn attestation_no_attesters(hardware_class: Option<String>, message: String) -> Self {
+        Self {
+            id: HealthProbeId::attestation_no_attesters(),
+            target: hardware_class,
+            in_alert_since: Some(chrono::Utc::now()),
+            message,
+            tenant_message: None,
+            classifications: vec![],
+        }
+    }
+
+    /// Creates an AttestationPolicyUnsatisfied alert.
+    ///
+    /// Takes the same hardware class target as
+    /// [`Self::attestation_no_attesters`].
+    pub fn attestation_policy_unsatisfied(hardware_class: Option<String>, message: String) -> Self {
+        Self {
+            id: HealthProbeId::attestation_policy_unsatisfied(),
+            target: hardware_class,
+            in_alert_since: Some(chrono::Utc::now()),
+            message,
+            tenant_message: None,
+            classifications: vec![],
+        }
+    }
+
     /// Merge a HealthProbeAlert with the report from another probe of the same type
     ///
     /// The function does not check whether the Probe ID and target are equivalent.
@@ -649,6 +763,11 @@ impl HealthProbeId {
         HealthProbeId("MissingRackComponent".to_string())
     }
 
+    /// The ID used when trays of the same type report different firmware versions.
+    pub fn rack_firmware_mismatch() -> Self {
+        HealthProbeId("RackFirmwareMismatch".to_string())
+    }
+
     /// The ID used while a new HBN configuration waits for a later health sample.
     pub fn post_config_check_wait() -> Self {
         HealthProbeId("PostConfigCheckWait".to_string())
@@ -661,6 +780,23 @@ impl HealthProbeId {
         HealthProbeId("NvlinkUnhealthy".to_string())
     }
 
+    /// The ID used when the switch reachability monitor cannot connect to a switch's NVOS
+    /// management address.
+    pub fn switch_unreachable() -> Self {
+        HealthProbeId("SwitchUnreachable".to_string())
+    }
+
+    /// The ID used when the switch reachability monitor cannot connect to the NMX-T telemetry
+    /// listener on a primary switch.
+    pub fn nmxt_unreachable() -> Self {
+        HealthProbeId("NmxtUnreachable".to_string())
+    }
+
+    /// The ID used when the NVLink partition monitor cannot reach a rack's NMX-C.
+    pub fn nmxc_unreachable() -> Self {
+        HealthProbeId("NmxcUnreachable".to_string())
+    }
+
     /// The ID used while a host marked for NVLink isolation still has GPUs in an NVLink
     /// partition, or the NVLink partition monitor cannot confirm that it has none.
     pub fn nvlink_isolation_pending() -> Self {
@@ -671,6 +807,23 @@ impl HealthProbeId {
     /// marked host's GPUs in any NVLink partition.
     pub fn nvlink_isolated() -> Self {
         HealthProbeId("NvlinkIsolated".to_string())
+    }
+
+    /// The ID used when an attester failed SPDM attestation.
+    pub fn spdm_attestation_failed() -> Self {
+        HealthProbeId("SpdmAttestationFailed".to_string())
+    }
+
+    /// The ID used when an attestation profile applied but the BMC offered no
+    /// eligible attester.
+    pub fn attestation_no_attesters() -> Self {
+        HealthProbeId("AttestationNoAttesters".to_string())
+    }
+
+    /// The ID used when an attestation profile asked for attesters the BMC did
+    /// not offer.
+    pub fn attestation_policy_unsatisfied() -> Self {
+        HealthProbeId("AttestationPolicyUnsatisfied".to_string())
     }
 }
 
@@ -1104,11 +1257,8 @@ mod tests {
             triggered_by: None,
         };
         new2.update_in_alert_since(None);
-        assert!(new.alerts[0].in_alert_since.is_some());
-        assert_ne!(
-            new.alerts[0].in_alert_since,
-            Some("2024-01-01T19:00:01.100Z".parse().unwrap())
-        );
+        let in_alert_since = new2.alerts[0].in_alert_since.expect("new alert is stamped");
+        assert_ne!(Some(in_alert_since), new2.observed_at);
     }
 
     #[test]
@@ -1555,6 +1705,51 @@ mod tests {
                 .classifications
                 .contains(&HealthAlertClassification::prevent_allocations())
         );
+    }
+
+    #[test]
+    fn test_attestation_alert_ids_targets_and_classifications() {
+        let cases = [
+            (
+                HealthProbeAlert::spdm_attestation_failed(
+                    "HGX_ERoT_GPU_3".to_string(),
+                    "Failed NRAS".to_string(),
+                ),
+                "SpdmAttestationFailed",
+                Some("HGX_ERoT_GPU_3"),
+                true,
+            ),
+            (
+                HealthProbeAlert::attestation_no_attesters(
+                    Some("nvidia_dgx-h100".to_string()),
+                    "the BMC offered no eligible attester".to_string(),
+                ),
+                "AttestationNoAttesters",
+                Some("nvidia_dgx-h100"),
+                false,
+            ),
+            (
+                HealthProbeAlert::attestation_policy_unsatisfied(
+                    None,
+                    "no hardware class recorded".to_string(),
+                ),
+                "AttestationPolicyUnsatisfied",
+                None,
+                false,
+            ),
+        ];
+
+        for (alert, expected_id, expected_target, prevents_allocations) in cases {
+            assert_eq!(alert.id.as_str(), expected_id);
+            assert_eq!(alert.target.as_deref(), expected_target);
+            assert_eq!(
+                alert
+                    .classifications
+                    .contains(&HealthAlertClassification::prevent_allocations()),
+                prevents_allocations,
+                "{expected_id} allocation classification"
+            );
+        }
     }
 
     #[test]

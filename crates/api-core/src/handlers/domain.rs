@@ -63,7 +63,6 @@ pub(crate) async fn create(
     let req = request.into_inner();
     ensure_not_reverse_zone_name(&req.name)?;
     let new_domain = NewDomain {
-        vpc_id: req.vpc_id,
         default_ttl: zone_ttl_argument(req.default_ttl)?,
         ..NewDomain::new(req.name)
     };
@@ -92,21 +91,16 @@ pub(crate) async fn update(
         .id
         .ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let mut domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    // Serial-bump writers can already own this row while syncing an interface.
+    // The update's timestamp/live-row predicates detect conflicting writes.
+    let mut domain = domain::find_by_uuid(&mut txn, uuid)
+        .await?
+        .filter(|domain| domain.deleted.is_none())
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
 
-    if domain_proto.vpc_id.is_some() && domain_proto.vpc_id != domain.vpc_id {
-        return Err(CarbideError::InvalidArgument(format!(
-            "changing the VPC ownership of domain {} is not supported; delete it and create a new domain under the other VPC",
-            domain.name
-        ))
-        .into());
-    }
     // Renaming a domain is not supported. The name may be omitted or sent
     // back unchanged so a caller updating another field need not read the
     // row first.
@@ -142,18 +136,25 @@ pub(crate) async fn delete(
     let req = request.into_inner();
     let uuid = req.id.ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    let domain = domain::find_by_uuid_for_delete(txn.as_mut(), uuid)
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
+    if domain.deleted.is_some() {
+        txn.commit().await?;
+        return Ok(Response::new(DomainDeletionResult {}));
+    }
 
     db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name)).await?;
 
-    // TODO: This needs to validate that nothing references the domain anymore
-    // (like NetworkSegments)
+    if domain::has_live_references(txn.as_mut(), uuid).await? {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "domain {uuid} is still referenced by a network segment or machine interface"
+        ))
+        .into());
+    }
 
     domain::delete(domain, &mut txn).await?;
 
@@ -225,7 +226,6 @@ pub(crate) async fn create_legacy_compat(
     let create_request = CreateDomainRequest {
         name: domain_legacy.name,
         default_ttl: None,
-        vpc_id: None,
     };
 
     // Call the new handler
@@ -264,7 +264,6 @@ pub(crate) async fn update_legacy_compat(
             metadata: None, // Legacy doesn't have metadata
             soa: None,      // Legacy doesn't have SOA
             default_ttl: None,
-            vpc_id: None,
         }),
     };
 

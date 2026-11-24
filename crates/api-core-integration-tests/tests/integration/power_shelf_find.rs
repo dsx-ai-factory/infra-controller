@@ -306,15 +306,15 @@ async fn test_find_power_shelf_all(pool: PgPool) -> Result<(), Box<dyn std::erro
     let power_shelf_list = find_response.into_inner();
     assert_eq!(power_shelf_list.power_shelves.len(), 3);
 
-    let names: Vec<String> = power_shelf_list
+    let names: Vec<&str> = power_shelf_list
         .power_shelves
         .iter()
-        .map(|ps| ps.config.as_ref().unwrap().name.clone())
+        .map(|ps| ps.config.as_ref().unwrap().name.as_str())
         .collect();
 
-    assert!(names.contains(&"Power Shelf 1".to_string()));
-    assert!(names.contains(&"Power Shelf 2".to_string()));
-    assert!(names.contains(&"Power Shelf 3".to_string()));
+    assert!(names.contains(&"Power Shelf 1"));
+    assert!(names.contains(&"Power Shelf 2"));
+    assert!(names.contains(&"Power Shelf 3"));
 
     Ok(())
 }

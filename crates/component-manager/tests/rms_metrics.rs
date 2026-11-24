@@ -15,9 +15,6 @@
  * limitations under the License.
  */
 
-// Keep this check in its own test target: RED metrics are process-global,
-// and parallel RMS unit tests record observations with the same labels.
-
 use std::sync::Arc;
 
 use api_test_helper::mock_rms::MockRmsApi;
@@ -28,10 +25,15 @@ use component_manager::firmware_inventory::FirmwareReadError;
 use component_manager::power_shelf_manager::{
     PowerShelfEndpoint, PowerShelfManager, PowerShelfVendor,
 };
-use component_manager::rms::RmsBackend;
+use component_manager::rms::{RmsBackend, rms_rack_firmware_update_manager};
+use component_manager::{
+    FirmwareExpectationError, RackFirmwareExpectationsRequest, RackFirmwareUpdateManager,
+};
+use db::TransactionVending as _;
 use librms::RackManagerError;
 use librms::protos::rack_manager as rms;
 use model::expected_power_shelf::ExpectedPowerShelf;
+use model::rack::FirmwareUpgradeDeviceInfo;
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityPowerShelf, RackProductFamily, RackProfile,
     RackProfileConfig,
@@ -45,7 +47,7 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let peer_mac = "AA:BB:CC:DD:EE:02".parse().unwrap();
     let profile_id = RackProfileId::new("rms-metrics");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::rack::create(
         &mut txn,
         &rack_id,
@@ -96,7 +98,15 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
         tonic::Status::unavailable("down"),
     )))
     .await;
-    let backend = RmsBackend::new(mock.clone(), None, pool, Arc::new(profiles), false);
+    let metrics = MetricsCapture::owned();
+    let backend = RmsBackend::new(
+        mock.clone(),
+        None,
+        pool,
+        Arc::new(profiles),
+        false,
+        metrics.instrumentation().clone(),
+    );
     let mut endpoints = vec![PowerShelfEndpoint {
         pmc_ip: "10.0.0.1".parse().unwrap(),
         pmc_mac: device_mac,
@@ -112,7 +122,6 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     peer.pmc_ip = "10.0.0.2".parse().unwrap();
     endpoints.push(peer);
 
-    let metrics = MetricsCapture::start();
     let mut observed = Vec::new();
     for _ in 0..2 {
         observed.push(backend.get_power_state(&endpoints).await.unwrap());
@@ -168,7 +177,7 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     for call in calls {
         let nodes = &call.nodes.as_ref().unwrap().nodes;
         assert_eq!(nodes.len(), 2);
-        assert!(nodes.iter().all(|node| node.rack_id == rack_id.to_string()));
+        assert!(nodes.iter().all(|node| node.rack_id == rack_id.as_str()));
         assert_eq!(
             nodes
                 .iter()
@@ -195,6 +204,139 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
             ),
             count,
             "{operation} {outcome}"
+        );
+    }
+}
+
+/// Counts comparison RPCs rather than devices and rejects a reply at the deadline.
+/// A later unsent batch must not add a transport observation.
+#[tokio::test(start_paused = true)]
+async fn firmware_comparison_metrics_count_batches_and_local_timeouts() {
+    let rack_id = RackId::new("firmware-comparison-metrics");
+    let profile = RackProfile {
+        product_family: Some(RackProductFamily::Gb200),
+        rack_capabilities: RackCapabilitiesSet {
+            power_shelf: RackCapabilityPowerShelf {
+                count: 65,
+                vendor: Some("LiteOn".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let shelves: Vec<_> = (0..65)
+        .map(|slot| FirmwareUpgradeDeviceInfo {
+            node_id: format!("shelf-{slot:03}"),
+            mac: format!("02:00:00:00:00:{slot:02x}"),
+            bmc_ip: format!("192.0.2.{}", slot + 1),
+            bmc_username: "admin".to_owned(),
+            bmc_password: "test-password".to_owned(),
+            // Shelves use their PMC endpoint without switch OS connection data.
+            os_mac: None,
+            os_ip: None,
+            os_username: None,
+            os_password: None,
+            os_hostname: None,
+        })
+        .collect();
+    let request = || RackFirmwareExpectationsRequest {
+        rack_id: &rack_id,
+        profile: &profile,
+        config_json: "{}",
+        components: &[],
+        machines: &[],
+        switches: &[],
+        power_shelves: &shelves[..2],
+    };
+    let mock = Arc::new(MockRmsApi::new());
+    let metrics = MetricsCapture::owned();
+    let manager = rms_rack_firmware_update_manager(mock.clone(), metrics.instrumentation().clone());
+
+    // RED describes the RPC, so an unusable payload still counts as transport
+    // success. Each call includes both shelves but contributes one observation.
+    mock.enqueue_compare_firmware_object(Ok(rms::CompareFirmwareObjectResponse::default()))
+        .await;
+    let unusable = manager.get_firmware_expectations(request()).await.unwrap();
+    assert_eq!(unusable.len(), 2);
+    assert!(
+        unusable
+            .iter()
+            .all(|device| device.expectations == Err(FirmwareExpectationError::ReadFailed))
+    );
+    mock.enqueue_compare_firmware_object(Err(tonic::Status::unavailable("down").into()))
+        .await;
+    let failed = manager.get_firmware_expectations(request()).await.unwrap();
+    assert_eq!(failed.len(), 2);
+    assert!(
+        failed
+            .iter()
+            .all(|device| device.expectations == Err(FirmwareExpectationError::ReadFailed))
+    );
+
+    mock.enqueue_compare_firmware_object(Ok(rms::CompareFirmwareObjectResponse::default()))
+        .await;
+    let (arrival, release) = mock.block_next_compare_firmware_object().await;
+    // Only the final attempt selects all 65 devices. Its first batch expires;
+    // the remaining device must not cause another RPC or metric observation.
+    let mut full_request = request();
+    full_request.power_shelves = &shelves;
+    let read = manager.get_firmware_expectations(full_request);
+    tokio::pin!(read);
+    tokio::select! {
+        arrived = tokio::time::timeout(std::time::Duration::from_secs(10), arrival) => arrived.unwrap().unwrap(),
+        _ = &mut read => panic!("comparison must remain blocked at the RPC gate"),
+    }
+
+    // The clock was paused before deadline creation, so this reaches the exact
+    // boundary rather than merely passing it after real setup time.
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    // Both the response and timer will be ready on the next poll. Tokio polls
+    // the response first, so the reader must check expiry before RED records it.
+    assert!(!release.is_closed());
+    release.send(()).unwrap();
+    let timed_out = tokio::time::timeout(std::time::Duration::from_secs(120), read)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(timed_out.len(), 65);
+    assert_eq!(
+        timed_out
+            .iter()
+            .map(|device| device.node_id.as_str())
+            .collect::<Vec<_>>(),
+        shelves
+            .iter()
+            .map(|device| device.node_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        timed_out.iter().all(|device| {
+            device.expectations == Err(FirmwareExpectationError::DeadlineExceeded)
+        })
+    );
+    let calls = mock.compare_firmware_object_calls().await;
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.nodes.as_ref().unwrap().nodes.len())
+            .collect::<Vec<_>>(),
+        vec![2, 2, 64]
+    );
+    for (outcome, count) in [("ok", 1), ("error", 2)] {
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_external_call_duration_milliseconds",
+                &[
+                    ("backend", "rms"),
+                    ("operation", "compare_firmware_object"),
+                    ("outcome", outcome),
+                ],
+            ),
+            count,
+            "comparison {outcome}"
         );
     }
 }

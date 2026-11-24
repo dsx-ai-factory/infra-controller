@@ -3,16 +3,19 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use carbide_secrets::SecretsError;
-use carbide_secrets::credentials::CompositeCredentialManager;
+use carbide_secrets::credentials::{CredentialKey, CredentialReader};
 use carbide_secrets::test_support::credentials::TestCredentialManager;
+use component_manager::credentials::resolve_credentials as resolve_shared_credentials;
+use db::TransactionVending as _;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::expected_switch::ExpectedSwitch;
 
 use super::*;
-use crate::test_support::builder::TestApiBuilder;
+use crate::tests::wait_for_blocked_query;
 
 struct StubCredentialReader {
     result: Result<Option<Credentials>, ()>,
@@ -32,11 +35,8 @@ impl CredentialReader for StubCredentialReader {
     }
 }
 
-#[crate::sqlx_test]
-async fn direct_dispatch_credentials_only_query_expected_inventory_on_vault_miss(
-    db_pool: sqlx::PgPool,
-) {
-    let env = crate::tests::create_test_env(db_pool).await;
+#[tokio::test]
+async fn direct_dispatch_credentials_only_query_expected_inventory_on_vault_miss() {
     let pool = sqlx::PgPool::connect_lazy("postgresql://localhost/unused").unwrap();
     pool.close().await;
     let vault = Credentials::new("vault-user", "vault-password");
@@ -102,21 +102,13 @@ async fn direct_dispatch_credentials_only_query_expected_inventory_on_vault_miss
     ] {
         let reads = Arc::new(AtomicUsize::new(0));
         let credentials = parse_component_credentials(overrides).unwrap();
-        let api = TestApiBuilder::new(
-            pool.clone(),
-            env.api.common_pools.clone(),
-            env.api.work_lock_manager_handle.clone(),
-        )
-        .with_credential_manager(Arc::new(CompositeCredentialManager::new(
-            StubCredentialReader {
-                result: vault_result,
-                reads: reads.clone(),
-            },
-            TestCredentialManager::default(),
-        )))
-        .build();
-        let result = resolve_credentials(
-            &api,
+        let reader = StubCredentialReader {
+            result: vault_result,
+            reads: reads.clone(),
+        };
+        let result = resolve_shared_credentials(
+            &pool,
+            &reader,
             component,
             MacAddress::new([2, 0, 0, 0, 0, 1]),
             credentials.as_ref(),
@@ -144,9 +136,9 @@ async fn direct_dispatch_credentials_only_query_expected_inventory_on_vault_miss
 async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: sqlx::PgPool) {
     // Distinct credentials at the same MAC prove each kind selects its own table.
     let mac = MacAddress::new([2, 0, 0, 0, 0, 1]);
-    let mut conn = pool.acquire().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::expected_machine::create(
-        &mut conn,
+        &mut txn,
         ExpectedMachine {
             id: None,
             bmc_mac_address: mac,
@@ -161,7 +153,7 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
     .await
     .unwrap();
     db::expected_switch::create(
-        &mut conn,
+        &mut txn,
         ExpectedSwitch {
             bmc_mac_address: mac,
             bmc_username: "switch".into(),
@@ -175,7 +167,7 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
     .await
     .unwrap();
     db::expected_power_shelf::create(
-        &mut conn,
+        &mut txn,
         ExpectedPowerShelf {
             bmc_mac_address: mac,
             bmc_username: "shelf".into(),
@@ -186,8 +178,9 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
     )
     .await
     .unwrap();
-    drop(conn);
+    txn.commit().await.unwrap();
 
+    let reader = TestCredentialManager::default();
     for (user, kind) in [
         ("compute", RackComponent::ComputeBmc),
         ("switch", RackComponent::SwitchBmc),
@@ -195,16 +188,20 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
         ("shelf", RackComponent::PowerShelfPmc),
     ] {
         assert_eq!(
-            fetch_expected_credentials(kind, &pool, mac).await.unwrap(),
+            resolve_shared_credentials(&pool, &reader, kind, mac, None)
+                .await
+                .unwrap(),
             Credentials::new(user, format!("{user}-password")),
             "{user}",
         );
     }
     assert!(matches!(
-        fetch_expected_credentials(
-            RackComponent::ComputeBmc,
+        resolve_shared_credentials(
             &pool,
-            MacAddress::new([2, 0, 0, 0, 0, 4])
+            &reader,
+            RackComponent::ComputeBmc,
+            MacAddress::new([2, 0, 0, 0, 0, 4]),
+            None,
         )
         .await,
         Err(ComponentManagerError::NotFound(_))
@@ -213,6 +210,7 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
 
 #[crate::sqlx_test]
 async fn direct_dispatch_credentials_require_both_expected_nvos_fields(pool: sqlx::PgPool) {
+    let reader = TestCredentialManager::default();
     for (index, (username, password)) in [
         (Some("nvos".into()), None),
         (None, Some("nvos-password".into())),
@@ -238,10 +236,82 @@ async fn direct_dispatch_credentials_require_both_expected_nvos_fields(pool: sql
         .unwrap();
         drop(conn);
         assert!(matches!(
-            fetch_expected_credentials(RackComponent::SwitchNvos, &pool, mac).await,
+            resolve_shared_credentials(&pool, &reader, RackComponent::SwitchNvos, mac, None).await,
             Err(ComponentManagerError::NotFound(_))
         ));
     }
+}
+
+/// Expected-credential fallback must release its local pool slot when the caller
+/// drops a blocked read, without waiting for the server statement cap or lock.
+#[crate::sqlx_test]
+async fn expected_credentials_cancellation_releases_pool_capacity(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    let reader_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await?;
+    let (configured_timeout, reader_pid): (String, i32) =
+        sqlx::query_as("SELECT set_config('statement_timeout', '0', false), pg_backend_pid()")
+            .fetch_one(&reader_pool)
+            .await?;
+    assert_eq!(configured_timeout, "0");
+    let mac = MacAddress::new([2, 0, 0, 0, 0, 9]);
+    let reader = TestCredentialManager::default();
+
+    // Missing credentials are a successful query, so the helper must commit and
+    // return this healthy session before mapping the absence to `NotFound`.
+    let missing =
+        resolve_shared_credentials(&reader_pool, &reader, RackComponent::SwitchBmc, mac, None)
+            .await;
+
+    assert!(matches!(missing, Err(ComponentManagerError::NotFound(_))));
+    let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&reader_pool)
+        .await?;
+    assert_eq!(reused_pid, reader_pid);
+
+    let mut blocker = pool.txn_begin().await?;
+    sqlx::query("LOCK TABLE expected_switches IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let mut read = Box::pin(resolve_shared_credentials(
+        &reader_pool,
+        &reader,
+        RackComponent::SwitchBmc,
+        mac,
+        None,
+    ));
+    let blocked_pid = tokio::select! {
+        result = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_blocked_query(&pool, blocker_pid, "FROM expected_switches"),
+        ) => result.expect("expected-credential query must reach the held lock"),
+        result = &mut read => panic!("credential read finished before blocking: {result:?}"),
+    };
+    assert_eq!(blocked_pid, reader_pid);
+
+    drop(read);
+
+    // Check local capacity before any async cleanup can run, then borrow again
+    // while the table remains locked. Unlocking first would hide blocked cleanup.
+    assert_eq!(reader_pool.size(), 0);
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&reader_pool),
+    )
+    .await;
+    blocker.rollback().await?;
+    reader_pool.close().await;
+    assert_eq!(
+        recovered.expect("cancelled read must free its local pool slot")?,
+        1
+    );
+    Ok(())
 }
 
 fn pair(username: &str) -> rpc::UsernamePassword {

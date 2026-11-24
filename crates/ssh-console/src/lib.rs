@@ -43,8 +43,9 @@ use crate::shutdown_handle::{ReadyHandle, ShutdownHandle};
 
 pub static POWER_RESET_COMMAND: &str = "power reset";
 
-/// Run a ssh-console server in the background, returning a [`SpawnHandle`] once the service is
-/// healthy and ready. When the handle is dropped, the server will exit.
+/// Run a ssh-console server in the background, returning a [`SpawnHandle`] once its listeners are
+/// bound. The BMC connection pool fills in the background. When the handle is dropped, the server
+/// will exit.
 ///
 /// Takes an optional `CancellationToken`, which will be used if provided as a `DropGuard` in
 /// `SpawnHandle`, otherwise a new cancel token will be created.
@@ -54,18 +55,20 @@ pub async fn spawn(
 ) -> Result<SpawnHandle, SpawnError> {
     let config = Arc::new(config);
     let metrics = Arc::new(MetricsState::new());
-    let forge_api_client = config.make_forge_api_client();
+    let carbide_api_client = config.make_carbide_api_client(metrics.instrumentation.clone());
 
     let (cancel_token, drop_guard) = {
         let cancel_token = cancel_token.unwrap_or_default();
         (cancel_token.clone(), cancel_token.drop_guard())
     };
 
-    // 1) Start BMC client pool
+    // 1) Start BMC client pool. It is ready before its first refresh, so the servers below do
+    // not wait for the pool to fill.
     let mut bmc_client_pool = bmc::client_pool::spawn(
         config.clone(),
-        forge_api_client.clone(),
+        carbide_api_client.clone(),
         &metrics.meter,
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     );
     bmc_client_pool
@@ -76,7 +79,7 @@ pub async fn spawn(
     // 2) Start SSH server itself
     let server = ssh_server::spawn(
         config.clone(),
-        forge_api_client.clone(),
+        carbide_api_client.clone(),
         bmc_client_pool.connection_store(),
         &metrics.meter,
         cancel_token.clone(),
@@ -87,6 +90,7 @@ pub async fn spawn(
     let api_server = api_server::spawn(
         config.clone(),
         bmc_client_pool.connection_store(),
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     )
     .await?;

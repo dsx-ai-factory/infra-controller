@@ -19,12 +19,17 @@ use std::net::SocketAddr;
 
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::machine_id::try_parse_machine_id;
+use bmc_platform::LockdownDesiredState;
+use carbide_machine_controller::config::MachineStateHandlerSiteConfig;
+use carbide_machine_controller::platform_config::{self, PlatformBmc};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_utils::none_if_empty::NoneIfEmpty;
+use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::device::DeviceId;
-use carbide_uuid::machine::{HostMachineId, HostMachineIdSubtype, MachineId};
+use carbide_uuid::machine::{HostMachineId, HostMachineIdSubtype, MachineId, MachineInterfaceId};
 use db::WithTransaction;
-use db::machine_interface::find_by_ip;
+use db::db_read::DbReader;
+use db::machine_interface::{MachineInterfaces, find_by_ip};
 use libredfish::RoleId;
 use mac_address::MacAddress;
 use model::expected_entity::ExpectedEntity;
@@ -32,10 +37,9 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{LoadSnapshotOptions, MachineInterfaceSnapshot, ManagedHostState};
 use model::machine_boot_interface::{
     BootInterfaceSelectionAuthority, MachineBootInterface, MachineBootInterfaceTarget,
-    canonical_redfish_boot_interface_id,
 };
-use model::predicted_machine_interface::PredictedMachineInterface;
 use model::site_explorer::{BlueFieldOperatingMode, PreingestionState};
+use nv_redfish::resource::ResetType;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
@@ -92,56 +96,11 @@ fn admin_selection_authority(entered_mac: Option<MacAddress>) -> BootInterfaceSe
 fn resolve_admin_boot_interface_target(
     stored: Option<MachineBootInterface>,
     desired: Option<&MachineBootInterfaceTarget>,
-    candidates: Option<&BootInterfaceCandidates>,
+    candidates: Option<&MachineInterfaces>,
     entered_mac: Option<MacAddress>,
 ) -> Option<BootInterfaceTarget> {
-    enum UniqueInterfaceId {
-        Missing,
-        One(String),
-        Conflicting,
-    }
-
-    fn unique_interface_id<'a>(ids: impl Iterator<Item = &'a str>) -> UniqueInterfaceId {
-        let mut unique = ids.filter_map(canonical_redfish_boot_interface_id);
-        let Some(first) = unique.next() else {
-            return UniqueInterfaceId::Missing;
-        };
-        if unique.any(|id| id != first) {
-            UniqueInterfaceId::Conflicting
-        } else {
-            UniqueInterfaceId::One(first.to_string())
-        }
-    }
-
-    // The machine's unambiguous `MachineBootInterface` for `mac`, if known:
-    // owned rows first, then predictions only when owned rows offer no id.
     let pair_from_candidates = |mac: MacAddress| -> Option<MachineBootInterface> {
-        let candidates = candidates?;
-        let owned = unique_interface_id(
-            candidates
-                .interfaces
-                .iter()
-                .filter(|row| row.mac_address == mac)
-                .filter_map(|row| row.boot_interface_id.as_deref()),
-        );
-        let interface_id = match owned {
-            UniqueInterfaceId::One(interface_id) => interface_id,
-            UniqueInterfaceId::Conflicting => return None,
-            UniqueInterfaceId::Missing => match unique_interface_id(
-                candidates
-                    .predicted
-                    .iter()
-                    .filter(|predicted| predicted.mac_address == mac)
-                    .filter_map(|predicted| predicted.boot_interface_id.as_deref()),
-            ) {
-                UniqueInterfaceId::One(interface_id) => interface_id,
-                UniqueInterfaceId::Missing | UniqueInterfaceId::Conflicting => return None,
-            },
-        };
-        Some(MachineBootInterface {
-            mac_address: mac,
-            interface_id,
-        })
+        candidates?.boot_interface_for_mac(mac)
     };
     let desired_pair_for = |mac: MacAddress| match desired {
         Some(MachineBootInterfaceTarget::Pair(pair)) if pair.mac_address == mac => {
@@ -191,7 +150,7 @@ fn resolve_admin_boot_interface_target(
                     }
                 });
             }
-            if let Some(picked) = model::machine::pick_boot_interface(&candidates.interfaces) {
+            if let Some(picked) = candidates.boot_interface() {
                 return Some(target_from_candidates(picked.mac_address));
             }
             // The rows offered no boot candidate: the machine's predicted NICs
@@ -199,7 +158,7 @@ fn resolve_admin_boot_interface_target(
             // primary, else the sole non-underlay prediction. With several and
             // none declared primary the boot NIC is unknowable, so it returns
             // `None` and the action keeps requiring an explicit MAC.
-            if let Some(predicted) = model::machine::pick_boot_prediction(&candidates.predicted) {
+            if let Some(predicted) = candidates.boot_prediction() {
                 return Some(target_from_candidates(predicted.mac_address));
             }
             // An owned machine resolves from its own data alone: no
@@ -277,7 +236,7 @@ async fn boot_interface_reconciliation_eligible(
 fn managed_boot_interface_target(
     machine_id: Option<MachineId>,
     desired: Option<&MachineBootInterfaceTarget>,
-    candidates: Option<&BootInterfaceCandidates>,
+    candidates: Option<&MachineInterfaces>,
     entered_mac: Option<MacAddress>,
 ) -> Result<Option<(HostMachineId, BootInterfaceTarget)>, CarbideError> {
     let Some(Ok(host_machine_id)) = machine_id.map(HostMachineId::try_from) else {
@@ -292,21 +251,6 @@ fn managed_boot_interface_target(
     Ok(Some((host_machine_id, target)))
 }
 
-/// What a host machine offers boot-interface resolution to select from: its
-/// real `machine_interfaces` rows, and -- for the window before a NIC's first
-/// DHCP lease creates a real row -- its `predicted_machine_interfaces`.
-struct BootInterfaceCandidates {
-    /// The machine's non-BMC `machine_interfaces` rows. When they offer a
-    /// boot candidate (the machine-controller's own `pick_boot_interface`
-    /// selection), it is the first fallback when no desired target is stored.
-    interfaces: Vec<MachineInterfaceSnapshot>,
-    /// The machine's predicted interfaces, consulted only when the rows
-    /// offer no fallback candidate -- none exist yet (zero-DPU/NIC-mode
-    /// machines awaiting their first lease), or none are selectable (e.g.
-    /// only underlay-typed declared NICs).
-    predicted: Vec<PredictedMachineInterface>,
-}
-
 /// Load what boot-interface resolution selects from, when the BMC endpoint
 /// belongs to a (predicted or confirmed) host machine.
 ///
@@ -319,19 +263,11 @@ struct BootInterfaceCandidates {
 async fn boot_interface_candidates(
     txn: &mut PgConnection,
     machine_id: Option<MachineId>,
-) -> Result<Option<BootInterfaceCandidates>, CarbideError> {
+) -> Result<Option<MachineInterfaces>, CarbideError> {
     let Some(machine_id) = machine_id.filter(|id| !id.machine_type().is_dpu()) else {
         return Ok(None);
     };
-    let interfaces = db::machine_interface::find_by_machine_ids(txn, &[machine_id])
-        .await?
-        .remove(&machine_id)
-        .unwrap_or_default();
-    let predicted = db::predicted_machine_interface::find_by_machine_id(txn, &machine_id).await?;
-    Ok(Some(BootInterfaceCandidates {
-        interfaces,
-        predicted,
-    }))
+    Ok(Some(MachineInterfaces::load(txn, &machine_id).await?))
 }
 
 /// Summarize boot-interface candidates for crate-local integration-style unit tests without
@@ -349,23 +285,21 @@ pub(crate) async fn summarize_boot_interface_candidates_for_test(
                     .interfaces
                     .iter()
                     .any(|interface| interface.primary_interface),
-                candidates.predicted.is_empty(),
+                candidates.predictions.is_empty(),
             )
         }))
 }
 
-/// Map the request's `ResetType` to the libredfish `Manager.Reset` type.
+/// Map the request's `ResetType` to the `Manager.Reset` type.
 /// `Unspecified` maps to `None`, which each vendor resolves to its default
 /// (`GracefulRestart` for the standard/switch/power-shelf path, `ForceRestart`
 /// for AMI/Viking machine BMCs).
-fn map_reset_type(
-    reset_type: rpc::admin_bmc_reset_request::ResetType,
-) -> Option<libredfish::ManagerResetType> {
-    use rpc::admin_bmc_reset_request::ResetType;
+fn map_reset_type(reset_type: rpc::admin_bmc_reset_request::ResetType) -> Option<ResetType> {
+    use rpc::admin_bmc_reset_request::ResetType as RpcResetType;
     match reset_type {
-        ResetType::Unspecified => None,
-        ResetType::GracefulRestart => Some(libredfish::ManagerResetType::GracefulRestart),
-        ResetType::ForceRestart => Some(libredfish::ManagerResetType::ForceRestart),
+        RpcResetType::Unspecified => None,
+        RpcResetType::GracefulRestart => Some(ResetType::GracefulRestart),
+        RpcResetType::ForceRestart => Some(ResetType::ForceRestart),
     }
 }
 
@@ -404,8 +338,6 @@ pub(crate) async fn admin_bmc_reset(
         (None, None) => None,
     };
 
-    let mut txn = api.txn_begin().await?;
-
     let bmc_endpoint_request = match (req.bmc_endpoint_request, device_id) {
         (Some(_), Some(_)) => {
             return Err(Status::invalid_argument(
@@ -419,18 +351,19 @@ pub(crate) async fn admin_bmc_reset(
         }
         (Some(endpoint), None) => {
             let (completed, _) =
-                validate_and_complete_bmc_endpoint_request(&mut txn, Some(endpoint), None).await?;
+                validate_and_complete_bmc_endpoint_request(api.pg_pool(), Some(endpoint), None)
+                    .await?;
             completed
         }
         (None, Some(DeviceId::Machine(machine_id))) => {
             let (completed, _) =
-                validate_and_complete_bmc_endpoint_request(&mut txn, None, Some(machine_id))
+                validate_and_complete_bmc_endpoint_request(api.pg_pool(), None, Some(machine_id))
                     .await?;
             completed
         }
         (None, Some(DeviceId::Switch(switch_id))) => {
             let row = db::switch::find_switch_endpoints_by_ids(
-                &mut txn,
+                api.pg_pool(),
                 std::slice::from_ref(&switch_id),
             )
             .await
@@ -449,7 +382,7 @@ pub(crate) async fn admin_bmc_reset(
         }
         (None, Some(DeviceId::PowerShelf(power_shelf_id))) => {
             let row = db::power_shelf::find_power_shelf_endpoints_by_ids(
-                &mut txn,
+                api.pg_pool(),
                 std::slice::from_ref(&power_shelf_id),
             )
             .await
@@ -469,8 +402,6 @@ pub(crate) async fn admin_bmc_reset(
             }
         }
     };
-
-    txn.commit().await?;
 
     let endpoint_address = bmc_endpoint_request.ip_address.clone();
 
@@ -502,18 +433,19 @@ pub(crate) async fn disable_secure_boot(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
     let (bmc_endpoint_request, _) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, Some(req), None).await?;
-
-    txn.commit().await?;
+        validate_and_complete_bmc_endpoint_request(api.pg_pool(), Some(req), None).await?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
 
     api.bmc_client
-        .disable_secure_boot(bmc_addr, &machine_interface)
+        .disable_secure_boot(bmc_addr, &machine_interface, report.as_ref())
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -533,33 +465,35 @@ pub(crate) async fn lockdown(
     log_request_data(&request);
     let req = request.into_inner();
     let action = req.action();
-    let action = match action {
-        rpc::LockdownAction::Enable => libredfish::EnabledDisabled::Enabled,
-        rpc::LockdownAction::Disable => libredfish::EnabledDisabled::Disabled,
+    let desired = match action {
+        rpc::LockdownAction::Enable => LockdownDesiredState::Enabled,
+        rpc::LockdownAction::Disable => LockdownDesiredState::Disabled,
     };
 
-    let mut txn = api.txn_begin().await?;
-
     let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
-        &mut txn,
+        api.pg_pool(),
         req.bmc_endpoint_request,
         req.machine_id,
     )
     .await?;
 
-    txn.commit().await?;
-
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
+
     api.bmc_client
-        .lockdown(bmc_addr, &machine_interface, action)
+        .lockdown(bmc_addr, &machine_interface, report.as_ref(), desired)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
-    let endpoint_address = bmc_endpoint_request.ip_address.clone();
+    let endpoint_address = bmc_endpoint_request.ip_address.as_str();
     tracing::info!(
-        action = %action.to_string().to_lowercase(),
+        action = ?desired,
         bmc_ip_address = %endpoint_address,
         "lockdown request succeeded",
     );
@@ -574,23 +508,25 @@ pub(crate) async fn lockdown_status(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
     let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
-        &mut txn,
+        api.pg_pool(),
         req.bmc_endpoint_request,
         req.machine_id,
     )
     .await?;
 
-    txn.commit().await?;
-
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
+
     let response = api
         .bmc_client
-        .lockdown_status(bmc_addr, &machine_interface)
+        .lockdown_status(bmc_addr, &machine_interface, report.as_ref())
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -611,13 +547,12 @@ pub(crate) async fn enable_infinite_boot(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-
-    let (bmc_endpoint_request, _) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
-            .await?;
-
-    txn.commit().await?;
+    let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
+        api.pg_pool(),
+        req.bmc_endpoint_request,
+        machine_id,
+    )
+    .await?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -650,13 +585,12 @@ pub(crate) async fn is_infinite_boot_enabled(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-
-    let (bmc_endpoint_request, _) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
-            .await?;
-
-    txn.commit().await?;
+    let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
+        api.pg_pool(),
+        req.bmc_endpoint_request,
+        machine_id,
+    )
+    .await?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -676,6 +610,25 @@ pub(crate) async fn is_infinite_boot_enabled(
     Ok(Response::new(rpc::IsInfiniteBootEnabledResponse {
         is_enabled,
     }))
+}
+
+pub(crate) async fn reverify_host_boot_configuration(
+    txn: &mut PgConnection,
+    machine_id: HostMachineId,
+) -> Result<Option<bool>, CarbideError> {
+    let Some(desired) = desired_boot_interface_target(txn, Some(machine_id.into())).await? else {
+        return Ok(None);
+    };
+    let reconciliation_eligible =
+        boot_interface_reconciliation_eligible(txn, Some(machine_id)).await?;
+    db::machine_desired_boot_interface::force_reconcile(
+        txn,
+        &machine_id,
+        &desired,
+        BootInterfaceSelectionAuthority::Existing,
+    )
+    .await?;
+    Ok(Some(reconciliation_eligible))
 }
 
 pub(crate) async fn machine_setup(
@@ -742,22 +695,52 @@ pub(crate) async fn machine_setup(
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
-    let stored = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
-        .await?
-        .into_iter()
-        .next()
-        .and_then(|ep| ep.boot_interface());
+    let explored =
+        db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+            .await?
+            .into_iter()
+            .next();
     let boot_interface = resolve_admin_boot_interface_target(
-        stored,
+        explored.as_ref().and_then(|ep| ep.boot_interface()),
         desired.as_ref(),
         candidates.as_ref(),
         entered_mac,
     );
 
-    api.bmc_client
-        .machine_setup(bmc_addr, &machine_interface, boot_interface.as_ref())
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let access = BmcAccessInfo {
+        host: bmc_addr.ip().to_string(),
+        port: Some(bmc_addr.port()),
+        mac_address: bmc_mac_address,
+    };
+    match api.connect_drivers(&access).await? {
+        Some(bmc) => {
+            // Like libredfish's `machine_setup` through site-explorer, the RPC
+            // applies no site BIOS or BMC manager profiles.
+            let site_config = MachineStateHandlerSiteConfig {
+                bios_profiles: Default::default(),
+                oem_manager_profiles: Default::default(),
+                ..api.runtime_config.machine_state_handler_site_config()
+            };
+            platform_config::apply(
+                &PlatformBmc::Drivers(bmc),
+                &site_config,
+                boot_interface.as_ref(),
+            )
+            .await
+            .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+        None => {
+            api.bmc_client
+                .machine_setup(
+                    bmc_addr,
+                    &machine_interface,
+                    explored.as_ref().map(|ep| &ep.report),
+                    boot_interface.as_ref(),
+                )
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+    }
 
     tracing::info!(
         bmc_ip_address = %endpoint_address,
@@ -844,10 +827,24 @@ pub(crate) async fn set_dpu_first_boot_order(
         )
     })?;
 
-    api.bmc_client
-        .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let access = BmcAccessInfo {
+        host: bmc_addr.ip().to_string(),
+        port: Some(bmc_addr.port()),
+        mac_address: bmc_mac_address,
+    };
+    match api.connect_drivers(&access).await? {
+        Some(bmc) => {
+            platform_config::configure_boot_order(&PlatformBmc::Drivers(bmc), &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+        None => {
+            api.bmc_client
+                .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+    }
 
     tracing::info!(
         bmc_ip_address = %endpoint_address,
@@ -873,39 +870,36 @@ pub(crate) async fn admin_power_control(
 
     let action = req.action();
 
+    let machine_selector = machine_id.filter(|_| req.bmc_endpoint_request.is_none());
     let mut txn = api.txn_begin().await?;
-
-    let (bmc_endpoint_request, machine_id) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
-            .await?;
+    db::set_read_only_snapshot(txn.as_mut()).await?;
+    let target = resolve_bmc_endpoint(txn.as_mut(), req.bmc_endpoint_request, machine_id).await?;
+    let host = target.owning_host(txn.as_mut()).await?;
+    txn.commit().await?;
 
     let action = match action {
-        rpc::admin_power_control_request::SystemPowerControl::On => {
-            libredfish::SystemPowerControl::On
-        }
+        rpc::admin_power_control_request::SystemPowerControl::On => ResetType::On,
         rpc::admin_power_control_request::SystemPowerControl::GracefulShutdown => {
-            libredfish::SystemPowerControl::GracefulShutdown
+            ResetType::GracefulShutdown
         }
-        rpc::admin_power_control_request::SystemPowerControl::ForceOff => {
-            libredfish::SystemPowerControl::ForceOff
-        }
+        rpc::admin_power_control_request::SystemPowerControl::ForceOff => ResetType::ForceOff,
         rpc::admin_power_control_request::SystemPowerControl::GracefulRestart => {
-            libredfish::SystemPowerControl::GracefulRestart
+            ResetType::GracefulRestart
         }
         rpc::admin_power_control_request::SystemPowerControl::ForceRestart => {
-            libredfish::SystemPowerControl::ForceRestart
+            ResetType::ForceRestart
         }
         rpc::admin_power_control_request::SystemPowerControl::AcPowercycle => {
-            libredfish::SystemPowerControl::ACPowercycle
+            ResetType::FullPowerCycle
         }
     };
 
     let mut msg: Option<String> = None;
-    if let Some(machine_id) = machine_id {
+    if let Some(machine_id) = target.machine_id() {
         let power_manager_enabled = api.runtime_config.power_manager_options.enabled;
         if power_manager_enabled {
             let snapshot = db::managed_host::load_snapshot(
-                &mut txn,
+                &mut api.db_reader(),
                 &machine_id,
                 LoadSnapshotOptions {
                     include_history: true,
@@ -925,7 +919,7 @@ pub(crate) async fn admin_power_control(
                 .power_options
                 .map(|x| x.desired_power_state)
                 && power_state == model::power_manager::PowerState::On
-                && action == libredfish::SystemPowerControl::ForceOff
+                && action == ResetType::ForceOff
             {
                 msg = Some(
                         "!!WARNING!! Desired power state for the host is set as On while the requested action is Off. Carbide will attempt to bring the host online after some time.".to_string(),
@@ -934,9 +928,56 @@ pub(crate) async fn admin_power_control(
         }
     }
 
-    txn.commit().await?;
+    let (address, mac) = resolve_bmc_interface(api, &target.request).await?;
+    let interface = MachineInterfaceSnapshot::mock_with_mac(mac);
+    let report = db::explored_endpoints::find_by_ips(api.pg_pool(), vec![address.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|endpoint| endpoint.report);
+    let prepared = api
+        .bmc_client
+        .prepare_redfish_power_control(address, &interface, report.as_ref(), action)
+        .await
+        .map_err(|error| CarbideError::internal(error.to_string()))?;
 
-    redfish_power_control(api, bmc_endpoint_request, action).await?;
+    // While Core prepared the client, the endpoint or DPU could have moved or the
+    // host could have started conflicting work. This snapshot authorizes invocation
+    // of the prepared backend, without reserving later hardware or proxy operations.
+    let mut txn = api.txn_begin().await?;
+    db::set_read_only_snapshot(txn.as_mut()).await?;
+    let changed = || {
+        CarbideError::FailedPrecondition(format!(
+            "administrator power target {address} changed during client preparation"
+        ))
+    };
+    if !target
+        .still_matches(txn.as_mut(), machine_selector, address, mac)
+        .await?
+    {
+        return Err(changed().into());
+    }
+    if target.owning_host(txn.as_mut()).await? != host {
+        return Err(changed().into());
+    }
+    if prepared.ipmi_port.is_some() {
+        let current = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![address.ip()])
+            .await
+            .map_err(CarbideError::from)?;
+        if !prepared.matches_ipmi_report(current.first().map(|endpoint| &endpoint.report)) {
+            return Err(changed().into());
+        }
+    }
+    if let Some(host) = host {
+        db::hardware_dispatch::check_admin_power(txn.as_mut(), host)
+            .await
+            .map_err(CarbideError::from)?;
+    }
+    txn.commit().await?;
+    prepared
+        .send
+        .await
+        .map_err(|error| CarbideError::internal(error.to_string()))?;
 
     Ok(Response::new(rpc::AdminPowerControlResponse { msg }))
 }
@@ -969,13 +1010,11 @@ pub(crate) async fn explore(
     };
 
     // Use the same stored boot-interface target as periodic exploration.
-    let mut txn = api.txn_begin().await?;
-    let boot_interface = db::explored_endpoints::find_by_ips(&mut txn, vec![bmc_addr.ip()])
+    let boot_interface = db::explored_endpoints::find_by_ips(api.pg_pool(), vec![bmc_addr.ip()])
         .await?
         .first()
         .and_then(|ep| ep.boot_interface_target())
         .map(Into::into);
-    txn.commit().await?;
 
     let report = api
         .endpoint_explorer
@@ -985,6 +1024,7 @@ pub(crate) async fn explore(
             expected.as_ref(),
             None,
             boot_interface.as_ref(),
+            Box::new(|| api.endpoint_explorer.load_sitewide_bmc_password()),
         )
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
@@ -995,13 +1035,18 @@ pub(crate) async fn explore(
 async fn redfish_reset_bmc(
     api: &Api,
     request: rpc::BmcEndpointRequest,
-    reset_type: Option<libredfish::ManagerResetType>,
+    reset_type: Option<ResetType>,
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
 
     api.bmc_client
-        .redfish_reset_bmc(bmc_addr, &machine_interface, reset_type)
+        .redfish_reset_bmc(bmc_addr, &machine_interface, report.as_ref(), reset_type)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1017,22 +1062,6 @@ async fn ipmitool_reset_bmc(
 
     api.bmc_client
         .ipmitool_reset_bmc(bmc_addr, &machine_interface)
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
-
-    Ok(Response::new(()))
-}
-
-async fn redfish_power_control(
-    api: &Api,
-    request: rpc::BmcEndpointRequest,
-    action: libredfish::SystemPowerControl,
-) -> Result<Response<()>, Status> {
-    let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &request).await?;
-    let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
-
-    api.bmc_client
-        .redfish_power_control(bmc_addr, &machine_interface, action)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1062,17 +1091,23 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let ip_str = match &req.ssh_request {
-        Some(ssh_req) => match &ssh_req.endpoint_request {
-            Some(bmc_request) => bmc_request.ip_address.clone(),
-            None => return Err(CarbideError::MissingArgument("bmc_endpoint_request").into()),
-        },
-        None => return Err(CarbideError::MissingArgument("ssh_request").into()),
-    };
-
+    let bmc_request = req
+        .ssh_request
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("ssh_request"))?
+        .endpoint_request
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("bmc_endpoint_request"))?;
+    let ip_str = &bmc_request.ip_address;
     let dpu_ip: std::net::IpAddr = ip_str
         .parse()
         .map_err(|_| CarbideError::InvalidArgument(format!("invalid DPU IP: {ip_str}")))?;
+    let requested_mac = bmc_request
+        .mac_address
+        .as_deref()
+        .map(str::parse::<MacAddress>)
+        .transpose()
+        .map_err(|_| CarbideError::InvalidArgument("invalid DPU BMC MAC address".to_string()))?;
 
     if req.host_bmc_ip.is_empty() {
         return Err(CarbideError::MissingArgument("host_bmc_ip").into());
@@ -1098,10 +1133,12 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
     let dpu_endpoints = db::explored_endpoints::find_by_ips(&api.database_connection, vec![dpu_ip])
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
-    let dpu_endpoint = dpu_endpoints.first().ok_or(CarbideError::NotFoundError {
-        kind: "explored_endpoint",
-        id: dpu_ip.to_string(),
-    })?;
+    let dpu_endpoint = dpu_endpoints
+        .first()
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "explored_endpoint",
+            id: dpu_ip.to_string(),
+        })?;
 
     // If the DPU is in NIC mode, don't allow operators to copy_bfb_to_dpu_rshim
     // at all to begin with. While the rshim + copy part will technically
@@ -1138,10 +1175,12 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
             db::explored_endpoints::find_by_ips(&api.database_connection, vec![host_bmc_ip])
                 .await
                 .map_err(|e| CarbideError::internal(e.to_string()))?;
-        let host_ep = host_endpoints.first().ok_or(CarbideError::NotFoundError {
-            kind: "explored_endpoint",
-            id: host_bmc_ip.to_string(),
-        })?;
+        let host_ep = host_endpoints
+            .first()
+            .ok_or_else(|| CarbideError::NotFoundError {
+                kind: "explored_endpoint",
+                id: host_bmc_ip.to_string(),
+            })?;
         match &host_ep.preingestion_state {
             PreingestionState::Complete | PreingestionState::Failed { .. } => {}
             other => {
@@ -1154,28 +1193,43 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
         }
     }
 
-    api.database_connection
-        .with_txn(|txn| {
-            Box::pin(async move {
-                db::explored_endpoints::set_preingestion_bfb_recovery_needed(
-                    dpu_ip,
-                    "Triggered via CLI".to_string(),
-                    host_bmc_ip,
-                    pre_copy_powercycle,
-                    txn,
-                )
-                .await?;
+    api.with_txn(|txn| {
+        Box::pin(async move {
+            // Addresses are unique across interfaces. Bind recovery to the
+            // resolved identity even when the caller omits the MAC constraint.
+            let interface = find_by_ip(&mut **txn, dpu_ip).await?.ok_or_else(|| {
+                CarbideError::InvalidArgument(format!(
+                    "cannot trigger BFB recovery: no machine interface for DPU {dpu_ip}"
+                ))
+            })?;
+            if let Some(mac) = requested_mac
+                && mac != interface.mac_address
+            {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "DPU BMC MAC {mac} does not match {} assigned to {dpu_ip}",
+                    interface.mac_address,
+                )));
+            }
 
-                // Pause site explorer remediation on the host so it doesn't
-                // issue BMC resets during the power-cycle phases.
-                db::explored_endpoints::set_pause_remediation(host_bmc_ip, true, txn).await?;
+            db::explored_endpoints::set_preingestion_bfb_recovery_needed(
+                dpu_ip,
+                "Triggered via CLI".to_string(),
+                host_bmc_ip,
+                pre_copy_powercycle,
+                Some(interface.mac_address),
+                txn,
+            )
+            .await?;
 
-                Ok::<(), db::DatabaseError>(())
-            })
+            // Pause site explorer remediation on the host so it doesn't
+            // issue BMC resets during the power-cycle phases.
+            db::explored_endpoints::set_pause_remediation(host_bmc_ip, true, txn).await?;
+
+            Ok::<(), CarbideError>(())
         })
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    })
+    .await
+    .map_err(|e| CarbideError::internal(e.to_string()))??;
 
     Ok(Response::new(()))
 }
@@ -1230,19 +1284,19 @@ pub(crate) async fn create_bmc_user(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-
-    let (bmc_endpoint_request, _) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
-            .await?;
-
-    txn.commit().await?;
+    let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
+        api.pg_pool(),
+        req.bmc_endpoint_request,
+        machine_id,
+    )
+    .await?;
 
     let endpoint_address = &bmc_endpoint_request.ip_address;
 
     let role: RoleId = match req
         .create_role_id
-        .unwrap_or("Administrator".to_string())
+        .as_deref()
+        .unwrap_or("Administrator")
         .to_lowercase()
         .as_str()
     {
@@ -1293,12 +1347,12 @@ pub(crate) async fn delete_bmc_user(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-    let (bmc_endpoint_request, _) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
-            .await?;
-
-    txn.commit().await?;
+    let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
+        api.pg_pool(),
+        req.bmc_endpoint_request,
+        machine_id,
+    )
+    .await?;
 
     let endpoint_address = &bmc_endpoint_request.ip_address;
 
@@ -1340,19 +1394,27 @@ pub(crate) async fn set_bmc_root_password(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-    let (bmc_endpoint_request, _) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
-            .await?;
-    txn.commit().await?;
+    let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
+        api.pg_pool(),
+        req.bmc_endpoint_request,
+        machine_id,
+    )
+    .await?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report =
+        db::explored_endpoints::find_report_by_ip(&api.database_connection, bmc_addr.ip()).await?;
 
     tracing::info!(bmc_address = %bmc_addr, "Setting BMC root password");
 
     api.bmc_client
-        .set_bmc_root_password(bmc_addr, &machine_interface, &req.new_password)
+        .set_bmc_root_password(
+            bmc_addr,
+            &machine_interface,
+            report.as_ref(),
+            &req.new_password,
+        )
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1374,11 +1436,12 @@ pub(crate) async fn probe_bmc_vendor(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-    let (bmc_endpoint_request, _) =
-        validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
-            .await?;
-    txn.commit().await?;
+    let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
+        api.pg_pool(),
+        req.bmc_endpoint_request,
+        machine_id,
+    )
+    .await?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -1405,11 +1468,14 @@ async fn do_create_bmc_user(
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report =
+        db::explored_endpoints::find_report_by_ip(&api.database_connection, bmc_addr.ip()).await?;
 
     api.bmc_client
         .create_bmc_user(
             bmc_addr,
             &machine_interface,
+            report.as_ref(),
             create_username,
             create_password,
             create_role_id,
@@ -1427,9 +1493,11 @@ async fn do_delete_bmc_user(
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report =
+        db::explored_endpoints::find_report_by_ip(&api.database_connection, bmc_addr.ip()).await?;
 
     api.bmc_client
-        .delete_bmc_user(bmc_addr, &machine_interface, delete_user)
+        .delete_bmc_user(bmc_addr, &machine_interface, report.as_ref(), delete_user)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1438,14 +1506,84 @@ async fn do_delete_bmc_user(
 
 /// Accepts an optional partial or complete BmcEndpointRequest and optional machine ID and returns a complete and valid BmcEndpointRequest.
 ///
-/// * `txn`                  - Active database transaction
 /// * `bmc_endpoint_request` - Optional BmcEndpointRequest.  Can supply _only_ ip_address or all fields.
 /// * `machine_id`           - Optional machine ID that can be used to build a new BmcEndpointRequest.
 pub(super) async fn validate_and_complete_bmc_endpoint_request(
-    txn: &mut PgConnection,
+    db: impl DbReader<'_>,
     bmc_endpoint_request: Option<rpc::BmcEndpointRequest>,
     machine_id: Option<MachineId>,
 ) -> Result<(rpc::BmcEndpointRequest, Option<MachineId>), CarbideError> {
+    let target = resolve_bmc_endpoint(db, bmc_endpoint_request, machine_id).await?;
+    let machine_id = target.machine_id();
+    Ok((target.request, machine_id))
+}
+
+struct ResolvedBmcEndpoint {
+    request: rpc::BmcEndpointRequest,
+    interface_id: Option<MachineInterfaceId>,
+    device_id: Option<DeviceId>,
+}
+
+impl ResolvedBmcEndpoint {
+    fn machine_id(&self) -> Option<MachineId> {
+        match self.device_id {
+            Some(DeviceId::Machine(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn interface_device(interface: &MachineInterfaceSnapshot) -> Option<DeviceId> {
+        interface
+            .machine_id
+            .map(DeviceId::Machine)
+            .or_else(|| interface.switch_id.map(DeviceId::Switch))
+            .or_else(|| interface.power_shelf_id.map(DeviceId::PowerShelf))
+    }
+
+    /// Re-read the original selector without recording a replacement on the request span.
+    /// Missing routing fields now mean a formerly valid target went away.
+    async fn still_matches(
+        &self,
+        db: impl DbReader<'_>,
+        machine_selector: Option<MachineId>,
+        address: SocketAddr,
+        mac: MacAddress,
+    ) -> Result<bool, CarbideError> {
+        if let Some(machine_id) = machine_selector {
+            return Ok(db::machine::find_one(db, &machine_id, Default::default())
+                .await?
+                .is_some_and(|machine| {
+                    let bmc = &machine.status.bmc_info;
+                    bmc.machine_interface_id == self.interface_id
+                        && bmc.ip == Some(address.ip())
+                        && bmc.mac == Some(mac)
+                }));
+        }
+        Ok(db::machine_interface::find_by_ip(db, address.ip())
+            .await?
+            .is_some_and(|interface| {
+                self.interface_id == Some(interface.id)
+                    && self.device_id == Self::interface_device(&interface)
+                    && interface.mac_address == mac
+            }))
+    }
+
+    async fn owning_host(
+        &self,
+        db: impl DbReader<'_>,
+    ) -> Result<Option<HostMachineId>, CarbideError> {
+        match self.machine_id() {
+            Some(id) => Ok(db::hardware_dispatch::owning_host(db, id).await?),
+            None => Ok(None),
+        }
+    }
+}
+
+async fn resolve_bmc_endpoint(
+    db: impl DbReader<'_>,
+    bmc_endpoint_request: Option<rpc::BmcEndpointRequest>,
+    machine_id: Option<MachineId>,
+) -> Result<ResolvedBmcEndpoint, CarbideError> {
     match (bmc_endpoint_request, machine_id) {
         (Some(bmc_endpoint_request), _) => {
             let parsed_ip = bmc_endpoint_request.ip_address.parse().map_err(|e| {
@@ -1454,7 +1592,12 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                     bmc_endpoint_request.ip_address
                 ))
             })?;
-            let interface = db::machine_interface::find_by_ip(txn, parsed_ip)
+            trace_propagation::MachineTraceAttributes {
+                bmc_ip: Some(parsed_ip),
+                ..Default::default()
+            }
+            .record_on(&tracing::Span::current());
+            let interface = db::machine_interface::find_by_ip(db, parsed_ip)
                 .await?
                 .ok_or_else(|| CarbideError::NotFoundError {
                     kind: "machine_interface",
@@ -1483,25 +1626,30 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                 }
             };
 
-            Ok((
-                rpc::BmcEndpointRequest {
+            if let Some(machine_id) = interface.machine_id {
+                log_machine_id(&machine_id);
+            }
+            Ok(ResolvedBmcEndpoint {
+                request: rpc::BmcEndpointRequest {
                     ip_address: bmc_endpoint_request.ip_address,
                     mac_address: Some(bmc_mac),
                 },
-                interface.machine_id,
-            ))
+                interface_id: Some(interface.id),
+                device_id: ResolvedBmcEndpoint::interface_device(&interface),
+            })
         }
         // User provided machine_id
         (_, Some(machine_id)) => {
             log_machine_id(&machine_id);
 
-            let machine = db::machine::find_one(txn, &machine_id, MachineSearchConfig::default())
+            let machine = db::machine::find_one(db, &machine_id, MachineSearchConfig::default())
                 .await?
                 .ok_or_else(|| CarbideError::NotFoundError {
                     kind: "machine",
                     id: machine_id.to_string(),
                 })?;
 
+            crate::api::log_machine_snapshot(&machine);
             let bmc_ip = machine.status.bmc_info.ip.as_ref().ok_or_else(|| {
                 CarbideError::internal(format!(
                     "machine found for {machine_id} but BMC IP is missing"
@@ -1512,13 +1660,14 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                 CarbideError::internal(format!("BMC endpoint for {bmc_ip} ({machine_id}) found but does not have associated MAC"))
             })?;
 
-            Ok((
-                rpc::BmcEndpointRequest {
+            Ok(ResolvedBmcEndpoint {
+                request: rpc::BmcEndpointRequest {
                     ip_address: bmc_ip.to_string(),
                     mac_address: Some(bmc_mac_address.to_string()),
                 },
-                Some(machine_id),
-            ))
+                interface_id: machine.status.bmc_info.machine_interface_id,
+                device_id: Some(DeviceId::Machine(machine_id)),
+            })
         }
 
         _ => Err(CarbideError::InvalidArgument(
@@ -1531,6 +1680,7 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
 mod tests {
     use carbide_test_support::value_scenarios;
     use model::network_segment::NetworkSegmentType;
+    use model::predicted_machine_interface::PredictedMachineInterface;
 
     use super::*;
 
@@ -1580,22 +1730,22 @@ mod tests {
     }
 
     // `Unspecified` defers to the per-vendor default (None); the explicit types
-    // map one-to-one onto the libredfish `Manager.Reset` type.
+    // map one-to-one onto the `Manager.Reset` type.
     #[test]
     fn reset_type_maps_to_manager_reset_type() {
-        use super::rpc::admin_bmc_reset_request::ResetType;
+        use super::rpc::admin_bmc_reset_request::ResetType as RpcResetType;
 
-        value_scenarios!(run = |reset_type: ResetType| { map_reset_type(reset_type) };
+        value_scenarios!(run = |reset_type: RpcResetType| { map_reset_type(reset_type) };
             "unspecified defers to the vendor default" {
-                ResetType::Unspecified => None,
+                RpcResetType::Unspecified => None,
             }
 
             "graceful maps to GracefulRestart" {
-                ResetType::GracefulRestart => Some(libredfish::ManagerResetType::GracefulRestart),
+                RpcResetType::GracefulRestart => Some(ResetType::GracefulRestart),
             }
 
             "force maps to ForceRestart" {
-                ResetType::ForceRestart => Some(libredfish::ManagerResetType::ForceRestart),
+                RpcResetType::ForceRestart => Some(ResetType::ForceRestart),
             }
         );
     }
@@ -1623,12 +1773,12 @@ mod tests {
 
     #[test]
     fn no_mac_keeps_the_desired_mac_and_refreshes_its_redfish_id() {
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", true, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", false, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
         let desired =
             MachineBootInterfaceTarget::Pair(pair("00:00:5e:00:53:02", "NIC.Remembered.7-1-1"));
@@ -1645,12 +1795,12 @@ mod tests {
     #[test]
     fn no_mac_completes_a_persisted_mac_only_target_from_current_rows() {
         let desired = MachineBootInterfaceTarget::MacOnly("00:00:5e:00:53:02".parse().unwrap());
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", true, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", false, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
 
         assert_eq!(
@@ -1669,7 +1819,7 @@ mod tests {
 
         value_scenarios!(run = |(desired, candidates): (
             Option<MachineBootInterfaceTarget>,
-            BootInterfaceCandidates,
+            MachineInterfaces,
         )| {
             resolve_admin_boot_interface_target(
                 None,
@@ -1684,9 +1834,9 @@ mod tests {
                         mac,
                         "NIC.Remembered.7-1-1",
                     ))),
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, None)],
-                        predicted: vec![],
+                        predictions: vec![],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(
                     mac,
@@ -1700,12 +1850,12 @@ mod tests {
                         mac,
                         "NIC.Remembered.7-1-1",
                     ))),
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![
                             row(mac, true, Some("NIC.Conflicting.1")),
                             row(mac, false, Some("NIC.Conflicting.2")),
                         ],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(
                     mac,
@@ -1716,12 +1866,12 @@ mod tests {
             "duplicate owned id is unambiguous" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![
                             row(mac, true, Some(" \tNIC.Owned.1\n ")),
                             row(mac, false, Some("NIC.Owned.1")),
                         ],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(mac, "NIC.Owned.1"))),
             }
@@ -1729,12 +1879,12 @@ mod tests {
             "conflicting owned ids block prediction fallback" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![
                             row(mac, true, Some("NIC.Owned.1")),
                             row(mac, false, Some("NIC.Owned.2")),
                         ],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::MacOnly(entered_mac)),
             }
@@ -1742,9 +1892,9 @@ mod tests {
             "duplicate prediction id is unambiguous" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, None)],
-                        predicted: vec![
+                        predictions: vec![
                             predicted(mac, Some("NIC.Predicted.1")),
                             predicted(mac, Some("NIC.Predicted.1")),
                         ],
@@ -1755,9 +1905,9 @@ mod tests {
             "whitespace-only owned id falls through to prediction" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, Some("\t\n"))],
-                        predicted: vec![predicted(mac, Some("NIC.Predicted.1"))],
+                        predictions: vec![predicted(mac, Some("NIC.Predicted.1"))],
                     },
                 ) => Some(BootInterfaceTarget::Pair(pair(mac, "NIC.Predicted.1"))),
             }
@@ -1765,9 +1915,9 @@ mod tests {
             "conflicting prediction ids remain MAC-only" {
                 (
                     None,
-                    BootInterfaceCandidates {
+                    MachineInterfaces {
                         interfaces: vec![row(mac, true, None)],
-                        predicted: vec![
+                        predictions: vec![
                             predicted(mac, Some("NIC.Predicted.1")),
                             predicted(mac, Some("NIC.Predicted.2")),
                         ],
@@ -1782,12 +1932,12 @@ mod tests {
         // The operator picked a NIC; its machine_interface row holds the Redfish
         // id, so the target is the full pair -- even though the explored default
         // names a different NIC.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", true, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", false, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
         let stored = Some(pair("00:00:5e:00:53:01", "NIC.Integrated.1-1-1"));
         let target = resolve_admin_boot_interface_target(
@@ -1810,9 +1960,9 @@ mod tests {
         // The named NIC has no machine_interfaces row yet (its first lease is
         // still pending), but the machine's prediction for it recorded the
         // Redfish id -- the entered MAC is completed from there.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![predicted("00:00:5e:00:53:02", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:02", Some("NIC.Embedded.1-1-1"))],
         };
         let target = resolve_admin_boot_interface_target(
             None,
@@ -1860,12 +2010,12 @@ mod tests {
     fn no_mac_prefers_the_machines_designation_over_the_explored_default() {
         // The machine's primary row is the authority; the explored default
         // (site-explorer's automatic pick) names a different NIC and loses.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![
                 row("00:00:5e:00:53:01", false, Some("NIC.Integrated.1-1-1")),
                 row("00:00:5e:00:53:02", true, Some("NIC.Slot.7-1-1")),
             ],
-            predicted: vec![],
+            predictions: vec![],
         };
         let stored = Some(pair("00:00:5e:00:53:01", "NIC.Integrated.1-1-1"));
         assert_eq!(
@@ -1881,9 +2031,9 @@ mod tests {
     fn no_mac_real_rows_beat_predicted_interfaces() {
         // Once any real machine_interfaces row exists, predictions are out of
         // the running -- even a fully-populated one.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![row("00:00:5e:00:53:02", true, Some("NIC.Slot.7-1-1"))],
-            predicted: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&c), None),
@@ -1900,9 +2050,9 @@ mod tests {
         // MAC alone, exactly like the machine-controller's
         // boot_interface_target. The explored default is not consulted for an
         // owned machine -- even when it holds an id for the very same NIC.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![row("00:00:5e:00:53:02", true, None)],
-            predicted: vec![],
+            predictions: vec![],
         };
         for stored in [
             Some(pair("00:00:5e:00:53:02", "NIC.Slot.7-1-1")),
@@ -1923,9 +2073,9 @@ mod tests {
         // A machine awaiting its first lease resolves from its prediction when
         // there is exactly one: the recorded id completes the pair, and a
         // prediction without an id is targeted by MAC alone.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&c), None),
@@ -1935,9 +2085,9 @@ mod tests {
             ))),
         );
 
-        let idless = BootInterfaceCandidates {
+        let idless = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![predicted("00:00:5e:00:53:01", None)],
+            predictions: vec![predicted("00:00:5e:00:53:01", None)],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&idless), None),
@@ -1955,9 +2105,9 @@ mod tests {
         // refuses to guess rather than silently programming boot order against
         // whichever NIC sorts lowest. The operator's explicit MAC still
         // resolves, completed from the matching prediction.
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![
+            predictions: vec![
                 predicted("00:00:5e:00:53:02", Some("NIC.Slot.7-1-1")),
                 predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1")),
             ],
@@ -1997,9 +2147,9 @@ mod tests {
             ..predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))
         };
         let other = predicted("00:00:5e:00:53:02", Some("NIC.Slot.7-1-1"));
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![other, declared_primary],
+            predictions: vec![other, declared_primary],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(None, None, Some(&c), None),
@@ -2017,9 +2167,9 @@ mod tests {
         // the explored default.
         let mut underlay = row("00:00:5e:00:53:09", false, None);
         underlay.network_segment_type = Some(NetworkSegmentType::Underlay);
-        let c = BootInterfaceCandidates {
+        let c = MachineInterfaces {
             interfaces: vec![underlay],
-            predicted: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
+            predictions: vec![predicted("00:00:5e:00:53:01", Some("NIC.Embedded.1-1-1"))],
         };
         let stored = Some(pair("00:00:5e:00:53:09", "NIC.Other.9-9-9"));
         assert_eq!(
@@ -2041,9 +2191,9 @@ mod tests {
             resolve_admin_boot_interface_target(Some(stored.clone()), None, None, None),
             Some(BootInterfaceTarget::Pair(stored.clone())),
         );
-        let empty = BootInterfaceCandidates {
+        let empty = MachineInterfaces {
             interfaces: vec![],
-            predicted: vec![],
+            predictions: vec![],
         };
         assert_eq!(
             resolve_admin_boot_interface_target(Some(stored), None, Some(&empty), None),

@@ -6,13 +6,13 @@
 package dps
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -84,7 +84,7 @@ func (c tokenCredentials) GetRequestMetadata(context.Context, ...string) (map[st
 		return nil, fmt.Errorf("read DPS token: %w", err)
 	}
 
-	trimmedToken := strings.TrimSpace(string(token))
+	trimmedToken := string(bytes.TrimSpace(token))
 	if trimmedToken == "" {
 		return nil, fmt.Errorf("DPS token file is empty")
 	}

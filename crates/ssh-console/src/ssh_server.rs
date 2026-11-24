@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use opentelemetry::metrics::{Counter, Meter, ObservableGauge, UpDownCounter};
-use rpc::forge_api_client::ForgeApiClient;
+use rpc::carbide_api_client::CarbideApiClient;
 use russh::server::{Server as RusshServer, run_stream};
 use russh::{MethodKind, MethodSet};
 use tokio::net::TcpListener;
@@ -36,7 +36,7 @@ use crate::{fork_cancel_token, tcp_listener};
 
 pub(crate) async fn spawn(
     config: Arc<Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     bmc_connection_store: BmcConnectionStore,
     meter: &Meter,
     cancel_token: CancellationToken,
@@ -49,7 +49,11 @@ pub(crate) async fn spawn(
     let host_key =
         russh::keys::PrivateKey::read_openssh_file(&config.host_key_path).map_err(|error| {
             ReadingHostKeyFile {
-                path: config.host_key_path.as_path().to_string_lossy().to_string(),
+                path: config
+                    .host_key_path
+                    .as_path()
+                    .to_string_lossy()
+                    .into_owned(),
                 error,
             }
         })?;
@@ -65,7 +69,7 @@ pub(crate) async fn spawn(
 
     let server = SshServer {
         config,
-        forge_api_client,
+        carbide_api_client,
         bmc_connection_store,
         russh_config,
         metrics,
@@ -125,7 +129,7 @@ impl ShutdownHandle<()> for Handle {
 struct SshServer {
     config: Arc<Config>,
     russh_config: Arc<russh::server::Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     bmc_connection_store: BmcConnectionStore,
     metrics: Arc<ServerMetrics>,
 }
@@ -210,6 +214,14 @@ pub(crate) struct ServerMetrics {
 }
 
 impl ServerMetrics {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new(
+            &opentelemetry::global::meter("ssh-console-test"),
+            &Config::default(),
+        )
+    }
+
     fn new(meter: &Meter, config: &Config) -> ServerMetrics {
         Self {
             total_clients: meter
@@ -261,7 +273,7 @@ impl russh::server::Server for SshServer {
         Self::Handler::new(
             self.bmc_connection_store.clone(),
             self.config.clone(),
-            self.forge_api_client.clone(),
+            self.carbide_api_client.clone(),
             self.metrics.clone(),
             addr,
         )

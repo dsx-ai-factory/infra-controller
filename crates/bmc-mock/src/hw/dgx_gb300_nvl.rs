@@ -50,7 +50,7 @@ impl DgxGB300Nvl<'_> {
             vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
             product: Some("GB BMC"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -169,16 +169,15 @@ impl DgxGB300Nvl<'_> {
                 .map(|(n, nic)| {
                     let id = format!("Boot{:04X}", n + 3); // Starting with 0003
                     let pci_path = "PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)";
+                    let [a, b, c, d, e, f] = nic.mac_address.bytes();
                     redfish::boot_option::builder(&redfish::boot_option::resource(system_id, &id))
                         .boot_option_reference(&id)
                         .display_name(format!(
-                            "UEFI HTTPv4 (MAC:{})",
-                            nic.mac_address.to_string().replace(":", ""),
+                            "UEFI HTTPv4 (MAC:{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X})"
                         ))
                         .uefi_device_path(format!(
-                            "{pci_path}/MAC({},0x1)\
-                             /IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
-                            nic.mac_address.to_string().replace(":", "")
+                            "{pci_path}/MAC({a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X},0x1)\
+                             /IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"
                         ))
                         .build(BootOptionKind::Network)
                 }),
@@ -200,7 +199,7 @@ impl DgxGB300Nvl<'_> {
             .collect();
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     base_bios: None,
                     bios_mode: redfish::computer_system::BiosMode::Generic,
@@ -244,7 +243,7 @@ impl DgxGB300Nvl<'_> {
                     processors: None,
                     memory: None,
                 },
-            ],
+            ]),
         }
     }
 

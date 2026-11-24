@@ -662,9 +662,9 @@ func TestSSHKeyGroupSiteAssociationSQLDAO_Update(t *testing.T) {
 			got, err := skgasd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
-				assert.Equal(t, tc.expectedSSHKeyGroupID.String(), got.SSHKeyGroupID.String())
+				assert.Equal(t, *tc.expectedSSHKeyGroupID, got.SSHKeyGroupID)
 				assert.Equal(t, tc.expectedVersion, got.Version)
-				assert.Equal(t, tc.expectedSiteID.String(), got.SiteID.String())
+				assert.Equal(t, *tc.expectedSiteID, got.SiteID)
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, *tc.expectedIsMissingOnSite, got.IsMissingOnSite)
 			}
@@ -726,6 +726,80 @@ func TestSSHKeyGroupSiteAssociationSQLDAO_Delete(t *testing.T) {
 				tmp, err := skgasd.GetByID(ctx, nil, tc.id, nil)
 				assert.NotNil(t, err)
 				assert.Nil(t, tmp)
+			}
+			if tc.verifyChildSpanner {
+				span := otrace.SpanFromContext(ctx)
+				assert.True(t, span.SpanContext().IsValid())
+			}
+		})
+	}
+}
+
+func TestSSHKeyGroupSiteAssociationSQLDAO_Clear(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceInitDB(t)
+	defer dbSession.Close()
+	testSSHKeyGroupSiteAssociationSetupSchema(t, dbSession)
+	user := testOperatingSystemBuildUser(t, dbSession, "testUser")
+	ip := testBuildInfrastructureProvider(t, dbSession, cutil.GetPtr(uuid.New()), "test", "testorg", user.ID)
+	site := TestBuildSite(t, dbSession, ip, "test", user)
+	tenant := testOperatingSystemBuildTenant(t, dbSession, "testTenant")
+
+	skgasd := NewSSHKeyGroupSiteAssociationDAO(dbSession)
+	sshKeyGroup1 := testBuildSSHKeyGroup(t, dbSession, "test1", cutil.GetPtr("test1"), "testorg", tenant.ID, nil, SSHKeyGroupStatusSyncing, user.ID)
+	sshKeyGroup2 := testBuildSSHKeyGroup(t, dbSession, "test2", cutil.GetPtr("test2"), "testorg", tenant.ID, nil, SSHKeyGroupStatusSyncing, user.ID)
+
+	skga1, err := skgasd.Create(ctx, nil, SSHKeyGroupSiteAssociationCreateInput{
+		SSHKeyGroupID: sshKeyGroup1.ID,
+		SiteID:        site.ID,
+		Status:        SSHKeyGroupSiteAssociationStatusSyncing,
+		CreatedBy:     user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, skgasd.Delete(ctx, nil, skga1.ID))
+
+	skga2, err := skgasd.Create(ctx, nil, SSHKeyGroupSiteAssociationCreateInput{
+		SSHKeyGroupID: sshKeyGroup2.ID,
+		SiteID:        site.ID,
+		Status:        SSHKeyGroupSiteAssociationStatusSyncing,
+		CreatedBy:     user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, skgasd.Delete(ctx, nil, skga2.ID))
+
+	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
+
+	tests := []struct {
+		desc               string
+		input              SSHKeyGroupSiteAssociationClearInput
+		expectError        bool
+		verifyChildSpanner bool
+	}{
+		{
+			desc:               "clears deleted timestamp on soft-deleted SSHKeyGroupSiteAssociation",
+			input:              SSHKeyGroupSiteAssociationClearInput{ID: skga1.ID, Deleted: true},
+			expectError:        false,
+			verifyChildSpanner: true,
+		},
+		{
+			desc:        "returns error when Deleted is false on soft-deleted SSHKeyGroupSiteAssociation",
+			input:       SSHKeyGroupSiteAssociationClearInput{ID: skga2.ID, Deleted: false},
+			expectError: true,
+		},
+		{
+			desc:        "returns error when SSHKeyGroupSiteAssociation ID does not exist",
+			input:       SSHKeyGroupSiteAssociationClearInput{ID: uuid.New(), Deleted: true},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := skgasd.Clear(ctx, nil, tc.input)
+			assert.Equal(t, tc.expectError, err != nil)
+			if !tc.expectError {
+				require.NotNil(t, got)
+				assert.Nil(t, got.Deleted)
 			}
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

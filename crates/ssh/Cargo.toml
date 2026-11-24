@@ -22,10 +22,6 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# TODO: rename to carbide_ssh in source
-[lib]
-name = "forge_ssh"
-
 [features]
 test_support = []
 

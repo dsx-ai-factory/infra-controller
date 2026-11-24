@@ -16,6 +16,8 @@ Ensure you have the following prerequisites met before ingesting machines:
 1. For the remaining REST parity gaps, you have `nico-admin-cli` and direct access to the NICo site. See the next section for details.
 1. The NICo API service is running at IP address `NICo_API_EXTERNAL`. It is recommended that you add this IP address to your trusted list.
 1. DHCP requests from all managed host IPMI networks have been forwarded to the NICo service running at IP address `NICo_DHCP_EXTERNAL`.
+1. Complete the [DHCP Cutover Checklist](ip-and-network-configuration.md#dhcp-cutover-checklist). Configure reservations for each DPU BMC or DPU OS interface that uses a Fixed allocation policy. Dynamic and Retained policies allocate addresses through DHCP without a predefined reservation only on segments with `allocation_strategy = "dynamic"`. On segments with `allocation_strategy = "reserved"`, an interface cannot obtain its first DHCP address without an existing reservation.
+1. Configure the [Site-wide Credentials](../getting-started/quick-start.md#set-site-wide-credentials) before starting discovery.
 1. You have the following information for all hosts that need to be ingested:
 
    - The MAC address of the host BMC
@@ -258,6 +260,7 @@ per-host fields and compatibility controls. It reads a snake_case
   [Host BMC compatibility fields](ip-and-network-configuration.md#host-bmc-compatibility-fields)
   for field interactions and the supported shared HostInband topology.
 - **`host_lifecycle_profile.disable_lockdown`** (bool, default `false`): When `true`, the state machine does not lock down the host during lifecycle management, which suits automation workflows that keep lockdown disabled.
+- **`host_lifecycle_profile.retain_hbn_config_on_boot`** (bool, default `false`): When `true`, designates the machine to retain its HBN config on boot. A designated machine must declare a `dpu_bmc` and a `dpu_os` interface, and must use a `Fixed` or `Retained` `ip_allocation` on the host BMC and on both DPU interfaces; the API rejects the designation otherwise. Declaring the DPU interfaces is required because an undeclared one gets a DHCP address. A machine whose `dpu_policy` attaches no DPU declares neither. Host data interfaces are not restricted. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable.
 
 The previous `host_nics` manifest key and `--host_nics` CLI option remain
 aliases for `interfaces` and `--interfaces`. Existing manifests do not need
@@ -354,7 +357,7 @@ The following are the conditions in which Site Explorer cannot complete pairing 
 | `dpu_pf0_mac_missing` | DPU is in DPU mode but its pf0 MAC address is not retrievable. | Install a fresh DPU OS; see [Installing a Fresh DPU OS](#dpu-related-issues-installing-a-fresh-dpu-os) below |
 | `manual_power_cycle_required` | DPU mode was changed but the host vendor does not support automated power cycling. | Manually power-cycle the host at the data center level |
 | `host_system_report_missing` | Host BMC Redfish returned no valid system report; likely a BMC firmware issue or transient error. | Check `nico-api` logs for the host BMC IP |
-| `no_dpu_reported_by_host` | Host BMC reports no BlueField PCIe devices. | Check DPU seating and host BMC firmware version |
+| `no_dpu_reported_by_host` | Under `manage`, pairing completeness passed, but no DPU is available for management. | Check host inventory, reported card modes, and the effective `dpu_policy`. Use [`nic` for NIC-only hosts](boot-interfaces-and-dpu-modes.md#33-dpu-in-nic-mode) or [`ignore` for zero-DPU hosts](boot-interfaces-and-dpu-modes.md#32-zero-dpu-host-no-dpu-hardware). For an expected DPU in NIC mode, check its [part-number rule and target mode](boot-interfaces-and-dpu-modes.md#oem-part-numbers-for-hostdpu-pairing). If the card is missing from inventory, check seating and firmware. |
 | `boot_interface_mac_mismatch` | Host boot MAC does not match the pf0 MAC of any discovered DPU. | Check exploration reports and `nico-api` logs for both the host and DPU BMC IPs |
 | `viking_cpld_version_issue` | NVIDIA Viking (DGX): `CPLDMB_0` firmware below minimum required version (`0.2.1.9`). | Contact the data center team for a full DC power cycle |
 
@@ -373,6 +376,10 @@ This command copies the NICo BFB image directly to the DPU via rshim (SSH to the
 <Note>
 The `--host-bmc-ip` flag is required. NICo uses it to power-cycle the host after the BFB copy completes. Use `--pre-copy-powercycle` if the host needs to release rshim control to the DPU BMC before the copy can start.
 </Note>
+
+The DPU BMC IP must belong to a known machine interface. Optionally pass `--mac` to require that interface to match the expected DPU BMC MAC; this option does not override credential lookup. NICo saves the resolved MAC even when `--mac` is omitted. An invalid or mismatching MAC rejects the request without queuing recovery or changing the host's remediation pause.
+
+Before copying the BFB or powering off the host, NICo checks the saved DPU identity again. A missing or changed IP-to-interface mapping fails recovery and releases the host's remediation pause. Recovery states without a saved MAC also require a new request before another copy or power-off. Verify the DPU BMC IP and MAC, then rerun the command to retry. A recovery in the host power-on phase restores host power before checking the DPU identity again.
 
 For additional DPU-specific troubleshooting including Secure Boot configuration, BMC password resets, and firmware version checks, see [Adding New Machines to an Existing Site](../playbooks/stuck_objects/adding_new_machines.md).
 

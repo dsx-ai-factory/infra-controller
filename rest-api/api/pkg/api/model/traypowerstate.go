@@ -37,7 +37,7 @@ type APIPowerActionOperation string
 // APIPowerTaskOperation names the power operation requested through Flow.
 type APIPowerTaskOperation string
 
-// APIPowerTaskRelevance explains why a task appears for the requested tray.
+// APIPowerTaskRelevance explains a member's relationship to a task; root rack tasks use `Unknown`.
 type APIPowerTaskRelevance string
 
 // APITaskType categorizes an active conflict or earlier waiting task, including non-power work.
@@ -91,6 +91,7 @@ var powerActionStatusNames = map[corev1.ComponentPowerActionStatus]APIPowerActio
 }
 
 var powerActionOperationNames = map[corev1.ComponentPowerActionOperation]APIPowerActionOperation{
+	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_AC_POWERCYCLE: "AcPowercycle",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_ON:      "PowerOn",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_OFF:     "PowerOff",
 	corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_RESET:         "Reset",
@@ -114,6 +115,7 @@ var powerTaskOperationNames = map[flowv1.PowerControlOperation]APIPowerTaskOpera
 }
 
 var taskTypeNames = map[flowv1.TaskKind]APITaskType{
+	flowv1.TaskKind_TASK_KIND_COMPONENT_RESET:    "ComponentReset",
 	flowv1.TaskKind_TASK_KIND_POWER_CONTROL:      "PowerControl",
 	flowv1.TaskKind_TASK_KIND_FIRMWARE_CONTROL:   "FirmwareControl",
 	flowv1.TaskKind_TASK_KIND_BRING_UP:           "BringUp",
@@ -220,7 +222,8 @@ type APIPowerTask struct {
 	// Started is the recorded execution start, or nil until recorded.
 	Started *time.Time `json:"started"`
 	// Relevance is `Selected` when the tray is a recorded target, or `RackAffected` when the task
-	// selects a shelf in the tray's current rack.
+	// selects a shelf in the tray's current rack. Root rack tasks and unrecognized service values use `Unknown`;
+	// member references supply each tray's relevance to a root task.
 	Relevance APIPowerTaskRelevance `json:"relevance"`
 	// WaitingContext describes other work in the rack for a Flow `Waiting` task, and is nil for every other
 	// task. When an older service doesn't supply it, both lists are empty and Error is `Unsupported`.

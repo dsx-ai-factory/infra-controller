@@ -108,12 +108,15 @@ make core-proto             # Copy Core protos, format, and generate Go clients
 make core-protogen          # Generate from the existing Core proto copies
 make flow-proto             # Copy Flow protos and generate Go clients
 make flow-protogen          # Generate from the existing Flow proto copies
+make ipam-protogen          # Format, lint, and generate IPAM Go clients
 ```
 
 Core sources are `../crates/rpc/proto/`; Flow sources are `flow/proto/v1/`.
 Change those sources and regenerate instead of editing copies in `proto/`.
+IPAM sources are `ipam/proto/api/v1/`; `ipam-protogen` uses remote buf.build
+plugins and needs network access.
 
-### Local development and hooks
+### Local development
 
 | Command | Purpose |
 | --- | --- |
@@ -122,9 +125,9 @@ Change those sources and regenerate instead of editing copies in `proto/`.
 | `make kind-redeploy`, `make helm-redeploy` | Rebuild and restart for iteration |
 | `make kind-status`, `make kind-logs`, `make kind-verify` | Inspect pods, API logs, and health |
 | `make kind-down` | Tear down the cluster |
-| `make pre-commit-install` | Install pre-commit and TruffleHog hooks |
-| `make pre-commit-run` | Scan all files for secrets |
-| `make pre-commit-update` | Update hook versions |
+
+Secret scanning uses the repository root's pre-commit hook; see
+[Secret Scanning](../CONTRIBUTING.md#secret-scanning).
 
 ## Go authoring conventions
 
@@ -307,6 +310,11 @@ Tests must exercise the changed surface:
   identifiers, method names, kinds, and site IDs rather than credential-bearing
   payloads. Operator examples use supported prompts, stdin, or protected files
   instead of credentials in command arguments.
+- When adding or renaming sensitive REST request fields, verify server audit
+  redaction and nicocli HTTP debug output (`cli/pkg/client.go`), echoed commands,
+  and TUI history. Redact nested authentication values regardless of field
+  naming. Cover affected logging paths; audit redaction alone does not protect
+  CLI output.
 
 ## Validation and conversion
 
@@ -470,6 +478,27 @@ For Flow endpoints follow
 use `ProxyFlowGRPCWithSecrets` when redaction is needed. Callers supply the
 workflow ID and conflict policy. Do not add bespoke workflows per method.
 Preserve the skill's multi-release registration, migration, and retirement order.
+
+Do not persist Temporal execution state in the REST DB, whether as a column,
+a JSONB field or a dedicated table. This covers workflow and run IDs, attempt
+and retry markers, completion flags and observed-at timestamps for a Site
+call. Do not walk workflow history to reconstruct what an earlier run did.
+Instead:
+
+- To dedupe or rejoin an in-flight Site call, use a deterministic workflow ID
+  with a conflict policy, as `common.ExecuteCoreGRPCWithConflictPolicy` and
+  `common.ExecuteFlowGRPC` allow.
+- Make a retry safe through the destination service's idempotent replies,
+  such as Core treating `NotFound` on deletion as done.
+- Report an operation's effect on a resource through its existing status,
+  status detail and flags. Site inventory then reconciles them against the
+  authoritative Site service.
+
+A saved run ID can outlive its Temporal history. After that history expires,
+the saved ID alone cannot recover the earlier result, which can strand tracking
+state that depends on it. Tracking state also forces resource paths to
+special-case it. Remove persisted fields or schema objects only after supported
+releases stop reading or writing them.
 
 When adding or renaming Site inventory workflows, update their registration in
 `workflow/cmd/workflow/main.go` and `inventoryWorkflowTypes` in

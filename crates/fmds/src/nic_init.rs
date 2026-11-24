@@ -18,8 +18,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
+use carbide_dpu_agent_utils::{FMDS_IPV6_ADDRESS, FMDS_IPV6_GATEWAY};
 use eyre::{WrapErr, eyre};
-use forge_dpu_agent_utils::{FMDS_IPV6_ADDRESS, FMDS_IPV6_GATEWAY};
 use futures_util::TryStreamExt;
 use ipnetwork::IpNetwork;
 use rtnetlink::packet_route::AddressFamily;
@@ -175,7 +175,9 @@ async fn with_netlink_connection(
 ) -> eyre::Result<()> {
     tokio::select! {
         biased;
-        () = connection => eyre::bail!("netlink connection stopped during metadata setup"),
+        () = connection => {
+            eyre::bail!("netlink connection stopped during metadata setup");
+        }
         result = operation => result,
     }
 }

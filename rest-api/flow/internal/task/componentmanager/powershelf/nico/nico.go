@@ -17,6 +17,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -125,7 +126,12 @@ func powerShelfIDsProto(ids []string) *corev1.PowerShelfIdList {
 // Shelves not associated with a rack in Core are skipped with a warning
 // (see the equivalent NVSwitch helper for the reasoning).
 // ensureTargetOperable keeps readiness resolution separate from API targeting.
-func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) (err error) {
+	defer func() {
+		if err == nil {
+			err = dispatchguard.Check(ctx)
+		}
+	}()
 	if !target.UsesMACAddresses() {
 		return m.ensureRackOperable(ctx, target.Identifiers, op, override)
 	}
@@ -144,7 +150,12 @@ func (m *Manager) ensureRackOperable(
 	shelfIDs []string,
 	op types.OperationType,
 	overrideReadinessCheck bool,
-) error {
+) (err error) {
+	defer func() {
+		if err == nil {
+			err = dispatchguard.Check(ctx)
+		}
+	}()
 	if len(shelfIDs) == 0 {
 		return nil
 	}
@@ -262,6 +273,9 @@ func (m *Manager) PowerControl(
 		}
 	}
 
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
 	if err != nil {
 		return fmt.Errorf("ComponentPowerControl failed: %w", err)
@@ -319,6 +333,11 @@ func (m *Manager) FirmwareControl(
 	target common.Target,
 	info operations.FirmwareControlTaskInfo,
 ) error {
+	err := m.ValidateFirmwareControl(info)
+	if err != nil {
+		return err
+	}
+
 	log.Debug().
 		Str("components", target.String()).
 		Str("target_version", info.TargetVersion).
@@ -356,19 +375,29 @@ func (m *Manager) FirmwareControl(
 		},
 		TargetVersion:         info.TargetVersion,
 		ForceUpdate:           info.OverrideVersionCheck,
+		CredentialOverrides:   info.CredentialOverrides,
 		BypassStateController: info.OverrideReadinessCheck,
 	}
 	if info.AccessToken != "" {
 		req.AccessToken = &info.AccessToken
 	}
 
+	if err := dispatchguard.Check(ctx); err != nil {
+		return err
+	}
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
 	if err != nil {
+		if info.CredentialOverrides != nil {
+			return nicoprovider.FirmwareRPCError("dispatch", err)
+		}
 		return fmt.Errorf("UpdateComponentFirmware failed: %w", err)
 	}
 
 	for _, r := range resp.GetResults() {
 		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			if info.CredentialOverrides != nil {
+				return fmt.Errorf("%s", nicoprovider.FirmwareResultDiagnostic(r, target.UsesMACAddresses()))
+			}
 			return fmt.Errorf("firmware update failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
@@ -380,9 +409,15 @@ func (m *Manager) FirmwareControl(
 	return nil
 }
 
-func (m *Manager) GetFirmwareStatus(
+func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (map[string]operations.FirmwareUpdateStatus, error) {
+	return m.GetFirmwareStatusWithCredentials(ctx, target, nil)
+}
+
+// GetFirmwareStatusWithCredentials forwards the dispatch credentials for polling.
+func (m *Manager) GetFirmwareStatusWithCredentials(
 	ctx context.Context,
 	target common.Target,
+	credentials *corev1.ComponentCredentialOverrides,
 ) (map[string]operations.FirmwareUpdateStatus, error) {
 	log.Debug().
 		Str("components", target.String()).
@@ -392,7 +427,7 @@ func (m *Manager) GetFirmwareStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &corev1.GetComponentFirmwareStatusRequest{}
+	req := &corev1.GetComponentFirmwareStatusRequest{CredentialOverrides: credentials}
 	if target.UsesMACAddresses() {
 		req.Target = &corev1.GetComponentFirmwareStatusRequest_PowerShelfPmcMacs{
 			PowerShelfPmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
@@ -405,15 +440,28 @@ func (m *Manager) GetFirmwareStatus(
 
 	resp, err := m.nicoClient.GetComponentFirmwareStatus(ctx, req)
 	if err != nil {
+		if credentials != nil {
+			return nil, nicoprovider.FirmwareRPCError("status query", err)
+		}
 		return nil, fmt.Errorf("GetComponentFirmwareStatus failed: %w", err)
 	}
 
 	result := make(map[string]operations.FirmwareUpdateStatus, len(resp.GetStatuses()))
 	for _, s := range resp.GetStatuses() {
+		if credentials != nil && s.GetResult() != nil &&
+			(s.GetResult().GetError() != "" || s.GetResult().GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS ||
+				nicoprovider.MapFirmwareState(s.GetState()) == operations.FirmwareUpdateStateFailed) {
+			s.Result.Error = nicoprovider.FirmwareResultDiagnostic(s.GetResult(), target.UsesMACAddresses())
+		}
 		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
 		result[compID] = operations.FirmwareUpdateStatus{
 			ComponentID: compID,
 			State:       nicoprovider.MapFirmwareState(s.GetState()),
+		}
+		if credentials != nil {
+			entry := result[compID]
+			entry.Error = s.GetResult().GetError()
+			result[compID] = entry
 		}
 	}
 
@@ -487,4 +535,19 @@ func normalizeDecommissionState(raw string) string {
 		return "Decommissioned"
 	}
 	return "Decommissioning/" + state.DecommissioningState.State
+}
+
+// ValidateFirmwareControl rejects device credentials that this execution path
+// would otherwise ignore. It runs before any device operation.
+func (m *Manager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	if info.DeviceCredentials == nil && info.CredentialOverrides == nil {
+		return nil
+	}
+	if !info.OverrideReadinessCheck {
+		return fmt.Errorf("device credential overrides require readiness override for direct dispatch")
+	}
+	if info.CredentialOverrides.GetNvos() != nil {
+		return fmt.Errorf("NVOS credentials are supported only for switches")
+	}
+	return nil
 }

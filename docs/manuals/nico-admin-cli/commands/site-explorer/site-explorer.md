@@ -39,7 +39,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Subcommands
 
@@ -47,6 +47,7 @@ Print help (see a summary with -h)
 |---|---|
 | [`get-report`](./site-explorer-get-report.md) | Retrieves the latest site exploration report |
 | [`mlx-devices`](./site-explorer-mlx-devices.md) | Report Mellanox/BlueField device NIC firmware from explored Redfish data. |
+| [`drivers`](./site-explorer-drivers.md) | Show the drivers a BMC uses, the rule that chose each, and the identity they were selected from. |
 | [`explore`](./site-explorer-explore.md) | Asks carbide-api to explore a single host and prints the report. Does not store it. |
 | [`re-explore`](./site-explorer-re-explore.md) | Asks carbide-api to explore a single host in the next exploration cycle. The results will be stored. |
 | [`refresh`](./site-explorer-refresh.md) | Immediately probes a BMC endpoint and persists the report. |

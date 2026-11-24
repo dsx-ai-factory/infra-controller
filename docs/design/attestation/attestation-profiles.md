@@ -45,10 +45,12 @@ classified and `NoProfile` for one it has; seeding `any` ends both.
 | 2   | The class, the BMC's `ComponentIntegrity` list, and the attester set it implies are recorded          | §5.1, §7.1, §7.5                                                  |
 | 3   | An operator writes a profile keyed to a hardware class                                               | §4, §6                                                            |
 | 4   | Attestation resolves machine → BMC → class → profile, then writes one work row per selected attester | §5                                                                |
-| 5   | The controller collects evidence per work row                                                        | Exists, unchanged                                                 |
-| 6   | The evidence is verified and recorded                                                                | Exists, unchanged                                                 |
+| 5   | The controller collects evidence per work row                                                        | SPDM controller                                                   |
+| 6   | The evidence is verified and recorded                                                                | SPDM controller                                                   |
 
-Steps 1 through 4 are this document's scope.
+Steps 1 through 4 are this document's scope. The selected devices are scheduled
+as an [SPDM attestation job](spdm-jobs.md), which gives each attempt its own
+identity and retained results.
 
 **Resolution goes through the BMC.** A machine row carries no class; its BMC
 endpoint does. The scheduler goes from `machine_id` to that machine's BMC
@@ -233,11 +235,18 @@ consulted only after that lookup misses.
 Seed `any` with `mode: ALL` to attest whatever the BMC offers on hardware
 nobody has profiled.
 
-Without that fallback, a machine whose class has no profile is never attested.
+Without that fallback, lifecycle triggers and manual triggers without
+`--attester-id-regex` do not attest a machine whose class has no profile.
 It is not blocked either. Scheduling reports `NoProfile`, and the machine
 continues to exactly the state it would have reached if attestation had run and
-passed. Nothing later in the flow can tell those two apart, so §6.4 is the only
-place the gap is visible.
+passed. Nothing later in the flow can tell those two apart, so the gap is
+visible in two places: the per-class aggregate in §6.4, and the machine's
+stored scheduling decision, which a database query can read
+([attestation health alerts](attestation-health-alerts.md), §5.4).
+
+A manual trigger with `--attester-id-regex` can still attest eligible devices
+without a profile. It overrides profile selection for that request; see
+[attester override selection](spdm-jobs.md#start-a-run-trigger).
 
 A `mode: NONE` profile on a real class also attests nothing, but on purpose.
 `NONE` means an operator decided this platform has nothing to attest.
@@ -327,6 +336,10 @@ list attesters before collecting.
 
 ## 5 Resolving the class and scheduling
 
+The flow below applies to lifecycle triggers and manual triggers without
+`--attester-id-regex`. An attester override replaces profile selection for
+one request; see [trigger selection](spdm-jobs.md#start-a-run-trigger).
+
 1. Check `spdm_enabled`. If false, stop.
 2. Resolve the machine to its BMC address from `machine_interfaces`, as the
   existing worker does.
@@ -350,9 +363,13 @@ list attesters before collecting.
    would stop attesting working hardware. The version is not persisted.
 8. Apply the selection's patterns to what remains and take the outcome from
   §5.3.
-9. On success, write one `spdm_machine_devices_attestation` row per selected
-  attester — keyed `(machine_id, device_id)`, where `device_id` is that
-  attester's `ComponentIntegrity` `Id` — which the existing controller picks up.
+9. When devices are selected, create a job and write one
+  `spdm_machine_devices_attestation` row per selected attester, keyed
+  `(machine_id, device_id, job_id)`. The `device_id` is that attester's
+  `ComponentIntegrity` `Id`; all rows from this scheduling attempt share the
+  same `job_id` and `started_at`. The SPDM controller processes those rows.
+  An empty selection creates no job. Earlier jobs retain their own records;
+  see [job identity and history](spdm-jobs.md).
 
 Step 6 stays a live call even though exploration records the same collection
 (§7.1). Selection has to use what the BMC reports now, since the recorded copy
@@ -643,9 +660,9 @@ a derived class always has two `_`-separated fields, and `any` has one.
 
 ### 6.3 The admin CLI
 
-The commands sit under the existing `attestation spdm` group, alongside the
-`trigger`, `get`, `list`, and `cancel` commands that act on the machines these
-profiles decide:
+The commands sit under the existing `attestation spdm` group, alongside
+`trigger` and the `job get`, `job list`, `job waive`, and `job fail` commands that
+act on the machines these profiles decide:
 
 ```text
 nico-admin-cli attestation spdm profile list
@@ -685,8 +702,8 @@ error: generic error: removing the 'any' fallback leaves every hardware class
        confirm
 ```
 
-`attestation spdm trigger` prints what §5.3 decided for the machine: the
-outcome, the hardware class resolved for it, and the profile version that
+Without a regex override, `attestation spdm trigger` prints what §5.3 decided for
+the machine: the outcome, the hardware class resolved for it, and the profile version that
 applied. A trigger that schedules nothing still succeeds, so without the outcome
 its response cannot be told from one that scheduled work.
 
@@ -765,9 +782,28 @@ is present. `--format` is a root-level flag and must precede the command path:
 
 ### 6.5 What editing a profile does not do
 
-A profile is consulted once, when attestation is scheduled. Changing one affects
-attestations scheduled afterwards and does not alter those already scheduled or
-in flight. Deleting one does not cancel scheduled work.
+A job keeps the devices selected when it was created. Editing or deleting a
+profile does not add or remove device records from an existing job.
+
+The managed-host controller polls its job's database status without contacting
+the BMC while the job is in progress. Once the job has passed, failed, or been
+waived, it rechecks the selected device IDs before accepting the results.
+If that set changes, including becoming empty, it returns to scheduling without
+modifying the old job or its cancellation request. Stored device outcomes and
+completion timestamps stay unchanged. An empty selection then follows
+the skip path. If the selected IDs stay the same, it evaluates their latest results.
+
+Device removals and profile edits therefore do not restart an in-progress job.
+If a removed device leaves the job stuck, use `attestation spdm job fail` with
+that job's ID. Unfinished devices are resolved as failed after BMC cleanup, allowing the controller
+to recheck the selection. If the selected IDs still match, failed latest results
+put the machine in its attestation failure state; a successful new run can let it
+recover. See [job fail semantics](spdm-jobs.md#progress-waivers-and-failure).
+A new manual trigger creates a separate job and does not replace the job the
+managed-host controller is waiting for. The final selection check requires
+the BMC to respond when the resolved profile needs inventory; BMC errors leave
+the machine polling for a later retry. Jobs started directly through the
+trigger API are not automatically invalidated by profile edits.
 
 ## 7 Storage
 
@@ -839,7 +875,8 @@ checks stay in the API (§6.2).
 
 ### 7.3 The existing tables
 
-Relevant columns only; all as they are on `main`.
+Relevant columns only. Device work records include the job identity described
+in [SPDM attestation jobs](spdm-jobs.md).
 
 ```sql
 -- Where the hardware class is read from. Keyed by BMC IP.
@@ -850,7 +887,7 @@ explored_endpoints (
     attester_digest      text             -- NULL until an attester set is seen
 )
 
--- One attestation run per machine.
+-- Machine-level attestation record, separate from per-job device work.
 spdm_machine_attestation (
     machine_id         varchar NOT NULL UNIQUE REFERENCES machines(id),
     requested_at       timestamptz NOT NULL,
@@ -858,17 +895,18 @@ spdm_machine_attestation (
     attestation_status spdm_attestation_status_t NOT NULL DEFAULT 'not_started'
 )
 
--- One work row per selected attester. Written by §5 step 9.
+-- One work row per selected attester per job. Written by §5 step 9.
 spdm_machine_devices_attestation (
     machine_id  varchar NOT NULL,
     device_id   varchar NOT NULL,       -- the ComponentIntegrity Id
+    job_id      uuid NOT NULL,          -- shared by this scheduling attempt's rows
     nonce       uuid NOT NULL,          -- fresh, per attester
     started_at  timestamptz NOT NULL,   -- stamped per scheduling pass; see §8
     state       jsonb,                  -- SpdmAttestationState
     metadata    jsonb,                  -- firmware_version, fetched at FetchMetadata
     evidence    jsonb,
     ca_certificate jsonb,
-    PRIMARY KEY (machine_id, device_id)
+    PRIMARY KEY (machine_id, device_id, job_id)
 )
 
 -- How a machine resolves to the BMC that answers for it.
@@ -900,8 +938,8 @@ erDiagram
     machine_interface_addresses |o..o| explored_endpoints : "same IP, no FK"
     explored_endpoints }o..o| attestation_profiles : "class name, no FK"
     explored_endpoints }o..o| hardware_class_attesters : "class + digest, no FK"
-    machines ||--o| spdm_machine_attestation : "one run"
-    machines ||--o{ spdm_machine_devices_attestation : "one row per attester"
+    machines ||--o| spdm_machine_attestation : "one record"
+    machines ||--o{ spdm_machine_devices_attestation : "one row per attester per job"
 
     machines {
         varchar id PK
@@ -941,6 +979,7 @@ erDiagram
     spdm_machine_devices_attestation {
         varchar machine_id PK
         varchar device_id PK "ComponentIntegrity Id"
+        uuid job_id PK "scheduling attempt"
         uuid nonce
         timestamptz started_at "one value per scheduling pass"
         jsonb state
@@ -1035,8 +1074,8 @@ that have to reckon with it. Within a class, distinct digests are the drift sign
 
 ## 8 The trigger API
 
-`TriggerMachineAttestation` keeps its signature. Five response fields are added,
-which does not break clients.
+`TriggerMachineAttestation` returns the profile selection details and a job ID
+when work is scheduled:
 
 ```protobuf
 message SpdmMachineAttestationTriggerResponse {
@@ -1047,11 +1086,14 @@ message SpdmMachineAttestationTriggerResponse {
   bool used_any_fallback = 5;
   optional string profile_version = 6;
   optional google.protobuf.Timestamp started_at = 7;
+  common.UUID job_id = 8;
+  repeated string attester_ids = 9;
+  optional string attester_id_regex = 10;
 }
 ```
 
-`outcome` is an enum of the §5.3 values rather than a string, so the schema
-carries them and a client switching on it is exhaustive:
+`outcome` is an enum of the §5.3 profile outcomes and the attester override outcomes
+below, so the schema carries them and a client switching on it is exhaustive:
 
 ```protobuf
 enum SpdmSchedulingOutcome {
@@ -1065,8 +1107,20 @@ enum SpdmSchedulingOutcome {
   SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
   SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
   SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 7;
+  reserved 8, 9;
+  SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING = 10;
+  SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_SCHEDULED = 11;
 }
 ```
+
+Numbers 8 and 9 are reserved: they carried these two outcomes under names that
+predate the term "attester override".
+With `attester_id_regex`, eligible devices selected by the regex report
+`AttesterOverrideScheduled`. If eligible devices exist but none match,
+the outcome is `AttesterOverrideMatchedNothing` and no job is created.
+An absent component-integrity collection or no eligible devices still reports
+`NoAttestersFound`. The regex can select one or several devices; these outcomes
+identify an attester override rather than the number of selected devices.
 
 `used_any_fallback` is needed separately because `resolved_hardware_class`
 reports the machine's class either way, so without it the response cannot
@@ -1078,21 +1132,29 @@ from a count whether it was applied.
 separately does not answer this: profiles are editable, so the one an operator
 reads before or after a trigger may not be the one that ran. It is `optional`
 because `class_not_recorded` and `no_profile` are reached before any profile
-applies, so they have no version to report, and an empty string would read as
-unknown rather than none.
+applies, and an attester override applies no profile. They have no version to
+report, and an empty string would read as unknown rather than none.
 
 It answers "which policy produced this response", not "which policy the machine
 is attesting under".
 
-`started_at` tells a caller whether the devices it scheduled are still the ones
-the machine has. Scheduling stamps every device row it writes with one value, so
-a caller that still finds its own there knows nothing has replaced it.
+`job_id` identifies the scheduling attempt. It is present only when devices
+were scheduled, including `PartiallySatisfied` and
+`AttesterOverrideScheduled` outcomes. Use it with
+`GetAttestation` to read that job's device details in
+`SpdmGetAttestationResponse`, with `WaiveAttestation` to request a waiver,
+or with `FailAttestation` to request failure. Either request may replace the
+previous target, including after completion. Terminal devices immediately count
+as waived or failed for status and recovery; unfinished devices finish BMC cleanup
+first. Stored attestation results and completion timestamps remain unchanged.
+See [job resolution semantics](spdm-jobs.md#progress-waivers-and-failure).
 
-It takes the name the column and the read API already use: the same value is
-`SpdmAttestationDetails.started_at` in `SpdmGetAttestationMachineResponse`.
-Comparing the two is the whole point of reporting it, so a second name for one
-instant would hide the comparison it exists for. It is `optional` here and not
-there because a call that scheduled nothing has nothing to stamp.
+`started_at` records when the job's device rows were written. Every row in the
+job carries the same value, also returned as `SpdmAttestationDetails.started_at`.
+It is optional in the trigger response because a call that schedules nothing
+has no job to timestamp. Earlier jobs can remain as history, so finding that
+timestamp does not establish that the job is the latest attempt. See
+[SPDM attestation jobs](spdm-jobs.md) for identity, progress, and history.
 
 What a caller does with a failing outcome is not decided here; that belongs to
 whatever drives host ingestion, firmware update, and tenant switching (§12).
@@ -1131,10 +1193,32 @@ struct AttestationScheduled {
 }
 ```
 
-`outcome` is a fixed enum of the §5.3 values, and `profile_source` a three-value
-enum: the class's own profile, the `any` fallback, or neither, which keeps
-`ClassNotRecorded` and `NoProfile` from reading as a profile an operator never
-wrote. Both are safe as labels, and they are the only two. `profile_source`
+`outcome` is a fixed enum of the §5.3 profile outcomes and the §8 attester
+override outcomes. An attester override reports
+`attester_override_scheduled` when devices are scheduled, or
+`attester_override_matched_nothing` when eligible devices exist but
+none match. These values separate an attester override from profile-driven
+`scheduled` and `policy_matched_nothing` attempts.
+
+`profile_source` is `class`, `any_fallback`, or `unprofiled`. It describes the
+profile that supplied the selection, rather than whether a profile is stored
+for the machine. An attester override always reports `unprofiled`, even when the
+machine has a valid profile, because the regex replaces that profile's selection.
+For an attester override, an absent component-integrity collection or no eligible
+devices produces `NoAttestersFound` with `profile_source=unprofiled`. For profile
+selection, §5.3 applies: an advertised collection with no eligible devices
+produces `PolicyMatchedNothing` under an allowlist and `NoAttestersFound` under
+`ALL` or a denylist. An absent collection produces `NoAttestersFound` for every
+mode that contacts the BMC.
+
+Selection and work-row insertion errors propagate without emitting the
+scheduling event. An empty selection emits the event but creates no job. API
+triggers emit after committing any new job. Managed-host triggers emit before
+the controller persists and commits the transition with the job. A rejected
+transition or later database failure can therefore leave a counted attempt
+without a committed job.
+
+Both labels are bounded, and they are the only two. `profile_source`
 earns its place because a class re-keyed by changed BMC reporting (§5.2) drops
 onto the `any` fallback and keeps reporting `Scheduled`, so the outcome alone
 cannot tell a machine attesting what its operator asked for from one attesting
@@ -1241,8 +1325,6 @@ own ticket.
 
 - **Per-subject outcomes under one run:** attesting a host covering its attached
 DPU machines and reporting one result.
-- **Attestation run identity,** so a late worker from an old attempt cannot write
-onto a new one.
 - **Having attestation record the attesters it saw,** the way exploration
 already does (§7.5). Only exploration writes to the inventory today, so a
 machine that starts reporting fewer attesters stays invisible until the next

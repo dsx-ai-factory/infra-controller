@@ -22,6 +22,68 @@ all specified tests on the host.
 An alert with this ID is placed on a host in case the SKU validation workflow failed.
 The alert will make the host un-allocatable by tenants.
 
+## SPDM attestation health probe identifiers
+
+Attestation alerts are reported under the `attestation` source. Every update
+replaces all of that source's alerts at once, so an alert goes away by not
+being in the next update rather than being cleared on its own. A machine that
+no attestation profile covered raises no coverage alert. It can still raise
+`SpdmAttestationFailed` for attesters an operator named on a trigger.
+
+### `SpdmAttestationFailed`
+
+Indicates that an attester's newest finished SPDM attestation failed. The
+target is the attester ID the machine's BMC reports, such as `HGX_ERoT_GPU_3`,
+so a machine carries one alert per failed attester. The message is the stored
+failure text from the attestation result, followed by the job ID that produced
+it. The `PreventAllocations`
+classification blocks allocation through the default allocation gate.
+
+`FailAttestation` raises the alert even over a stored pass, with the reason
+`Failed by operator`, so the message reads `Failed by operator (job <id>)`.
+Over a stored failure, the stored reason is kept. The stored result stays as
+it was.
+
+It clears when that attester is attested again and passes, when
+`WaiveAttestation` waives the job named in the message, or when a change of
+selection stops including it. Waiving an older job does not clear it, because
+the alert reports the newest finished result. Waiving works even while
+`spdm.enabled` is off; see the
+[SPDM attestation jobs guide](../../design/attestation/spdm-jobs.md).
+
+An operator who names the attesters on a trigger replaces the profile's
+selection, so those attesters are the ones reported until a later scheduling
+decision is recorded. Starting a new job does not
+clear the alert of an attester it selects, because the
+attester's newest finished result is unchanged until that job finishes the
+attester. A missing alert therefore means this probe reports no failure for the
+attester right now, not that the problem is fixed.
+
+### `AttestationNoAttesters`
+
+Indicates that an attestation profile applied to the machine, but its BMC
+offered no eligible attester. The target is
+the machine's hardware class, and
+is absent when no class is recorded. The alert carries no classification and
+does not prevent allocations, because it reports a gap between the profile and
+the hardware rather than a bad result from a device.
+
+### `AttestationPolicyUnsatisfied`
+
+Indicates that an allowlist requirement did not match an eligible attester or
+a denylist excluded all eligible attesters. The message includes the profile
+name, the unsatisfied requirement, and the profile version, followed by the job
+when the attempt created one. The target and classification match
+`AttestationNoAttesters`.
+
+An operator who names the attesters on a trigger raises neither alert. That
+request is answered in its own response, and a regex that selects nothing
+leaves the machine's stored decision and alerts as they were.
+
+A machine can carry this alert alongside `SpdmAttestationFailed` alerts. When
+only some of a profile's patterns matched nothing, the attesters that did match
+are still attested, so a device can then fail.
+
 ## Repair workflow integrations related health probe identifiers
 
 ### `TenantReportedIssue`
@@ -95,7 +157,15 @@ event removes it.
 
 Reports BMC Redfish leak detector observations. The target identifies the
 detector. Warning and critical detector states use the `LeakDetector`
-classification, while a detector that cannot be read uses `SensorFailure`.
+classification. A detector that cannot be read, or whose resource state is
+`UnavailableOffline` or `StandbyOffline`, uses `SensorFailure`. Other
+non-`Enabled` resource states, such as `Disabled`, `Absent`, and `Degraded`,
+are logged and not reported. A `SensorFailure` alert keeps tray leak
+processing from clearing an existing tray leak.
+An aggregate detector, whose resource ID exactly matches an entry in
+`collectors.leak_detector.aggregate_detector_ids` (default `["leakage_aggr"]`),
+is ignored when its chassis exposes individual detectors. If the chassis
+exposes only aggregates, all are reported.
 Configured leak processing can derive tray-level and rack-level alerts with the
 `TrayLeak` and `RackLeak` classifications from these observations.
 
@@ -129,6 +199,78 @@ Indicates that BMS reported a rack-level leak sensor fault.
 Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
 health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
 `Unknown` do not generate a domain health report.
+
+## NVLink rack health probe identifiers
+
+### `NmxcUnreachable`
+
+Raised on a rack when the NVLink partition monitor could not use the rack's
+NMX-C for `nvlink_config.partition_monitor_unreachable_alert_after` consecutive
+passes (default `3`): no switch yielded an endpoint, the endpoint URL was
+invalid, the client could not be created, `Hello` failed, or `Hello` returned
+no usable domain UUID. The monitor writes a `Merge` report on the rack under the
+source `nvlink-partition-monitor`, with one alert whose `target` is the NMX-C
+endpoint URL the monitor resolved, absent when none resolved, and whose
+`message` names the failing step. The alert carries
+[`Hardware`](health_alert_classifications.md#hardware) only; it does not block
+allocations. A single failed pass is not reported, since a keepalive timeout on
+a loaded site is routine, and the stored alert is not rewritten while the outage
+continues. Only passes that contact the rack count: a rack skipped by change
+detection is not checked, so an outage on an otherwise unchanged rack is first
+noticed at its next full check, up to
+`nvlink_config.partition_monitor_full_check_interval` later (default `10m`),
+and the consecutive-pass count starts there. The first pass that reaches NMX-C
+removes the report, as does a rack that no longer has managed hosts for the
+monitor to reconcile. Only passes without a stored report count towards the
+threshold, so removing the report by hand during an ongoing outage suppresses
+it for another `partition_monitor_unreachable_alert_after` consecutive failed
+passes. The alert's `in_alert_since` is the first failed pass of the run that
+raised it, not the pass that wrote it. A report write that fails is retried on
+the next pass, including the removal of a report from a rack that has since
+recovered and is being skipped by change detection. Standalone chassis mapped
+through
+`nvlink_nmxc_endpoints` have no rack and receive no such alert.
+
+## Switch reachability health probe identifiers
+
+Both probes are raised by the switch reachability monitor in `nico-api`, which
+runs whenever `nvlink_config.enabled` is `true` unless
+`nvlink_config.switch_reachability.enabled` overrides it. Each pass opens a TCP
+connection to every switch in the `ready` controller state; switches in other
+states, and switches whose NVOS management interface has no IP address yet, are
+not probed and keep no report. Alerts are stored as one `Merge` report on the
+switch under the source `switch-reachability-monitor`, one alert per service,
+each carrying [`Hardware`](health_alert_classifications.md#hardware) only, so
+neither blocks allocations. Each service is debounced separately: its alert is
+raised after `nvlink_config.switch_reachability.unreachable_alert_after`
+consecutive failed checks (default `3`, one per `run_interval`, default `60s`)
+and removed on the first check that connects. Only checks without a stored
+alert count toward the threshold, so removing an alert by hand during an
+ongoing outage suppresses it for another `unreachable_alert_after` checks. The
+alert's `in_alert_since` is the first failed check of the run that raised it. A
+report write that fails is retried on the next pass. One `nico-api` replica owns
+the monitor at a time and keeps its work lock across passes so the counts see
+every pass; when that replica stops or loses its lease, the next owner counts
+from zero, so a takeover restarts the debounce without touching stored alerts. A switch that leaves the
+`ready` state has its report removed on the next pass. A
+successful TCP connection proves only that the service accepts connections,
+not that it answers requests.
+
+### `SwitchUnreachable`
+
+The switch's NVOS management address did not accept a TCP connection on
+`nvlink_config.switch_reachability.nvos_port` (default `443`). The alert's
+`target` is the probed `address:port` and its `message` includes the last
+connection error.
+
+### `NmxtUnreachable`
+
+The NMX-T telemetry listener on a primary switch did not accept a TCP
+connection on `nvlink_config.switch_reachability.nmx_t_port` (default `9352`).
+Only switches marked `is_primary` host NMX-T, so other switches never receive
+this alert, and a primary that is demoted has the alert removed on the next
+pass while its `SwitchUnreachable` checks continue. The alert's `target` is
+the probed `address:port` and its `message` includes the last connection error.
 
 ## NVLink GPU health probe identifiers
 
@@ -284,7 +426,14 @@ Indicates issues regarding the start of the DHCP relay on the DPU
 
 ### `DhcpServer`
 
-Indicates issues regarding the start of the DHCP server on the DPU
+Indicates that the DHCP server on the DPU is not working. Its meaning depends on how `dpu-agent` configures HBN:
+
+- ContainerExec: the DHCP server process in the HBN container is not running. While HBN is up, the agent checks it on the primary DPU and on any DPU that uses the tenant network. The alert prevents allocations and host state changes.
+- NVUE, which DPF uses: the agent's latest attempt to update the DHCP server failed, and the message contains the error. On a secondary DPU that uses the admin network, the update stops the server. If service VPC slots are configured, it instead keeps the server running for those slots only. On DPF, the DHCP server runs in its own pod. The agent skips the update while HBN is down and reports no result then. The alert prevents allocations but not host state changes, so instance release can proceed.
+
+### `Fmds`
+
+Indicates that `dpu-agent` could not connect to FMDS or push configuration to it in its latest iteration, and the message contains the error. Only the NVUE path, which DPF uses, reports this probe. On every iteration, the agent connects to the external FMDS that DPF deploys, so the alert also appears when FMDS is down on a host without an instance. The alert prevents allocations but not host state changes, so instance release can proceed.
 
 ### `Ifreload`
 
@@ -391,6 +540,11 @@ Indicates that an update for host firmware was scheduled on the host
 
 ### `IbCleanupPending`
 
-Indicates that the host was released back to the admin pool without the system being able to fully clean up all port to partition key associations for all InfiniBand interfaces.
-This means the host might still be bound to a tenants partition.
-Once the IB subsystem can communicate with UFM and detects that the port is not bound to a partition anymore, the alert will automatically clear.
+Indicates that termination deferred InfiniBand membership cleanup because
+configured-port entries were missing or incomplete within an existing IB
+observation. The host can still be bound to a tenant partition. While present,
+the alert prevents new allocations on the host by default.
+Clearing it alone does not confirm UFM membership removal. Refer to
+[Force-Delete and Cleanup](../../manuals/networking/infiniband_partitioning.md#force-delete-and-cleanup)
+for the trigger, override for targeted allocation, monitor clearance condition, and
+verification limits.

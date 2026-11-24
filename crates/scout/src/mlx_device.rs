@@ -23,7 +23,7 @@ use ::rpc::protos::mlx_device::{
     PublishMlxDeviceReportResponse, PublishMlxObservationReportRequest,
     PublishMlxObservationReportResponse,
 };
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_uuid::machine::MachineId;
 use libmlx::device::discovery;
@@ -87,6 +87,7 @@ pub(super) async fn publish_device_report_if_pending(
     config: &Options,
     machine_id: MachineId,
     pending: &mut bool,
+    instrumentation: &Instrumentation,
 ) {
     publish_pending_device_report(
         pending,
@@ -96,6 +97,7 @@ pub(super) async fn publish_device_report_if_pending(
                 .await
                 .map_err(|error| format!("{error:?}"))
         },
+        instrumentation,
     )
     .await;
 }
@@ -139,6 +141,7 @@ async fn publish_pending_device_report<PublishFuture>(
     pending: &mut bool,
     query: impl std::future::Future<Output = Result<Option<PublishMlxDeviceReportRequest>, String>>,
     publish: impl FnOnce(PublishMlxDeviceReportRequest) -> PublishFuture,
+    instrumentation: &Instrumentation,
 ) where
     PublishFuture: std::future::Future<Output = Result<PublishMlxDeviceReportResponse, String>>,
 {
@@ -149,7 +152,7 @@ async fn publish_pending_device_report<PublishFuture>(
         Ok(Some(request)) => request,
         Ok(None) => return,
         Err(error) => {
-            emit(ScoutMlxOperationFailed::DeviceReportCreate { error });
+            instrumentation.emit(ScoutMlxOperationFailed::DeviceReportCreate { error });
             return;
         }
     };
@@ -158,7 +161,7 @@ async fn publish_pending_device_report<PublishFuture>(
             *pending = false;
             tracing::info!(?response, "received PublishMlxDeviceReportResponse");
         }
-        Err(error) => emit(ScoutMlxOperationFailed::DeviceReportPublish { error }),
+        Err(error) => instrumentation.emit(ScoutMlxOperationFailed::DeviceReportPublish { error }),
     }
 }
 
@@ -418,6 +421,7 @@ fn mask_secret_values<'a>(text: &str, secrets: impl Iterator<Item = &'a str>) ->
 pub(super) fn handle_profile_sync(
     request: mlx_device_pb::MlxDeviceProfileSyncRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceProfileSyncResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -426,7 +430,7 @@ pub(super) fn handle_profile_sync(
     );
 
     let Some(serializable_profile_pb) = request.serializable_profile else {
-        emit(ScoutMlxRequestRejected::ProfileSync {});
+        instrumentation.emit(ScoutMlxRequestRejected::ProfileSync {});
         return mlx_device_pb::MlxDeviceProfileSyncResponse {
             reply: Some(
                 mlx_device_pb::mlx_device_profile_sync_response::Reply::Error(
@@ -442,7 +446,7 @@ pub(super) fn handle_profile_sync(
     let serializable_profile: SerializableProfile = match serializable_profile_pb.try_into() {
         Ok(profile) => profile,
         Err(e) => {
-            emit(ScoutMlxOperationFailed::ProfileSyncDecode {
+            instrumentation.emit(ScoutMlxOperationFailed::ProfileSyncDecode {
                 error: e.to_string(),
             });
             return mlx_device_pb::MlxDeviceProfileSyncResponse {
@@ -475,7 +479,7 @@ pub(super) fn handle_profile_sync(
                     ),
                 },
                 Err(e) => {
-                    emit(ScoutMlxOperationFailed::ProfileSyncSerialize {
+                    instrumentation.emit(ScoutMlxOperationFailed::ProfileSyncSerialize {
                         error: e.to_string(),
                     });
                     mlx_device_pb::MlxDeviceProfileSyncResponse {
@@ -494,7 +498,7 @@ pub(super) fn handle_profile_sync(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxProfileOperationFailed::Sync {
+            instrumentation.emit(ScoutMlxProfileOperationFailed::Sync {
                 device_id: request.device_id.clone(),
                 profile_name: request.profile_name.clone(),
                 error: e.to_string(),
@@ -516,6 +520,7 @@ pub(super) fn handle_profile_sync(
 pub(super) fn handle_profile_compare(
     request: mlx_device_pb::MlxDeviceProfileCompareRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceProfileCompareResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -524,7 +529,7 @@ pub(super) fn handle_profile_compare(
     );
 
     let Some(serializable_profile_pb) = request.serializable_profile else {
-        emit(ScoutMlxRequestRejected::ProfileCompare {});
+        instrumentation.emit(ScoutMlxRequestRejected::ProfileCompare {});
         return mlx_device_pb::MlxDeviceProfileCompareResponse {
             reply: Some(
                 mlx_device_pb::mlx_device_profile_compare_response::Reply::Error(
@@ -540,7 +545,7 @@ pub(super) fn handle_profile_compare(
     let serializable_profile: SerializableProfile = match serializable_profile_pb.try_into() {
         Ok(profile) => profile,
         Err(e) => {
-            emit(ScoutMlxOperationFailed::ProfileCompareDecode {
+            instrumentation.emit(ScoutMlxOperationFailed::ProfileCompareDecode {
                 error: e.to_string(),
             });
             return mlx_device_pb::MlxDeviceProfileCompareResponse {
@@ -573,7 +578,7 @@ pub(super) fn handle_profile_compare(
                     ),
                 },
                 Err(e) => {
-                    emit(ScoutMlxOperationFailed::ProfileCompareSerialize {
+                    instrumentation.emit(ScoutMlxOperationFailed::ProfileCompareSerialize {
                         error: e.to_string(),
                     });
                     mlx_device_pb::MlxDeviceProfileCompareResponse {
@@ -592,7 +597,7 @@ pub(super) fn handle_profile_compare(
         }
         Err(e) => {
             access.observe_error(e.as_ref());
-            emit(ScoutMlxProfileOperationFailed::Compare {
+            instrumentation.emit(ScoutMlxProfileOperationFailed::Compare {
                 device_id: request.device_id.clone(),
                 profile_name: request.profile_name.clone(),
                 error: e.to_string(),
@@ -615,6 +620,7 @@ pub(super) fn handle_profile_compare(
 pub(super) fn handle_lockdown_lock(
     request: mlx_device_pb::MlxDeviceLockdownLockRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceLockdownResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -625,7 +631,7 @@ pub(super) fn handle_lockdown_lock(
         Ok(m) => m,
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxOperationFailed::LockdownLockInitialize {
+            instrumentation.emit(ScoutMlxOperationFailed::LockdownLockInitialize {
                 error: e.to_string(),
             });
             return mlx_device_pb::MlxDeviceLockdownResponse {
@@ -655,7 +661,7 @@ pub(super) fn handle_lockdown_lock(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxDeviceOperationFailed::LockdownLockExecute {
+            instrumentation.emit(ScoutMlxDeviceOperationFailed::LockdownLockExecute {
                 device_id: request.device_id.clone(),
                 error: e.to_string(),
             });
@@ -675,6 +681,7 @@ pub(super) fn handle_lockdown_lock(
 pub(super) fn handle_lockdown_unlock(
     request: mlx_device_pb::MlxDeviceLockdownUnlockRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceLockdownResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -685,7 +692,7 @@ pub(super) fn handle_lockdown_unlock(
         Ok(m) => m,
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxOperationFailed::LockdownUnlockInitialize {
+            instrumentation.emit(ScoutMlxOperationFailed::LockdownUnlockInitialize {
                 error: e.to_string(),
             });
             return mlx_device_pb::MlxDeviceLockdownResponse {
@@ -715,7 +722,7 @@ pub(super) fn handle_lockdown_unlock(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxDeviceOperationFailed::LockdownUnlockExecute {
+            instrumentation.emit(ScoutMlxDeviceOperationFailed::LockdownUnlockExecute {
                 device_id: request.device_id.clone(),
                 error: e.to_string(),
             });
@@ -735,6 +742,7 @@ pub(super) fn handle_lockdown_unlock(
 pub(super) fn handle_lockdown_status(
     request: mlx_device_pb::MlxDeviceLockdownStatusRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceLockdownResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -745,7 +753,7 @@ pub(super) fn handle_lockdown_status(
         Ok(m) => m,
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxOperationFailed::LockdownStatusInitialize {
+            instrumentation.emit(ScoutMlxOperationFailed::LockdownStatusInitialize {
                 error: e.to_string(),
             });
             return mlx_device_pb::MlxDeviceLockdownResponse {
@@ -775,7 +783,7 @@ pub(super) fn handle_lockdown_status(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxDeviceOperationFailed::LockdownStatusExecute {
+            instrumentation.emit(ScoutMlxDeviceOperationFailed::LockdownStatusExecute {
                 device_id: request.device_id.clone(),
                 error: e.to_string(),
             });
@@ -794,6 +802,7 @@ pub(super) fn handle_lockdown_status(
 pub(super) fn handle_info_device(
     request: mlx_device_pb::MlxDeviceInfoDeviceRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceInfoDeviceResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -816,7 +825,7 @@ pub(super) fn handle_info_device(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxDeviceOperationFailed::DeviceInfoDiscover {
+            instrumentation.emit(ScoutMlxDeviceOperationFailed::DeviceInfoDiscover {
                 device_id: request.device_id.clone(),
                 error: e.to_string(),
             });
@@ -837,6 +846,7 @@ pub(super) fn handle_info_device(
 pub(super) fn handle_info_report(
     request: mlx_device_pb::MlxDeviceInfoReportRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceInfoReportResponse {
     tracing::info!("[scout_stream::mlx_device] device report requested");
 
@@ -844,7 +854,7 @@ pub(super) fn handle_info_report(
         match libmlx::device::filters::DeviceFilterSet::try_from(filter_set_pb) {
             Ok(filters) => MlxDeviceReport::new().with_filter_set(filters),
             Err(e) => {
-                emit(ScoutMlxOperationFailed::InfoReportDecode {
+                instrumentation.emit(ScoutMlxOperationFailed::InfoReportDecode {
                     error: e.to_string(),
                 });
                 return mlx_device_pb::MlxDeviceInfoReportResponse {
@@ -879,7 +889,7 @@ pub(super) fn handle_info_report(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxOperationFailed::InfoReportExecute {
+            instrumentation.emit(ScoutMlxOperationFailed::InfoReportExecute {
                 error: e.to_string(),
             });
             mlx_device_pb::MlxDeviceInfoReportResponse {
@@ -915,6 +925,7 @@ pub(super) fn handle_registry_list(
 // handle_registry_show returns a specific registry as JSON.
 pub(super) fn handle_registry_show(
     request: mlx_device_pb::MlxDeviceRegistryShowRequest,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceRegistryShowResponse {
     tracing::info!(
         registry_name = %request.registry_name,
@@ -937,7 +948,7 @@ pub(super) fn handle_registry_show(
             }
         }
         None => {
-            emit(ScoutMlxRegistryLookupFailed::registry_show_lookup(
+            instrumentation.emit(ScoutMlxRegistryLookupFailed::registry_show_lookup(
                 request.registry_name.clone(),
             ));
             mlx_device_pb::MlxDeviceRegistryShowResponse {
@@ -959,6 +970,7 @@ pub(super) fn handle_registry_show(
 pub(super) fn handle_config_query(
     request: mlx_device_pb::MlxDeviceConfigQueryRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceConfigQueryResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -970,7 +982,7 @@ pub(super) fn handle_config_query(
     let registry = match registries::get(&request.registry_name) {
         Some(r) => r.clone(),
         None => {
-            emit(ScoutMlxConfigRegistryLookupFailed::Query {
+            instrumentation.emit(ScoutMlxConfigRegistryLookupFailed::Query {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
             });
@@ -1017,7 +1029,7 @@ pub(super) fn handle_config_query(
                     ),
                 },
                 Err(e) => {
-                    emit(ScoutMlxConfigOperationFailed::QuerySerialize {
+                    instrumentation.emit(ScoutMlxConfigOperationFailed::QuerySerialize {
                         device_id: request.device_id.clone(),
                         registry_name: request.registry_name.clone(),
                         error: e.to_string(),
@@ -1041,7 +1053,7 @@ pub(super) fn handle_config_query(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxConfigOperationFailed::QueryExecute {
+            instrumentation.emit(ScoutMlxConfigOperationFailed::QueryExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
                 error: e.to_string(),
@@ -1067,6 +1079,7 @@ pub(super) fn handle_config_query(
 pub(super) fn handle_config_set(
     request: mlx_device_pb::MlxDeviceConfigSetRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceConfigSetResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -1078,7 +1091,7 @@ pub(super) fn handle_config_set(
     let registry = match registries::get(&request.registry_name) {
         Some(r) => r.clone(),
         None => {
-            emit(ScoutMlxConfigRegistryLookupFailed::Set {
+            instrumentation.emit(ScoutMlxConfigRegistryLookupFailed::Set {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
             });
@@ -1126,7 +1139,7 @@ pub(super) fn handle_config_set(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxConfigOperationFailed::SetExecute {
+            instrumentation.emit(ScoutMlxConfigOperationFailed::SetExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
                 error: e.to_string(),
@@ -1151,6 +1164,7 @@ pub(super) fn handle_config_set(
 pub(super) fn handle_config_sync(
     request: mlx_device_pb::MlxDeviceConfigSyncRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceConfigSyncResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -1162,7 +1176,7 @@ pub(super) fn handle_config_sync(
     let registry = match registries::get(&request.registry_name) {
         Some(r) => r.clone(),
         None => {
-            emit(ScoutMlxConfigRegistryLookupFailed::Sync {
+            instrumentation.emit(ScoutMlxConfigRegistryLookupFailed::Sync {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
             });
@@ -1210,7 +1224,7 @@ pub(super) fn handle_config_sync(
                     ),
                 },
                 Err(e) => {
-                    emit(ScoutMlxConfigOperationFailed::SyncSerialize {
+                    instrumentation.emit(ScoutMlxConfigOperationFailed::SyncSerialize {
                         device_id: request.device_id.clone(),
                         registry_name: request.registry_name.clone(),
                         error: e.to_string(),
@@ -1234,7 +1248,7 @@ pub(super) fn handle_config_sync(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxConfigOperationFailed::SyncExecute {
+            instrumentation.emit(ScoutMlxConfigOperationFailed::SyncExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
                 error: e.to_string(),
@@ -1261,6 +1275,7 @@ pub(super) fn handle_config_sync(
 pub(super) fn handle_config_compare(
     request: mlx_device_pb::MlxDeviceConfigCompareRequest,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> mlx_device_pb::MlxDeviceConfigCompareResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -1272,7 +1287,7 @@ pub(super) fn handle_config_compare(
     let registry = match registries::get(&request.registry_name) {
         Some(r) => r.clone(),
         None => {
-            emit(ScoutMlxConfigRegistryLookupFailed::Compare {
+            instrumentation.emit(ScoutMlxConfigRegistryLookupFailed::Compare {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
             });
@@ -1320,7 +1335,7 @@ pub(super) fn handle_config_compare(
                     ),
                 },
                 Err(e) => {
-                    emit(ScoutMlxConfigOperationFailed::CompareSerialize {
+                    instrumentation.emit(ScoutMlxConfigOperationFailed::CompareSerialize {
                         device_id: request.device_id.clone(),
                         registry_name: request.registry_name.clone(),
                         error: e.to_string(),
@@ -1344,7 +1359,7 @@ pub(super) fn handle_config_compare(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxConfigOperationFailed::CompareExecute {
+            instrumentation.emit(ScoutMlxConfigOperationFailed::CompareExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
                 error: e.to_string(),
@@ -1426,6 +1441,7 @@ fn firmware_update_result(
                     FirmwareSupervisorClientError::Transport(_) => ("connection", None),
                     FirmwareSupervisorClientError::Deadline => ("deadline", None),
                     FirmwareSupervisorClientError::InvalidResponse(_) => ("response", None),
+                    FirmwareSupervisorClientError::NotAdmitted { .. } => ("response", None),
                 },
                 SupervisorLaunchError::InvalidConfiguration(_) => ("configuration", None),
                 SupervisorLaunchError::Environment(_) => ("environment", None),
@@ -1456,6 +1472,12 @@ fn firmware_update_result(
                 ) => (
                     Code::Unavailable,
                     "firmware supervisor protocol version does not match the client",
+                ),
+                SupervisorLaunchError::Client(FirmwareSupervisorClientError::NotAdmitted {
+                    ..
+                }) => (
+                    Code::Unavailable,
+                    "firmware supervisor rejected this submission before admission",
                 ),
                 SupervisorLaunchError::Client(FirmwareSupervisorClientError::Rpc(status)) => {
                     match status.code() {
@@ -1729,6 +1751,7 @@ pub(super) async fn apply_firmware(
     operation_id: &str,
     profile: Option<&FirmwareFlasherProfile>,
     config: &SupervisorConfig,
+    instrumentation: &Instrumentation,
 ) -> Result<Option<mlx_device_pb::FirmwareOperation>, String> {
     if operation_id.is_empty() {
         return Err("firmware operation ID is required; no work was submitted".to_string());
@@ -1766,7 +1789,7 @@ pub(super) async fn apply_firmware(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .observe(device, &operation);
     if new_failure {
-        emit(ScoutMlxFirmwareReceiptFailed::observed(device, &operation));
+        instrumentation.emit(ScoutMlxFirmwareReceiptFailed::observed(device, &operation));
     }
     Ok(Some(operation.into()))
 }
@@ -1846,12 +1869,13 @@ pub(super) fn apply_profile(
     device: &str,
     profile: Option<SerializableProfile>,
     access: &mut DirectMlxAccess,
+    instrumentation: &Instrumentation,
 ) -> (Option<String>, Option<bool>) {
     // Always reset to factory defaults first.
     let applier = MlxConfigApplier::new(device);
     if let Err(e) = applier.reset_config() {
         access.observe_error(&e);
-        emit(ScoutMlxProfileResetFailed::execute(
+        instrumentation.emit(ScoutMlxProfileResetFailed::execute(
             device.to_string(),
             e.to_string(),
         ));
@@ -1878,7 +1902,7 @@ pub(super) fn apply_profile(
         }
         Err(e) => {
             access.observe_error(&e);
-            emit(ScoutMlxProfileApplyFailed::execute(
+            instrumentation.emit(ScoutMlxProfileApplyFailed::execute(
                 device.to_string(),
                 name.clone(),
                 e.to_string(),
@@ -1909,6 +1933,7 @@ fn load_and_compare_profile(
 
 #[cfg(test)]
 mod tests {
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs, capture_logs_async};
     use carbide_test_support::{Check, check_values};
     use libmlx::firmware::config::{FirmwareSpec, FlashOptions, FlashSpec};
@@ -1995,10 +2020,12 @@ mod tests {
                 report: Default::default(),
                 diagnostic: Some("firmware tool exited unsuccessfully".to_string()),
             };
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let logs = capture_logs(|| {
                 if observations.observe(device, &operation) {
-                    emit(ScoutMlxFirmwareReceiptFailed::observed(device, &operation));
+                    metrics
+                        .instrumentation()
+                        .emit(ScoutMlxFirmwareReceiptFailed::observed(device, &operation));
                 }
             });
             assert_eq!(
@@ -2125,7 +2152,10 @@ mod tests {
             [("operation", operation), ("failure_stage", failure_stage)]
         }
 
-        fn invoke(self) -> mlx_device_pb::MlxDeviceStreamError {
+        fn invoke(
+            self,
+            instrumentation: &carbide_instrument::Instrumentation,
+        ) -> mlx_device_pb::MlxDeviceStreamError {
             let directory = firmware_state_directory();
             let config = SupervisorConfig {
                 state_directory: directory.path().to_path_buf(),
@@ -2141,6 +2171,7 @@ mod tests {
                             serializable_profile: None,
                         },
                         &mut access,
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_profile_compare_response::Reply::Error(
@@ -2157,6 +2188,7 @@ mod tests {
                             serializable_profile: None,
                         },
                         &mut access,
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_profile_sync_response::Reply::Error(
@@ -2166,10 +2198,12 @@ mod tests {
                     }
                 }
                 Self::MissingRegistry => {
-                    let response =
-                        handle_registry_show(mlx_device_pb::MlxDeviceRegistryShowRequest {
+                    let response = handle_registry_show(
+                        mlx_device_pb::MlxDeviceRegistryShowRequest {
                             registry_name: REGISTRY.to_string(),
-                        });
+                        },
+                        instrumentation,
+                    );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_registry_show_response::Reply::Error(
                             error,
@@ -2185,6 +2219,7 @@ mod tests {
                             variables: Vec::new(),
                         },
                         &mut access,
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_query_response::Reply::Error(
@@ -2201,6 +2236,7 @@ mod tests {
                             assignments: Vec::new(),
                         },
                         &mut access,
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_compare_response::Reply::Error(
@@ -2217,6 +2253,7 @@ mod tests {
                             assignments: Vec::new(),
                         },
                         &mut access,
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_set_response::Reply::Error(
@@ -2233,6 +2270,7 @@ mod tests {
                             assignments: Vec::new(),
                         },
                         &mut access,
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_sync_response::Reply::Error(
@@ -2373,12 +2411,12 @@ mod tests {
                 },
             ],
             |fixture| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let mut response = mlx_device_pb::MlxDeviceStreamError {
                     status: 0,
                     message: String::new(),
                 };
-                let logs = capture_logs(|| response = fixture.invoke());
+                let logs = capture_logs(|| response = fixture.invoke(metrics.instrumentation()));
                 let events = logs
                     .iter()
                     .filter_map(|log| {
@@ -2461,9 +2499,15 @@ mod tests {
     /// device access; legacy wire commands are rejected during conversion.
     #[tokio::test]
     async fn firmware_without_operation_id_does_not_dispatch() {
-        let error = apply_firmware("not-a-device", "", None, &SupervisorConfig::default())
-            .await
-            .expect_err("missing operation identity must reject");
+        let error = apply_firmware(
+            "not-a-device",
+            "",
+            None,
+            &SupervisorConfig::default(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .expect_err("missing operation identity must reject");
         assert_eq!(
             error,
             "firmware operation ID is required; no work was submitted"
@@ -2547,6 +2591,7 @@ mod tests {
                     published = Some(request);
                     std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
                 },
+                &carbide_instrument::Instrumentation::noop(),
             )
             .await;
             let report = published
@@ -2618,6 +2663,7 @@ mod tests {
             ) -> Result<Response<SubmitFirmwareOperationResponse>, Status> {
                 let request = request.into_inner();
                 if self.site_cache {
+                    assert!(!request.report_rejection_details);
                     assert_eq!(
                         request.expected_supervisor_instance_id.as_deref(),
                         Some("cache-instance")
@@ -2934,6 +2980,7 @@ mod tests {
                     published = Some(request);
                     std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
                 },
+                &carbide_instrument::Instrumentation::noop(),
             ))
             .await;
 
@@ -3109,7 +3156,7 @@ mod tests {
                     ),
                 ])
             };
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             crate::collect_and_publish_mlx_observations(
                 &machine_id,
                 commands(),
@@ -3117,6 +3164,7 @@ mod tests {
                 None,
                 |_| panic!("deferred automatic commands must not even discover the card"),
                 |_| async { panic!("deferred automatic commands must not publish a report") },
+                metrics.instrumentation(),
             )
             .await;
             assert_eq!(
@@ -3135,12 +3183,19 @@ mod tests {
             // Stop there in this fixture; no test path invokes real vendor tools.
             std::fs::remove_file(claim).unwrap();
             let mut queries = 0;
-            crate::collect_mlx_observations(&machine_id, commands(), &config, None, |_| {
-                queries += 1;
-                Err(discovery::DeviceDiscoveryError::InvalidReport(
-                    "fixture ends before mutation".into(),
-                ))
-            })
+            crate::collect_mlx_observations(
+                &machine_id,
+                commands(),
+                &config,
+                None,
+                |_| {
+                    queries += 1;
+                    Err(discovery::DeviceDiscoveryError::InvalidReport(
+                        "fixture ends before mutation".into(),
+                    ))
+                },
+                metrics.instrumentation(),
+            )
             .await;
             assert_eq!(queries, 3, "{scenario}");
             let inventory = create_device_report_request_with_query(machine_id, &config, async {
@@ -3177,6 +3232,7 @@ mod tests {
             &config,
             None,
             |_| panic!("Noop must not discover hardware"),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -3197,8 +3253,12 @@ mod tests {
         ]);
         let mut queries = 0;
 
-        let report =
-            crate::collect_mlx_observations(&machine_id, commands, &config, None, |device| {
+        let report = crate::collect_mlx_observations(
+            &machine_id,
+            commands,
+            &config,
+            None,
+            |device| {
                 assert_eq!(device, next_device);
                 queries += 1;
                 assert!(config.state_directory.join("mutation.json").is_file());
@@ -3206,8 +3266,10 @@ mod tests {
                 Err(discovery::DeviceDiscoveryError::InvalidReport(
                     "fixture ends before mutation".into(),
                 ))
-            })
-            .await;
+            },
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
 
         assert_eq!(queries, 1);
         assert!(report.observations.is_empty());
@@ -3248,15 +3310,22 @@ mod tests {
             ),
         ]);
         let mut queries = 0;
-        let report = crate::collect_mlx_observations(&machine_id, commands, &config, None, |_| {
-            queries += 1;
-            Err(discovery::DeviceDiscoveryError::DirectQuery(
-                MlxRunnerError::ProcessUnsettled {
-                    command: "mlxfwmanager".to_string(),
-                    source: std::io::Error::other("fixture lost query completion"),
-                },
-            ))
-        })
+        let report = crate::collect_mlx_observations(
+            &machine_id,
+            commands,
+            &config,
+            None,
+            |_| {
+                queries += 1;
+                Err(discovery::DeviceDiscoveryError::DirectQuery(
+                    MlxRunnerError::ProcessUnsettled {
+                        command: "mlxfwmanager".to_string(),
+                        source: std::io::Error::other("fixture lost query completion"),
+                    },
+                ))
+            },
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .await;
         assert_eq!(
             queries, 1,
@@ -3313,7 +3382,7 @@ mod tests {
     async fn startup_device_report_retries_until_published() {
         use std::os::unix::fs::OpenOptionsExt;
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let directory = firmware_state_directory();
         let claim = directory.path().join("mutation.json");
         std::fs::OpenOptions::new()
@@ -3339,6 +3408,7 @@ mod tests {
                 panic!("inventory must defer while firmware owns hardware")
             }),
             |_| async { panic!("a deferred inventory must not be published") },
+            metrics.instrumentation(),
         )
         .await;
         assert!(pending);
@@ -3354,6 +3424,7 @@ mod tests {
                 ))
             }),
             |_| async { panic!("a failed inventory query must not publish a report") },
+            metrics.instrumentation(),
         )
         .await;
         assert!(pending);
@@ -3408,6 +3479,7 @@ mod tests {
                     requests.push(request);
                     std::future::ready(publish_result)
                 },
+                metrics.instrumentation(),
             )
             .await;
             assert_eq!(pending, expected_pending);
@@ -3421,6 +3493,7 @@ mod tests {
             &mut pending,
             async { panic!("an already published inventory must not be queried again") },
             |_| async { panic!("an already published inventory must not be republished") },
+            metrics.instrumentation(),
         )
         .await;
         assert!(!pending);
@@ -3523,7 +3596,7 @@ mod tests {
             GetFirmwareOperationRequest, GetFirmwareOperationResponse, GetSupervisorStatusRequest,
             GetSupervisorStatusResponse, ObserveFirmwareOperationResponse,
             ObserveFirmwareUpdateRequest, SubmitFirmwareOperationRequest,
-            SubmitFirmwareOperationResponse,
+            SubmitFirmwareOperationResponse, submit_firmware_operation_response,
         };
         use tokio_stream::wrappers::UnixListenerStream;
         use tokio_util::sync::CancellationToken;
@@ -3554,7 +3627,9 @@ mod tests {
                 }
                 self.admission.clone().map(|operation| {
                     Response::new(SubmitFirmwareOperationResponse {
-                        operation: Some(operation),
+                        result: Some(submit_firmware_operation_response::Result::Operation(
+                            operation,
+                        )),
                     })
                 })
             }
@@ -3814,7 +3889,7 @@ mod tests {
             let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
                 .parse()
                 .unwrap();
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let mut published = Vec::new();
             let mut logs = Vec::new();
             for poll in 0..if recovering { 3 } else { 1 } {
@@ -3868,6 +3943,7 @@ mod tests {
                             published.push(request);
                             std::future::ready(response)
                         },
+                        metrics.instrumentation(),
                     ))
                     .await;
                 logs.extend(poll_logs);
@@ -3992,7 +4068,6 @@ mod tests {
                     case.name,
                 );
             }
-            drop(metrics);
             stop.cancel();
             tokio::time::timeout(std::time::Duration::from_secs(5), server)
                 .await
@@ -4005,6 +4080,7 @@ mod tests {
                 assert_eq!(
                     *submitted,
                     [SubmitFirmwareOperationRequest {
+                        report_rejection_details: false,
                         operation_id,
                         profile: case.profile.map(Into::into),
                         observer_exit_behavior: 0,

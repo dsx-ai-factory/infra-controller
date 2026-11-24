@@ -114,7 +114,7 @@ const RMS_PREFIX: &str = "rms: ";
 /// - **nico-api → RMS (not configured)**: The handler returns a specific
 ///   `UNAVAILABLE` message when no RMS endpoint is configured.
 /// - **CLI → nico-api**: A transport-level `UNAVAILABLE` means nico-api is
-///   down or unreachable from this host.  `ForgeTlsClientError` also maps
+///   down or unreachable from this host.  `CarbideTlsClientError` also maps
 ///   local configuration failures (missing root CA, bad cert, etc.) to
 ///   `UNAVAILABLE`; those are identified by their message prefix.
 ///
@@ -125,7 +125,7 @@ const RMS_PREFIX: &str = "rms: ";
 /// `GetRmsVersion`, the RBAC rule is absent and the result is
 /// `PermissionDenied`, not `Unimplemented`.
 fn classify(s: tonic::Status) -> Report {
-    let msg = s.message().to_owned();
+    let msg = s.message();
 
     if let Some(rms_detail) = msg.strip_prefix(RMS_PREFIX) {
         return classify_rms_failure(s.code(), rms_detail);
@@ -143,7 +143,7 @@ fn classify(s: tonic::Status) -> Report {
                 || msg.contains("transport error")
                 || msg.contains("error trying to connect")
                 || msg.contains("connection refused")
-                // ForgeTlsClientError::Connection surfaces as "ConnectError error: …"
+                // CarbideTlsClientError::Connection surfaces as "ConnectError error: …"
                 || msg.contains("ConnectError")
             {
                 // Tonic transport errors surface as UNAVAILABLE with a
@@ -157,12 +157,12 @@ fn classify(s: tonic::Status) -> Report {
                         if msg.is_empty() {
                             "connection refused or service unavailable"
                         } else {
-                            &msg
+                            msg
                         }
                     ),
                 )
             } else if msg.contains("configuration error") {
-                // ForgeTlsClientError::Configuration (missing CA file, invalid
+                // CarbideTlsClientError::Configuration (missing CA file, invalid
                 // cert, etc.) — the CLI never contacted nico-api.
                 Report::failure(
                     StatusToken::CliConfigError,
@@ -376,12 +376,12 @@ mod tests {
                 StatusToken::ApiUnreachable,
             ),
             (
-                "api-unreachable: ForgeTlsClientError::Connection",
+                "api-unreachable: CarbideTlsClientError::Connection",
                 tonic::Status::unavailable("ConnectError error: tcp connect error"),
                 StatusToken::ApiUnreachable,
             ),
             (
-                "cli-config-error: ForgeTlsClientError::Configuration",
+                "cli-config-error: CarbideTlsClientError::Configuration",
                 tonic::Status::unavailable(
                     "configuration error: could not read root CA cert at /bad/path: \
                      no such file or directory",

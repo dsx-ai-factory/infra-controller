@@ -23,6 +23,7 @@ use model::machine::HostReprovisionRequest;
 use sqlx::PgConnection;
 
 use super::DatabaseError;
+use crate::db_read::DbReader;
 use crate::desired_firmware::DesiredFirmwareRow;
 
 // The host firmware upgrade predicates. find_upgrade_needed requires all of
@@ -78,7 +79,7 @@ const FIND_UPGRADE_NEEDED: &str = concatcp!(
 );
 
 pub async fn find_upgrade_needed(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     global_enabled: bool,
     ready_only: bool,
 ) -> Result<Vec<HostMachineUpdate>, DatabaseError> {
@@ -89,7 +90,7 @@ pub async fn find_upgrade_needed(
         .bind(host_prefix)
         .bind(!ready_only)
         .bind(global_enabled)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find_outdated_hosts", e))
 }
@@ -100,7 +101,7 @@ pub async fn find_upgrade_needed(
 /// text is shared and the table is never read. A row passes the manager query
 /// exactly when every predicate is true.
 pub async fn find_update_gates(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     now: DateTime<Utc>,
     global_enabled: bool,
     ready_only: bool,
@@ -113,6 +114,8 @@ pub async fn find_update_gates(
             AS d(vendor text, model text, versions jsonb, explicit_update_start_needed boolean)
         )
         SELECT machines.id AS host_id,
+            machines.firmware_update_time_window_start AS window_start,
+            machines.firmware_update_time_window_end AS window_end,
             machine_interface_addresses.address AS bmc_address,
             explored_endpoints.version AS report_version,
             explored_endpoints.waiting_for_explorer_refresh,
@@ -162,33 +165,50 @@ pub async fn find_update_gates(
         .bind(global_enabled)
         .bind(host_ids)
         .bind(sqlx::types::Json(desired))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find_update_gates", e))
 }
 
 pub async fn find_upgrade_in_progress(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<HostMachineUpdate>, DatabaseError> {
     let query = "SELECT id FROM machines WHERE controller_state->'state' = '\"hostreprovision\"'";
     sqlx::query_as(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find_upgrade_in_progress", e))
 }
 
+/// `find_completed_updates` locks machines whose host request has cleared but
+/// whose `host-fw-update` health report still needs completion cleanup.
+///
+/// Callers must keep a transaction open through report removal and completion
+/// writes. `FOR NO KEY UPDATE` blocks [`trigger_host_reprovisioning_request`]
+/// while allowing foreign key checks that reference the machine.
+///
+/// At Read Committed isolation, selection waits for conflicting row locks and
+/// rechecks updated rows after waiting. Only candidates visible in the statement
+/// snapshot are considered. This statement locks candidates in machine ID order,
+/// as [`crate::machine::find_ids_by_instance_type_id`] does when `for_update` is
+/// true, so ID-ordered selections acquire shared rows consistently.
 pub async fn find_completed_updates(
     txn: &mut PgConnection,
 ) -> Result<Vec<HostMachineId>, DatabaseError> {
     let query = r#"SELECT id FROM machines
                     WHERE host_reprovisioning_requested IS NULL
-                            AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? 'host-fw-update' = TRUE"#;
+                            AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? 'host-fw-update' = TRUE
+                    ORDER BY id FOR NO KEY UPDATE"#;
     sqlx::query_as::<_, HostMachineId>(query)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Creates or replaces a host reprovisioning request and clears its completion
+/// flag in the caller's transaction. A missing machine returns an error wrapping
+/// [`sqlx::Error::RowNotFound`]. Automatic admission uses
+/// [`try_trigger_host_reprovisioning_request`] to preserve existing requests.
 pub async fn trigger_host_reprovisioning_request(
     txn: &mut PgConnection,
     initiator: &str,
@@ -202,7 +222,6 @@ pub async fn trigger_host_reprovisioning_request(
         request_reset: Some(false),
     };
 
-    // The WHERE on controller state means that we'll update it in the case where we were in ready, but not when assigned.
     let query = r#"UPDATE machines SET host_reprovisioning_requested=$2, update_complete = false WHERE id=$1 RETURNING id"#;
     let _id = sqlx::query_as::<_, HostMachineId>(query)
         .bind(machine_id)
@@ -212,6 +231,39 @@ pub async fn trigger_host_reprovisioning_request(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+/// Creates a reprovisioning request only when
+/// `host_reprovisioning_requested IS NULL`. Pending and started requests both
+/// prevent this write.
+///
+/// Returns `false` if the machine is missing or already has a request, leaving
+/// its request and completion flag unchanged. The caller owns the transaction
+/// and must commit an applied request.
+pub async fn try_trigger_host_reprovisioning_request(
+    txn: &mut PgConnection,
+    initiator: &str,
+    machine_id: &HostMachineId,
+) -> Result<bool, DatabaseError> {
+    let req = HostReprovisionRequest {
+        requested_at: chrono::Utc::now(),
+        started_at: None,
+        initiator: initiator.to_string(),
+        user_approval_received: false,
+        request_reset: Some(false),
+    };
+    let query = r#"UPDATE machines
+        SET host_reprovisioning_requested = $2, update_complete = false
+        WHERE id = $1 AND host_reprovisioning_requested IS NULL
+        RETURNING id"#;
+    let updated = sqlx::query_as::<_, HostMachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(req))
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(updated.is_some())
 }
 
 pub async fn clear_host_reprovisioning_request(
@@ -259,7 +311,6 @@ pub async fn reset_host_reprovisioning_request(
     machine_id: &HostMachineId,
     clear_reset: bool,
 ) -> Result<(), DatabaseError> {
-    // The WHERE on controller state means that we'll update it in the case where we were in ready, but not when assigned.
     let query = r#"UPDATE machines SET host_reprovisioning_requested = jsonb_set(host_reprovisioning_requested, '{request_reset}', $2::jsonb) WHERE id=$1 RETURNING id"#;
     let _id = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
@@ -301,6 +352,8 @@ pub async fn clear_manual_firmware_upgrade_completed(
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
+
     use super::*;
 
     /// find_upgrade_needed as written before its predicates were shared.
@@ -326,7 +379,7 @@ mod tests {
 
     #[test]
     fn find_upgrade_needed_sql_text_unchanged() {
-        let normalized = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized = |sql: &str| sql.split_whitespace().join(" ");
         assert_eq!(
             normalized(FIND_UPGRADE_NEEDED),
             normalized(ORIGINAL_FIND_UPGRADE_NEEDED)

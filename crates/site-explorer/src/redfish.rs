@@ -17,42 +17,36 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_explorer::ProcessorExt;
-use carbide_network::{deserialize_input_mac_to_address, is_locally_administered_mac};
+use bmc_backend::{BackendBmc, BmcConnector};
+use bmc_platform::{
+    AuthError, BiosSettings, BootInterfaceSelector, LockdownDesiredState, LockdownScope,
+    LockdownState, NicMode, PlatformError, PowerState, ResetType,
+};
+use bmc_runtime::DriverConnector;
+use carbide_credential_rotation::bmc_accounts;
+use carbide_hw_identification::host_serial::HOST_SERIAL_ASSEMBLY_CHASSIS_IDS;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
-use carbide_redfish::libredfish::conv::{IntoModel, bmc_vendor};
-use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
 use carbide_redfish::libredfish::{
-    BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
+    BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool, probe_bmc_vendor,
 };
-use carbide_redfish::nv_redfish::NvRedfishClientPool;
+use carbide_redfish::nv_redfish::{NvRedfishClientPool, RedfishBmc, ServiceRoot};
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-use libredfish::model::oem::nvidia_dpu::NicMode;
-use libredfish::model::service_root::{RedfishVendor, ServiceRoot};
-use libredfish::model::{
-    ComputerSystem as LibredfishComputerSystem, ODataId, SerialConsoleConnectionType,
-};
+use carbide_utils::redfish::BmcAccessInfo;
+use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Redfish, RedfishError};
 use mac_address::MacAddress;
-use model::errors::{ErrorCode, ErrorSubsystem, OperatorError, OperatorErrorSchema};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
-    BootOption, BootOrder, Chassis, ComponentIntegrityEntry, ComputerSystem,
-    ComputerSystemAttributes, EndpointExplorationError, EndpointExplorationReport, EndpointType,
-    EthernetInterface, InternalLockdownStatus, Inventory, LockdownStatus, MachineSetupDiff,
-    MachineSetupStatus, Manager, NetworkAdapter, PCIeDevice, SecureBootStatus, Service,
-    UefiDevicePath, derive_hardware_class,
+    EndpointExplorationError, EndpointExplorationReport, InternalLockdownStatus, LockdownStatus,
+    MachineSetupStatus,
 };
-use regex::Regex;
-
-use crate::explored_endpoint_ext::{mac_to_u64, u64_to_mac};
-
-const NOT_FOUND: u16 = 404;
-const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
+use nv_redfish::account::ManagerAccountCreate;
+use nv_redfish::computer_system::ComputerSystem;
+use nv_redfish::manager::Manager;
+use nv_redfish::schema::secure_boot::SecureBootUpdate;
 
 // RedfishClient is a wrapper around a redfish client pool and implements redfish utility functions that the site explorer utilizes.
 // TODO: In the future, we should refactor a lot of this client's work to api/src/redfish.rs because other components in carbide can utilize this functionality.
@@ -66,6 +60,9 @@ pub(super) struct RedfishClient {
     /// and everything when `None`, uses the direct pools above exactly as
     /// before the proxy existed.
     proxied: Option<ProxiedPools>,
+    /// Connects moved BMC operations through their drivers when the site
+    /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
+    pub(super) driver_connector: Option<Arc<DriverConnector>>,
 }
 
 /// The pools that reach nico-bmc-proxy, handed to site-explorer only when
@@ -83,6 +80,13 @@ pub struct ProxiedPools {
 pub struct EstablishedBmc {
     pub(crate) bmc_mac_address: MacAddress,
     pub(crate) credentials: Credentials,
+}
+
+/// Administrator calls bind their IPMI restart credential before Core rechecks the target.
+/// Other callers use the transport's ordinary credential lookup.
+pub(super) enum PowerDispatch {
+    Immediate,
+    AfterTargetCheck,
 }
 
 /// How site-explorer reaches a BMC for one operation.
@@ -109,7 +113,65 @@ impl RedfishClient {
             redfish_client_pool,
             nv_redfish_client_pool,
             proxied,
+            driver_connector: None,
         }
+    }
+
+    /// Connects with explicit credentials, which always bypass `nico-bmc-proxy`.
+    fn bmc_connector(&self) -> BmcConnector {
+        let direct: Arc<dyn RedfishClientPool> = self.redfish_client_pool.clone();
+        BmcConnector::new(direct, self.driver_connector.clone())
+    }
+
+    /// Connects to an established endpoint through the configured
+    /// `bmc_backend`, selecting drivers for the identity `report` recorded.
+    /// The drivers backend fails without an explored report.
+    pub(super) async fn connect_established(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
+    ) -> Result<BackendBmc, EndpointExplorationError> {
+        let Some(connector) = &self.driver_connector else {
+            return self
+                .create_established_redfish_client(bmc_ip_address, bmc, None)
+                .await
+                .map(BackendBmc::Libredfish)
+                .map_err(map_redfish_client_creation_error);
+        };
+        let Some(report) = report else {
+            return Err(EndpointExplorationError::Other {
+                details: format!("BMC {bmc_ip_address} has no explored report to select drivers"),
+            });
+        };
+        Self::connect_drivers(connector, bmc_ip_address, bmc.bmc_mac_address, report, None)
+            .await
+            .map(BackendBmc::from)
+    }
+
+    async fn connect_drivers(
+        connector: &DriverConnector,
+        bmc_ip_address: SocketAddr,
+        mac: MacAddress,
+        report: &EndpointExplorationReport,
+        prepared_root: Option<Credentials>,
+    ) -> Result<bmc_runtime::ConnectedBmc<RedfishBmc>, EndpointExplorationError> {
+        let bmc_access_info = BmcAccessInfo {
+            host: bmc_ip_address.ip().to_string(),
+            port: Some(bmc_ip_address.port()),
+            mac_address: mac,
+        };
+        let connection = match prepared_root {
+            Some(root) => {
+                connector
+                    .connect_for_admin_power(&bmc_access_info, report, root)
+                    .await
+            }
+            None => connector.connect(&bmc_access_info, report).await,
+        };
+        connection.map_err(|error| EndpointExplorationError::Other {
+            details: format!("Cannot connect to {bmc_ip_address} through its drivers: {error}"),
+        })
     }
 
     /// Client for an established endpoint. With `[bmc_proxy]` enabled it
@@ -265,254 +327,125 @@ impl RedfishClient {
             .unwrap_or_default()
     }
 
-    pub(super) async fn validate_bmc_credentials(
+    /// Checks that the root `credentials` of an unexplored BMC authenticate,
+    /// failing with `Unauthorized` when the BMC rejects them.
+    pub(super) async fn validate_bmc_root_credentials(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
         credentials: Credentials,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_direct_redfish_client(bmc_ip_address, credentials, Some(RedfishVendor::Unknown))
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.get_systems().await.map_err(map_redfish_error)?;
-
-        Ok(())
+        let authenticated = bmc_accounts::probe_bmc_credentials(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            None,
+            credentials,
+            false,
+        )
+        .await
+        .map_err(map_platform_error)?;
+        if authenticated {
+            Ok(())
+        } else {
+            Err(map_platform_error(PlatformError::Auth(
+                AuthError::InvalidCredentials,
+            )))
+        }
     }
 
     /// Resolve the precise `RedfishVendor` of a BMC using the supplied
-    /// credentials, delegating to the shared `RedfishClientPool` probe (an
-    /// anonymous service-root read with a credentialed chassis-manufacturer
-    /// fallback for BMCs that don't populate the service-root vendor).
+    /// credentials (only for the standalone `ProbeBmcVendor` admin RPC).
     pub(super) async fn probe_bmc_vendor(
         &self,
         bmc_ip_address: SocketAddr,
         credentials: Credentials,
     ) -> Result<RedfishVendor, EndpointExplorationError> {
-        self.redfish_client_pool
-            .probe_bmc_vendor(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                credentials,
-            )
-            .await
-            .map_err(map_redfish_client_creation_error)
+        probe_bmc_vendor(
+            self.redfish_client_pool.as_ref(),
+            &bmc_ip_address.ip().to_string(),
+            Some(bmc_ip_address.port()),
+            credentials,
+        )
+        .await
+        .map_err(map_redfish_client_creation_error)
     }
 
-    pub(super) async fn restore_bmc_root_ipmi_access(
-        &self,
-        bmc_ip_address: SocketAddr,
-        vendor: RedfishVendor,
-        credentials: Credentials,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client_pool
-            .restore_bmc_root_ipmi_access(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                vendor,
-                credentials,
-            )
-            .await
-            .map_err(map_redfish_client_creation_error)
-    }
-
+    /// Changes the root password, then applies the default account policy as
+    /// the new password.
     pub(super) async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
-        vendor: RedfishVendor,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
         current_bmc_root_credentials: Credentials,
         new_password: String,
     ) -> Result<(), EndpointExplorationError> {
-        // The two-client rotation flow (uninitialized `Unknown` client for the
-        // `/AccountService` PATCH, then a vendor-specific client for the
-        // password policy) and the per-vendor dispatch now live on the shared
-        // `RedfishClientPool` primitive so credential rotation can reuse them.
-        // See its docs for why the rotation PATCH must not initialize the
-        // vendor client first.
-        self.redfish_client_pool
-            .set_bmc_root_password(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                vendor,
-                current_bmc_root_credentials,
-                new_password,
-            )
+        let Credentials::UsernamePassword { username, .. } = &current_bmc_root_credentials;
+        let new_credentials = Credentials::new(username.as_str(), new_password.as_str());
+        self.change_bmc_root_password(
+            bmc_ip_address,
+            bmc_mac_address,
+            report,
+            current_bmc_root_credentials,
+            &new_password,
+        )
+        .await?;
+        self.apply_bmc_root_policy(bmc_ip_address, bmc_mac_address, report, new_credentials)
             .await
-            .map_err(map_redfish_client_creation_error)
+    }
+
+    pub(super) async fn change_bmc_root_password(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
+        current_bmc_root_credentials: Credentials,
+        new_password: &str,
+    ) -> Result<(), EndpointExplorationError> {
+        bmc_accounts::change_bmc_root_password(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            report,
+            current_bmc_root_credentials,
+            new_password,
+        )
+        .await
+        .map_err(map_platform_error)
+    }
+
+    pub(super) async fn apply_bmc_root_policy(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
+        credentials: Credentials,
+    ) -> Result<(), EndpointExplorationError> {
+        bmc_accounts::apply_bmc_root_policy(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            report,
+            credentials,
+        )
+        .await
+        .map_err(map_platform_error)
     }
 
     pub(super) async fn set_bf4_dpu_service_password(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
         root_credentials: Credentials,
         new_password: String,
     ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client_pool
-            .set_bf4_dpu_service_password(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                root_credentials,
-                new_password,
-            )
-            .await
-            .map_err(map_redfish_client_creation_error)
-    }
-
-    pub(super) async fn generate_exploration_report(
-        &self,
-        bmc_ip_address: SocketAddr,
-        access: BmcAccess,
-        boot_interface: Option<&BootInterfaceTarget>,
-        vendor: Option<RedfishVendor>,
-    ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
-        let client = match access {
-            BmcAccess::Established(bmc) => {
-                self.create_established_redfish_client(bmc_ip_address, bmc, vendor)
-                    .await
-            }
-            BmcAccess::Direct(credentials) => {
-                self.create_direct_redfish_client(bmc_ip_address, credentials, vendor)
-                    .await
-            }
-        }
-        .map_err(map_redfish_client_creation_error)?;
-
-        let service_root = client.get_service_root().await.map_err(map_redfish_error)?;
-        let redfish_vendor = service_root.vendor();
-        // Lenovo XCC is the platform where we have verified that adapter Ports
-        // belong to the linked host chassis. Keep that policy here so the
-        // inventory path stays generic.
-        let supports_adapter_port_mac_inventory = redfish_vendor == Some(RedfishVendor::Lenovo);
-        let vendor = redfish_vendor.map(bmc_vendor);
-
-        let manager = fetch_manager(client.as_ref())
-            .await
-            .map_err(map_redfish_error)?;
-        let system_resources = fetch_system_resources(client.as_ref(), &service_root).await;
-        let FetchedSystem {
-            system,
-            is_dpu,
-            is_host,
-            linked_chassis_ids,
-        } = fetch_system(client.as_ref(), &system_resources).await?;
-
-        let additional_systems = system_resources
-            .into_iter()
-            .filter(|other| other.id != system.id)
-            .collect::<Vec<_>>();
-
-        let fetch_network_adapter_ports = should_fetch_network_adapter_ports(
-            supports_adapter_port_mac_inventory,
-            is_host,
-            &linked_chassis_ids,
-        );
-        // TODO (spyda): once we test the BMC reset logic, we can enhance our logic here
-        // to detect cases where the host's BMC is returning invalid (empty) chassis information, even though
-        // an error is not returned.
-        let FetchedChassis { chassis } = fetch_chassis(
-            client.as_ref(),
-            fetch_network_adapter_ports.then_some(linked_chassis_ids.as_slice()),
+        bmc_accounts::change_bmc_service_password(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            None,
+            root_credentials,
+            &new_password,
         )
         .await
-        .map_err(map_redfish_error)?;
-        let service = fetch_service(client.as_ref())
-            .await
-            .map_err(map_redfish_error)?;
-        let (machine_setup_status, remediation_error) = match fetch_machine_setup_status(
-            client.as_ref(),
-            boot_interface,
-        )
-        .await
-        {
-            Ok(status) => (Some(status), None),
-            Err(error) if is_dpu && is_dpu_bios_attributes_not_ready(&error) => {
-                let details = format!(
-                    "DPU BMC BIOS attributes not ready ({error}); scheduling a force-restart to mitigate the known UEFI POST/BMC race"
-                );
-                let exploration_error = EndpointExplorationError::InvalidDpuRedfishBiosResponse {
-                    details,
-                    response_body: None,
-                    response_code: None,
-                };
-                let schema = exploration_error.operator_error_schema();
-                tracing::warn!(
-                    error = %error,
-                    error_code = %schema.error_code,
-                    mitigation = %schema.mitigation_for_log(),
-                    text = %schema.text,
-                    "Failed to fetch machine setup status"
-                );
-                (None, Some(exploration_error))
-            }
-            Err(error) => {
-                let schema = OperatorErrorSchema::new(
-                    ErrorCode::nico(ErrorSubsystem::SiteExplorer, 130),
-                    format!("Failed to fetch machine setup status: {error}"),
-                    None,
-                );
-                tracing::warn!(
-                    error = %error,
-                    error_code = %schema.error_code,
-                    mitigation = %schema.mitigation_for_log(),
-                    text = %schema.text,
-                    "Failed to fetch machine setup status"
-                );
-                (None, None)
-            }
-        };
-
-        let secure_boot_status = fetch_secure_boot_status(client.as_ref())
-            .await
-            .inspect_err(
-                |error| tracing::warn!(%error, "Failed to fetch forge secure boot status."),
-            )
-            .ok()
-            .flatten();
-
-        let lockdown_status = fetch_lockdown_status(client.as_ref())
-            .await
-            .inspect_err(|error| {
-                if !matches!(error, libredfish::RedfishError::NotSupported(_)) {
-                    tracing::warn!(%error, "Failed to fetch lockdown status.");
-                }
-            })
-            .ok();
-
-        let component_integrities =
-            fetch_component_integrities(client.as_ref(), &service_root).await;
-
-        // `Vendor` rather than `vendor_string()`, which falls back to an
-        // arbitrary key of an unordered `Oem` map. A class has to derive the
-        // same way on every exploration, or the profile keyed to it stops
-        // applying.
-        let hardware_class = derive_hardware_class(
-            Some(&system),
-            service_root.vendor.as_deref(),
-            service_root.product.as_deref(),
-        );
-        Ok(EndpointExplorationReport {
-            endpoint_type: EndpointType::Bmc,
-            last_exploration_error: None,
-            last_exploration_latency: None,
-            machine_id: None,
-            managers: vec![manager],
-            systems: std::iter::once(system).chain(additional_systems).collect(),
-            chassis,
-            service,
-            component_integrities: component_integrities.entries,
-            component_integrity_unavailable: component_integrities.unavailable,
-            vendor,
-            hardware_class: Some(hardware_class),
-            versions: HashMap::default(),
-            model: None,
-            power_shelf_id: None,
-            switch_id: None,
-            machine_setup_status,
-            secure_boot_status,
-            lockdown_status,
-            remediation_error,
-            ..Default::default()
-        })
+        .map_err(map_platform_error)
     }
 
     /// Picks the nv-redfish pool and credentials for one report fetch.
@@ -575,22 +508,45 @@ impl RedfishClient {
         Ok(report)
     }
 
+    /// Restarts the BMC. Without `reset_type` the platform picks the reset its
+    /// BMC needs; the drivers do so only for a BMC exploration identified, and
+    /// a BMC they do not reset receives a plain Redfish `Manager.Reset`. A
+    /// `reset_type` bypasses [`BackendBmc`], whose reset takes none.
     pub(super) async fn reset_bmc(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
-        reset_type: Option<libredfish::ManagerResetType>,
+        report: Option<&EndpointExplorationReport>,
+        reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
-            .bmc_reset(reset_type)
-            .await
-            .map_err(map_redfish_error)?;
-
+        if let (Some(reset_type), None) = (reset_type, &self.driver_connector) {
+            let reset_type = libredfish_manager_reset_type(reset_type)?;
+            let client = self
+                .create_established_redfish_client(bmc_ip_address, bmc, None)
+                .await
+                .map_err(map_redfish_client_creation_error)?;
+            return client
+                .bmc_reset(Some(reset_type))
+                .await
+                .map_err(map_redfish_error);
+        }
+        let report = identifying(report);
+        if self.driver_connector.is_some() && (report.is_none() || reset_type.is_some()) {
+            let manager = self.host_manager(bmc_ip_address, bmc).await?;
+            return manager.reset(reset_type).await.map(drop).map_err(|err| {
+                map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
+                    context: "manager reset",
+                    err: Box::new(err),
+                })
+            });
+        }
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, report)
+            .await?;
+        let bmc_control = bmc
+            .bmc_control()
+            .map_err(|error| map_platform_error(error.into()))?;
+        bmc_control.reset().await.map_err(map_platform_error)?;
         Ok(())
     }
 
@@ -598,80 +554,197 @@ impl RedfishClient {
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
-    ) -> Result<libredfish::PowerState, EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.get_power_state().await.map_err(map_redfish_error)
+        report: Option<&EndpointExplorationReport>,
+    ) -> Result<Option<PowerState>, EndpointExplorationError> {
+        let report = identifying(report);
+        if self.driver_connector.is_some() && report.is_none() {
+            let system = self.host_system(bmc_ip_address, bmc).await?;
+            return Ok(system.power_state());
+        }
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, report)
+            .await?;
+        let power = bmc
+            .power()
+            .map_err(|error| map_platform_error(error.into()))?;
+        power.state().await.map_err(map_platform_error)
     }
 
-    pub(super) async fn power(
+    pub(super) async fn prepare_power(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
-        action: libredfish::SystemPowerControl,
-    ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.power(action).await.map_err(map_redfish_error)?;
-        Ok(())
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
+        dispatch: PowerDispatch,
+    ) -> Result<crate::PreparedPowerControl, EndpointExplorationError> {
+        let report = identifying(report);
+        if self.driver_connector.is_some() && report.is_none() {
+            let system = self.host_system(bmc_ip_address, bmc).await?;
+            return Ok(crate::PreparedPowerControl {
+                ipmi_port: None,
+                send: Box::pin(async move {
+                    system.reset(Some(action)).await.map(drop).map_err(|err| {
+                        map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
+                            context: "system reset",
+                            err: Box::new(err),
+                        })
+                    })
+                }),
+            });
+        }
+        let (bmc, ipmi_port) = match (&self.driver_connector, report, dispatch) {
+            (Some(connector), Some(report), PowerDispatch::AfterTargetCheck) => {
+                let client = Self::connect_drivers(
+                    connector,
+                    bmc_ip_address,
+                    bmc.bmc_mac_address,
+                    report,
+                    Some(bmc.credentials),
+                )
+                .await?;
+                let port = client
+                    .power()
+                    .map_err(|error| map_platform_error(error.into()))?
+                    .may_use_ipmi_restart(action)
+                    .then(|| bmc_runtime::ipmi_port(report));
+                (BackendBmc::from(client), port)
+            }
+            _ => (
+                self.connect_established(bmc_ip_address, bmc, report)
+                    .await?,
+                None,
+            ),
+        };
+        Ok(crate::PreparedPowerControl {
+            ipmi_port,
+            send: Box::pin(async move {
+                let power = bmc
+                    .power()
+                    .map_err(|error| map_platform_error(error.into()))?;
+                power.set(action).await.map_err(map_platform_error)?;
+                Ok(())
+            }),
+        })
     }
 
     pub(super) async fn chassis_reset(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
         chassis_id: &str,
-        action: libredfish::SystemPowerControl,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, report)
+            .await?;
+        let power = bmc
+            .power()
+            .map_err(|error| map_platform_error(error.into()))?;
+        power
             .chassis_reset(chassis_id, action)
             .await
-            .map_err(map_redfish_error)?;
+            .map_err(map_platform_error)?;
         Ok(())
     }
 
+    /// The host system, chosen as exploration chooses it, for power calls
+    /// without an explored report to select drivers from.
+    async fn host_system(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc: EstablishedBmc,
+    ) -> Result<ComputerSystem<RedfishBmc>, EndpointExplorationError> {
+        let (nv_pool, credentials) = self.nv_pool_and_credentials(BmcAccess::Established(bmc));
+        let root = nv_pool
+            .service_root(bmc_ip_address, credentials)
+            .await
+            .map_err(|err| EndpointExplorationError::Other {
+                details: format!("Cannot Redfish service root: {err}"),
+            })?;
+        primary_system(&root)
+            .await?
+            .ok_or_else(|| EndpointExplorationError::Other {
+                details: format!("BMC {bmc_ip_address} lists no computer systems"),
+            })
+    }
+
+    /// The manager exploration records: the host system's, or the first for a
+    /// BMC that lists no systems, such as a power shelf.
+    async fn host_manager(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc: EstablishedBmc,
+    ) -> Result<Manager<RedfishBmc>, EndpointExplorationError> {
+        let (nv_pool, credentials) = self.nv_pool_and_credentials(BmcAccess::Established(bmc));
+        let root = nv_pool
+            .service_root(bmc_ip_address, credentials)
+            .await
+            .map_err(|err| EndpointExplorationError::Other {
+                details: format!("Cannot Redfish service root: {err}"),
+            })?;
+        let no_managers = || EndpointExplorationError::Other {
+            details: format!("BMC {bmc_ip_address} lists no managers"),
+        };
+        let mut managers = root
+            .managers()
+            .await
+            .map_err(nv_error("managers"))?
+            .ok_or_else(no_managers)?
+            .members()
+            .await
+            .map_err(nv_error("managers members"))?;
+        let system = primary_system(&root).await?;
+        let index = bmc_explorer::primary_manager_index(&managers, system.as_ref())
+            .ok_or_else(no_managers)?;
+        Ok(managers.swap_remove(index))
+    }
+
+    /// Turns secure boot off for the next boot. A platform without secure boot
+    /// is an error, as the operator asked for it.
     pub(super) async fn disable_secure_boot(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        let secure_boot = bmc
+            .secure_boot()
+            .map_err(|error| map_platform_error(error.into()))?;
+        secure_boot
+            .set(
+                &SecureBootUpdate::builder()
+                    .with_secure_boot_enable(false)
+                    .build(),
+            )
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
-            .disable_secure_boot()
-            .await
-            .map_err(map_redfish_error)?;
-
+            .map_err(map_platform_error)?;
         Ok(())
     }
 
+    /// Moves the platform's full lockdown to `desired`. A platform without
+    /// lockdown is an error, as the operator asked for it.
     pub(super) async fn lockdown(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
-        action: libredfish::EnabledDisabled,
+        report: Option<&EndpointExplorationReport>,
+        desired: LockdownDesiredState,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        let lockdown = bmc
+            .lockdown()
+            .map_err(|error| map_platform_error(error.into()))?;
+        lockdown
+            .set(LockdownScope::All, desired)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.lockdown(action).await.map_err(map_redfish_error)?;
-
+            .map_err(map_platform_error)?;
         Ok(())
     }
 
@@ -679,17 +752,16 @@ impl RedfishClient {
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<LockdownStatus, EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        let response = fetch_lockdown_status(client.as_ref())
-            .await
-            .map_err(map_redfish_error)?;
-
-        Ok(response)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        let lockdown = bmc
+            .lockdown()
+            .map_err(|error| map_platform_error(error.into()))?;
+        let status = lockdown.status().await.map_err(map_platform_error)?;
+        Ok(lockdown_report(&status))
     }
 
     pub(super) async fn enable_infinite_boot(
@@ -730,12 +802,24 @@ impl RedfishClient {
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
+        let client = match self
+            .connect_established(bmc_ip_address, bmc, report)
+            .await?
+        {
+            BackendBmc::Libredfish(client) => client,
+            BackendBmc::Drivers(bmc) => {
+                let boot_interface = boot_interface.map(BootInterfaceSelector::from);
+                bmc.bios()
+                    .map_err(|error| map_platform_error(error.into()))?
+                    .apply(&BiosSettings::default(), boot_interface.as_ref())
+                    .await
+                    .map_err(map_platform_error)?;
+                return Ok(());
+            }
+        };
 
         // We will be redoing machine_setup later and can worry about getting the profile right then.
         // Keep `empty_profiles` outside the closure so the returned future can borrow it.
@@ -788,19 +872,23 @@ impl RedfishClient {
         Ok(())
     }
 
+    /// Moves the DPU to `mode`. A platform without the control is an error,
+    /// as the caller asked for it.
     pub(super) async fn set_nic_mode(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
         mode: NicMode,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        bmc.dpu()
+            .map_err(|error| map_platform_error(error.into()))?
+            .set_nic_mode(mode)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.set_nic_mode(mode).await.map_err(map_redfish_error)?;
-
+            .map_err(map_platform_error)?;
         Ok(())
     }
 
@@ -841,39 +929,43 @@ impl RedfishClient {
     pub(super) async fn create_bmc_user(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
         credentials: Credentials,
-        new_username: &str,
-        new_password: &str,
-        new_user_role_id: libredfish::RoleId,
+        request: ManagerAccountCreate,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+        let access = bmc_access(bmc_ip_address, bmc_mac_address);
+        let bmc =
+            bmc_accounts::connect_accounts(&self.bmc_connector(), &access, report, credentials)
+                .await
+                .map_err(map_platform_error)?;
+        bmc.accounts()
+            .map_err(|error| map_platform_error(error.into()))?
+            .create(request)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
-            .create_user(new_username, new_password, new_user_role_id)
-            .await
-            .map_err(map_redfish_error)?;
-        Ok(())
+            .map(drop)
+            .map_err(map_platform_error)
     }
 
     pub(super) async fn delete_bmc_user(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
         credentials: Credentials,
         delete_user: &str,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+        let access = bmc_access(bmc_ip_address, bmc_mac_address);
+        let bmc =
+            bmc_accounts::connect_accounts(&self.bmc_connector(), &access, report, credentials)
+                .await
+                .map_err(map_platform_error)?;
+        bmc.accounts()
+            .map_err(|error| map_platform_error(error.into()))?
+            .delete(delete_user)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
-            .delete_user(delete_user)
-            .await
-            .map_err(map_redfish_error)?;
-        Ok(())
+            .map(drop)
+            .map_err(map_platform_error)
     }
 
     pub(super) async fn probe_vendor_name_from_chassis(
@@ -907,987 +999,17 @@ impl RedfishClient {
     }
 }
 
-async fn is_switch(client: &dyn Redfish) -> Result<bool, RedfishError> {
-    let chassis = client.get_chassis_all().await?;
-    Ok(chassis.contains(&"MGX_NVSwitch_0".to_string()))
-}
-
-async fn is_powershelf(client: &dyn Redfish) -> Result<bool, RedfishError> {
-    let chassis_ids = client.get_chassis_all().await?;
-    for chassis_id in &chassis_ids {
-        if chassis_id == "powershelf" {
-            return Ok(true);
-        }
-        if let Ok(chassis) = client.get_chassis(chassis_id).await
-            && chassis.manufacturer.as_ref().is_some_and(|m| {
-                let m = m.to_lowercase();
-                m.contains("lite-on") || m.contains("delta")
-            })
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-async fn fetch_manager(client: &dyn Redfish) -> Result<Manager, RedfishError> {
-    let manager = client.get_manager().await?;
-    let ethernet_interfaces = fetch_ethernet_interfaces(client, false, false)
-        .await
-        .or_else(|err| match err {
-            RedfishError::NotSupported(_) => Ok(vec![]),
-            _ => Err(err),
-        })?;
-
-    // Warn if the manager eth0 MAC is locally-administered: a real BMC MAC is
-    // globally unique, so this signals transient pre-sync data (seen briefly
-    // after a BMC reboot) that would poison anything keyed on the BMC MAC.
-    if let Some(eth0) = ethernet_interfaces.iter().find(|e| {
-        e.id.as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
-    }) && let Some(mac) = eth0.mac_address
-        && is_locally_administered_mac(mac)
-    {
-        tracing::warn!(
-            manager_id = %manager.id,
-            eth0_mac_address = %mac,
-            "manager eth0 MAC is locally-administered (transient pre-sync data?)",
-        );
-    }
-
-    Ok(Manager {
-        ethernet_interfaces,
-        id: manager.id,
-        ipmi_port: None,
-    })
-}
-
-fn system_resource_to_model(
-    system: LibredfishComputerSystem,
-    processors: Option<Vec<model::site_explorer::Processor>>,
-) -> ComputerSystem {
-    let serial_console_ssh_port = system
-        .serial_console
-        .map(|console| enabled_serial_console_ssh_port(&console.ssh))
-        .transpose()
-        .unwrap_or_else(|invalid_port| {
-            tracing::warn!(system_id = %system.id, serial_console_ssh_port = invalid_port,
-                "Ignoring invalid SSH serial-console port reported by Redfish");
-            None
-        })
-        .flatten();
-    ComputerSystem {
-        id: system.id,
-        manufacturer: system.manufacturer,
-        model: system.model,
-        serial_number: system.serial_number.map(|value| value.trim().to_string()),
-        sku: system.sku,
-        power_state: system.power_state.into_model(),
-        bios_version: system
-            .bios_version
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        serial_console_ssh_port,
-        processors,
-        ..Default::default()
-    }
-}
-
-fn enabled_serial_console_ssh_port(
-    ssh: &SerialConsoleConnectionType,
-) -> Result<Option<u16>, usize> {
-    ssh.service_enabled
-        .then_some(ssh.port)
-        .flatten()
-        .map(|port| {
-            let converted = u16::try_from(port).map_err(|_| port)?;
-            (converted != 0).then_some(converted).ok_or(port)
-        })
-        .transpose()
-}
-
-// A local wrapper permits implementing libredfish's trait for the SDK schema.
-// try_get() also requires the exact type name Processor.
-#[derive(serde::Deserialize)]
-#[serde(transparent)]
-struct Processor {
-    processor: nv_redfish::schema::processor::Processor,
-}
-
-impl libredfish::model::resource::IsResource for Processor {
-    fn odata_id(&self) -> String {
-        self.processor.odata_id.to_string()
-    }
-    fn odata_type(&self) -> String {
-        // Collection::try_get() only reads the collection's type, not its members'.
-        "#Processor.v1_0_0.Processor".to_owned()
-    }
-}
-
-impl Processor {
-    fn to_model(&self) -> model::site_explorer::Processor {
-        use nv_redfish::oem::nvidia::schema::nvidia_processor::NvidiaGpu;
-
-        // libredfish supplies only the schema; the SDK's OEM constructor is private.
-        let gpu = self
-            .processor
-            .oem
-            .as_ref()
-            .and_then(|oem| oem.additional_properties.get("Nvidia"))
-            .filter(|oem| !oem.is_null())
-            .and_then(
-                |oem| match <NvidiaGpu as serde::Deserialize>::deserialize(oem) {
-                    Ok(gpu) => Some(gpu),
-                    Err(error) => {
-                        tracing::warn!(%error, processor_id = %self.processor.id,
-                        "Failed to parse NVIDIA processor OEM data");
-                        None
-                    }
-                },
-            );
-        let topology = gpu
-            .as_ref()
-            .and_then(|gpu| gpu.mnnv_link_topology.as_ref())
-            .and_then(Option::as_ref);
-        self.processor.to_model(topology)
-    }
-}
-
-async fn fetch_processors(client: &dyn Redfish, collection_uri: Option<ODataId>) -> Vec<Processor> {
-    let Some(collection_uri) = collection_uri else {
-        return Vec::new();
-    };
-    let collection = match client
-        .get_collection(collection_uri.clone())
-        .await
-        .and_then(|collection| collection.try_get::<Processor>())
-    {
-        Ok(collection) => collection,
-        Err(error) => {
-            tracing::warn!(%error, resource_uri = %collection_uri.odata_id, "Failed to fetch processors");
-            return Vec::new();
-        }
-    };
-    let mut processors = collection.members;
-    processors.sort_by(|left, right| left.processor.id.cmp(&right.processor.id));
-    processors.dedup_by(|left, right| left.processor.id == right.processor.id);
-    processors
-}
-
-/// Collects system resource fields and their processor inventory without other linked resources.
-async fn fetch_system_resources(client: &dyn Redfish, root: &ServiceRoot) -> Vec<ComputerSystem> {
-    // libredfish's system model lacks the Processors link. Keep its resource model
-    // and expose that link through an adapter named for try_get()'s type check.
-    #[derive(serde::Deserialize)]
-    struct ComputerSystem {
-        #[serde(flatten)]
-        system: LibredfishComputerSystem,
-        #[serde(rename = "Processors")]
-        processors: Option<ODataId>,
-    }
-
-    impl libredfish::model::resource::IsResource for ComputerSystem {
-        fn odata_id(&self) -> String {
-            self.system.odata.odata_id.clone()
-        }
-        fn odata_type(&self) -> String {
-            self.system.odata.odata_type.clone()
-        }
-    }
-
-    let Some(collection_uri) = root.systems.as_ref() else {
-        return Vec::new();
-    };
-    let collection = match client
-        .get_collection(collection_uri.clone())
-        .await
-        .and_then(|collection| collection.try_get::<ComputerSystem>())
-    {
-        Ok(collection) => collection,
-        Err(error) => {
-            tracing::warn!(%error, resource_uri = %collection_uri.odata_id,
-                "Failed to fetch Systems inventory");
-            return Vec::new();
-        }
-    };
-    let mut explored_systems = Vec::new();
-    for resource in collection.members {
-        let processors = if root.is_vera_rubin() && resource.system.id == "HGX_Baseboard_0" {
-            Some(fetch_processors(client, resource.processors).await)
-        } else {
-            None
-        };
-        explored_systems.push((resource.system, processors));
-    }
-    let mut systems: Vec<_> = explored_systems
-        .into_iter()
-        .map(|(system, processors)| {
-            system_resource_to_model(
-                system,
-                processors.map(|processors| processors.iter().map(Processor::to_model).collect()),
-            )
-        })
-        .collect();
-    systems.sort_by(|left, right| left.id.cmp(&right.id));
-    systems.dedup_by(|left, right| left.id == right.id);
-    systems
-}
-
-struct FetchedSystem {
-    system: ComputerSystem,
-    is_dpu: bool,
-    is_host: bool,
-    linked_chassis_ids: Vec<String>,
-}
-
-async fn fetch_system(
-    client: &dyn Redfish,
-    system_resources: &[ComputerSystem],
-) -> Result<FetchedSystem, EndpointExplorationError> {
-    let mut system = client.get_system().await.map_err(map_redfish_error)?;
-    let linked_chassis_ids = system
-        .links
-        .as_ref()
-        .and_then(|links| links.chassis.as_ref())
-        .into_iter()
-        .flatten()
-        .filter_map(|chassis| {
-            chassis
-                .odata_id_get()
-                .ok()
-                .and_then(|id| id.rsplit('/').next())
-                .map(str::to_owned)
-        })
-        .collect();
-    let is_dpu = system.id.to_lowercase().contains("bluefield");
-    let ethernet_interfaces = match fetch_ethernet_interfaces(client, true, is_dpu).await {
-        Ok(interfaces) => Ok(interfaces),
-        Err(e) if is_dpu => {
-            tracing::warn!(
-                error = %e,
-                "Failed to get system Ethernet interfaces; ignoring the error"
-            );
-            Ok(Vec::default())
-        }
-        Err(e) => Err(map_redfish_error(e)),
-    }?;
-    let mut base_mac = None;
-    let mut nic_mode = None;
-
-    let is_switch = is_switch(client).await.map_err(map_redfish_error)?;
-    let is_powershelf = is_powershelf(client).await.map_err(map_redfish_error)?;
-    if is_dpu {
-        // This part processes dpu case and do two things such as
-        // 1. update system serial_number in case it is empty using chassis serial_number
-        // 2. format serial_number data using the same rules as in fetch_chassis()
-        if system.serial_number.is_none() {
-            let chassis = client
-                .get_chassis("Card1")
-                .await
-                .map_err(map_redfish_error)?;
-            system.serial_number = chassis.serial_number;
-        }
-
-        base_mac = match client.get_base_mac_address().await {
-            Ok(base_mac) => base_mac.and_then(|v| {
-                v.parse()
-                    .inspect_err(|err| {
-                        tracing::warn!(
-                            error = %err,
-                            mac_address = %v,
-                            "Failed to parse BaseMAC"
-                        );
-                    })
-                    .ok()
-            }),
-            Err(error) => {
-                tracing::info!(
-                    serial_number = ?system.serial_number,
-                    %error,
-                    "Could not use new method to retrieve base MAC address for DPU"
-                );
-                None
-            }
-        };
-        if base_mac.is_none() {
-            // BF4 temporary patch:
-            // BF4 BMC reports do not expose PF0 base MAC via the usual
-            // ComputerSystem BaseMAC path, so we patch `systems[].base_mac` by
-            // reading NDF0 PermanentMACAddress from the BF4 NIC subtree and
-            // deriving base MAC as (NDF0 - 0x10).
-            //
-            // Remove this fallback once BF4 BMC exposes PF0 base MAC directly in
-            // the standard system/base_mac report path.
-            //
-            // This path depends on NIC inventory being up and queryable; it may
-            // be absent when NIC firmware is in recovery/uninitialized states or
-            // when NIC-side inventory endpoints are not populated/responding.
-            base_mac = get_base_mac_from_bf4_ndf0(client).await.map(Into::into);
-            if base_mac.is_none() {
-                tracing::warn!(
-                    "BF4 NDF0 fallback did not provide PF0 base MAC (NIC inventory unavailable/uninitialized?)"
-                );
-            }
-        }
-        nic_mode = match client.get_nic_mode().await {
-            Ok(nic_mode) => nic_mode,
-            Err(e) => return Err(map_redfish_error(e)),
-        };
-    }
-
-    system.serial_number = system.serial_number.map(|s| s.trim().to_string());
-
-    let pcie_devices = if !is_powershelf {
-        fetch_pcie_devices(client)
-            .await
-            .map_err(map_redfish_error)?
-    } else {
-        vec![]
-    };
-
-    let is_infinite_boot_enabled = client
-        .is_infinite_boot_enabled()
-        .await
-        .map_err(map_redfish_error)?;
-
-    // If this is an nvswitch, don't set a boot order.
-    let boot_order = match is_switch || is_powershelf {
-        true => {
-            tracing::debug!("Skipping boot order for nvswitch or powershelf");
-            None
-        }
-        false => fetch_boot_order(client, &system)
-            .await
-            .inspect_err(|error| tracing::warn!(%error, "Failed to fetch boot order."))
-            .ok(),
-    };
-
-    let bios_version = system
-        .bios_version
-        .as_deref()
-        .map(str::trim)
-        .filter(|version| !version.is_empty())
-        .map(str::to_string);
-
-    Ok(FetchedSystem {
-        system: ComputerSystem {
-            processors: system_resources
-                .iter()
-                .find(|resource| resource.id == system.id)
-                .and_then(|resource| resource.processors.clone()),
-            ethernet_interfaces,
-            id: system.id,
-            manufacturer: system.manufacturer,
-            model: system.model,
-            serial_number: system.serial_number,
-            attributes: ComputerSystemAttributes {
-                nic_mode: nic_mode.map(IntoModel::into_model),
-                is_infinite_boot_enabled,
-            },
-            pcie_devices,
-            base_mac,
-            power_state: system.power_state.into_model(),
-            sku: system.sku,
-            boot_order,
-            bios_version,
-            serial_console_ssh_port: None,
+/// `status` as NICo reports it, with an aggregate it cannot classify as
+/// `Partial`.
+pub fn lockdown_report(status: &bmc_platform::LockdownStatus) -> LockdownStatus {
+    LockdownStatus {
+        status: match status.aggregate {
+            LockdownState::Enabled => InternalLockdownStatus::Enabled,
+            LockdownState::Disabled => InternalLockdownStatus::Disabled,
+            LockdownState::Partial | LockdownState::Unknown => InternalLockdownStatus::Partial,
         },
-        is_dpu,
-        is_host: !(is_dpu || is_switch || is_powershelf),
-        linked_chassis_ids,
-    })
-}
-
-async fn fetch_ethernet_interfaces(
-    client: &dyn Redfish,
-    fetch_system_interfaces: bool,
-    fetch_bluefield_oob: bool,
-) -> Result<Vec<EthernetInterface>, RedfishError> {
-    let eth_if_ids: Vec<String> = match match fetch_system_interfaces {
-        false => client.get_manager_ethernet_interfaces().await,
-        true => client.get_system_ethernet_interfaces().await,
-    } {
-        Ok(ids) => ids,
-        Err(e) => {
-            match e {
-                RedfishError::HTTPErrorCode { status_code, .. } if status_code == NOT_FOUND => {
-                    // missing oob for DPUs is handled below
-                    Vec::new()
-                }
-                _ => return Err(e),
-            }
-        }
-    };
-    let mut eth_ifs: Vec<EthernetInterface> = Vec::new();
-    let mut oob_found = false;
-
-    for iface_id in eth_if_ids.iter() {
-        let iface = match fetch_system_interfaces {
-            false => client.get_manager_ethernet_interface(iface_id).await,
-            true => client.get_system_ethernet_interface(iface_id).await,
-        }?;
-
-        oob_found |= iface_id.to_lowercase().contains("oob");
-
-        let mac_address = if let Some(iface_mac_address) = iface.mac_address {
-            match deserialize_input_mac_to_address(&iface_mac_address).map_err(|e| {
-                RedfishError::GenericError {
-                    error: format!("MAC address not valid: {iface_mac_address} (err: {e})"),
-                }
-            }) {
-                Ok(mac) => Ok(Some(mac)),
-                Err(e) => {
-                    if iface
-                        .interface_enabled
-                        .is_some_and(|is_enabled| !is_enabled)
-                    {
-                        // disabled interfaces sometimes populate the MAC address with junk,
-                        // ignore this error and create the interface with an empty mac address
-                        // in the exploration report
-                        tracing::debug!(
-                            interface_id = %iface_id,
-                            link_status = ?iface.link_status,
-                            error = %e,
-                            "could not parse MAC address for a disabled interface"
-                        );
-                        Ok(None)
-                    } else {
-                        Err(e)
-                    }
-                }
-            }
-        } else {
-            Ok(None)
-        }?;
-
-        let uefi_device_path = if let Some(uefi_device_path) = iface.uefi_device_path {
-            let path_as_version_string = UefiDevicePath::from_str(&uefi_device_path)
-                .map_err(|error| RedfishError::GenericError { error })?;
-            Some(path_as_version_string)
-        } else {
-            None
-        };
-
-        let iface = EthernetInterface {
-            description: iface.description,
-            id: iface.id,
-            interface_enabled: iface.interface_enabled,
-            mac_address,
-            link_status: iface.link_status.map(|s| s.to_string()),
-            uefi_device_path,
-        };
-
-        eth_ifs.push(iface);
+        message: status.message.clone(),
     }
-
-    if !oob_found && fetch_bluefield_oob {
-        // Temporary workaround untill get_system_ethernet_interface will return oob interface information
-        // Usually the workaround for not even being able to enumerate the interfaces
-        // would be used. But if a future Bluefield BMC revision returns interfaces
-        // but still misses the OOB interface, we would use this path.
-        if let Some(oob_iface) = get_oob_interface(client).await? {
-            eth_ifs.push(oob_iface);
-        } else {
-            return Err(RedfishError::GenericError {
-                error: "oob interface missing for dpu".to_string(),
-            });
-        }
-    }
-
-    Ok(eth_ifs)
-}
-
-async fn get_oob_interface(
-    client: &dyn Redfish,
-) -> Result<Option<EthernetInterface>, RedfishError> {
-    // If chassis.contains(&"MGX_NVSwitch_0".to_string()),
-    // nvlink switch does not have oob interface. And, if we try
-    // querying boot options over redfish, we will get a 404 error.
-    // So just return Ok(None) here.
-    if is_switch(client).await? || is_powershelf(client).await? {
-        return Ok(None);
-    }
-
-    // Temporary workaround until oob mac would be possible to get via Redfish
-    let boot_options = client.get_boot_options().await?;
-    let mac_pattern = Regex::new(r"MAC\((?<mac>[[:alnum:]]+)\,").unwrap();
-    let mut boot_order_first_ethernet_interface = None;
-
-    for option in boot_options.members.iter() {
-        // odata_id: "/redfish/v1/Systems/Bluefield/BootOptions/Boot0001"
-        let option_id = option.odata_id.split('/').next_back().unwrap();
-        let boot_option = client.get_boot_option(option_id).await?;
-        // display_name: "NET-OOB-IPV4"
-        if boot_option.display_name.contains("OOB") {
-            if boot_option.uefi_device_path.is_none() {
-                // Try whether there might be other matching options
-                continue;
-            }
-            // UefiDevicePath: "MAC(B83FD2909582,0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"
-            if let Some(captures) =
-                mac_pattern.captures(boot_option.uefi_device_path.unwrap().as_str())
-            {
-                let mac_addr_str = captures.name("mac").unwrap().as_str();
-                let mut mac_addr_builder = String::new();
-
-                // Transform B83FD2909582 -> B8:3F:D2:90:95:82
-                for (i, c) in mac_addr_str.chars().enumerate() {
-                    mac_addr_builder.push(c);
-                    if ((i + 1) % 2 == 0) && ((i + 1) < mac_addr_str.len()) {
-                        mac_addr_builder.push(':');
-                    }
-                }
-
-                let mac_addr =
-                    deserialize_input_mac_to_address(&mac_addr_builder).map_err(|e| {
-                        RedfishError::GenericError {
-                            error: format!("MAC address not valid: {mac_addr_builder} (err: {e})"),
-                        }
-                    })?;
-
-                let (description, id) = if boot_option.display_name.contains("OOB") {
-                    (
-                        Some("1G DPU OOB network interface".to_string()),
-                        Some("oob_net0".to_string()),
-                    )
-                } else {
-                    (boot_option.description, Some(option_id.to_string()))
-                };
-
-                boot_order_first_ethernet_interface = Some(EthernetInterface {
-                    description: description.clone(),
-                    id: id.clone(),
-                    interface_enabled: None,
-                    mac_address: Some(mac_addr),
-                    link_status: None,
-                    uefi_device_path: None,
-                });
-            }
-        }
-    }
-
-    Ok(boot_order_first_ethernet_interface)
-}
-
-struct FetchedChassis {
-    chassis: Vec<Chassis>,
-}
-
-fn should_fetch_network_adapter_ports(
-    supports_adapter_port_mac_inventory: bool,
-    is_host: bool,
-    linked_chassis_ids: &[String],
-) -> bool {
-    supports_adapter_port_mac_inventory && is_host && !linked_chassis_ids.is_empty()
-}
-
-async fn fetch_network_adapter_port_mac_addresses(
-    client: &dyn Redfish,
-    chassis_id: &str,
-    network_adapter_id: &str,
-) -> Vec<MacAddress> {
-    let port_ids = match client.get_ports(chassis_id, network_adapter_id).await {
-        Ok(port_ids) => port_ids,
-        Err(error) => {
-            tracing::warn!(
-                %chassis_id,
-                %network_adapter_id,
-                %error,
-                "Failed to enumerate network adapter ports; continuing without port MAC addresses"
-            );
-            return Vec::new();
-        }
-    };
-
-    let mut result = Vec::new();
-    for port_id in port_ids {
-        let port = match client
-            .get_port(chassis_id, network_adapter_id, &port_id)
-            .await
-        {
-            Ok(port) => port,
-            Err(error) => {
-                tracing::warn!(
-                    %chassis_id,
-                    %network_adapter_id,
-                    %port_id,
-                    %error,
-                    "Failed to read network adapter port; continuing without its MAC addresses"
-                );
-                continue;
-            }
-        };
-        let mac_addresses = match port.mac_addresses() {
-            Ok(mac_addresses) => mac_addresses,
-            Err(error) => {
-                tracing::warn!(
-                    %chassis_id,
-                    %network_adapter_id,
-                    %port_id,
-                    %error,
-                    "Failed to parse network adapter port MAC addresses; continuing without them"
-                );
-                continue;
-            }
-        };
-        for mac_address in mac_addresses {
-            if !result.contains(&mac_address) {
-                result.push(mac_address);
-            }
-        }
-    }
-    result
-}
-
-async fn fetch_chassis(
-    client: &dyn Redfish,
-    port_chassis_ids: Option<&[String]>,
-) -> Result<FetchedChassis, RedfishError> {
-    let mut chassis: Vec<Chassis> = Vec::new();
-
-    let chassis_list = client.get_chassis_all().await?;
-    for chassis_id in &chassis_list {
-        let Ok(desc) = client.get_chassis(chassis_id).await else {
-            continue;
-        };
-
-        let net_adapter_list = if desc.network_adapters.is_some() {
-            match client.get_chassis_network_adapters(chassis_id).await {
-                Ok(v) => v,
-                Err(RedfishError::NotSupported(_)) => vec![],
-                // Nautobot uses Chassis_0 as the source of truth for the GB200 chassis serial number.
-                // Other chassis subsystems with network adapters may report different serial numbers.
-                Err(RedfishError::MissingKey { .. }) if chassis_id == "Chassis_0" => vec![],
-                Err(_) => continue,
-            }
-        } else {
-            vec![]
-        };
-
-        let mut net_adapters: Vec<NetworkAdapter> = Vec::new();
-        for net_adapter_id in &net_adapter_list {
-            let value = client
-                .get_chassis_network_adapter(chassis_id, net_adapter_id)
-                .await?;
-
-            let port_mac_addresses = if value.ports.is_some()
-                && port_chassis_ids.is_some_and(|chassis_ids| chassis_ids.contains(chassis_id))
-            {
-                fetch_network_adapter_port_mac_addresses(client, chassis_id, net_adapter_id).await
-            } else {
-                Vec::new()
-            };
-
-            let net_adapter = NetworkAdapter {
-                id: value.id,
-                manufacturer: value.manufacturer,
-                model: value.model,
-                part_number: value.part_number,
-                serial_number: Some(
-                    value
-                        .serial_number
-                        .as_ref()
-                        .unwrap_or(&"".to_string())
-                        .trim()
-                        .to_string(),
-                ),
-                port_mac_addresses,
-            };
-
-            net_adapters.push(net_adapter);
-        }
-
-        // For GB200 and Vera Rubin hosts, use the Chassis_0 assembly serial number to
-        // match Nautobot / expected-machine inventory serials.
-        let serial_number = if chassis_id == "Chassis_0" {
-            client
-                .get_chassis_assembly("Chassis_0")
-                .await
-                .ok()
-                .and_then(|assembly| {
-                    assembly
-                        .assemblies
-                        .iter()
-                        .find(|asm| {
-                            let model = asm.model.as_deref();
-                            model.is_some_and(
-                                bmc_explorer::hw::vera_rubin::chassis_assembly_serial_model,
-                            ) || model == Some("GB200 NVL")
-                        })
-                        .and_then(|asm| asm.serial_number.clone())
-                })
-                .or(desc.serial_number)
-        } else {
-            desc.serial_number
-        };
-
-        let nvidia_oem = desc.oem.as_ref().and_then(|x| x.nvidia.as_ref());
-        chassis.push(Chassis {
-            id: chassis_id.to_string(),
-            manufacturer: desc.manufacturer,
-            model: desc.model,
-            part_number: desc.part_number,
-            serial_number,
-            network_adapters: net_adapters,
-            physical_slot_number: nvidia_oem.and_then(|x| x.chassis_physical_slot_number),
-            compute_tray_index: nvidia_oem.and_then(|x| x.compute_tray_index),
-            topology_id: nvidia_oem.and_then(|x| x.topology_id),
-            revision_id: nvidia_oem.and_then(|x| x.revision_id),
-        });
-    }
-
-    Ok(FetchedChassis { chassis })
-}
-
-async fn get_base_mac_from_bf4_ndf0(client: &dyn Redfish) -> Option<MacAddress> {
-    let ndf0_paths = [
-        "/redfish/v1/Chassis/BlueField_0/NetworkAdapters/BlueField_NIC_0/NetworkDeviceFunctions/0",
-        "/redfish/v1/Chassis/Card1/NetworkAdapters/Bluefield_NIC/NetworkDeviceFunctions/0",
-    ];
-    for path in ndf0_paths {
-        let resource = match client.get_resource(ODataId::from(path)).await {
-            Ok(resource) => resource,
-            Err(RedfishError::NotSupported(_)) => continue,
-            Err(_) => continue,
-        };
-        let body: serde_json::Value = match serde_json::from_str(resource.raw.get()) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(mac) = body
-            .pointer("/Ethernet/PermanentMACAddress")
-            .and_then(serde_json::Value::as_str)
-            && let Ok(parsed) = deserialize_input_mac_to_address(mac)
-        {
-            let derived = mac_to_u64(parsed).checked_sub(BF4_NDF0_TO_BASE_MAC_OFFSET)?;
-            return Some(u64_to_mac(derived));
-        }
-    }
-    None
-}
-
-async fn fetch_boot_order(
-    client: &dyn Redfish,
-    system: &libredfish::model::ComputerSystem,
-) -> Result<BootOrder, RedfishError> {
-    let boot_options_id =
-        system
-            .boot
-            .boot_options
-            .clone()
-            .ok_or_else(|| RedfishError::MissingKey {
-                key: "boot.boot_options".to_string(),
-                url: system.odata.odata_id.to_string(),
-            })?;
-
-    let all_boot_options: Vec<libredfish::model::BootOption> = client
-        .get_collection(boot_options_id)
-        .await
-        .and_then(|t1| t1.try_get::<libredfish::model::BootOption>())
-        .into_iter()
-        .flat_map(|x1| x1.members)
-        .collect();
-
-    let boot_order: Vec<BootOption> = system
-        .boot
-        .boot_order
-        .iter()
-        .filter_map(|ref_id| {
-            all_boot_options
-                .iter()
-                .find(|opt| opt.boot_option_reference == *ref_id)
-                .cloned()
-                .map(IntoModel::into_model)
-        })
-        .collect();
-
-    Ok(BootOrder { boot_order })
-}
-
-async fn fetch_pcie_devices(client: &dyn Redfish) -> Result<Vec<PCIeDevice>, RedfishError> {
-    let pci_device_list = client.pcie_devices().await?;
-    let mut pci_devices: Vec<PCIeDevice> = Vec::new();
-
-    for pci_device in pci_device_list {
-        pci_devices.push(PCIeDevice {
-            description: pci_device.description,
-            firmware_version: pci_device.firmware_version,
-            id: pci_device.id.clone(),
-            manufacturer: pci_device.manufacturer,
-            gpu_vendor: pci_device.gpu_vendor,
-            name: pci_device.name,
-            part_number: pci_device.part_number,
-            serial_number: pci_device.serial_number,
-            status: pci_device.status.map(IntoModel::into_model),
-        });
-    }
-    Ok(pci_devices)
-}
-
-async fn fetch_service(client: &dyn Redfish) -> Result<Vec<Service>, RedfishError> {
-    let mut service: Vec<Service> = Vec::new();
-
-    let inventory_list = client.get_software_inventories().await?;
-    let mut inventories: Vec<Inventory> = Vec::new();
-    for inventory_id in &inventory_list {
-        let Ok(value) = client.get_firmware(inventory_id).await else {
-            continue;
-        };
-
-        let inventory = Inventory {
-            id: value.id,
-            description: value.description,
-            version: value.version,
-            release_date: value.release_date,
-            drive: None,
-        };
-
-        inventories.push(inventory);
-    }
-
-    service.push(Service {
-        id: "FirmwareInventory".to_string(),
-        inventories,
-    });
-
-    Ok(service)
-}
-
-async fn fetch_machine_setup_status(
-    client: &dyn Redfish,
-    boot_interface: Option<&BootInterfaceTarget>,
-) -> Result<MachineSetupStatus, RedfishError> {
-    let status = match boot_interface {
-        Some(target) => {
-            target
-                .run(|boot_interface| client.machine_setup_status(Some(boot_interface)))
-                .await?
-        }
-        None => client.machine_setup_status(None).await?,
-    };
-    let mut diffs: Vec<MachineSetupDiff> = Vec::new();
-
-    for diff in status.diffs {
-        diffs.push(MachineSetupDiff {
-            key: diff.key,
-            expected: diff.expected,
-            actual: diff.actual,
-        });
-    }
-
-    Ok(MachineSetupStatus {
-        is_done: status.is_done,
-        diffs,
-        evaluated_boot_interface: boot_interface.map(MachineBootInterfaceTarget::from),
-    })
-}
-
-async fn fetch_secure_boot_status(
-    client: &dyn Redfish,
-) -> Result<Option<SecureBootStatus>, RedfishError> {
-    let status = match client.get_secure_boot().await {
-        Ok(status) => status,
-        Err(RedfishError::NotSupported(_)) => return Ok(None),
-        // The standard client probes the optional resource directly, without a link check.
-        Err(RedfishError::HTTPErrorCode {
-            status_code, url, ..
-        }) if status_code == http::StatusCode::NOT_FOUND => {
-            tracing::debug!(%url, "SecureBoot resource returned 404; treating as absent");
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-
-    let secure_boot_enable =
-        status
-            .secure_boot_enable
-            .ok_or_else(|| RedfishError::GenericError {
-                error: "expected secure_boot_enable_field set in secure boot response".to_string(),
-            })?;
-
-    let secure_boot_current_boot =
-        status
-            .secure_boot_current_boot
-            .ok_or_else(|| RedfishError::GenericError {
-                error: "expected secure_boot_current_boot set in secure boot response".to_string(),
-            })?;
-
-    let is_enabled = secure_boot_enable && secure_boot_current_boot.is_enabled();
-
-    Ok(Some(SecureBootStatus { is_enabled }))
-}
-
-/// What an exploration learned about the BMC's `ComponentIntegrity`
-/// collection.
-///
-/// A BMC that advertises no collection and one whose collection could not be
-/// read both leave `entries` absent, but only the second is a missing answer:
-/// the first is the BMC saying it has nothing to attest. Coverage reads the
-/// two differently, so they are kept apart here rather than merged into one
-/// absence.
-#[derive(Default)]
-struct ComponentIntegrityObservation {
-    /// The members the collection listed, unfiltered.
-    entries: Option<Vec<ComponentIntegrityEntry>>,
-    /// Set when the collection was advertised but fetching it failed.
-    unavailable: bool,
-}
-
-/// What the BMC says it can attest, unfiltered.
-///
-/// A failed fetch is reported rather than raised: the list drives attestation
-/// coverage, while scheduling reads the collection live from the BMC, so
-/// losing it must not fail an exploration that otherwise succeeded.
-async fn fetch_component_integrities(
-    client: &dyn Redfish,
-    service_root: &libredfish::model::service_root::ServiceRoot,
-) -> ComponentIntegrityObservation {
-    // A BMC without the collection has nothing to list, and asking anyway only
-    // buys a 404.
-    if service_root.component_integrity.is_none() {
-        return ComponentIntegrityObservation::default();
-    }
-
-    let collection = match client.get_component_integrities().await {
-        Ok(collection) => collection,
-        Err(error) => {
-            tracing::warn!(%error, "Failed to fetch the ComponentIntegrity collection.");
-            return ComponentIntegrityObservation {
-                entries: None,
-                unavailable: true,
-            };
-        }
-    };
-
-    ComponentIntegrityObservation {
-        entries: Some(
-            collection
-                .members
-                .iter()
-                .map(|member| ComponentIntegrityEntry {
-                    id: member.id.clone(),
-                    component_integrity_type: member.component_integrity_type.clone(),
-                    component_integrity_enabled: member.component_integrity_enabled,
-                })
-                .collect(),
-        ),
-        unavailable: false,
-    }
-}
-
-async fn fetch_lockdown_status(client: &dyn Redfish) -> Result<LockdownStatus, RedfishError> {
-    let status = client.lockdown_status().await?;
-    let internal_status = if status.is_fully_enabled() {
-        InternalLockdownStatus::Enabled
-    } else if status.is_fully_disabled() {
-        InternalLockdownStatus::Disabled
-    } else {
-        InternalLockdownStatus::Partial
-    };
-    Ok(LockdownStatus {
-        status: internal_status,
-        message: status.message().to_string(),
-    })
 }
 
 pub(crate) fn map_redfish_client_creation_error(
@@ -1920,6 +1042,92 @@ pub(crate) fn map_redfish_client_creation_error(
         RedfishClientCreationError::Unsupported(details) => {
             EndpointExplorationError::Other { details }
         }
+    }
+}
+
+/// `report` when it identifies the BMC. A failed exploration records no
+/// service root, so drivers cannot be selected for it and power calls fall
+/// to plain Redfish on the host system.
+fn identifying(report: Option<&EndpointExplorationReport>) -> Option<&EndpointExplorationReport> {
+    report.filter(|report| report.service_root.is_some())
+}
+
+/// The host system among `root`'s systems, chosen as exploration chooses it;
+/// `None` when the BMC lists none.
+async fn primary_system(
+    root: &ServiceRoot,
+) -> Result<Option<ComputerSystem<RedfishBmc>>, EndpointExplorationError> {
+    // nv-redfish fetches `/Systems` even when the service root does not
+    // advertise it, and power shelves answer that with 404.
+    if root.root.systems.is_none() {
+        return Ok(None);
+    }
+    let Some(systems) = root.systems().await.map_err(nv_error("systems"))? else {
+        return Ok(None);
+    };
+    let mut systems = systems
+        .members()
+        .await
+        .map_err(nv_error("systems members"))?;
+    Ok(bmc_explorer::primary_system_index(&systems).map(|index| systems.swap_remove(index)))
+}
+
+/// Classifies an nv-redfish failure in `context` the way exploration does.
+fn nv_error(
+    context: &'static str,
+) -> impl FnOnce(nv_redfish::Error<RedfishBmc>) -> EndpointExplorationError {
+    move |err| {
+        map_nv_redfish_explore_error(bmc_explorer::Error::NvRedfish {
+            context,
+            err: Box::new(err),
+        })
+    }
+}
+
+/// The libredfish `Manager.Reset` type for `reset_type`; libredfish supports
+/// only graceful and forced restarts.
+fn libredfish_manager_reset_type(
+    reset_type: ResetType,
+) -> Result<libredfish::ManagerResetType, EndpointExplorationError> {
+    match reset_type {
+        ResetType::GracefulRestart => Ok(libredfish::ManagerResetType::GracefulRestart),
+        ResetType::ForceRestart => Ok(libredfish::ManagerResetType::ForceRestart),
+        other => Err(EndpointExplorationError::Other {
+            details: format!("libredfish cannot request a {other:?} BMC reset"),
+        }),
+    }
+}
+
+/// Classifies a driver failure the way [`map_redfish_error`] classifies the
+/// libredfish one.
+fn bmc_access(bmc_ip_address: SocketAddr, bmc_mac_address: MacAddress) -> BmcAccessInfo {
+    BmcAccessInfo {
+        host: bmc_ip_address.ip().to_string(),
+        port: Some(bmc_ip_address.port()),
+        mac_address: bmc_mac_address,
+    }
+}
+
+pub(crate) fn map_platform_error(error: PlatformError) -> EndpointExplorationError {
+    match &error {
+        PlatformError::Unreachable => EndpointExplorationError::Unreachable {
+            details: Some(error.to_string()),
+        },
+        PlatformError::Auth(_) => EndpointExplorationError::Unauthorized {
+            details: error.to_string(),
+            response_body: None,
+            response_code: None,
+        },
+        PlatformError::Bmc { status, .. } => EndpointExplorationError::RedfishError {
+            details: error.to_string(),
+            response_body: None,
+            response_code: Some(*status),
+        },
+        _ => EndpointExplorationError::RedfishError {
+            details: error.to_string(),
+            response_body: None,
+            response_code: None,
+        },
     }
 }
 
@@ -1991,29 +1199,14 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
     }
 }
 
-fn nv_error_classifier(
-    err: &carbide_redfish::nv_redfish::BmcError,
-) -> Option<bmc_explorer::ErrorClass> {
-    type BmcError = carbide_redfish::nv_redfish::BmcError;
-    match err {
-        BmcError::InvalidResponse { status, .. } => match *status {
-            http::StatusCode::NOT_FOUND => Some(bmc_explorer::ErrorClass::NotFound),
-            http::StatusCode::INTERNAL_SERVER_ERROR => {
-                Some(bmc_explorer::ErrorClass::InternalServerError)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn nv_bmc_explore_config(
     boot_interface: Option<&BootInterfaceTarget>,
     explore_drive_firmware: bool,
 ) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
-        error_classifier: &nv_error_classifier,
+        error_classifier: &bmc_explorer::nv_redfish_error_class,
+        assembly_chassis_ids: HOST_SERIAL_ASSEMBLY_CHASSIS_IDS,
         // Chosen arbitrarily: we want to wait a bit between tries,
         // but not for too long relative to the total exploration
         // time.
@@ -2039,7 +1232,7 @@ fn map_nv_redfish_explore_error(
     type BmcError = carbide_redfish::nv_redfish::BmcError;
     use carbide_redfish::nv_redfish::Error;
     match err {
-        bmc_explorer::Error::NvRedfish { context, err } => match err {
+        bmc_explorer::Error::NvRedfish { context, err } => match *err {
             Error::Bmc(err) => match err {
                 BmcError::ReqwestError(err) => {
                     let details = format!(
@@ -2063,7 +1256,7 @@ fn map_nv_redfish_explore_error(
                     match status {
                         // Disclaimer: this is original libredfish code...
                         http::StatusCode::FORBIDDEN
-                            if url.to_string().contains("FirmwareInventory") =>
+                            if url.as_str().contains("FirmwareInventory") =>
                         {
                             EndpointExplorationError::VikingFWInventoryForbiddenError {
                                 details: format!(
@@ -2121,304 +1314,45 @@ fn map_nv_redfish_explore_error(
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use arc_swap::ArcSwap;
-    use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimBootInterfaceRef};
-    use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Request;
+    use axum::http::{Method, StatusCode};
+    use axum::middleware::{self, Next};
+    use axum::response::IntoResponse;
+    use bmc_mock::test_support::{
+        dell_poweredge_r750_router_with_event_limits, delta_powershelf_router,
+        host_router_with_auth, nvidia_gh200_swapped_managers_router, record_writes, serve_https,
+    };
+    use bmc_mock::{
+        CombinedServer, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, EventServiceConfig,
+        HardwareType,
+    };
+    use bmc_runtime::DriverPools;
+    use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_redfish::nv_redfish::NvRedfishClientPool;
     use carbide_secrets::credentials::Credentials;
+    use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, Check, check_cases_async, check_values, value_scenarios};
+    use carbide_test_support::{Case, check_cases_async, value_scenarios};
     use libredfish::model::service_root::RedfishVendor;
     use mac_address::MacAddress;
     use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
-    use model::site_explorer::PowerState;
-    use serde_json::json;
+    use model::site_explorer::{
+        ComputerSystem as ExploredSystem, Manager as ExploredManager, ServiceRoot,
+    };
+    use serde_json::Value;
 
     use super::{
-        BmcAccess, BmcCredentialType, BootInterfaceTarget, ComputerSystem, CredentialKey,
-        EndpointExplorationError, EstablishedBmc, LibredfishComputerSystem, MachineSetupStatus,
-        ProxiedPools, RedfishClient, fetch_machine_setup_status, fetch_system_resources,
-        nv_bmc_explore_config, record_evaluated_boot_interface, should_fetch_network_adapter_ports,
-        system_resource_to_model,
+        BmcAccess, BmcCredentialType, BootInterfaceTarget, CredentialKey, DriverConnector,
+        EndpointExplorationError, EndpointExplorationReport, EstablishedBmc,
+        InternalLockdownStatus, LockdownState, MachineSetupStatus, PowerDispatch, PowerState,
+        ProxiedPools, RedfishClient, ResetType, lockdown_report, nv_bmc_explore_config,
+        record_evaluated_boot_interface,
     };
-
-    #[tokio::test]
-    async fn secure_boot_absence_preserves_other_errors() {
-        use std::sync::Mutex;
-
-        use carbide_instrument::testing::capture_logs_async;
-        use libredfish::model::secure_boot::SecureBoot;
-        use libredfish::{EnabledDisabled, Redfish, RedfishError, RedfishFuture};
-
-        struct SecureBootClient(Mutex<Option<Result<SecureBoot, RedfishError>>>);
-
-        impl Redfish for SecureBootClient {
-            fn std_redfish(&self) -> &libredfish::standard::RedfishStandard {
-                panic!("this test only reads SecureBoot")
-            }
-
-            fn get_secure_boot(&self) -> RedfishFuture<'_, Result<SecureBoot, RedfishError>> {
-                Box::pin(async { self.0.lock().unwrap().take().unwrap() })
-            }
-        }
-
-        let status = |enabled, current_boot| {
-            Ok(SecureBoot {
-                secure_boot_enable: enabled,
-                secure_boot_current_boot: current_boot,
-                ..Default::default()
-            })
-        };
-        let http_error = |status_code| {
-            Err(RedfishError::HTTPErrorCode {
-                url: "https://bmc.example/redfish/v1/Systems/1/SecureBoot".into(),
-                status_code,
-                response_body: String::new(),
-            })
-        };
-        let cases = [
-            (
-                "absent",
-                http_error(http::StatusCode::NOT_FOUND),
-                Yields(None),
-            ),
-            (
-                "unsupported",
-                Err(RedfishError::NotSupported("SecureBoot".into())),
-                Yields(None),
-            ),
-            (
-                "enabled",
-                status(Some(true), Some(EnabledDisabled::Enabled)),
-                Yields(Some(true)),
-            ),
-            (
-                "disabled",
-                status(Some(false), Some(EnabledDisabled::Enabled)),
-                Yields(Some(false)),
-            ),
-            (
-                "current boot disabled",
-                status(Some(true), Some(EnabledDisabled::Disabled)),
-                Yields(Some(false)),
-            ),
-            (
-                "missing enable",
-                status(None, Some(EnabledDisabled::Enabled)),
-                Fails,
-            ),
-            ("missing current boot", status(Some(true), None), Fails),
-            (
-                "unauthorized",
-                http_error(http::StatusCode::UNAUTHORIZED),
-                Fails,
-            ),
-            ("forbidden", http_error(http::StatusCode::FORBIDDEN), Fails),
-            (
-                "server failure",
-                http_error(http::StatusCode::INTERNAL_SERVER_ERROR),
-                Fails,
-            ),
-            (
-                "invalid JSON",
-                Err(RedfishError::JsonDeserializeError {
-                    url: "https://bmc.example/redfish/v1/Systems/1/SecureBoot".into(),
-                    body: "{".into(),
-                    source: serde_json::from_str::<SecureBoot>("{").unwrap_err(),
-                }),
-                Fails,
-            ),
-        ];
-        check_cases_async(
-            cases.into_iter().map(|(scenario, input, expect)| Case {
-                scenario,
-                input,
-                expect,
-            }),
-            |response| async {
-                let client = SecureBootClient(Mutex::new(Some(response)));
-                super::fetch_secure_boot_status(&client)
-                    .await
-                    .map(|s| s.map(|s| s.is_enabled))
-                    .map_err(drop)
-            },
-        )
-        .await;
-
-        let client = SecureBootClient(Mutex::new(Some(http_error(http::StatusCode::NOT_FOUND))));
-        let (result, logs) = capture_logs_async(super::fetch_secure_boot_status(&client)).await;
-        assert!(result.unwrap().is_none());
-        assert_eq!(
-            logs.len(),
-            1,
-            "404 should emit only a debug diagnostic: {logs:?}"
-        );
-        assert_eq!(logs[0].level, tracing::Level::DEBUG);
-        assert_eq!(
-            logs[0].message,
-            "SecureBoot resource returned 404; treating as absent"
-        );
-        assert_eq!(
-            logs[0].field("url"),
-            Some("https://bmc.example/redfish/v1/Systems/1/SecureBoot"),
-        );
-    }
-
-    #[test]
-    fn resource_fields_are_normalized_without_linked_inventory() {
-        let raw = json!({
-            "@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
-            "Id": "HGX_Baseboard_0", "Manufacturer": "NVIDIA", "Model": "VR NVL",
-            "SerialNumber": " board-serial ", "SKU": "board-sku", "PowerState": "Off",
-            "BiosVersion": " 1.2 ",
-            "SerialConsole": {"SSH": {"ServiceEnabled": true, "Port": 2200}, "IPMI": {"ServiceEnabled": false}},
-            "EthernetInterfaces": {"@odata.id": "/interfaces"},
-            "Processors": {"@odata.id": "/processors"},
-            "Boot": {"BootOptions": {"@odata.id": "/boot-options"}}
-        });
-        let system = system_resource_to_model(
-            serde_json::from_value::<LibredfishComputerSystem>(raw).unwrap(),
-            None,
-        );
-        assert_eq!(
-            system,
-            ComputerSystem {
-                id: "HGX_Baseboard_0".into(),
-                manufacturer: Some("NVIDIA".into()),
-                model: Some("VR NVL".into()),
-                serial_number: Some("board-serial".into()),
-                sku: Some("board-sku".into()),
-                power_state: PowerState::Off,
-                bios_version: Some("1.2".into()),
-                serial_console_ssh_port: Some(2200),
-                ..Default::default()
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn expanded_systems_keep_good_members_and_deduplicate() {
-        let sim = Arc::new(RedfishSim::default());
-        sim.set_systems_collection_uri("/systems");
-        sim.set_resource("/systems", json!({
-            "@odata.id": "/systems", "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
-            "Name": "Systems", "Members@odata.count": 5,
-            "Members": [
-                {"@odata.id": "/primary", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "System_0"},
-                {"@odata.id": "/z", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "Z", "SerialNumber": "z-serial"},
-                {"@odata.id": "/broken", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": 42},
-                {"@odata.id": "/z", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "Z", "SerialNumber": "z-serial"},
-                {"@odata.id": "/a", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "A"}
-            ]
-        }));
-        let client = sim
-            .create_client("localhost", Some(443), RedfishAuth::Anonymous, None)
-            .await
-            .unwrap();
-        let root = client.get_service_root().await.unwrap();
-        let systems = fetch_system_resources(client.as_ref(), &root).await;
-        assert_eq!(
-            systems
-                .iter()
-                .map(|system| system.id.as_str())
-                .collect::<Vec<_>>(),
-            ["A", "System_0", "Z"]
-        );
-        assert_eq!(sim.resource_requests(), ["/systems"]);
-        assert_eq!(systems[2].serial_number.as_deref(), Some("z-serial"));
-    }
-
-    #[tokio::test]
-    async fn processor_discovery_is_optional_and_collects_all_vera_rubin_processors() {
-        for (vera_rubin, unavailable) in [(false, false), (true, false), (true, true)] {
-            let sim = Arc::new(RedfishSim::default());
-            sim.set_system_id("System_0");
-            if vera_rubin {
-                sim.set_service_root_vendor(Some("NVIDIA".into()));
-                sim.set_service_root_product(Some("VR NVL72".into()));
-            }
-            sim.set_systems_collection_uri("/systems");
-            sim.set_resource("/systems", json!({
-                "@odata.id": "/systems", "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
-                "Name": "Systems", "Members@odata.count": 2, "Members": [
-                    {"@odata.id": "/primary", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
-                     "Id": "System_0", "Processors": {"@odata.id": "/cpus"}},
-                    {"@odata.id": "/component", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
-                     "Id": "HGX_Baseboard_0", "Processors": {"@odata.id": "/gpus"}}
-                ]
-            }));
-            sim.fail_resource("/cpus");
-            if unavailable {
-                sim.fail_resource("/gpus");
-            } else {
-                sim.set_resource("/gpus", json!({
-                    "@odata.id": "/gpus", "@odata.type": "#ProcessorCollection.ProcessorCollection",
-                    "Name": "Processors", "Members@odata.count": 4, "Members": [
-                        {"@odata.id": "/gpu1", "@odata.type": "#Processor.v1_20_0.Processor",
-                         "Id": "GPU_1", "Name": "GPU 1", "ProcessorType": "GPU", "Model": "Other GPU"},
-                        {"@odata.id": "/invalid", "@odata.type": "#Processor.v1_20_0.Processor", "Id": 42, "Name": "Invalid"},
-                        {"@odata.id": "/gpu0", "@odata.type": "#Processor.v1_20_0.Processor",
-                         "Id": "GPU_0", "Name": "GPU 0", "ProcessorType": "GPU", "Model": "Tray GPU",
-                         "Oem": {"Nvidia": {"MNNVLinkTopology": {"TraySlotIndex": 16}}}},
-                        {"@odata.id": "/gpu0", "@odata.type": "#Processor.v1_20_0.Processor",
-                         "Id": "GPU_0", "Name": "GPU 0", "ProcessorType": "GPU", "Model": "Tray GPU"}
-                    ]
-                }));
-            }
-            let redfish = build_redfish_client(sim.clone());
-            let report = redfish
-                .generate_exploration_report(
-                    test_addr(),
-                    BmcAccess::Direct(Credentials::UsernamePassword {
-                        username: "root".into(),
-                        password: "password".into(),
-                    }),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap();
-            assert_eq!(report.systems[0].id, "System_0");
-            assert_eq!(report.systems[0].processors, None);
-            assert_eq!(report.systems[1].id, "HGX_Baseboard_0");
-            match report.systems[1].processors.as_ref() {
-                Some(processors) if unavailable => assert!(processors.is_empty()),
-                Some(processors) => {
-                    assert_eq!(processors.len(), 2);
-                    assert_eq!(processors[0].id, "GPU_0");
-                    assert_eq!(processors[0].model.as_deref(), Some("Tray GPU"));
-                    assert_eq!(processors[1].id, "GPU_1");
-                    assert_eq!(processors[1].model.as_deref(), Some("Other GPU"));
-                    assert_eq!(report.rack_position().compute_tray_index, Some(16));
-                }
-                None => assert!(!vera_rubin),
-            }
-            assert!(!sim.resource_requests().iter().any(|uri| uri == "/cpus"));
-            assert_eq!(
-                sim.resource_requests().iter().any(|uri| uri == "/gpus"),
-                vera_rubin
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn unavailable_collection_has_no_additional_inventory() {
-        let sim = Arc::new(RedfishSim::default());
-        sim.set_systems_collection_uri("/unavailable");
-        sim.fail_resource("/unavailable");
-        let client = sim
-            .create_client("localhost", Some(443), RedfishAuth::Anonymous, None)
-            .await
-            .unwrap();
-        let root = client.get_service_root().await.unwrap();
-        assert!(
-            fetch_system_resources(client.as_ref(), &root)
-                .await
-                .is_empty()
-        );
-    }
 
     fn test_addr() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443)
@@ -2430,308 +1364,26 @@ mod tests {
         RedfishClient::new(sim, nv_pool, None)
     }
 
-    #[tokio::test]
-    async fn both_backends_preserve_system_and_processor_inventory() {
-        let bmc = bmc_mock::test_support::nvidia_dgx_vr_host_bmc().await;
-        let raw_systems = bmc
-            .service_root
-            .systems()
-            .await
-            .unwrap()
-            .unwrap()
-            .members()
-            .await
-            .unwrap();
-        let hgx = raw_systems
-            .iter()
-            .find(|system| system.raw().id == "HGX_Baseboard_0")
-            .unwrap();
-        // HGX has no power-control callbacks, so its resource omits PowerState.
-        // libredfish defaults a missing PowerState but rejects an explicit null.
-        assert!(hgx.power_state().is_none());
-        let hardware = hgx.hardware_id();
-        let hgx_resource = serde_json::json!({
-            "@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
-            "Id": hgx.raw().id,
-            "Manufacturer": hardware.manufacturer.map(|value| value.to_string()),
-            "Model": hardware.model.map(|value| value.to_string()),
-            "SerialNumber": hardware.serial_number.map(|value| value.into_inner()),
-            "SKU": hgx.sku().map(|value| value.to_string()),
-            "BiosVersion": hgx.raw().bios_version.clone().flatten(),
-            "Processors": {"@odata.id": "/advertised-gpu-inventory"},
-        });
-        let nv_report = bmc_explorer::nv_generate_exploration_report(
-            bmc.service_root,
-            &bmc_explorer::Config {
-                boot_interface_mac: None,
-                error_classifier: &|_| None,
-                retry_timeout: std::time::Duration::ZERO,
-                explore_drive_firmware: false,
-            },
-        )
-        .await
-        .unwrap();
-        let sim = Arc::new(RedfishSim::default());
-        sim.set_system_id("System_0");
-        sim.set_service_root_vendor(Some("NVIDIA".into()));
-        sim.set_service_root_product(Some("VR NVL72".into()));
-        sim.set_systems_collection_uri("/redfish/v1/Systems");
-        sim.set_resource(
-            "/redfish/v1/Systems",
-            serde_json::json!({"@odata.id": "/redfish/v1/Systems", "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection", "Name": "Systems", "Members@odata.count": 2, "Members": [
-                hgx_resource,
-                {"@odata.id": "/redfish/v1/Systems/System_0", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "System_0"}
-            ]}),
-        );
-        sim.set_resource("/advertised-gpu-inventory", json!({
-            "@odata.id": "/advertised-gpu-inventory", "@odata.type": "#ProcessorCollection.ProcessorCollection",
-            "Name": "Processors", "Members@odata.count": 1, "Members": [{
-                "@odata.id": "/advertised-gpu-inventory/GPU_0",
-                "@odata.type": "#Processor.v1_20_0.Processor",
-                "Id": "GPU_0", "Name": "GPU 0", "Model": "Vera Rubin GPU",
-                "Oem": {"Nvidia": {
-                    "@odata.type": "#NvidiaProcessor.v1_4_0.NvidiaGPU",
-                    "MNNVLinkTopology": {"TraySlotNumber": 26, "TraySlotIndex": 16}
-                }}
-            }]
-        }));
-        let redfish = build_redfish_client(sim.clone());
-        let report = redfish
-            .generate_exploration_report(
-                test_addr(),
-                BmcAccess::Direct(Credentials::UsernamePassword {
-                    username: "root".into(),
-                    password: "password".into(),
-                }),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            report
-                .systems
-                .iter()
-                .map(|system| system.id.as_str())
-                .collect::<Vec<_>>(),
-            ["System_0", "HGX_Baseboard_0"]
-        );
-        assert_eq!(report.systems[1], nv_report.systems[1]);
-        assert_eq!(report.rack_position(), nv_report.rack_position());
-        assert!(
-            sim.resource_requests()
-                .iter()
-                .any(|uri| uri == "/advertised-gpu-inventory")
-        );
-        assert!(
-            !sim.resource_requests()
-                .iter()
-                .any(|uri| uri == "/redfish/v1/Systems/System_0")
-        );
-        sim.fail_resource("/redfish/v1/Systems");
-        let refreshed = redfish
-            .generate_exploration_report(
-                test_addr(),
-                BmcAccess::Direct(Credentials::UsernamePassword {
-                    username: "root".into(),
-                    password: "password".into(),
-                }),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(refreshed.systems.len(), 1);
-        assert_eq!(refreshed.systems[0], report.systems[0]);
-    }
-
-    #[tokio::test]
-    async fn detected_lenovo_host_collects_linked_network_adapter_port_mac() {
-        let mac_address = MacAddress::new([0x94, 0x6d, 0xae, 0x53, 0xcb, 0x9b]);
-        let sim = Arc::new(RedfishSim::default());
-        sim.set_service_root_vendor(Some("Lenovo".to_string()));
-        sim.set_system_id("System");
-        sim.set_system_chassis_ids(vec!["Card1".to_string()]);
-        sim.set_network_adapter_port_mac_addresses(vec![mac_address]);
-        let redfish = build_redfish_client(sim);
-
-        let report = redfish
-            .generate_exploration_report(
-                test_addr(),
-                BmcAccess::Direct(Credentials::UsernamePassword {
-                    username: "root".to_string(),
-                    password: "password".to_string(),
-                }),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(
-            report.systems[0]
-                .ethernet_interfaces
-                .iter()
-                .all(|interface| interface.mac_address.is_none()),
-            "Port data must not become a System EthernetInterface",
-        );
-        let adapter = report
-            .chassis
-            .iter()
-            .find(|chassis| chassis.id == "Card1")
-            .and_then(|chassis| chassis.network_adapters.first())
-            .expect("linked chassis network adapter");
-        assert_eq!(adapter.port_mac_addresses, vec![mac_address]);
-        assert_eq!(report.all_mac_addresses(), vec![mac_address]);
-        assert_eq!(report.find_interface_id_for_mac(mac_address), None);
-    }
-
-    #[tokio::test]
-    async fn network_adapter_port_invalid_ids_return_errors_without_poisoning_the_sim() {
-        let sim = RedfishSim::default();
-        sim.set_network_adapter_port_mac_addresses(vec![MacAddress::new([
-            0x94, 0x6d, 0xae, 0x53, 0xcb, 0x9b,
-        ])]);
-        let client = sim
-            .create_client("test-host", None, RedfishAuth::Anonymous, None)
-            .await
-            .unwrap();
-
-        for (scenario, port_id) in [
-            ("non-numeric identifier", "not-a-port"),
-            ("out-of-range identifier", "1"),
-        ] {
-            assert!(
-                client.get_port("Card1", "0", port_id).await.is_err(),
-                "{scenario} should return an error",
-            );
-            assert!(
-                client.get_port("Card1", "0", "0").await.is_ok(),
-                "{scenario} should not poison simulator state",
-            );
-        }
-    }
-
     #[test]
-    fn network_adapter_port_inventory_gate_cases() {
-        #[derive(Clone)]
-        struct Input {
-            supports_adapter_port_mac_inventory: bool,
-            is_host: bool,
-            linked_chassis_ids: Vec<String>,
-        }
-
-        check_values(
-            [
-                Check {
-                    scenario: "eligible host uses linked adapter ports",
-                    input: Input {
-                        supports_adapter_port_mac_inventory: true,
-                        is_host: true,
-                        linked_chassis_ids: vec!["Card1".to_string()],
-                    },
-                    expect: true,
-                },
-                Check {
-                    scenario: "non-host skips adapter ports",
-                    input: Input {
-                        supports_adapter_port_mac_inventory: true,
-                        is_host: false,
-                        linked_chassis_ids: vec!["Card1".to_string()],
-                    },
-                    expect: false,
-                },
-                Check {
-                    scenario: "platform without adapter-port inventory skips adapter ports",
-                    input: Input {
-                        supports_adapter_port_mac_inventory: false,
-                        is_host: true,
-                        linked_chassis_ids: vec!["Card1".to_string()],
-                    },
-                    expect: false,
-                },
-                Check {
-                    scenario: "eligible host without chassis links skips adapter ports",
-                    input: Input {
-                        supports_adapter_port_mac_inventory: true,
-                        is_host: true,
-                        linked_chassis_ids: vec![],
-                    },
-                    expect: false,
-                },
-            ],
-            |input| {
-                should_fetch_network_adapter_ports(
-                    input.supports_adapter_port_mac_inventory,
-                    input.is_host,
-                    &input.linked_chassis_ids,
-                )
-            },
-        );
-    }
-
-    async fn machine_setup_status_target(
-        target: Option<BootInterfaceTarget>,
-    ) -> Result<
-        (
-            Option<MachineBootInterfaceTarget>,
-            Vec<Option<RedfishSimBootInterfaceRef>>,
-        ),
-        String,
-    > {
-        let sim = RedfishSim::default();
-        let client = sim
-            .create_client("test-host", None, RedfishAuth::Anonymous, None)
-            .await
-            .map_err(|error| error.to_string())?;
-        let status = fetch_machine_setup_status(client.as_ref(), target.as_ref())
-            .await
-            .map_err(|error| error.to_string())?;
-
-        Ok((
-            status.evaluated_boot_interface,
-            sim.machine_setup_status_targets("test-host"),
-        ))
-    }
-
-    #[tokio::test]
-    async fn machine_setup_status_records_the_exact_evaluated_target() {
-        let mac_address = MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
-        let boot_interface = MachineBootInterface {
-            mac_address,
-            interface_id: "NIC.Slot.7-1-1".to_string(),
+    fn lockdown_reports_an_unclassified_aggregate_as_partial() {
+        value_scenarios!(run = |aggregate| {
+            lockdown_report(&bmc_platform::LockdownStatus {
+                aggregate,
+                message: String::new(),
+                host: LockdownState::Unknown,
+                bmc: LockdownState::Unknown,
+            })
+            .status
         };
-
-        check_cases_async(
-            [
-                Case {
-                    scenario: "complete pair",
-                    input: Some(BootInterfaceTarget::Pair(boot_interface.clone())),
-                    expect: Yields((
-                        Some(MachineBootInterfaceTarget::Pair(boot_interface.clone())),
-                        vec![Some(RedfishSimBootInterfaceRef::Pair {
-                            mac_address,
-                            interface_id: boot_interface.interface_id.clone(),
-                        })],
-                    )),
-                },
-                Case {
-                    scenario: "legacy MAC only",
-                    input: Some(BootInterfaceTarget::MacOnly(mac_address)),
-                    expect: Yields((
-                        Some(MachineBootInterfaceTarget::MacOnly(mac_address)),
-                        vec![Some(RedfishSimBootInterfaceRef::Mac(mac_address))],
-                    )),
-                },
-                Case {
-                    scenario: "no boot interface",
-                    input: None,
-                    expect: Yields((None, vec![None])),
-                },
-            ],
-            machine_setup_status_target,
-        )
-        .await;
+            "classified" {
+                LockdownState::Enabled => InternalLockdownStatus::Enabled,
+                LockdownState::Disabled => InternalLockdownStatus::Disabled,
+                LockdownState::Partial => InternalLockdownStatus::Partial,
+            }
+            "unclassified" {
+                LockdownState::Unknown => InternalLockdownStatus::Partial,
+            }
+        );
     }
 
     #[test]
@@ -2792,8 +1444,57 @@ mod tests {
             password: "factory_pass".to_string(),
         };
 
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let report = match vendor {
+            RedfishVendor::LiteOnPowerShelf => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot::default()),
+                chassis: vec![model::site_explorer::Chassis {
+                    manufacturer: Some("Lite-On Technology Corp.".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            RedfishVendor::DeltaPowerShelf => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot::default()),
+                chassis: vec![model::site_explorer::Chassis {
+                    manufacturer: Some("Delta Electronics".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            RedfishVendor::NvidiaGBx00 => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot {
+                    vendor: Some("NVIDIA".to_string()),
+                    product: Some("GB200 NVL".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            RedfishVendor::NvidiaDpu => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot {
+                    vendor: Some("Nvidia".to_string()),
+                    product: Some("BlueField-3 DPU".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            _ => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot {
+                    vendor: Some(vendor.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        };
+
         redfish
-            .set_bmc_root_password(test_addr(), vendor, factory_creds, "site_pass".to_string())
+            .set_bmc_root_password(
+                test_addr(),
+                mac,
+                Some(&report),
+                factory_creds,
+                "site_pass".to_string(),
+            )
             .await?;
 
         Ok(sim
@@ -2898,6 +1599,7 @@ mod tests {
             .get_power_state(
                 test_addr(),
                 established(mac, Credentials::new("root", "pw")),
+                None,
             )
             .await
             .expect("established read succeeds on the sim");
@@ -2939,6 +1641,7 @@ mod tests {
             .get_power_state(
                 test_addr(),
                 established(mac, Credentials::new("root", "pw")),
+                None,
             )
             .await
             .expect("established read succeeds on the sim");
@@ -2959,18 +1662,31 @@ mod tests {
         use carbide_redfish::libredfish::test_support::RedfishAuthKind;
         let (client, ops_sim, general_sim, _) = proxied_client();
 
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let credentials = Credentials::new("root", "password");
         client
-            .validate_bmc_credentials(test_addr(), Credentials::new("root", "password"))
+            .validate_bmc_root_credentials(test_addr(), mac, credentials.clone())
             .await
             .expect("validation succeeds on the sim");
+        client
+            .apply_bmc_root_policy(test_addr(), mac, None, credentials)
+            .await
+            .expect("the policy applies on the sim");
 
         assert!(
             general_sim.create_client_calls().is_empty(),
             "credential validation must not route via the proxied pool"
         );
-        let calls = ops_sim.create_client_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].auth, RedfishAuthKind::Direct);
+        let auths: Vec<_> = ops_sim
+            .create_client_calls()
+            .into_iter()
+            .map(|call| call.auth)
+            .collect();
+        assert!(auths.contains(&RedfishAuthKind::Direct), "{auths:?}");
+        assert!(
+            !auths.contains(&RedfishAuthKind::Key),
+            "explicit-credential setup must not use stored credentials: {auths:?}"
+        );
     }
 
     /// The nv-redfish selection: established + proxy -> proxied pool with no
@@ -3009,5 +1725,439 @@ mod tests {
             client.nv_pool_and_credentials(BmcAccess::Direct(explicit.clone()));
         assert!(std::ptr::eq(pool, client.nv_redfish_client_pool.as_ref()));
         assert_eq!(credentials, Some(explicit));
+    }
+
+    // --- drivers backend ---------------------------------------------------
+
+    /// A drivers-backed client against the mock BMC `router` serves, recording
+    /// the path and body of every action the mock receives.
+    struct DriversBmc {
+        _server: CombinedServer,
+        address: SocketAddr,
+        client: RedfishClient,
+        credentials: Credentials,
+        actions: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    fn dell_router() -> Router {
+        dell_poweredge_r750_router_with_event_limits(EventServiceConfig::default()).0
+    }
+
+    fn drivers_bmc(router: Router) -> DriversBmc {
+        drivers_bmc_with_ipmi(
+            router,
+            carbide_ipmi::test_support(),
+            TestCredentialManager::new(Credentials::new("root", "password")),
+        )
+    }
+
+    fn drivers_bmc_with_ipmi(
+        router: Router,
+        ipmi: Arc<dyn carbide_ipmi::IPMITool>,
+        store: TestCredentialManager,
+    ) -> DriversBmc {
+        let actions: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+        let recorded = actions.clone();
+        // The mock answers actions with `{}`, which the production client
+        // rejects; real BMCs answer with 204 or a Redfish success envelope.
+        let router = router.layer(middleware::from_fn(move |request: Request, next: Next| {
+            let recorded = recorded.clone();
+            async move {
+                if request.method() != Method::POST {
+                    return next.run(request).await;
+                }
+                let (parts, body) = request.into_parts();
+                let body = to_bytes(body, usize::MAX)
+                    .await
+                    .expect("the action body is readable");
+                recorded.lock().unwrap().push((
+                    parts.uri.path().to_string(),
+                    String::from_utf8_lossy(&body).into_owned(),
+                ));
+                let response = next.run(Request::from_parts(parts, Body::from(body))).await;
+                if response.status().is_success() {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    response
+                }
+            }
+        }));
+        let (server, base_url) = serve_https("site-explorer", router);
+        let address = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            base_url.port().expect("the mock BMC names its port"),
+        );
+        let credentials = Credentials::new("root", "password");
+        let connector = DriverConnector::new(
+            DriverPools {
+                routed: nv_pool(),
+                direct: nv_pool(),
+            },
+            Arc::new(store),
+            "site-explorer-test",
+            bmc_drivers::built_in_rules(),
+            ipmi,
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("the pools are in order");
+        let mut client = build_redfish_client(Arc::new(RedfishSim::default()));
+        client.driver_connector = Some(Arc::new(connector));
+        DriversBmc {
+            _server: server,
+            address,
+            client,
+            credentials,
+            actions,
+        }
+    }
+
+    /// Under the drivers backend, a power call without a report that
+    /// identifies the BMC, as remediation makes after a failed exploration,
+    /// reaches the host over plain Redfish, while an identifying report still
+    /// selects drivers.
+    #[tokio::test]
+    async fn drivers_backend_powers_an_unidentified_host_over_plain_redfish() {
+        let DriversBmc {
+            _server,
+            address,
+            client,
+            credentials,
+            actions,
+        } = drivers_bmc(dell_router());
+        let failed =
+            EndpointExplorationReport::new_with_error(EndpointExplorationError::Unreachable {
+                details: None,
+            });
+        let mac: MacAddress = "02:00:00:00:00:0a".parse().unwrap();
+        let bmc = || established(mac, credentials.clone());
+
+        for (scenario, report) in [
+            ("never explored", None),
+            ("exploration failed", Some(&failed)),
+        ] {
+            let state = client
+                .get_power_state(address, bmc(), report)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+            assert_eq!(state, Some(PowerState::On), "{scenario}");
+            let count = actions.lock().unwrap().len();
+            let dispatch = if report.is_some() {
+                PowerDispatch::Immediate
+            } else {
+                PowerDispatch::AfterTargetCheck
+            };
+            let prepared = client
+                .prepare_power(address, bmc(), report, ResetType::ForceRestart, dispatch)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+            assert!(prepared.ipmi_port.is_none());
+            assert_eq!(actions.lock().unwrap().len(), count);
+            prepared
+                .send
+                .await
+                .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+            let actions = actions.lock().unwrap();
+            let [(path, body)] = &actions[count..] else {
+                panic!("expected one reset in {scenario}")
+            };
+            assert_eq!(
+                path,
+                "/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset"
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap()["ResetType"],
+                "ForceRestart"
+            );
+        }
+
+        // Plain Redfish must discover a target before returning a prepared operation.
+        let shelf = drivers_bmc(delta_powershelf_router());
+        let error = shelf
+            .client
+            .prepare_power(
+                shelf.address,
+                established(mac, shelf.credentials.clone()),
+                None,
+                ResetType::ForceRestart,
+                PowerDispatch::AfterTargetCheck,
+            )
+            .await
+            .err()
+            .expect("a BMC with no system cannot prepare a reset");
+        assert!(
+            error.to_string().contains("lists no computer systems"),
+            "{error}"
+        );
+        assert!(shelf.actions.lock().unwrap().is_empty());
+
+        // Drivers act on the system the report names, which plain Redfish
+        // would never look for, so naming a missing one shows they ran.
+        let identified = EndpointExplorationReport {
+            service_root: Some(ServiceRoot::default()),
+            systems: vec![ExploredSystem {
+                id: "Missing".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let error = client
+            .get_power_state(address, bmc(), Some(&identified))
+            .await
+            .expect_err("the drivers look for the system the report names");
+        assert!(error.to_string().contains("Missing"), "{error}");
+        let before = actions.lock().unwrap().len();
+        let prepared = client
+            .prepare_power(
+                address,
+                bmc(),
+                Some(&identified),
+                ResetType::ForceRestart,
+                PowerDispatch::AfterTargetCheck,
+            )
+            .await
+            .unwrap();
+        assert!(prepared.ipmi_port.is_none());
+        assert_eq!(actions.lock().unwrap().len(), before);
+        assert!(
+            prepared
+                .send
+                .await
+                .expect_err("the missing system cannot receive a reset")
+                .to_string()
+                .contains("Missing")
+        );
+        assert_eq!(actions.lock().unwrap().len(), before);
+    }
+
+    #[tokio::test]
+    async fn prepared_drivers_ipmi_restart_uses_captured_credentials_and_port() {
+        #[derive(Default)]
+        struct Ipmi(Mutex<Vec<SocketAddr>>);
+        #[async_trait::async_trait]
+        impl carbide_ipmi::IPMITool for Ipmi {
+            async fn restart_with_credentials(
+                &self,
+                address: SocketAddr,
+                credentials: &Credentials,
+            ) -> eyre::Result<()> {
+                assert_eq!(
+                    credentials,
+                    &Credentials::new("captured-root", "captured-secret")
+                );
+                self.0.lock().unwrap().push(address);
+                Ok(())
+            }
+            async fn restart(&self, _: SocketAddr, _: bool, _: &CredentialKey) -> eyre::Result<()> {
+                panic!("prepared IPMI restart used the credential key")
+            }
+            async fn bmc_cold_reset(&self, _: SocketAddr, _: &CredentialKey) -> eyre::Result<()> {
+                panic!("unexpected BMC reset")
+            }
+        }
+        let ipmi = Arc::new(Ipmi::default());
+        // A second credential-store read for either transport would fail.
+        let bmc = drivers_bmc_with_ipmi(
+            dell_router(),
+            ipmi.clone(),
+            TestCredentialManager::default(),
+        );
+        let report = EndpointExplorationReport {
+            service_root: Some(ServiceRoot {
+                vendor: Some("Lenovo".into()),
+                ..Default::default()
+            }),
+            systems: vec![ExploredSystem {
+                id: "1".into(),
+                model: Some("ThinkSystem SR650 V4".into()),
+                ..Default::default()
+            }],
+            managers: vec![ExploredManager {
+                id: "1".into(),
+                ipmi_port: Some(6623),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let prepared = bmc
+            .client
+            .prepare_power(
+                bmc.address,
+                established(
+                    "02:00:00:00:00:0a".parse().unwrap(),
+                    Credentials::new("captured-root", "captured-secret"),
+                ),
+                Some(&report),
+                ResetType::GracefulRestart,
+                PowerDispatch::AfterTargetCheck,
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared.ipmi_port, Some(6623));
+        assert!(prepared.matches_ipmi_report(Some(&report)));
+        let mut changed = report;
+        changed.managers[0].ipmi_port = None;
+        assert!(!prepared.matches_ipmi_report(Some(&changed)));
+        assert!(ipmi.0.lock().unwrap().is_empty());
+        prepared.send.await.unwrap();
+        assert_eq!(
+            ipmi.0.lock().unwrap().as_slice(),
+            &[SocketAddr::new(bmc.address.ip(), 6623)]
+        );
+        assert!(bmc.actions.lock().unwrap().is_empty());
+    }
+
+    /// Under the drivers backend, a BMC reset whose type the drivers cannot
+    /// choose, because the BMC is unidentified or the operator named a type,
+    /// posts `Manager.Reset` over plain Redfish carrying only the operator's
+    /// type, while an identifying report with no type selects the drivers.
+    #[tokio::test]
+    async fn drivers_backend_resets_over_plain_redfish_unless_the_drivers_choose() {
+        let dell = drivers_bmc(dell_router());
+        let delta = drivers_bmc(delta_powershelf_router());
+        let mac: MacAddress = "02:00:00:00:00:0b".parse().unwrap();
+        let failed =
+            EndpointExplorationReport::new_with_error(EndpointExplorationError::Unreachable {
+                details: None,
+            });
+        // Drivers reset the manager the report names, which plain Redfish
+        // never looks for, so naming a missing one keeps them off the wire.
+        let identified = EndpointExplorationReport {
+            service_root: Some(ServiceRoot::default()),
+            managers: vec![ExploredManager {
+                id: "Missing".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // `Some(type)` expects one plain `Manager.Reset` carrying `type`, if
+        // any; `None` expects the drivers to post none.
+        for (scenario, bmc, report, reset_type, posted) in [
+            (
+                "never explored leaves the type to the BMC",
+                &dell,
+                None,
+                None,
+                Some(None),
+            ),
+            (
+                "a failed exploration leaves the type to the BMC",
+                &dell,
+                Some(&failed),
+                None,
+                Some(None),
+            ),
+            (
+                "an operator's type is sent as given, even to an identified BMC",
+                &dell,
+                Some(&identified),
+                Some(ResetType::ForceRestart),
+                Some(Some("ForceRestart")),
+            ),
+            (
+                "an identified BMC with no type is reset by its drivers",
+                &dell,
+                Some(&identified),
+                None,
+                None,
+            ),
+            (
+                "an operator's type reaches a BMC that lists no computer systems",
+                &delta,
+                None,
+                Some(ResetType::GracefulRestart),
+                Some(Some("GracefulRestart")),
+            ),
+        ] {
+            bmc.actions.lock().unwrap().clear();
+            let result = bmc
+                .client
+                .reset_bmc(
+                    bmc.address,
+                    established(mac, bmc.credentials.clone()),
+                    report,
+                    reset_type,
+                )
+                .await;
+            let resets: Vec<Option<Value>> = bmc
+                .actions
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/Actions/Manager.Reset"))
+                .map(|(_, body)| serde_json::from_str(body).ok())
+                .collect();
+            match posted {
+                Some(expected) => {
+                    result.unwrap_or_else(|error| panic!("{scenario}: {error}"));
+                    let [body] = resets.as_slice() else {
+                        panic!("{scenario}: expected one Manager.Reset, got {resets:?}");
+                    };
+                    let sent = body
+                        .as_ref()
+                        .and_then(|body| body.get("ResetType"))
+                        .and_then(Value::as_str);
+                    assert_eq!(sent, expected, "{scenario}");
+                }
+                None => assert!(resets.is_empty(), "{scenario}: {resets:?}"),
+            }
+        }
+    }
+
+    /// Among several managers, the plain reset targets the one exploration
+    /// records for the host system, not the first the BMC lists.
+    #[tokio::test]
+    async fn plain_reset_targets_the_host_systems_manager_among_several() {
+        let bmc = drivers_bmc(nvidia_gh200_swapped_managers_router());
+        let mac: MacAddress = "02:00:00:00:00:0c".parse().unwrap();
+        let manager = bmc
+            .client
+            .host_manager(bmc.address, established(mac, bmc.credentials.clone()))
+            .await
+            .expect("the host system links a listed manager");
+        assert_eq!(
+            manager.raw().odata_id.to_string(),
+            "/redfish/v1/Managers/BMC_0"
+        );
+    }
+
+    /// On the drivers backend, factory takeover of a BMC that refuses its
+    /// factory password outside AccountService changes the password, then
+    /// applies the default account policy, which the BMC only accepts with
+    /// the new password.
+    #[tokio::test]
+    async fn drivers_backend_factory_takeover_changes_the_password_then_applies_policy() {
+        let (router, _state) = host_router_with_auth(HardwareType::WiwynnGB200Nvl);
+        let (router, writes) = record_writes(router);
+        let bmc = drivers_bmc(router);
+        let mac: MacAddress = "02:00:00:00:00:0d".parse().unwrap();
+        bmc.client
+            .set_bmc_root_password(
+                bmc.address,
+                mac,
+                None,
+                Credentials::new(DUMMY_FACTORY_USERNAME, DUMMY_FACTORY_PASSWORD),
+                "site-pass".to_string(),
+            )
+            .await
+            .expect("factory takeover succeeds on drivers backend");
+
+        let accepted: Vec<_> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|write| write.status.is_success())
+            .map(|write| (write.method.clone(), write.path.clone()))
+            .collect();
+        assert_eq!(
+            accepted,
+            [
+                (
+                    Method::PATCH,
+                    format!("/redfish/v1/AccountService/Accounts/{DUMMY_FACTORY_USERNAME}"),
+                ),
+                (Method::PATCH, "/redfish/v1/AccountService".to_string()),
+            ]
+        );
     }
 }

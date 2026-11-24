@@ -36,7 +36,7 @@ change something, you are touching one of these:
 |-------|---------------|------|
 | **1. Umbrella + subchart Helm values** | `helm/values.yaml` and `helm/charts/<chart>/values.yaml`, overridden by `helm-prereqs/values/nico-core.yaml` | Which subcharts are enabled, image references, replica counts, per-service LoadBalancer VIPs, ServiceMonitor toggles, certificate parameters. |
 | **2. `nico-api` siteConfig (TOML)** | `nico-api.siteConfig.nicoApiSiteConfig` block inside `helm-prereqs/values/nico-core.yaml`. Mounted into the `nico-api` pod as `nico-api-config.toml`. | All site-policy decisions: identity, pools, networks, tenant isolation, IB, NvLink, firmware updates, host health thresholds, state-controller timing, optional features (DSX, DPA, FNN, SPDM, attestation, ...). |
-| **3. Environment variables + secrets** | Container env in chart templates, Kubernetes Secrets, ConfigMaps. Injected by `setup.sh` (`NICO_IMAGE_REGISTRY`, `NICO_CORE_IMAGE_TAG`, `REGISTRY_PULL_SECRET`, ...) or ESO-synced from Vault. | Image registry/tag, registry pull credentials, database credentials, Vault tokens, SPIFFE trust domain overrides. |
+| **3. Environment variables + secrets** | Container env in chart templates, Kubernetes Secrets, ConfigMaps. Injected by `setup.sh` (`NICO_IMAGE_REGISTRY`, `NICO_CORE_IMAGE_TAG`, `REGISTRY_PULL_SECRET`, ...) or ESO-synced across namespaces. | Image registry/tag, registry pull credentials, database credentials, Vault tokens, SPIFFE trust domain overrides. |
 | **4. External-system config** | Vault PKI roles, Postgres-operator `postgresql` CRDs, MetalLB `IPAddressPool` / `BGPPeer` / `BGPAdvertisement` CRDs, MQTT brokers, Loki endpoints. | Anything outside NICo's own charts that NICo depends on. Wired by `helm-prereqs`, owned by the operator. |
 
 The rule of thumb: if you can change it with `helm upgrade`, it is layer 1
@@ -177,7 +177,7 @@ requirements.
 
 `site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
 
-`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. Inherited roots are reduced to their minimal exact union.
+`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered by an exact VpcPrefix reference, a contained VpcPrefix without parentage, or a contained VPC-attached direct NetworkPrefix. Exact parentage takes precedence over containment; a child parented to a replacement root does not retain the removed root. Direct prefixes retain retiring roots while their segment exists and no Ready operator root fully covers them, including during draining. Adding or restoring Ready operator coverage releases those roots without deleting the segment. VpcPrefix references remain until hard deletion. Inherited roots are reduced to their minimal exact union.
 
 An explicit list is authoritative. Under mutual isolation, it must cover every retained tenant root with an equal or broader route. Creation rejects a new tenant root without coverage. Startup and every FNN DPU configuration response, including Admin-only responses, check every retained tenant root. Unused roots and roots in `Deleting` still count, even with tenant overlap disabled. An empty list disables the routes and cannot support tenant roots under mutual isolation. Open isolation does not require coverage or enforce `max_site_prefix_isolation_rules`, because it installs no isolation rules. Explicit CIDRs use their network address and exact duplicates are removed. Parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route.
 
@@ -257,15 +257,13 @@ For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
 to descriptor-based RMS operations.
 
-Each `rack_capabilities.<role>` section also requires a `count` field. This
-field is independent of RMS: it tells the rack state machine how many devices
-with that role the rack must have before it can progress. A rack stays in
-`Created` until all three roles have at least `count` devices registered; it
-stays in `Discovering` until all three roles have at least `count` devices in
-`Ready` state. All three roles — `compute`, `switch`, and `power_shelf` —
-require a `count` regardless of which backends are set to `rms`. The third
-example below shows `count` on `compute` and `switch` even though those roles
-use non-RMS backends.
+Each `rack_capabilities.<role>` section requires a `count` field regardless
+of which backends are set to `rms`. Counts describe expected inventory for
+missing-component health alerts. Only the switch count gates ingestion:
+`Created` waits for that many registered switches and `Discovering` waits for
+that many ready switches. Compute and power shelf counts and readiness do not
+gate these transitions. See the [rack state machine](../../../docs/architecture/state_machines/rackstatemachine.md#discovering-r_discovering)
+for shipped defaults and transition details.
 
 The examples below only show the component-manager and rack-profile fields.
 Configure `[rms]` separately when NICo needs to call RMS.
@@ -407,6 +405,10 @@ plus thresholds for DPU agent compliance. Operators flip this from
   switches and power shelves (both on by default). A declared power shelf with
   no DHCP lease is discovered at its static `expected_power_shelves` IP as a
   matter of course.
+
+These creation toggles do not control BMC pre-ingestion. In particular, disabling
+switch creation still allows [initial NVOS password rotation](../../../docs/operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
+to complete before a switch state machine is created.
 
 Site Explorer auto-creation is additionally gated per device on a matching
 expected-hardware record (`expected_machines`, `expected_switches`,
@@ -831,13 +833,13 @@ pool; the uplink-side block defines public prefixes and how they are
 advertised. Both are documented field-by-field in
 [`crates/api-core/src/cfg/README.md` → VmaasConfig](../../../crates/api-core/src/cfg/README.md#vmaasconfig).
 
-### InfiniBand fabric definitions — `[ib_fabrics.<name>]`
+### InfiniBand fabric definitions — `[ib_fabrics.default]`
 
-`[ib_config]` toggles InfiniBand support fleet-wide; `[ib_fabrics.<name>]`
-defines a specific UFM-managed fabric. Currently exactly one fabric is
-supported. Required fields: UFM endpoint, credentials (a token or a client
-certificate), MGMT IB subnet, GUID prefix. See
-[`crates/api-core/src/cfg/README.md` → NicoConfig](../../../crates/api-core/src/cfg/README.md#nicoconfig-top-level).
+`[ib_config]` toggles InfiniBand support fleet-wide. When enabled, it supports
+at most one configured fabric, named `default`. The
+[InfiniBand partitioning manual](../../../docs/manuals/networking/infiniband_partitioning.md#configuring-nico-to-talk-to-ufm)
+defines the supported fabric settings, P_Key ranges and separate credential
+configuration.
 
 ### Operator dev / debug knobs
 
@@ -869,22 +871,22 @@ values files.
 | `NICO_SITE_UUID` | Stable UUID for this site | UUIDv4. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 | `PREFLIGHT_CHECK_IMAGE` | Image for per-node preflight checks | Defaults to `busybox:1.36`. Override for air-gapped clusters. |
 
-Inside the cluster, `nico-api` discovers Vault, Postgres, and SPIFFE settings
-through Kubernetes Secrets and ConfigMaps wired by `helm-prereqs`:
+Inside the cluster, `nico-api` discovers Vault (when installed), Postgres, and
+SPIFFE settings through Kubernetes Secrets and ConfigMaps wired by `helm-prereqs`:
 
 | Secret / ConfigMap | Type | Provisioned by | Consumed by |
 |--------------------|------|----------------|-------------|
 | `nico-system.nico.nico-pg-cluster.credentials` | Secret | postgres-operator | `nico-api` (`DATASTORE_*` env) |
 | `nico-system-nico-database-config` | ConfigMap | `helm-prereqs` | `nico-api` (`DATASTORE_HOST/PORT/NAME` env) |
-| `nico-vault-token` | Secret | Vault unseal job | `nico-api` (`VAULT_TOKEN` env) |
-| `nico-vault-approle-tokens` | Secret | Vault unseal job | Long-running token refresher (`VAULT_ROLE_ID`, `VAULT_SECRET_ID`) |
-| `vault-cluster-info` | ConfigMap | `helm-prereqs` | `nico-api` (`VAULT_SERVICE`, `VAULT_MOUNT`) |
+| `nico-vault-token` | Secret | `nico-prereqs`, from `vaultroottoken` (with Vault) | `nico-api` (`VAULT_TOKEN` env) |
+| `nico-vault-approle-tokens` | Secret | `nico-prereqs`, filled by the `vault-pki-config` Job (with Vault) | Long-running token refresher (`VAULT_ROLE_ID`, `VAULT_SECRET_ID`) |
+| `vault-cluster-info` | ConfigMap | `nico-prereqs` (with Vault) | `nico-api` (`VAULT_SERVICE`, `VAULT_MOUNT`) |
 | `vault-cluster-keys` / `vaultunsealkeys` / `vaultroottoken` | Secret | Vault init job | Vault auto-unseal on pod restart |
-| `nico-roots` | Secret | ESO-synced from Vault PKI | Every workload that needs the SPIFFE root |
+| `nico-roots` | Secret | ESO-synced from the `site-root` Secret in `cert-manager` | Every workload that needs the SPIFFE root |
 | `imagepullsecret` / `nvcr-nico-dev` | dockerconfigjson | `setup.sh` (from `REGISTRY_PULL_SECRET`) | Every pod that pulls from authenticated registries |
 | `ssh-host-key` | Secret | `bootstrap_ssh_host_key.sh` during `setup.sh` prerequisite setup | `nico-ssh-console-rs` (mounted as `ssh_host_ed25519_key`) |
 | `azure-sso-nico-web-client-secret` | Secret | **operator-supplied** (manual, optional) | `nico-api` when `[auth.web].auth_type = "oauth2"` (`CARBIDE_WEB_OAUTH2_CLIENT_SECRET` env) |
-| `site-root` | cert-manager Certificate | `helm-prereqs` (self-signed bootstrap) | Vault PKI bootstrap chain |
+| `site-root` | cert-manager Certificate | `helm-prereqs` (self-signed bootstrap) | `site-issuer`; imported into Vault PKI on a Vault site |
 
 `setup.sh` provisions each chart-managed entry on first install. The OAuth2
 client secret is the only one operators must create manually — see
@@ -892,7 +894,7 @@ client secret is the only one operators must create manually — see
 for the `kubectl create secret` recipe.
 
 In steady state, all the auto-provisioned entries are reconciled by
-external-secrets-operator and the Vault PKI config job.
+external-secrets-operator and, on a Vault site, the Vault PKI config job.
 
 ---
 
@@ -900,8 +902,10 @@ external-secrets-operator and the Vault PKI config job.
 
 ### Vault PKI
 
-NICo issues every workload certificate through cert-manager backed by
-Vault PKI. Configurable surface:
+NICo issues its workload certificates through cert-manager, backed by Vault
+PKI (`vault-nico-issuer`) on a site with Vault, or by the `site-root` CA
+(`site-issuer`) on a site installed with `setup.sh --skip-vault`. Configurable
+surface:
 
 - `helm-prereqs/values.yaml` → `vault.nicoCliClientRole.{enabled,name,organization}` — adds an optional Vault role for short-lived `nico-cli` client certificates.
 - `helm/values.yaml` → `global.certificate.issuerRef.name` — change to point at a non-default ClusterIssuer.
@@ -961,6 +965,12 @@ scope          = "mqtt:publish mqtt:subscribe"
 `[*.auth.basic]` / `[*.auth.oauth2]` shape. See
 [`crates/api-core/src/cfg/README.md` → MqttAuthConfig / MqttOAuth2Config](../../../crates/api-core/src/cfg/README.md#mqttauthconfig).
 
+The `nico-dsx-exchange-consumer` chart reads its own MQTT credential and takes no Vault
+credential settings unless you opt in. Its Certificate still uses the Vault-named
+issuer `vault-nico-issuer` by default. Refer to
+[DSX Exchange Consumer Credential](../../../docs/configuration/credential-sources.md#dsx-exchange-consumer-credential)
+for the supported sources and rotation behavior.
+
 ### Network ports and firewall
 
 NICo services need both in-cluster and out-of-cluster reachability. The
@@ -984,7 +994,7 @@ rules.
 
 `nico-pxe` also needs egress to wherever PXE artifacts are stored
 (typically the same cluster's nico-api or an external HTTP boot artifact
-server). See [`helm/PREREQUISITES.md` → Network Requirements](../../../helm/PREREQUISITES.md#6-network-requirements)
+server). Refer to [`helm/PREREQUISITES.md` → Network Requirements](../../../helm/PREREQUISITES.md#7-network-requirements)
 for the layer-2 / broadcast-domain constraints on `nico-dhcp` /
 `nico-pxe`.
 
@@ -1053,19 +1063,26 @@ overrides.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `autoupdate` | `false` | Master switch for background firmware updates. |
-| `host_enable_autoupdate` | `[]` | Host model names to force-enable, regardless of `autoupdate`. |
-| `host_disable_autoupdate` | `[]` | Host model names to force-disable. |
+| `host_enable_autoupdate` | `[]` | Legacy field; automatic host selection does not read it. |
+| `host_disable_autoupdate` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `30s` | How often the firmware manager evaluates pending updates. |
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
-| `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
+| `concurrency_limit` | `16` | Maximum number of pre-ingestion endpoint tasks running concurrently within one pass. Separate from Machine Update Manager capacity for managed hosts. Use a positive value no greater than Tokio's semaphore maximum (`usize::MAX >> 3`). `0` stalls a nonempty pass; values above that maximum panic when the pass starts. |
 | `firmware_directory` | auto-detect (`/opt/nico/firmware` then `/opt/carbide/firmware`) | Where firmware binaries live on the API pod. Override to pin one location explicitly. |
 | `downloads` | See linked defaults | [Firmware download settings](https://docs.nvidia.com/infra-controller/documentation/operations-day-2/firmware-updates/configure-firmware-versions#firmware-downloads): worker, HTTP timeout, and response-size limits for each Core process. Requires a supporting Core build as described in the linked reference. |
 | `host_firmware_upgrade_retry_interval` | `60m` | Backoff between retries on failed host upgrades. |
-| `instance_updates_manual_tagging` | `true` | Require explicit instance tagging before instance-attached firmware upgrades fire. |
+| `instance_updates_manual_tagging` | `true` if field omitted; `false` if merged table absent | When `true`, automatic host candidate discovery requires top-level `Ready`. When `false`, discovery skips this state filter; `Ready` candidates still sort first. Other admission and [execution gates](../../../docs/operations/firmware-updates/host-firmware.md#scheduling-gates) still apply. |
 | `no_reset_retries` | `false` | Disable retry logic after BMC resets during firmware ops. |
 | `hgx_bmc_gpu_reboot_delay` | `30s` | Delay after GPU reboot before HGX BMC is contacted again. |
 | `requires_manual_upgrade` | `false` | Force every firmware upgrade to require explicit administrator approval. |
 | `max_concurrent_bfb_copies` | `10` | Concurrent DPU BFB copies. |
+
+Set `instance_updates_manual_tagging` explicitly. Core merges base configuration,
+site configuration, and `CARBIDE_API_` overrides before applying defaults.
+If the merged `firmware_global` table omits this field, its value is `true`;
+if that table is absent, its value is `false`. A `[firmware_global.downloads]`
+section also creates the parent table. The chart's bundled base configuration
+includes this table, so its omitted-field default is `true`.
 
 ### Update policy — `[machine_updater]`
 
@@ -1117,7 +1134,7 @@ InfiniBand fabric monitoring is a top-level capability gated on
 enabled = true
 max_partition_per_tenant = 16
 allow_insecure = false              # disable in production
-mtu = 4096
+mtu = 4 # 4k; accepted values are 2 (2k) and 4 (4k)
 rate_limit = 100
 service_level = 0
 fabric_monitor_run_interval = "60s" # how often UFM is polled for fabric topology + partition status
@@ -1125,7 +1142,7 @@ fabric_monitor_run_interval = "60s" # how often UFM is polled for fabric topolog
 
 The fabric monitor talks to UFM (Unified Fabric Manager) over its REST API
 to read partitions, map them to tenants, and enforce the per-tenant cap.
-Connection details (UFM host, credentials) live in `[ib_fabrics.<name>]`.
+The UFM endpoint and P_Key pool are configured in `[ib_fabrics.default]`.
 
 See [`crates/api-core/src/cfg/README.md` → IBFabricConfig](../../../crates/api-core/src/cfg/README.md#ibfabricconfig).
 
@@ -1141,7 +1158,12 @@ enabled = true
 monitor_run_interval = "60s"
 partition_monitor_max_concurrent_groups = 16 # racks or chassis reconciled in parallel per pass, documented range 1 to 256, larger values are accepted with a startup warning
 partition_monitor_full_check_interval = "10m" # racks and chassis whose inputs are unchanged and whose instances are synced are skipped between full checks, GPU health on them refreshes at this interval, "0s" checks every pass
+partition_monitor_unreachable_alert_after = 3 # consecutive passes a rack's NMX-C must be unusable before its NmxcUnreachable rack alert is raised; cleared by the first reachable pass
 nmxc_endpoint = "https://nmxc.example.com"
+
+[nvlink_config.switch_reachability]
+# enabled = false # TCP-probes ready switches each pass (NVOS on every switch, NMX-T on primaries); unset follows nvlink_config.enabled
+unreachable_alert_after = 3 # consecutive failed checks before the SwitchUnreachable or NmxtUnreachable switch alert is raised; the first successful check clears it
 # Plus auth + retry settings — see the canonical reference.
 ```
 
@@ -1368,7 +1390,7 @@ helm template nico ./helm -f helm-prereqs/values/nico-core.yaml --set global.ima
 - **`nico-api`**: stateless Deployment; scale replicas via `nico-api.replicas` (default 1). The state controllers use leader election when more than one replica runs.
 - **`nico-dns` / `nico-ntp`**: StatefulSets with per-pod LoadBalancer VIPs (default 3 replicas). Pod anti-affinity is enabled by default — replicas spread across nodes.
 - **PostgreSQL (NICo Core)**: Zalando HA Patroni cluster; `helm-prereqs/values.yaml` → `postgresql.instances` (default 3).
-- **Vault**: 3-node HA Raft (set in `helm-prereqs/operators/values/vault.yaml`).
+- **Vault** (when installed): 3-node HA Raft (set in `helm-prereqs/operators/values/vault.yaml`).
 - **PostgreSQL (NICo REST)**: single StatefulSet by default — not HA. For production, point `nico-site-agent.envConfig.DB_ADDR` at an external HA Postgres.
 
 ### Logging and observability
@@ -1382,9 +1404,9 @@ helm template nico ./helm -f helm-prereqs/values/nico-core.yaml --set global.ima
 ### Backup and restore
 
 - **NICo Core Postgres**: backed by Zalando postgres-operator's wal-g integration. Configure backup destinations in `helm-prereqs/operators/values/postgres-operator.yaml`. Operator docs are upstream.
-- **Vault**: 3-node HA Raft with disk persistence. Snapshots via `vault operator raft snapshot save`. For disaster recovery, the unseal keys are stored as the `vaultunsealkeys` Kubernetes Secret and the root token as `vaultroottoken` — preserve these out-of-band.
+- **Vault** (when installed): 3-node HA Raft with disk persistence. Snapshots via `vault operator raft snapshot save`. For disaster recovery, the unseal keys are stored as the `vaultunsealkeys` Kubernetes Secret and the root token as `vaultroottoken` — preserve these out-of-band.
 - **NICo REST Postgres**: single-replica StatefulSet — back up the underlying PVC or migrate to an external HA Postgres.
-- **Vault PKI roots**: cert-manager re-issues child certs automatically, but the Vault PKI mount's root CA must be backed up if you need to restore signing capability.
+- **CA roots**: the `site-root` Secret in `cert-manager` is the root that `site-issuer` and, on a Vault site, the Vault PKI mount sign with; cert-manager re-issues child certs automatically, but back up that Secret, and the PKI mount with it, if you need to restore signing capability.
 
 ### Helm hooks and pre-install Jobs
 
@@ -1588,7 +1610,7 @@ These are intentional compatibility surfaces, not bugs.
 | **SVID** | SPIFFE Verifiable Identity Document. Either X.509 (default) or JWT (used for tenant DPU identity via `[machine_identity]`). |
 | **TPM** | Trusted Platform Module. Required for `attestation_enabled`; can be bypassed for testing via `tpm_required = false`. |
 | **UEFI HTTP Boot** | UEFI firmware feature that fetches the bootloader over HTTP. Used by `nico-pxe`. URL pinned via DHCP option 67 or `HttpBootUri` Redfish setting. |
-| **UFM** | Unified Fabric Manager (NVIDIA). InfiniBand fabric controller. Talked to via `[ib_config]` + `[ib_fabrics.<name>]`. |
+| **UFM** | Unified Fabric Manager (NVIDIA). InfiniBand fabric controller. Talked to via `[ib_config]` + `[ib_fabrics.default]`. |
 | **VMaaS** | Virtual Machine as a Service. VM integration mode for sites that run VMs alongside bare-metal. Configured via `[vmaas_config]`. |
 | **VNI** | VXLAN Network Identifier. Allocated from `[pools.vni]` / `[pools.vpc-vni]`. |
 | **VPC** | Virtual Private Cloud. Tenant-level network isolation domain. Peering controlled by `vpc_peering_policy`. |

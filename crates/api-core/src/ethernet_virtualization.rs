@@ -55,6 +55,7 @@ pub(crate) struct EthVirtData {
 
 pub(crate) struct AdminNetworkOptions<'a> {
     pub(crate) fnn_enabled: bool,
+    pub(crate) l3_only: bool,
     pub(crate) common_pools: &'a CommonPools,
     pub(crate) booturl: &'a Option<String>,
     pub(crate) use_vpc_vrf_loopback: bool,
@@ -407,16 +408,18 @@ pub(crate) async fn admin_network(
     snapshot: &ManagedHostStateSnapshot,
     dpu_machine_id: &DpuMachineId,
     options: AdminNetworkOptions<'_>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(rpc::FlatInterfaceConfig, MachineInterfaceId), tonic::Status> {
     let AdminNetworkOptions {
         fnn_enabled: fnn_enabled_on_admin,
+        l3_only,
         common_pools,
         booturl,
         use_vpc_vrf_loopback,
         routing_profile: admin_vpc_routing_profile,
     } = options;
 
-    let admin_segments = db::network_segment::admin(txn).await?;
+    let admin_segments = db::network_segment::admin(&mut *txn).await?;
     let admin_segment_ids = admin_segments
         .iter()
         .map(|s| s.id)
@@ -615,6 +618,7 @@ pub(crate) async fn admin_network(
                                     txn,
                                     dpu_machine_id,
                                     &vpc.id,
+                                    instrumentation,
                                 )
                                 .await?,
                             )
@@ -666,7 +670,7 @@ pub(crate) async fn admin_network(
         booturl: booturl.clone(),
         svi_ip,
         tenant_vrf_loopback_ip: tenant_vrf_loopback_for_legacy_ipv4_field(tenant_vrf_loopback_ip),
-        is_l2_segment: true,
+        is_l2_segment: !(fnn_enabled_on_admin && l3_only),
         vpc_peer_prefixes: vec![],
         vpc_peer_vnis: vec![],
         network_security_group: None,
@@ -711,7 +715,7 @@ pub(crate) async fn resolve_vpc_network_config(
         .map(|vpc_prefix| vpc_prefix.config.prefix.to_string())
         .collect::<Vec<_>>();
     vpc_prefixes.extend(
-        db::network_prefix::find_by_vpc(txn, vpc_id)
+        db::network_prefix::find_by_vpc(&mut *txn, vpc_id)
             .await?
             .into_iter()
             .map(|segment_prefix| segment_prefix.prefix.to_string()),
@@ -732,7 +736,7 @@ pub(crate) async fn resolve_vpc_network_config(
                     .capabilities()
                     .peers_with
                     .to_vec();
-                db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
+                db::vpc_peering::get_active_vpc_peer_vnis(&mut *txn, vpc_id, allowed_peer_types)
                     .await?
                     .into_iter()
                     .map(|(id, _)| id)
@@ -834,7 +838,7 @@ pub(crate) async fn resolve_vpc_network_security_group(
     )
     .await?
     .pop()
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "NetworkSecurityGroup",
         id: network_security_group_id.to_string(),
     })?;

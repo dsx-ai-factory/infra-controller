@@ -6,17 +6,21 @@ package nico
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/compute/common/dpureprov"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -168,14 +172,18 @@ func TestMACTargetRequests(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, macs, client.LastGetComponentInventoryRequest().GetComputeBmcMacs().GetMacAddresses())
 
+	credentials := &corev1.ComponentCredentialOverrides{Bmc: &corev1.UsernamePassword{Username: "operator", Password: "device-value"}}
 	require.NoError(t, m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
+		OverrideReadinessCheck: true, CredentialOverrides: credentials,
 		TargetVersion: "fw-bundle-id-v1",
 	}))
 	assert.Equal(t, macs, client.LastUpdateComponentFirmwareRequest().GetComputeTrays().GetBmcMacs().GetMacAddresses())
 
-	_, err = m.GetFirmwareStatus(context.Background(), target)
+	require.Equal(t, credentials, client.LastUpdateComponentFirmwareRequest().GetCredentialOverrides())
+	_, err = m.GetFirmwareStatusWithCredentials(context.Background(), target, credentials)
 	require.NoError(t, err)
 	assert.Equal(t, macs, client.LastGetComponentFirmwareStatusRequest().GetComputeBmcMacs().GetMacAddresses())
+	require.Equal(t, credentials, client.LastGetComponentFirmwareStatusRequest().GetCredentialOverrides())
 }
 
 func TestPowerControl_RejectsUnsupportedOperation(t *testing.T) {
@@ -543,26 +551,41 @@ func TestFirmwareControl_RefusesInUseMachine(t *testing.T) {
 	assert.Contains(t, err.Error(), "timed out")
 }
 
-// TestPowerControl_OverrideBypassesReadinessCheck verifies that
-// OverrideReadinessCheck short-circuits the readiness gate on
-// PowerControl. The host is reported as in-use — which would otherwise
-// block the call — yet the operation is expected to proceed past the
-// gate.
+type powerControlClient struct {
+	nicoapi.Client
+	request *corev1.ComponentPowerControlRequest
+	err     error
+}
+
+func (c *powerControlClient) ComponentPowerControl(_ context.Context, req *corev1.ComponentPowerControlRequest) (*corev1.ComponentPowerControlResponse, error) {
+	c.request = req
+	return &corev1.ComponentPowerControlResponse{}, c.err
+}
+
 func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
-	reader := readiness.NewMemReader()
-	reader.SetStatus("machine-1", inUseStatus())
-
-	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
-	target := common.Target{
-		Type:        devicetypes.ComponentTypeCompute,
-		Identifiers: []string{"machine-1"},
+	backendError := errors.New("power backend unavailable")
+	for name, backendErr := range map[string]error{"success": nil, "backend failure": backendError} {
+		t.Run(name, func(t *testing.T) {
+			reader := readiness.NewMemReader()
+			reader.SetStatus("machine-1", inUseStatus())
+			client := &powerControlClient{Client: nicoapi.NewMockClient(), err: backendErr}
+			m := newManagerForReadinessTest(t, client, reader)
+			target := common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"machine-1"}}
+			err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+				Operation:              operations.PowerOperationForcePowerOff,
+				OverrideReadinessCheck: true,
+			})
+			if backendErr != nil {
+				require.ErrorIs(t, err, backendErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NotNil(t, client.request)
+			assert.True(t, client.request.GetBypassStateController())
+			assert.Equal(t, corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_OFF, client.request.GetAction())
+			assert.Len(t, client.request.GetMachineIds().GetMachineIds(), 1)
+		})
 	}
-
-	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
-		Operation:              operations.PowerOperationPowerOn,
-		OverrideReadinessCheck: true,
-	})
-	require.NoError(t, err)
 }
 
 func TestBringUpControl_RefusesInUseMachine(t *testing.T) {
@@ -662,4 +685,114 @@ func mustMarshal(t *testing.T, v any) json.RawMessage {
 		t.Fatalf("failed to marshal: %v", err)
 	}
 	return data
+}
+
+func TestPowerControl_PreemptedReadinessWaiter(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override bool
+	}{
+		{name: "readiness waiter"}, {name: "readiness override", override: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := readiness.NewMemReader()
+			reader.SetStatus("machine-1", inUseStatus())
+			client := &powerControlClient{Client: nicoapi.NewMockClient()}
+			manager := newManagerForReadinessTest(t, client, reader)
+			preempted := errors.New("task was preempted")
+			checks := 0
+			stopAt := 2
+			if tc.override {
+				stopAt = 1
+			}
+			ctx := dispatchguard.WithCheck(t.Context(), func(context.Context) error {
+				checks++
+				if checks >= stopAt {
+					return preempted
+				}
+				return nil
+			})
+			err := manager.PowerControl(ctx, common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"machine-1"}}, operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn, OverrideReadinessCheck: tc.override})
+			require.ErrorIs(t, err, preempted)
+			require.Equal(t, stopAt, checks)
+			require.Nil(t, client.request)
+		})
+	}
+}
+
+// Embed the normal client so the probe changes only the firmware RPC outcomes.
+type testFirmwareDiagnosticClient struct {
+	nicoapi.Client
+	rpcErr error
+	result *corev1.ComponentResult
+}
+
+func (c *testFirmwareDiagnosticClient) UpdateComponentFirmware(context.Context, *corev1.UpdateComponentFirmwareRequest) (*corev1.UpdateComponentFirmwareResponse, error) {
+	return &corev1.UpdateComponentFirmwareResponse{Results: []*corev1.ComponentResult{c.result}}, c.rpcErr
+}
+func (c *testFirmwareDiagnosticClient) GetComponentFirmwareStatus(context.Context, *corev1.GetComponentFirmwareStatusRequest) (*corev1.GetComponentFirmwareStatusResponse, error) {
+	return &corev1.GetComponentFirmwareStatusResponse{Statuses: []*corev1.FirmwareUpdateStatus{{Result: c.result, State: corev1.FirmwareUpdateState_FW_STATE_FAILED}}}, c.rpcErr
+}
+
+func TestManager_FirmwareControl(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rpcErr error
+	}{
+		{"RPC code", status.Error(codes.FailedPrecondition, "synthetic-upstream-secret")},
+		{"component rejection", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "aa:bb:cc:dd:ee:01"
+			client := &testFirmwareDiagnosticClient{Client: nicoapi.NewMockClient(), rpcErr: tc.rpcErr, result: &corev1.ComponentResult{
+				MacAddress: &id, Status: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_UNAVAILABLE, Error: "synthetic-upstream-secret",
+			}}
+			m := New(client, nil)
+			target := common.Target{Type: devicetypes.ComponentTypeCompute, IdentifierType: common.IdentifierTypeMACAddress, Identifiers: []string{id}}
+			credentials := &corev1.ComponentCredentialOverrides{Bmc: &corev1.UsernamePassword{Username: "operator", Password: "synthetic-device-secret"}}
+			err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{OverrideReadinessCheck: true, CredentialOverrides: credentials, TargetVersion: "bundle-v1"})
+			require.Error(t, err)
+			if tc.rpcErr != nil {
+				require.Equal(t, codes.FailedPrecondition, status.Code(err))
+			} else {
+				require.ErrorContains(t, err, id)
+				require.ErrorContains(t, err, "UNAVAILABLE")
+			}
+			require.NotContains(t, err.Error(), "synthetic-upstream-secret")
+			require.NotContains(t, err.Error(), "synthetic-device-secret")
+		})
+	}
+}
+
+func TestManager_GetFirmwareStatusWithCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rpcErr error
+	}{
+		{"RPC code", status.Error(codes.FailedPrecondition, "synthetic-upstream-secret")},
+		{"component rejection", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "aa:bb:cc:dd:ee:01"
+			client := &testFirmwareDiagnosticClient{Client: nicoapi.NewMockClient(), rpcErr: tc.rpcErr, result: &corev1.ComponentResult{
+				MacAddress: &id, Status: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_UNAVAILABLE, Error: "synthetic-upstream-secret",
+			}}
+			m := New(client, nil)
+			target := common.Target{Type: devicetypes.ComponentTypeCompute, IdentifierType: common.IdentifierTypeMACAddress, Identifiers: []string{id}}
+			credentials := &corev1.ComponentCredentialOverrides{Bmc: &corev1.UsernamePassword{Username: "operator", Password: "synthetic-device-secret"}}
+			got, err := m.GetFirmwareStatusWithCredentials(context.Background(), target, credentials)
+			if tc.rpcErr != nil {
+				require.Error(t, err)
+				require.Equal(t, codes.FailedPrecondition, status.Code(err))
+				require.NotContains(t, err.Error(), "synthetic-upstream-secret")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, operations.FirmwareUpdateStateFailed, got[id].State)
+			require.Contains(t, got[id].Error, id)
+			require.Contains(t, got[id].Error, "UNAVAILABLE")
+			require.NotContains(t, got[id].Error, "synthetic-upstream-secret")
+			require.NotContains(t, got[id].Error, "synthetic-device-secret")
+		})
+	}
 }

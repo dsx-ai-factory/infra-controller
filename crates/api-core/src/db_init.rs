@@ -20,10 +20,11 @@ use std::collections::HashMap;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
+use db::db_read::PgPoolReader;
 use db::dns::domain;
 use db::network_segment::reconcile_network_defs;
 use db::vpc::{self};
-use db::{ObjectColumnFilter, Transaction, dpu_agent_upgrade_policy, network_segment};
+use db::{ObjectColumnFilter, TransactionVending as _, dpu_agent_upgrade_policy, network_segment};
 use itertools::Itertools;
 use model::dns::{Domain, NewDomain};
 use model::firmware::AgentUpgradePolicyChoice;
@@ -48,7 +49,7 @@ pub(crate) async fn create_initial_domain(
     db_pool: sqlx::pool::Pool<Postgres>,
     domain_name: &str,
 ) -> Result<bool, CarbideError> {
-    let mut txn = Transaction::begin(&db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let domains = domain::find_by(&mut txn, ObjectColumnFilter::<domain::IdColumn>::All).await?;
     if domains.is_empty() {
         let domain = NewDomain::new(domain_name);
@@ -77,11 +78,10 @@ enum InitialNetworkDomainSelection {
     Ambiguous(Vec<String>),
 }
 
-/// Select the infrastructure forward domain used by configured initial network segments.
+/// Select the forward domain used by configured initial network segments.
 ///
-/// Reverse-DNS and VPC-owned domains cannot be used for these segments.
-/// Exclude them before checking for multiple candidates so adding one cannot
-/// make the infrastructure domain selection ambiguous.
+/// Reverse-DNS zones share the domains table and must not make a sole forward
+/// domain appear ambiguous.
 fn select_initial_network_domain(
     domains: &[Domain],
     configured_domain_name: Option<&str>,
@@ -90,8 +90,7 @@ fn select_initial_network_domain(
         .iter()
         .filter(|domain| {
             let name = domain.name.trim_end_matches('.');
-            domain.vpc_id.is_none()
-                && !matches!(name, "in-addr.arpa" | "ip6.arpa")
+            !matches!(name, "in-addr.arpa" | "ip6.arpa")
                 && db::dns::normalize_reverse_zone_name(name).is_none()
         })
         .collect_vec();
@@ -124,8 +123,8 @@ pub(crate) async fn create_initial_networks(
     db_pool: &Pool<Postgres>,
     networks: &HashMap<String, NetworkDefinition>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    let mut txn = db_pool.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let domains = db::dns::domain::find_by(
         &mut txn,
         ObjectColumnFilter::<db::dns::domain::IdColumn>::All,
@@ -149,7 +148,7 @@ pub(crate) async fn create_initial_networks(
             return Ok(());
         }
     };
-    let to_create = reconcile_network_defs(&mut txn, networks).await?;
+    let to_create = reconcile_network_defs(&mut txn, networks, &api.instrumentation).await?;
 
     for (name, def) in &to_create {
         let mut ns = NewNetworkSegment::build_from(name, domain_id, def)?;
@@ -275,6 +274,7 @@ pub(crate) async fn create_initial_vpcs(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: def.routing_profile_type.clone(),
             routing_profile_overrides: def.routing_profile_overrides.clone(),
             power_resource_group: None,
@@ -299,7 +299,7 @@ pub(crate) async fn ensure_static_assignments_segment(
     subdomain_id: Option<carbide_uuid::domain::DomainId>,
 ) -> Result<(), CarbideError> {
     let segment_name = network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME;
-    match db::network_segment::find_by_name(txn, segment_name).await {
+    match db::network_segment::find_by_name(&mut *txn, segment_name).await {
         Ok(_) => return Ok(()),
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
@@ -344,9 +344,8 @@ pub(crate) async fn ensure_static_assignments_segment(
 pub(crate) async fn update_network_segments_svi_ip(
     db_pool: &Pool<Postgres>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
     let all_segments = db::network_segment::find_by(
-        &mut txn,
+        &mut PgPoolReader::from(db_pool.clone()),
         ObjectColumnFilter::<network_segment::IdColumn>::All,
         model::network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -362,7 +361,7 @@ pub(crate) async fn update_network_segments_svi_ip(
         .filter_map(|x| x.config.vpc_id)
         .collect_vec();
     let all_vpcs = db::vpc::find_by(
-        &mut txn,
+        db_pool,
         ObjectColumnFilter::List(vpc::IdColumn, &all_vpcs_ids),
     )
     .await?;
@@ -371,8 +370,6 @@ pub(crate) async fn update_network_segments_svi_ip(
         .iter()
         .map(|x| (x.id, x))
         .collect::<HashMap<_, _>>();
-
-    txn.rollback().await?;
 
     // Allocate SVI IP for the segments attached to a FNN VPC.
     for segment in all_segments {
@@ -395,7 +392,7 @@ pub(crate) async fn update_network_segments_svi_ip(
             continue;
         }
 
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         match db::network_segment::allocate_svi_ip(&segment, &mut txn).await {
             Ok(_) => {
@@ -419,7 +416,7 @@ pub(crate) async fn store_initial_dpu_agent_upgrade_policy(
     db_pool: &Pool<Postgres>,
     initial_dpu_agent_upgrade_policy: Option<AgentUpgradePolicyChoice>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let initial_policy: AgentUpgradePolicy = initial_dpu_agent_upgrade_policy
         .unwrap_or(AgentUpgradePolicyChoice::UpDown)
         .into();
@@ -444,8 +441,22 @@ pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<
         ));
     };
 
+    // Resolve the policy with the VNI reconciliation will store before changing VPCs or segments.
+    if let Some(admin) = api
+        .runtime_config
+        .fnn
+        .as_ref()
+        .and_then(|fnn| fnn.admin_vpc.as_ref())
+        .filter(|admin| admin.enabled)
+    {
+        admin
+            .routing_profile
+            .to_rpc(Some(vpc_vni))
+            .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?;
+    }
+
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     let configured_vni = vpc_vni as i32;
     let admin_segments = db::network_segment::admin(&mut txn).await?;
@@ -566,6 +577,7 @@ pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<
         power_resource_group: None,
         slaac_enabled: false,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         network_virtualization_type: carbide_network::virtualization::VpcVirtualizationType::Fnn,
         metadata: Metadata {
             name: "admin".to_string(),
@@ -617,7 +629,6 @@ mod tests {
             id: domain_id(id),
             name: name.to_string(),
             default_ttl: None,
-            vpc_id: None,
             created: timestamp,
             updated: timestamp,
             deleted: None,
@@ -639,20 +650,6 @@ mod tests {
                         configured_domain_name: None,
                     },
                     expect: InitialNetworkDomainSelection::NoForwardDomain,
-                },
-                Check {
-                    scenario: "a configured VPC domain cannot replace infrastructure scope",
-                    input: DomainSelectionCase {
-                        domains: vec![
-                            domain(1, "site.example"),
-                            Domain {
-                                vpc_id: Some(uuid::Uuid::from_u128(10).into()),
-                                ..domain(2, "vpc.example")
-                            },
-                        ],
-                        configured_domain_name: Some("vpc.example"),
-                    },
-                    expect: InitialNetworkDomainSelection::Selected(domain_id(1)),
                 },
                 Check {
                     scenario: "the configured domain wins among multiple forward domains",

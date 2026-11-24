@@ -22,6 +22,12 @@ use std::str::FromStr;
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+mod route_targets;
+pub use route_targets::{
+    ExportPrefixMatchType, PrefixRouteTargetConfig, PrefixRouteTargetConfigError,
+    RouteTargetContributions, RouteTargets,
+};
+
 /// DEFAULT_NETWORK_VIRTUALIZATION_TYPE is what to default to if the Cloud API
 /// doesn't send it to NICo (which it never does), or if the NICo API
 /// doesn't send it to the DPU agent.
@@ -304,7 +310,7 @@ pub fn get_svi_ip(
 ) -> eyre::Result<Option<IpNetwork>> {
     if virtualization_type == VpcVirtualizationType::Fnn && is_l2_segment {
         let Some(svi_ip) = svi_ip else {
-            return Err(eyre::eyre!(format!("SVI IP is not allocated",)));
+            return Err(eyre::eyre!("SVI IP is not allocated"));
         };
 
         return Ok(Some(IpNetwork::new(*svi_ip, prefix)?));

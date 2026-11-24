@@ -26,7 +26,8 @@
 //! Reports carry no units -- `MetricReport` only pairs a `MetricId`
 //! with a stringly-typed `MetricValue`. The unit lives on the matching
 //! `MetricDefinition`, so definitions are read once and cached by id
-//! for the lifetime of the collector.
+//! for the lifetime of the collector. A value without a `MetricId` is
+//! named by its `MetricProperty` and has no unit.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -34,6 +35,9 @@ use std::sync::Arc;
 
 use nv_redfish::ServiceRoot;
 use nv_redfish::core::Bmc;
+use nv_redfish::oem::nvidia::OEM_KEY;
+use nv_redfish::oem::nvidia::schema::nvidia_metric_report::NvidiaMetricReport;
+use nv_redfish::oem::oem_object;
 use nv_redfish::telemetry_service::MetricReport;
 
 use crate::HealthError;
@@ -253,7 +257,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         // A stale report is republishing the previous interval's
         // numbers. Emitting them would flatten real gaps into a held
         // value, so the whole report is dropped instead.
-        if self.report_is_stale(report) {
+        if self.marked_stale(report.oem_nvidia()) {
             tracing::debug!(
                 report_id,
                 bmc_address = ?self.endpoint.addr,
@@ -266,9 +270,32 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         let units = self.units.as_ref();
         let mut count = 0;
         for value in raw.metric_values.iter().flatten() {
-            let Some(metric_id) = value.metric_id.clone().flatten() else {
+            // `MetricId` is optional; some BMCs set only `MetricProperty`,
+            // so the property's last segment names the series instead.
+            let metric_id = value.metric_id.clone().flatten();
+            let property = value.metric_property.clone().flatten();
+            let Some(name) = metric_id
+                .as_deref()
+                .or_else(|| property.as_deref().and_then(|p| p.rsplit('/').next()))
+            else {
                 continue;
             };
+            let metric_type = metric_type_from_id(name);
+            // Some BMCs mark staleness per value rather than per report.
+            let value_oem = value
+                .oem
+                .as_ref()
+                .map_or(Ok(None), |oem| oem_object(oem, OEM_KEY));
+            if self.marked_stale(value_oem) {
+                tracing::debug!(
+                    report_id,
+                    metric = name,
+                    bmc_address = ?self.endpoint.addr,
+                    rack_id = self.event_context.rack_id().map(tracing::field::display),
+                    "Skipping metric value marked stale by the NVIDIA OEM extension"
+                );
+                continue;
+            }
             let Some(reading) = value.metric_value.as_ref().and_then(Option::as_ref) else {
                 continue;
             };
@@ -284,7 +311,8 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             if !reading.is_finite() {
                 tracing::debug!(
                     report_id,
-                    metric_id,
+                    metric_id = metric_id.as_deref(),
+                    metric_property = property.as_deref(),
                     reading,
                     bmc_address = ?self.endpoint.addr,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
@@ -294,7 +322,8 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             }
 
             let unit = units
-                .and_then(|units| units.get(&metric_id))
+                .zip(metric_id.as_ref())
+                .and_then(|(units, metric_id)| units.get(metric_id))
                 .map_or(UNKNOWN_UNIT, String::as_str);
 
             let mut labels: Vec<MetricLabel> =
@@ -306,11 +335,12 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             // what the key is built from: sinks index gauges by key, and
             // keying on the id alone would drop every reading but the
             // last. This also matches the entity collectors, whose keys
-            // are `{resource odata id}/{metric}`.
-            let property = value.metric_property.clone().flatten();
-            let key = match &property {
-                Some(property) => format!("{property}/{metric_id}"),
-                None => format!("{}/{metric_id}", report.raw().odata_id),
+            // are `{resource odata id}/{metric}`. Without a `MetricId`,
+            // the property alone identifies the reading.
+            let key = match (&property, &metric_id) {
+                (Some(property), Some(metric_id)) => format!("{property}/{metric_id}"),
+                (Some(property), None) => property.clone(),
+                (None, _) => format!("{}/{name}", report.raw().odata_id),
             };
             if let Some(property) = property {
                 labels.push((Cow::Borrowed("metric_property"), property));
@@ -321,7 +351,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
                     semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: METRIC_NAME.to_string(),
-                    metric_type: metric_type_from_id(&metric_id),
+                    metric_type,
                     unit: unit.to_string(),
                     value: reading,
                     labels,
@@ -335,10 +365,12 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         count
     }
 
-    /// Whether the NVIDIA OEM extension marks this report's values as
-    /// carried over from a previous interval.
-    fn report_is_stale(&self, report: &MetricReport<B>) -> bool {
-        match report.oem_nvidia() {
+    /// Whether NVIDIA OEM data marks readings as carried over from a previous interval.
+    fn marked_stale(
+        &self,
+        oem: Result<Option<Arc<NvidiaMetricReport>>, nv_redfish::Error<B>>,
+    ) -> bool {
+        match oem {
             Ok(Some(oem)) => oem.metric_value_stale.flatten().unwrap_or(false),
             Ok(None) => false,
             Err(error) => {
@@ -359,6 +391,7 @@ mod tests {
     use std::convert::Infallible;
     use std::sync::Mutex as StdMutex;
 
+    use carbide_instrument::testing::capture_logs_async;
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
 
@@ -503,10 +536,11 @@ mod tests {
         check_cases_async(
             [Case {
                 scenario: "finite readings publish with definition units; \
-                           stale, non-numeric and non-finite values are dropped",
+                           values without a MetricId key on their property; stale, \
+                           non-numeric and non-finite values are dropped",
                 input: fixture.bmc(),
                 expect: Yields(ObservedIteration {
-                    entity_count: Some(3),
+                    entity_count: Some(4),
                     fetch_failures: 0,
                     metrics: {
                         const REPORT: &str =
@@ -521,6 +555,18 @@ mod tests {
                                 &[
                                     ("report_id", "PlatformEnvironmentMetrics"),
                                     ("metric_property", &format!("{SENSORS}/GPU0_Temp")),
+                                ],
+                            ),
+                            // No MetricId: keyed and named by the property, with
+                            // no definition to give it a unit.
+                            metric(
+                                &format!("{SENSORS}/GPU_0_Temp_0"),
+                                "gpu_0_temp_0",
+                                "unknown",
+                                48.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", &format!("{SENSORS}/GPU_0_Temp_0")),
                                 ],
                             ),
                             metric(
@@ -550,6 +596,27 @@ mod tests {
             run,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn malformed_metric_value_oem_is_logged_without_dropping_the_reading() {
+        let fixture = ProjectionFixture::with_malformed_metric_value_oem().await;
+        let (result, logs) = capture_logs_async(run(fixture.bmc())).await;
+        let result = result.expect("telemetry iteration should succeed");
+
+        assert!(result.metrics.contains(&metric(
+            "/redfish/v1/TelemetryService/MetricReports/PlatformEnvironmentMetrics/FanPWM",
+            "fan_pwm",
+            "unknown",
+            30.0,
+            &[("report_id", "PlatformEnvironmentMetrics")],
+        )));
+        let log = logs
+            .iter()
+            .find(|log| log.message == "Failed to read NVIDIA OEM extension on metric report")
+            .expect("malformed per-value OEM data should log its parse error");
+        assert_eq!(log.level, tracing::Level::DEBUG);
+        assert!(log.field("error").is_some_and(|error| !error.is_empty()));
     }
 
     /// One failed definitions fetch must not pin every later reading to
@@ -601,6 +668,7 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "unknown"),
+                        ("gpu_0_temp_0", "unknown"),
                         ("total_gpu_power_watts", "unknown"),
                     ]),
                 ),
@@ -609,6 +677,7 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "celsius"),
+                        ("gpu_0_temp_0", "unknown"),
                         ("total_gpu_power_watts", "watts"),
                     ]),
                 ),

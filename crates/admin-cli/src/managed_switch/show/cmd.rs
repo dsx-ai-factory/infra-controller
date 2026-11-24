@@ -90,19 +90,19 @@ fn build_managed_switch_outputs(
     linked: Vec<LinkedExpectedSwitch>,
     nvos_mac_map: &HashMap<SwitchId, Vec<String>>,
 ) -> Vec<ManagedSwitchOutput> {
-    let switch_map: HashMap<String, &Switch> = switches
+    let switch_map: HashMap<SwitchId, &Switch> = switches
         .iter()
-        .filter_map(|s| s.id.as_ref().map(|id| (id.to_string(), s)))
+        .filter_map(|s| s.id.map(|id| (id, s)))
         .collect();
 
     let mut outputs: Vec<ManagedSwitchOutput> = Vec::new();
-    let mut seen_switch_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_switch_ids: std::collections::HashSet<SwitchId> = std::collections::HashSet::new();
 
     for linked_switch in &linked {
         let switch = linked_switch
             .switch_id
             .as_ref()
-            .and_then(|id| switch_map.get(&id.to_string()));
+            .and_then(|id| switch_map.get(id));
 
         if switch.is_none() {
             continue;
@@ -110,8 +110,8 @@ fn build_managed_switch_outputs(
 
         let switch_id_str = linked_switch.switch_id.as_ref().map(|id| id.to_string());
 
-        if let Some(ref id) = switch_id_str {
-            seen_switch_ids.insert(id.clone());
+        if let Some(id) = linked_switch.switch_id {
+            seen_switch_ids.insert(id);
         }
 
         let nvos_macs = linked_switch
@@ -167,8 +167,7 @@ fn build_managed_switch_outputs(
     }
 
     for switch in &switches {
-        let id_str = switch.id.as_ref().map(|id| id.to_string());
-        if let Some(ref id) = id_str
+        if let Some(id) = switch.id.as_ref()
             && seen_switch_ids.contains(id)
         {
             continue;
@@ -181,7 +180,7 @@ fn build_managed_switch_outputs(
             .unwrap_or_default();
 
         outputs.push(ManagedSwitchOutput {
-            switch_id: id_str,
+            switch_id: switch.id.map(|id| id.to_string()),
             name: switch
                 .config
                 .as_ref()
@@ -410,7 +409,7 @@ fn show_managed_switch_details_view(m: ManagedSwitchOutput) -> CarbideCliResult<
                 &mut lines,
                 "{:<width$}: {}",
                 key,
-                value.unwrap_or(UNKNOWN.to_string())
+                value.as_deref().unwrap_or(UNKNOWN)
             )?;
         }
     }

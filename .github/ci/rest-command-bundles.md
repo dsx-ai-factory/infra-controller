@@ -41,7 +41,7 @@ escape a token.
 The checked-in inventory has three deliberate boundaries:
 
 - Linux amd64 and Linux arm64 each build 13 commands. The ten production image
-  entrypoints are `api`, `migrations`, `sitemgr`, `workflow`, `site-agent`,
+  entrypoints are `api`, `migrations`, `site-manager`, `workflow`, `site-agent`,
   `credsmgr`, `flow`, `psm`, `nsm`, and `nico-mcp`. They use the same settings
   and metadata fields as their production Dockerfiles. Bundle timestamps use
   canonical UTC values rather than inheriting a runner's local timezone. The
@@ -55,7 +55,7 @@ The checked-in inventory has three deliberate boundaries:
   site-agent, and flow commands keep their runtime version metadata without
   acquiring Linux static-linker flags or new CLI/MCP builds.
 
-All three targets build `api`, `migrations`, `sitemgr`, `workflow`,
+All three targets build `api`, `migrations`, `site-manager`, `workflow`,
 `site-agent`, `mock-core`, `mock-flow`, `credsmgr`, `flow`, `psm`, and `nsm`.
 The two Linux targets also build `nicocli` and `nico-mcp`. The independent
 command-contract test pins the exact package, target, CGO, linker-flag, and
@@ -175,7 +175,8 @@ modes, paths, inventory, and contents described above.
 ## Embedded metadata
 
 The Linux and Darwin `api` and `site-agent` builds set `metadata.Version` to
-`--version` and `metadata.BuildTime` to `YYYY-MM-DD HH:MM:SS`. Their `flow`
+`--version` and `metadata.BuildTime` to `YYYY-MM-DD HH:MM:SS`. Their `workflow`
+builds set `metadata.Version` to `--version`. Their `flow`
 builds set `metadata.Version` to `--version`, `metadata.BuildTime` to
 `YYYY-MM-DDTHH:MM:SSZ`, and `metadata.GitCommit` to `--short-sha`. Their full Go
 symbol paths live in the source manifest and are pinned by the command-contract

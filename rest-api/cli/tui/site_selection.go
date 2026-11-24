@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -124,7 +125,7 @@ func sshKeyGroupSiteItems(s *Session, ctx context.Context, group *NamedItem) ([]
 func generatedCommandRequiresRegisteredSite(info appcli.GeneratedCommandInfo) bool {
 	switch info.OperationID {
 	case "create-operating-system", "create-vpc", "create-vpc-peering",
-		"create-network-security-group", "create-ssh-key-group",
+		"create-network-security-group", "create-dhcp-option-set", "create-ssh-key-group",
 		"create-infiniband-partition", "create-nvlink-logical-partition",
 		"create-spectrumx-partition", "create-dpu-extension-service",
 		"create-expected-machine",
@@ -181,7 +182,7 @@ func validateGeneratedSiteSelections(s *Session, info appcli.GeneratedCommandInf
 // Walk schema-declared fields so opaque labels or payloads named "siteId"
 // are not mistaken for resource references. This also covers bulk requests.
 func generatedBodySiteIDs(body json.RawMessage, fields []appcli.GeneratedCommandBodyFormField) ([]string, error) {
-	body = json.RawMessage(strings.TrimSpace(string(body)))
+	body = bytes.TrimSpace(body)
 	if len(body) > 0 && body[0] == '[' {
 		var items []json.RawMessage
 		err := json.Unmarshal(body, &items)

@@ -18,6 +18,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use axum::extract::Request;
+use axum::http::{Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_http_client::AxumRouterHttpClient;
@@ -316,6 +319,8 @@ pub struct TestBmcHandle<C: Callbacks = TestCallbacks> {
     /// The client behind `service_root`, for collectors that take the BMC
     /// directly rather than a service root.
     pub bmc: Arc<TestBmc>,
+    /// The router client behind `bmc`, which records every request.
+    pub http_client: AxumRouterHttpClient,
     pub state: BmcState<C>,
 }
 
@@ -324,6 +329,7 @@ impl<C: Callbacks> Clone for TestBmcHandle<C> {
         Self {
             service_root: self.service_root.clone(),
             bmc: self.bmc.clone(),
+            http_client: self.http_client.clone(),
             state: self.state.clone(),
         }
     }
@@ -334,7 +340,7 @@ async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) ->
     let endpoint = Url::parse("https://bmc-mock.local").expect("valid URL");
     let credentials = BmcCredentials::new("root".to_string(), "password".to_string());
     let bmc = Arc::new(HttpBmc::new(
-        client,
+        client.clone(),
         endpoint,
         credentials,
         CacheSettings::with_capacity(32),
@@ -345,6 +351,7 @@ async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) ->
             .unwrap()
             .into(),
         bmc,
+        http_client: client,
         state,
     }
 }
@@ -512,14 +519,16 @@ pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
     .await
 }
 
-/// Builds a LiteOn power shelf router that enforces Redfish authentication,
-/// as `bmc-mock --redfish-auth` does. Power shelves accept their factory-default
-/// password, [`crate::DUMMY_FACTORY_PASSWORD`] for [`crate::DUMMY_FACTORY_USERNAME`];
-/// rotate it with `state.account_service_state.change_factory_default_password`.
-/// Serve the router with [`serve_https`].
-pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>) {
+/// Builds a `hw_type` host router that enforces Redfish authentication, as
+/// `bmc-mock --redfish-auth` does. The administrator starts on
+/// [`crate::DUMMY_FACTORY_PASSWORD`] for [`crate::DUMMY_FACTORY_USERNAME`];
+/// hardware that requires a factory password change refuses it outside
+/// AccountService with 403. Rotate it with
+/// `state.account_service_state.change_factory_default_password`. Serve the
+/// router with [`serve_https`].
+pub fn host_router_with_auth(hw_type: HardwareType) -> (Router, BmcState<TestCallbacks>) {
     create_test_bmc(
-        &host_info(HardwareType::LiteOnPowerShelf),
+        &host_info(hw_type),
         TestBmcConfig::default(),
         "test-host-id".to_string(),
         true,
@@ -527,6 +536,45 @@ pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>)
     )
 }
 
+/// [`host_router_with_auth`] for a LiteOn power shelf, which accepts its
+/// factory-default password everywhere.
+pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>) {
+    host_router_with_auth(HardwareType::LiteOnPowerShelf)
+}
+
+/// A non-`GET` request a mock BMC answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnsweredWrite {
+    pub method: Method,
+    pub path: String,
+    pub status: StatusCode,
+}
+
+/// Wraps a mock BMC `router` to record every non-`GET` request it answers,
+/// including those its authentication refuses.
+pub fn record_writes(router: Router) -> (Router, Arc<Mutex<Vec<AnsweredWrite>>>) {
+    let writes: Arc<Mutex<Vec<AnsweredWrite>>> = Arc::default();
+    let recorded = writes.clone();
+    let router = router.layer(middleware::from_fn(move |request: Request, next: Next| {
+        let recorded = recorded.clone();
+        async move {
+            let method = request.method().clone();
+            let path = request.uri().path().to_string();
+            let response = next.run(request).await;
+            if method != Method::GET {
+                recorded.lock().unwrap().push(AnsweredWrite {
+                    method,
+                    path,
+                    status: response.status(),
+                });
+            }
+            response
+        }
+    }));
+    (router, writes)
+}
+
+/// Lite-On power shelf with an undeclared but available Systems collection.
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     test_bmc(create_test_bmc(
         &host_info(HardwareType::LiteOnPowerShelf),
@@ -536,6 +584,19 @@ pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
         MachineRouterOptions::default(),
     ))
     .await
+}
+
+/// Builds a Delta power shelf router, which lists a manager but no computer
+/// systems. Serve the router with [`serve_https`].
+pub fn delta_powershelf_router() -> Router {
+    let (router, _state) = create_test_bmc(
+        &host_info(HardwareType::DeltaPowerShelf),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    router
 }
 
 pub async fn delta_powershelf_bmc() -> TestBmcHandle {
@@ -1409,16 +1470,16 @@ mod test {
     async fn unroutable_request_returns_404_from_transport() {
         let client = AxumRouterHttpClient::new(Router::new());
         let url = Url::parse("https://bmc-mock.local/redfish/v1").unwrap();
-        let err = client
-            .get::<serde_json::Value>(
+        let result: Result<serde_json::Value, _> = client
+            .get(
                 url,
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
                 &NoRepair,
             )
-            .await
-            .expect_err("empty router should return transport error");
+            .await;
+        let err = result.expect_err("empty router should return transport error");
 
         match err {
             Error::InvalidResponse { status, .. } => {

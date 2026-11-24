@@ -17,7 +17,7 @@
 use std::net::SocketAddrV4;
 use std::sync::Arc;
 
-use carbide_rpc_utils::dhcp::ServiceReservation;
+use carbide_rpc_utils::dhcp::ServiceDhcpReservation;
 use lru::LruCache;
 use rpc::forge::{DhcpDiscovery, DhcpRecord, MessageKind};
 use tokio::sync::Mutex;
@@ -51,7 +51,7 @@ pub trait DhcpMode: Send + Sync + std::fmt::Debug {
         _config: &'a Config,
         _receiving_interface: &str,
         _client_mac: &str,
-    ) -> Result<Option<&'a ServiceReservation>, DhcpError> {
+    ) -> Result<Option<&'a ServiceDhcpReservation>, DhcpError> {
         Ok(None)
     }
 

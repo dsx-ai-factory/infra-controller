@@ -101,6 +101,62 @@ func TestResolvedVpcPrefixIDs(t *testing.T) {
 	}
 }
 
+func TestDpuExtensionServiceDeploymentStatusFromSite(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          corev1.DpuExtensionServiceDeploymentStatus
+		wantStatus      string
+		wantRecoverable bool
+	}{
+		{
+			name:            "Pending",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_PENDING,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusPending,
+			wantRecoverable: true,
+		},
+		{
+			name:            "Running",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusRunning,
+			wantRecoverable: true,
+		},
+		{
+			name:       "Terminating",
+			status:     corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATING,
+			wantStatus: cdbm.DpuExtensionServiceDeploymentStatusTerminating,
+		},
+		{
+			name:       "Terminated",
+			status:     corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATED,
+			wantStatus: cdbm.DpuExtensionServiceDeploymentStatusTerminating,
+		},
+		{
+			name:            "Error",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_ERROR,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusError,
+			wantRecoverable: true,
+		},
+		{
+			name:            "Failed",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_FAILED,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusFailed,
+			wantRecoverable: true,
+		},
+		{
+			name:   "Unknown",
+			status: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_UNKNOWN,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, recoverable := dpuExtensionServiceDeploymentStatusFromSite(tc.status)
+			assert.Equal(t, tc.wantStatus, status)
+			assert.Equal(t, tc.wantRecoverable, recoverable)
+		})
+	}
+}
+
 func TestGetDevicelessInterfaceKey(t *testing.T) {
 	prefixID := uuid.NewString()
 	tests := []struct {
@@ -448,12 +504,12 @@ func TestManageInstance_UpdateInstancesInDBVpcSelectionInventory(t *testing.T) {
 	require.NotNil(t, updatedDeviceIfc.Device)
 	assert.Equal(t, device, *updatedDeviceIfc.Device)
 
-	reportedProfilePersisted, err := instanceDAO.GetByID(ctx, nil, deviceLessInstance.ID, nil)
+	reportedProfilePersisted, err := instanceDAO.GetByID(ctx, nil, deviceLessInstance.ID, nil, false)
 	require.NoError(t, err)
 	require.NotNil(t, reportedProfilePersisted.PowerProfile)
 	assert.Equal(t, reportedPowerProfile, *reportedProfilePersisted.PowerProfile)
 
-	existingProfileCleared, err := instanceDAO.GetByID(ctx, nil, deviceInstance.ID, nil)
+	existingProfileCleared, err := instanceDAO.GetByID(ctx, nil, deviceInstance.ID, nil, false)
 	require.NoError(t, err)
 	assert.Nil(t, existingProfileCleared.PowerProfile)
 
@@ -468,7 +524,7 @@ func TestManageInstance_UpdateInstancesInDBVpcSelectionInventory(t *testing.T) {
 	assert.Equal(t, cdbm.InterfaceStatusPending, shortStatusUnchanged.Status)
 
 	// An incomplete inventory entry must not panic or clear persisted state.
-	nilConfigUnchanged, err := instanceDAO.GetByID(ctx, nil, nilConfigInstance.ID, nil)
+	nilConfigUnchanged, err := instanceDAO.GetByID(ctx, nil, nilConfigInstance.ID, nil, false)
 	require.NoError(t, err)
 	require.NotNil(t, nilConfigUnchanged.PowerProfile)
 	assert.Equal(t, existingPowerProfile, *nilConfigUnchanged.PowerProfile)
@@ -717,6 +773,12 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 		}, []string{"V1-1234567890"}, cdbm.DpuExtensionServiceStatusReady, ipu)
 	_ = util.TestBuildDpuExtensionServiceDeployment(t, dbSession, des.ID, site.ID, tenant.ID, instance.ID, "V1-1234567890", cdbm.DpuExtensionServiceDeploymentStatusRunning, tnu)
 
+	// Deleting and replacement Interfaces together can exceed the default page limit
+	subnet := util.TestBuildSubnet(t, dbSession, tenant, vpc, "testSubnet", cdbm.SubnetStatusReady, cutil.GetPtr(uuid.New()))
+	for i := range cdbp.DefaultLimit + 1 {
+		util.TestBuildInterface(t, dbSession, &instance.ID, &subnet.ID, nil, i == 0, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusReady)
+	}
+
 	tx, err := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	require.NoError(t, err)
 
@@ -750,8 +812,12 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.False(t, afterCommit.IsAssigned)
 	assert.Equal(t, cdbm.MachineStatusReady, afterCommit.Status)
-	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil)
+	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil, false)
 	assert.ErrorIs(t, readErr, cdb.ErrDoesNotExist)
+
+	ifcs, _, err := cdbm.NewInterfaceDAO(dbSession).GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	require.NoError(t, err)
+	require.Empty(t, ifcs)
 
 	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
@@ -940,7 +1006,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	nvlinkInterface3 := util.TestBuildNVLinkInterface(t, dbSession, instance1.ID, site.ID, nvllPartition1.ID, cutil.GetPtr(""), 2, cutil.GetPtr("e1f2a30200d71e9f"), nil, cdbm.NVLinkInterfaceStatusDeleting)
 	assert.NotNil(t, nvlinkInterface3)
 
-	// Set updated earlier than the inventory receipt interval for nvlinkInterface3 so it can be deleted
+	// Set updated earlier than the inventory receipt interval for nvlinkInterface3, making it stale
 	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlinkInterface3.ID.String())
 	assert.NoError(t, err)
 
@@ -972,8 +1038,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	// Set created earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance2.ID.String())
+	// Set created and updated earlier than the inventory receipt interval
+	_, err = dbSession.DB.Exec("UPDATE instance SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance2.ID.String())
 	assert.NoError(t, err)
 
 	instance2Subnet := util.TestBuildInterface(t, dbSession, &instance2.ID, &subnet1.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
@@ -1166,8 +1232,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	// Set updated earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance8.ID.String())
+	// Set created and updated earlier than the inventory receipt interval
+	_, err = dbSession.DB.Exec("UPDATE instance SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance8.ID.String())
 	assert.NoError(t, err)
 
 	// Instance 9 is in Ready state and power status is Rebooting, gets set to BootCompleted
@@ -1579,6 +1645,9 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	dpuExtensionService2 := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-ext-service-2", site, tenant, "ovs-offload", cutil.GetPtr("1"), nil, []string{}, cdbm.DpuExtensionServiceStatusReady, ipu)
 	assert.NotNil(t, dpuExtensionService2)
 
+	dpuExtensionService3 := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-ext-service-3", site, tenant, cdbm.DpuExtensionServiceServiceTypeKubernetesPod, cutil.GetPtr("1.0.0"), nil, []string{"1.0.0"}, cdbm.DpuExtensionServiceStatusReady, ipu)
+	assert.NotNil(t, dpuExtensionService3)
+
 	// Create DPU Extension Service Deployment for instance1 - will be updated to Running
 	dpuExtServiceDeployment1 := util.TestBuildDpuExtensionServiceDeployment(t, dbSession, dpuExtensionService1.ID, site.ID, tenant.ID, instance1.ID, "1.0.0", cdbm.DpuExtensionServiceDeploymentStatusPending, ipu)
 	assert.NotNil(t, dpuExtServiceDeployment1)
@@ -1640,6 +1709,10 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 								ServiceId: dpuExtensionService1.ID.String(),
 								Version:   "1.0.0",
 							},
+							{
+								ServiceId: dpuExtensionService3.ID.String(),
+								Version:   "1.0.0",
+							},
 						},
 					},
 					Nvlink: &corev1.InstanceNVLinkConfig{
@@ -1698,6 +1771,11 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 						DpuExtensionServices: []*corev1.InstanceDpuExtensionServiceStatus{
 							{
 								ServiceId:        dpuExtensionService1.ID.String(),
+								Version:          "1.0.0",
+								DeploymentStatus: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
+							},
+							{
+								ServiceId:        dpuExtensionService3.ID.String(),
 								Version:          "1.0.0",
 								DeploymentStatus: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
 							},
@@ -2148,6 +2226,24 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_, err = dbSession.DB.Exec("UPDATE instance SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance12.ID.String())
 	assert.NoError(t, err)
 
+	// Created within the inventory interval, so the Site's inventory can predate it
+	recentTerminatingInstance, err := instanceDAO.Create(
+		ctx, nil,
+		cdbm.InstanceCreateInput{
+			Name:                     "test-instance-recent-terminating",
+			TenantID:                 tenant.ID,
+			InfrastructureProviderID: ip.ID,
+			SiteID:                   site3.ID,
+			InstanceTypeID:           &instanceType3.ID,
+			VpcID:                    vpc3.ID,
+			ControllerInstanceID:     cutil.GetPtr(uuid.New()),
+			Labels:                   map[string]string{},
+			Status:                   cdbm.InstanceStatusTerminating,
+			CreatedBy:                tnu.ID,
+		},
+	)
+	assert.NoError(t, err)
+
 	// --- Site 4: NVLink Interface deletion strategy test scenarios ---
 	site4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
 	vpc4 := util.TestBuildVpc(t, dbSession, ip, site4, tenant, "test-vpc-4")
@@ -2161,7 +2257,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	gpuGuidDel4 := "gpu-guid-nvlink-del-4"
 	gpuGuidDel5 := "gpu-guid-nvlink-del-5"
 
-	// Instance A: Deleting NVLink Interface whose GPU GUID/Partition combo is NOT reported in controller status (should be deleted)
+	// Instance A: Site reports only GPU 1, so inventory deletes the aged GPU 0 binding and marks GPU 1 Ready.
 	machineNvlA := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
 	nvlinkDelInstA, err := instanceDAO.Create(ctx, nil, cdbm.InstanceCreateInput{
 		Name: "test-instance-nvlink-A", TenantID: tenant.ID, InfrastructureProviderID: ip.ID, SiteID: site4.ID,
@@ -2175,13 +2271,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_ = util.TestBuildInterface(t, dbSession, &nvlinkDelInstA.ID, &subnet4.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
 
 	nvlifcDelA1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 0, cutil.GetPtr(gpuGuidDel1), nil, cdbm.NVLinkInterfaceStatusDeleting)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlifcDelA1.ID.String())
-	assert.NoError(t, err)
+	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-2*cutil.DefaultInventoryReceiptInterval), nvlifcDelA1.ID)
+	require.NoError(t, err)
 
 	nvlifcDelA2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel2), nil, cdbm.NVLinkInterfaceStatusPending)
 	assert.NotNil(t, nvlifcDelA2)
 
-	// Instance B: Deleting NVLink Interface combo IS reported AND a Pending duplicate exists (should be deleted)
+	// Instance B: inventory removes the old partition assignment and the Deleting duplicate of the current binding.
 	machineNvlB := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
 	nvlinkDelInstB, err := instanceDAO.Create(ctx, nil, cdbm.InstanceCreateInput{
 		Name: "test-instance-nvlink-B", TenantID: tenant.ID, InfrastructureProviderID: ip.ID, SiteID: site4.ID,
@@ -2194,12 +2290,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	assert.NoError(t, err)
 	_ = util.TestBuildInterface(t, dbSession, &nvlinkDelInstB.ID, &subnet4.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
 
-	nvlifcDelB1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 0, cutil.GetPtr(gpuGuidDel3), nil, cdbm.NVLinkInterfaceStatusDeleting)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlifcDelB1.ID.String())
-	assert.NoError(t, err)
+	intermediatePartition := util.TestBuildNVLinkLogicalPartition(t, dbSession, "nvlink-intermediate", nil, site4, tenant, cdbm.NVLinkLogicalPartitionStatusReady, false)
+	nvlifcDelB1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel3), nil, cdbm.NVLinkInterfaceStatusDeleting)
+	retiredIntermediate := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, intermediatePartition.ID, nil, 1, nil, nil, cdbm.NVLinkInterfaceStatusDeleting)
+	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE instance_id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlinkDelInstB.ID)
+	require.NoError(t, err)
 
-	nvlifcDelB2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel3), nil, cdbm.NVLinkInterfaceStatusPending)
-	assert.NotNil(t, nvlifcDelB2)
+	nvlifcDelB2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, nil, 1, nil, nil, cdbm.NVLinkInterfaceStatusPending)
 
 	// Instance C: Last deleting NVLink Interface, Site won't report GPUConfig or Status, should be deleted
 	machineNvlC := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
@@ -2413,6 +2510,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 	cfg := config.GetTestConfig()
 
+	type recoveredDpuExtensionServiceDeployment struct {
+		instanceID uuid.UUID
+		serviceID  uuid.UUID
+		version    string
+		status     string
+	}
+
 	tests := []struct {
 		name                                  string
 		siteID                                uuid.UUID
@@ -2427,8 +2531,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		deletingInstance                      *cdbm.Instance
 		deletedInstances                      []*cdbm.Instance
 		missingInstances                      []*cdbm.Instance
-		// notMissingInstances are absent from the inventory but must keep their state,
-		// because the page carried no basis for calling them missing.
+		// notMissingInstances are absent from the inventory but must keep their state, because the
+		// page carried no basis for calling them missing or they may postdate the Site's inventory.
 		notMissingInstances                   []*cdbm.Instance
 		restoredInstance                      *cdbm.Instance
 		unpairedInstances                     []*cdbm.Instance
@@ -2446,6 +2550,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		readyInfiniBandInterfaces             []*cdbm.InfiniBandInterface
 		updatedDpuExtServiceDeployments       []*cdbm.DpuExtensionServiceDeployment
 		deletedDpuExtServiceDeployments       []*cdbm.DpuExtensionServiceDeployment
+		recoveredDpuExtServiceDeployments     []recoveredDpuExtensionServiceDeployment
 		readyNVLinkInterfaces                 []*cdbm.NVLinkInterface
 		deletedNVLinkInterfaces               []*cdbm.NVLinkInterface
 		deletingNVLinkInterfaces              []*cdbm.NVLinkInterface
@@ -2488,10 +2593,16 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			deviceLessFNNVirtualInterface:         deviceLessFNNVirtualInterface,
 			updatedDpuExtServiceDeployments:       []*cdbm.DpuExtensionServiceDeployment{dpuExtServiceDeployment1},
 			deletedDpuExtServiceDeployments:       []*cdbm.DpuExtensionServiceDeployment{dpuExtServiceDeployment2},
-			readyNVLinkInterfaces:                 []*cdbm.NVLinkInterface{nvlinkInterface1, nvlinkInterface2},
-			deletedNVLinkInterfaces:               []*cdbm.NVLinkInterface{nvlinkInterface3},
-			tpmCertificateUpdatedInstance:         instance16,
-			expectErr:                             false,
+			recoveredDpuExtServiceDeployments: []recoveredDpuExtensionServiceDeployment{{
+				instanceID: instance1.ID,
+				serviceID:  dpuExtensionService3.ID,
+				version:    "1.0.0",
+				status:     cdbm.DpuExtensionServiceDeploymentStatusRunning,
+			}},
+			readyNVLinkInterfaces:         []*cdbm.NVLinkInterface{nvlinkInterface1, nvlinkInterface2},
+			deletingNVLinkInterfaces:      []*cdbm.NVLinkInterface{nvlinkInterface3},
+			tpmCertificateUpdatedInstance: instance16,
+			expectErr:                     false,
 		},
 		{
 			name:             "test Instance inventory processing success with nil TPM certificate update",
@@ -2529,7 +2640,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 					PageSize:    25,
 				},
 			},
-			deletedInstances: []*cdbm.Instance{instance12},
+			deletedInstances:    []*cdbm.Instance{instance12},
+			notMissingInstances: []*cdbm.Instance{recentTerminatingInstance},
 		},
 		{
 			name:             "test paged Instance inventory processing, first page",
@@ -2614,7 +2726,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			clientPoolSiteID:         site4.ID.String(),
 			clientPoolClient:         mtc4,
 			instanceInventory:        nvlinkDelInventory,
-			deletedNVLinkInterfaces:  []*cdbm.NVLinkInterface{nvlifcDelA1, nvlifcDelB1, nvlifcDelC1},
+			deletedNVLinkInterfaces:  []*cdbm.NVLinkInterface{nvlifcDelA1, nvlifcDelB1, retiredIntermediate, nvlifcDelC1},
 			readyNVLinkInterfaces:    []*cdbm.NVLinkInterface{nvlifcDelA2, nvlifcDelB2},
 			deletingNVLinkInterfaces: []*cdbm.NVLinkInterface{nvlifcDelD1, nvlifcDelE1},
 		},
@@ -2636,13 +2748,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			for _, inst := range tc.nsgPropagationDetailsClearedInstances {
 				// If the VPC should not have propagation details according to the site
 				// make sure the DB agrees.
-				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, inst.ID, nil)
+				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, inst.ID, nil, false)
 				assert.Nil(t, updatedInstance.NetworkSecurityGroupPropagationDetails)
 			}
 
 			if tc.updatedInstance != nil {
 				// Check that Instance status, Instance Subnet status and attributes were updated in DB for Instance 1
-				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedInstance.ID, nil)
+				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedInstance.Status)
 
@@ -2714,7 +2826,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				// Instance NVLink Interfaces
 				_, totalNvIfcs, err := nvifcDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedInstance.ID}}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
-				assert.Equal(t, 3, totalNvIfcs)
+				assert.Equal(t, 4, totalNvIfcs)
 
 				nvIfc1, err := nvifcDAO.GetByID(ctx, nil, nvlinkInterface1.ID, nil)
 				assert.Nil(t, err)
@@ -2729,7 +2841,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.updatedVpcPrefixInstance != nil {
 				// Check that Instance status, Instance VpcPrefix status and attributes were updated in DB for Instance 1
-				updatedVpInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedVpcPrefixInstance.ID, nil)
+				updatedVpInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedVpcPrefixInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedVpInstance.Status)
 
@@ -2754,7 +2866,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.updatedMultiDPUInstance != nil {
 				// Check that Instance status, Instance VpcPrefix status and attributes were updated in DB for Instance 1
-				updatedMultiDPUInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedMultiDPUInstance.ID, nil)
+				updatedMultiDPUInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedMultiDPUInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedMultiDPUInstance.Status)
 
@@ -2802,7 +2914,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			}
 
 			for _, instPropStatus := range tc.instanceInventory.NetworkSecurityGroupPropagations {
-				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, uuid.MustParse(instPropStatus.Id), nil)
+				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, uuid.MustParse(instPropStatus.Id), nil, false)
 
 				// Prop details should not be nil
 				assert.NotNil(t, updatedInstance.NetworkSecurityGroupPropagationDetails)
@@ -2820,20 +2932,20 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.deletingInstance != nil {
 				// Check that Instance 5, which was in Terminating state, DID get its state changed to Ready if Site inventory reports it as Ready
-				ui, serr := instanceDAO.GetByID(ctx, nil, tc.deletingInstance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, tc.deletingInstance.ID, nil, false)
 				assert.NoError(t, serr)
 				assert.Equal(t, cdbm.InstanceStatusReady, ui.Status)
 			}
 
 			for _, instance := range tc.readyInstances {
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.NoError(t, serr)
 				assert.Equal(t, cdbm.InstanceStatusReady, ui.Status)
 			}
 
 			for _, instance := range tc.deletedInstances {
 				// Check that Instance was deleted as it was in Terminating state and missing from Inventory
-				_, err = instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				_, err = instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				require.Equal(t, cdb.ErrDoesNotExist, err, fmt.Sprintf("Instance %s was not deleted", instance.Name))
 				// Check Instance Subnets were deleted for Instance 2
 				_, ifcCnt, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, nil)
@@ -2855,7 +2967,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			for _, instance := range tc.missingInstances {
 				// Check that Instance has missing flag set
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 
 				if ui.ControllerInstanceID != nil {
@@ -2872,7 +2984,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.restoredInstance != nil {
 				// Check that Instance status is set to Ready
-				ui, err := instanceDAO.GetByID(ctx, nil, tc.restoredInstance.ID, nil)
+				ui, err := instanceDAO.GetByID(ctx, nil, tc.restoredInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.False(t, ui.IsMissingOnSite)
 				assert.Equal(t, cdbm.InstanceStatusReady, ui.Status)
@@ -2880,14 +2992,14 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			for _, instance := range tc.unpairedInstances {
 				// Check that Instance has controller ID set
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 				assert.NotNil(t, ui.ControllerInstanceID)
 			}
 
 			for _, instance := range tc.bootCompletedInstances {
 				// Check that Instance power status is set to BootCompleted
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 				assert.Equal(t, cdbm.InstancePowerStatusBootCompleted, *ui.PowerStatus)
 			}
@@ -2895,7 +3007,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			for _, instance := range tc.notMissingInstances {
 				// The page carried no ID list, so absence from it is not evidence the Site
 				// dropped the Instance and its state has to survive untouched.
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 				assert.False(t, ui.IsMissingOnSite)
 				assert.NotEqual(t, cdbm.InstanceStatusError, ui.Status)
@@ -2918,7 +3030,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.tpmCertificateUpdatedInstance != nil {
 				// Verify that the TPM EK certificate was updated from nil to the base64 encoded value
-				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.tpmCertificateUpdatedInstance.ID, nil)
+				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.tpmCertificateUpdatedInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.NotNil(t, updatedInstance.TpmEkCertificate)
 				assert.Equal(t, tpmEKCertBase64, *updatedInstance.TpmEkCertificate)
@@ -2983,6 +3095,19 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				}
 			}
 
+			for _, expected := range tc.recoveredDpuExtServiceDeployments {
+				desdDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(dbSession)
+				deployments, count, err := desdDAO.GetAll(ctx, nil, cdbm.DpuExtensionServiceDeploymentFilterInput{
+					InstanceIDs:            []uuid.UUID{expected.instanceID},
+					DpuExtensionServiceIDs: []uuid.UUID{expected.serviceID},
+					Versions:               []string{expected.version},
+				}, cdbp.PageInput{}, nil)
+				require.NoError(t, err)
+				require.Equal(t, 1, count)
+				require.Len(t, deployments, 1)
+				assert.Equal(t, expected.status, deployments[0].Status)
+			}
+
 			if tc.readyNVLinkInterfaces != nil {
 				for _, nvIfc := range tc.readyNVLinkInterfaces {
 					unvIfc, err := nvifcDAO.GetByID(ctx, nil, nvIfc.ID, nil)
@@ -3001,10 +3126,205 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.deletingNVLinkInterfaces != nil {
 				for _, nvIfc := range tc.deletingNVLinkInterfaces {
-					unvIfc, err := nvifcDAO.GetByID(ctx, nil, nvIfc.ID, []string{cdbm.InstanceRelationName})
-					require.NoError(t, err, "NVLink Interface: %s for Instance: %s should still exist", nvIfc.ID.String(), nvIfc.Instance.Name)
+					unvIfc, err := nvifcDAO.GetByID(ctx, nil, nvIfc.ID, nil)
+					require.NoError(t, err, "NVLink interface %s for instance %s should still exist", nvIfc.ID, nvIfc.InstanceID)
 					assert.Equal(t, cdbm.NVLinkInterfaceStatusDeleting, unvIfc.Status)
 				}
+			}
+		})
+	}
+}
+
+func TestManageInstance_createOrUpdateDpuExtensionServiceDeploymentFromSite(t *testing.T) {
+	const version = "1.0.0"
+
+	tests := []struct {
+		name                  string
+		activeVersions        []string
+		serviceOnAnotherSite  bool
+		serviceForOtherTenant bool
+		deleted               bool
+		staleDelete           bool
+		wantDeployment        bool
+		wantActive            bool
+		wantIdempotent        bool
+	}{
+		{
+			name:           "creates missing deployment idempotently",
+			activeVersions: []string{version},
+			wantDeployment: true,
+			wantActive:     true,
+			wantIdempotent: true,
+		},
+		{
+			name:           "restores stale soft-deleted deployment",
+			activeVersions: []string{version},
+			deleted:        true,
+			staleDelete:    true,
+			wantDeployment: true,
+			wantActive:     true,
+		},
+		{
+			name:           "defers recently soft-deleted deployment",
+			activeVersions: []string{version},
+			deleted:        true,
+		},
+		{
+			name:                 "skips service on another Site",
+			activeVersions:       []string{version},
+			serviceOnAnotherSite: true,
+		},
+		{
+			name:                  "skips service owned by another Tenant",
+			activeVersions:        []string{version},
+			serviceForOtherTenant: true,
+		},
+		{
+			name:           "skips inactive version",
+			activeVersions: []string{"2.0.0"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbSession := util.TestInitDB(t)
+			t.Cleanup(func() {
+				dbSession.Close()
+			})
+			util.TestSetupSchema(t, dbSession)
+
+			user := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-org"}, []string{"admin"})
+			ip := util.TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+			site := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, user)
+			tenant := util.TestBuildTenant(t, dbSession, "test-tenant", "test-tenant-org", nil, user)
+			vpc := util.TestBuildVpc(t, dbSession, ip, site, tenant, "test-vpc")
+
+			instance := &cdbm.Instance{
+				ID:                       uuid.New(),
+				Name:                     "test-instance",
+				TenantID:                 tenant.ID,
+				InfrastructureProviderID: ip.ID,
+				SiteID:                   site.ID,
+				VpcID:                    vpc.ID,
+				Labels:                   map[string]string{},
+				Status:                   cdbm.InstanceStatusReady,
+				CreatedBy:                user.ID,
+			}
+			_, err := dbSession.DB.NewInsert().Model(instance).Exec(ctx)
+			require.NoError(t, err)
+
+			serviceSite := site
+			if tc.serviceOnAnotherSite {
+				serviceSite = util.TestBuildSite(t, dbSession, ip, "other-site", cdbm.SiteStatusRegistered, nil, user)
+			}
+			serviceTenant := tenant
+			if tc.serviceForOtherTenant {
+				serviceTenant = util.TestBuildTenant(t, dbSession, "other-tenant", "other-tenant-org", nil, user)
+			}
+			service := util.TestBuildDpuExtensionService(
+				t,
+				dbSession,
+				"test-service",
+				serviceSite,
+				serviceTenant,
+				cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+				cutil.GetPtr(version),
+				nil,
+				tc.activeVersions,
+				cdbm.DpuExtensionServiceStatusReady,
+				user,
+			)
+
+			var existing *cdbm.DpuExtensionServiceDeployment
+			deploymentDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(dbSession)
+			if tc.deleted {
+				existing = util.TestBuildDpuExtensionServiceDeployment(
+					t,
+					dbSession,
+					service.ID,
+					site.ID,
+					tenant.ID,
+					instance.ID,
+					version,
+					cdbm.DpuExtensionServiceDeploymentStatusPending,
+					user,
+				)
+				require.NoError(t, deploymentDAO.Delete(ctx, nil, existing.ID))
+				if tc.staleDelete {
+					util.TestInventoryAgeDeletedTimestamp(
+						ctx,
+						t,
+						dbSession,
+						(*cdbm.DpuExtensionServiceDeployment)(nil),
+						existing.ID,
+					)
+				}
+			}
+
+			activity := ManageInstance{dbSession: dbSession}
+			reported := &corev1.InstanceDpuExtensionServiceStatus{
+				ServiceId:        service.ID.String(),
+				Version:          version,
+				DeploymentStatus: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
+			}
+			deployment, err := activity.createOrUpdateDpuExtensionServiceDeploymentFromSite(
+				ctx,
+				site,
+				instance,
+				reported,
+				cdbm.DpuExtensionServiceDeploymentStatusRunning,
+			)
+			require.NoError(t, err)
+
+			if tc.wantDeployment {
+				require.NotNil(t, deployment)
+				assert.Equal(t, cdbm.DpuExtensionServiceDeploymentStatusRunning, deployment.Status)
+				assert.Equal(t, user.ID, deployment.CreatedBy)
+				if existing != nil {
+					assert.Equal(t, existing.ID, deployment.ID)
+				}
+				if tc.wantIdempotent {
+					repeated, repeatErr := activity.createOrUpdateDpuExtensionServiceDeploymentFromSite(
+						ctx,
+						site,
+						instance,
+						reported,
+						cdbm.DpuExtensionServiceDeploymentStatusRunning,
+					)
+					require.NoError(t, repeatErr)
+					require.NotNil(t, repeated)
+					assert.Equal(t, deployment.ID, repeated.ID)
+				}
+			} else {
+				assert.Nil(t, deployment)
+			}
+
+			deployments, count, err := deploymentDAO.GetAll(
+				ctx,
+				nil,
+				cdbm.DpuExtensionServiceDeploymentFilterInput{
+					InstanceIDs:            []uuid.UUID{instance.ID},
+					DpuExtensionServiceIDs: []uuid.UUID{service.ID},
+					Versions:               []string{version},
+					IncludeDeleted:         true,
+				},
+				cdbp.PageInput{},
+				nil,
+			)
+			require.NoError(t, err)
+
+			if tc.deleted || tc.wantDeployment {
+				require.Equal(t, 1, count)
+				require.Len(t, deployments, 1)
+				if tc.wantActive {
+					assert.Nil(t, deployments[0].Deleted)
+				} else {
+					assert.NotNil(t, deployments[0].Deleted)
+				}
+			} else {
+				assert.Zero(t, count)
+				assert.Empty(t, deployments)
 			}
 		})
 	}
@@ -3574,5 +3894,61 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 		require.NotNil(t, persisted.BridgeName)
 		assert.Equal(t, "br-new", *persisted.BridgeName, "the reported bridge must be applied")
 		assert.Nil(t, persisted.OvnNetworkName, "an omitted ovn_network_name must clear the stale persisted value")
+	})
+}
+
+// TestUpdateInstancesInDB_InfiniBandInterfaceReconciliation covers the InfiniBand Interface branch
+// of the Instance inventory activity, on the SpectrumX fixture's Site and Instance.
+func TestUpdateInstancesInDB_InfiniBandInterfaceReconciliation(t *testing.T) {
+	// Config and status Interfaces are index-aligned by Core. A truncated status list must not
+	// panic the activity or shift another Interface's GUID onto this row.
+	t.Run("a status list shorter than the config list leaves the unmatched Interface alone", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		ctx := context.Background()
+		const device = "MT2910 Family [ConnectX-7]"
+		controllerPartitionID := uuid.New()
+		partition := util.TestBuildInfiniBandPartition(t, fx.dbSession, "ib-partition", fx.site, fx.tenant, &controllerPartitionID, cdbm.InfiniBandPartitionStatusReady, false)
+		first := util.TestBuildInfiniBandInterface(t, fx.dbSession, fx.instance.ID, fx.site.ID, partition.ID, device, 0, true, nil, cdbm.InfiniBandInterfaceStatusPending, false)
+		second := util.TestBuildInfiniBandInterface(t, fx.dbSession, fx.instance.ID, fx.site.ID, partition.ID, device, 1, true, nil, cdbm.InfiniBandInterfaceStatusPending, false)
+
+		configs := []*corev1.InstanceIBInterfaceConfig{}
+		for _, ibi := range []*cdbm.InfiniBandInterface{first, second} {
+			configs = append(configs, &corev1.InstanceIBInterfaceConfig{
+				Device:         device,
+				DeviceInstance: uint32(ibi.DeviceInstance),
+				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+				IbPartitionId:  &corev1.IBPartitionId{Value: controllerPartitionID.String()},
+			})
+		}
+
+		_, err := fx.manager.UpdateInstancesInDB(ctx, fx.site.ID, &corev1.InstanceInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			Timestamp:       timestamppb.Now(),
+			Instances: []*corev1.Instance{{
+				Id:     &corev1.InstanceId{Value: fx.instance.ControllerInstanceID.String()},
+				Config: &corev1.InstanceConfig{Infiniband: &corev1.InstanceInfinibandConfig{IbInterfaces: configs}},
+				Status: &corev1.InstanceStatus{Infiniband: &corev1.InstanceInfinibandStatus{
+					IbInterfaces:  []*corev1.InstanceIBInterfaceStatus{{Guid: cutil.GetPtr("1070fd0300bd43ad")}},
+					ConfigsSynced: corev1.SyncState_SYNCED,
+				}},
+			}},
+			InventoryPage: &corev1.InventoryPage{
+				TotalPages: 1, CurrentPage: 1, PageSize: 1, TotalItems: 1,
+				ItemIds: []string{fx.instance.ControllerInstanceID.String()},
+			},
+		})
+		require.NoError(t, err)
+
+		ibiDAO := cdbm.NewInfiniBandInterfaceDAO(fx.dbSession)
+		firstPersisted, err := ibiDAO.GetByID(ctx, nil, first.ID, nil)
+		require.NoError(t, err)
+		require.NotNil(t, firstPersisted.GUID)
+		assert.Equal(t, "1070fd0300bd43ad", *firstPersisted.GUID)
+		assert.Equal(t, cdbm.InfiniBandInterfaceStatusReady, firstPersisted.Status)
+
+		secondPersisted, err := ibiDAO.GetByID(ctx, nil, second.ID, nil)
+		require.NoError(t, err)
+		assert.Nil(t, secondPersisted.GUID, "the second Interface has no reported status, so it must stay empty")
+		assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, secondPersisted.Status)
 	})
 }

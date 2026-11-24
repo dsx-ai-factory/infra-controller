@@ -4,9 +4,10 @@
 {{/*
 nico-rest-site-manager has to reach nico-rest-cert-manager over verified TLS,
 which needs the hostname it dials and the CA it trusts to agree with how that
-subchart is actually deployed. A subchart cannot read a sibling's values, so
-neither can keep itself in step; this chart is the only scope that sees both.
-Each failure names the setting to adjust.
+subchart is actually deployed. nico-rest-api and nico-rest-workflow in turn
+have to reach nico-rest-site-manager. A subchart cannot read a sibling's
+values, so none of them can keep itself in step. This chart is the only scope
+that sees all of them. Each failure names the setting to adjust.
 */}}
 {{- $certManager := (index .Values "nico-rest-cert-manager") | default dict -}}
 {{- $siteManager := (index .Values "nico-rest-site-manager") | default dict -}}
@@ -71,5 +72,41 @@ are rejected by x509.VerifyHostname and so are not accepted here either.
 {{- fail (printf "nico-rest-cert-manager.config.dnsNames covers neither %q, the host nico-rest-site-manager dials, nor %q, so its TLS hostname verification would fail. Add one of those names, or set nico-rest-site-manager.args.credsManagerUrl to a host the list does cover." $endpointHost $wildcardHost) -}}
 {{- end -}}
 
+{{- end -}}
+
+{{- $siteContext := dict "Values" $siteManager "Release" .Release "Chart" (dict "Name" "nico-rest-site-manager") -}}
+{{- $certContext := dict "Values" $certManager "Release" .Release -}}
+{{- $clientID := include "nico-rest-site-manager.clientIdentity" $siteContext -}}
+{{- $allowedIDs := include "nico-rest-cert-manager.allowedIdentities" $certContext | fromYamlArray -}}
+{{- if not (has $clientID $allowedIDs) -}}
+{{- fail (printf "Site Manager client SPIFFE ID %q is missing from nico-rest-cert-manager.authorization.allowedIdentities" $clientID) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Site Manager endpoint. nico-rest-api and nico-rest-workflow call Site Manager
+at config.siteManager.svcEndpoint. Its default names the Site Manager Service
+by its chart name on port 8100 in the caller's own namespace. Renaming or
+moving that Service, or changing its port, leaves the default pointing at a
+Service that doesn't exist. Only enforced while an endpoint still carries the
+default, since an operator who set it has aimed it deliberately.
+*/}}
+{{- if $siteManager.enabled -}}
+{{- $defaultSiteManagerEndpoint := "https://nico-rest-site-manager:8100/v1/site" -}}
+{{- $siteManagerName := $siteManager.nameOverride | default "nico-rest-site-manager" | trunc 63 | trimSuffix "-" -}}
+{{- $siteManagerNamespace := $siteManager.namespaceOverride | default .Release.Namespace | trunc 63 | trimSuffix "-" -}}
+{{- $siteManagerPort := ($siteManager.service | default dict).port | default 8100 | int -}}
+{{- range $caller := list "nico-rest-api" "nico-rest-workflow" -}}
+{{- $callerValues := (index $.Values $caller) | default dict -}}
+{{- $callerSiteManager := ($callerValues.config | default dict).siteManager | default dict -}}
+{{/* nico-rest-workflow has no enabled flag. It always calls Site Manager. */}}
+{{- $callsSiteManager := ternary $callerSiteManager.enabled true (hasKey $callerSiteManager "enabled") -}}
+{{- $callerNamespace := $callerValues.namespaceOverride | default $.Release.Namespace | trunc 63 | trimSuffix "-" -}}
+{{- $endpointIsDefault := eq ($callerSiteManager.svcEndpoint | default "") $defaultSiteManagerEndpoint -}}
+{{- $defaultIsWrong := or (ne $siteManagerName "nico-rest-site-manager") (ne $siteManagerNamespace $callerNamespace) (ne $siteManagerPort 8100) -}}
+{{- if and $callerValues.enabled $callsSiteManager $endpointIsDefault $defaultIsWrong -}}
+{{- $host := ternary $siteManagerName (printf "%s.%s" $siteManagerName $siteManagerNamespace) (eq $siteManagerNamespace $callerNamespace) -}}
+{{- fail (printf "%s.config.siteManager.svcEndpoint is still the default %q, but the nico-rest-site-manager Service is %q in namespace %q on port %d. Set %s.config.siteManager.svcEndpoint to %q." $caller $defaultSiteManagerEndpoint $siteManagerName $siteManagerNamespace $siteManagerPort $caller (printf "https://%s:%d/v1/site" $host $siteManagerPort)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

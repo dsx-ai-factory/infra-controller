@@ -114,6 +114,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".forge.BmcIpAllocationType",
             "#[cfg_attr(feature = \"cli\", derive(clap::ValueEnum))]",
         )
+        .type_attribute(
+            ".forge.ServiceVpcAddressFamily",
+            "#[cfg_attr(feature = \"cli\", derive(clap::ValueEnum))]",
+        )
+        .field_attribute(
+            ".forge.ServiceVpcAddressFamily.SERVICE_VPC_ADDRESS_FAMILY_UNSPECIFIED",
+            "#[cfg_attr(feature = \"cli\", value(skip))]",
+        )
+        .type_attribute(
+            ".forge.InstanceDpuExtensionServiceConfig",
+            "#[cfg_attr(feature = \"cli\", derive(serde::Deserialize), serde(deny_unknown_fields))]",
+        )
+        .field_attribute(
+            ".forge.InstanceDpuExtensionServiceConfig.service_vpc_ids",
+            "#[cfg_attr(feature = \"cli\", serde(default))]",
+        )
         .include_file("prost_common.rs")
         .type_attribute(".health", "#[derive(serde::Deserialize, serde::Serialize)]")
         .type_attribute(
@@ -158,6 +174,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .field_attribute(
             "ExpectedMachine.replace_host_nics",
+            "#[serde(skip_serializing)]",
+        )
+        .field_attribute(
+            "ExpectedMachine.replace_dpu_loopbacks",
             "#[serde(skip_serializing)]",
         )
         .field_attribute(
@@ -256,8 +276,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // and response types imported from any file can be resolved. `root_files`
     // only selects the services for which each backend generates methods.
     let client_wrapper_config = codegen::Config {
-        wrapper_name: "ForgeApiClient".to_string(),
-        inner_rpc_client_type: "crate::forge_tls_client::ForgeClientT".to_string(),
+        wrapper_name: "CarbideApiClient".to_string(),
+        inner_rpc_client_type: "crate::carbide_tls_client::CarbideClientT".to_string(),
         root_files: vec!["forge.proto".to_string()],
         generated_types_path_within_crate: "protos".to_string(),
         extern_paths: codegen.extern_paths(),
@@ -265,14 +285,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_wrapper_generator =
         codegen::CodeGenerator::new(client_wrapper_config, &rust_descriptor_set)?;
 
-    client_wrapper_generator.write_rpc_client_wrapper(out_dir.join("forge_api_client.rs"))?;
+    client_wrapper_generator.write_rpc_client_wrapper(out_dir.join("carbide_api_client.rs"))?;
     client_wrapper_generator
         .write_rpc_convenience_converters(out_dir.join("convenience_converters.rs"))?;
 
     // Generate the NMX-C wrapper from the same descriptor set.
     let nmx_c_client_wrapper_config = codegen::Config {
         wrapper_name: "NmxCApiClient".to_string(),
-        inner_rpc_client_type: "crate::forge_tls_client::NmxCClientT".to_string(),
+        inner_rpc_client_type: "crate::carbide_tls_client::NmxCClientT".to_string(),
         root_files: vec!["nmx_c.proto".to_string()],
         extern_paths: Default::default(),
         generated_types_path_within_crate: "protos".to_string(),

@@ -101,7 +101,7 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.is_up(),
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("cannot read host readiness on {}", self.kind())
+                eyre::bail!("cannot read host readiness on {}", self.kind());
             }
         }
     }
@@ -154,7 +154,7 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.set_infiniband_port_state(guid, state),
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("cannot set InfiniBand port state on {}", self.kind())
+                eyre::bail!("cannot set InfiniBand port state on {}", self.kind());
             }
         }
     }
@@ -206,7 +206,7 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.clone().delete_from_api(api_client).await,
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("cannot delete {} through the machine API", self.kind())
+                eyre::bail!("cannot delete {} through the machine API", self.kind());
             }
         }
     }
@@ -267,7 +267,7 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Switch(handle) => handle.set_nvos_password(username, password),
             DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("only a switch has an NVOS password")
+                eyre::bail!("only a switch has an NVOS password");
             }
         }
     }
@@ -277,7 +277,7 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Switch(handle) => handle.reset_nvos(),
             DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("only a switch has an NVOS to reset")
+                eyre::bail!("only a switch has an NVOS to reset");
             }
         }
     }

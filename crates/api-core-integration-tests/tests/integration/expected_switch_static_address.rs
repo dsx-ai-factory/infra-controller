@@ -52,7 +52,7 @@ async fn test_update_with_bmc_and_nvos_ips_preallocates_both_interfaces(
         }))
         .await?;
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
 
     env.api()
         .update_expected_switch(tonic::Request::new(rpc::forge::ExpectedSwitch {
@@ -71,25 +71,23 @@ async fn test_update_with_bmc_and_nvos_ips_preallocates_both_interfaces(
         }))
         .await?;
 
-    let mut txn = env.api().database_connection.begin().await?;
     for (mac, ip) in [(bmc_mac, bmc_ip), (nvos_mac, nvos_ip)] {
-        let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+        let interfaces =
+            db::machine_interface::find_by_mac_address(&env.api().database_connection, mac).await?;
         assert_eq!(interfaces.len(), 1, "should create one interface for {mac}");
         assert!(
             interfaces[0].addresses.contains(&ip.parse()?),
             "interface {mac} should contain static address {ip}"
         );
     }
-    txn.rollback().await?;
 
-    // This update creates two interfaces and therefore emits two `created`
-    // outcomes. Other tests share the global metrics registry and can only
-    // increase this delta, so use a lower bound rather than exact equality.
-    assert!(
+    // This update creates two interfaces and therefore emits two `created` outcomes.
+    assert_eq!(
         metrics.counter_delta(
             "carbide_static_address_preallocations_total",
             &[("outcome", "created")],
-        ) >= 2.0
+        ),
+        2.0
     );
 
     Ok(())

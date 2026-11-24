@@ -147,7 +147,7 @@ func AllUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter, 
 // allUnits fails a read that does not move on (a cursor twice in one pass,
 // an empty page that asks for more) or needs more than maxPages and maxUnits
 // over both passes.
-func allUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter, name *string, maxPages, maxUnits int) ([]probeapi.Unit, error) {
+func allUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter, name *string, maxPages, maxUnits int, metadata ...*probeapi.SweepInfo) ([]probeapi.Unit, error) {
 	unavailable := func(format string, a ...any) error {
 		return &Error{Kind: Unavailable, Detail: fmt.Sprintf(format, a...)}
 	}
@@ -172,11 +172,17 @@ read:
 				continue read
 			case err != nil:
 				return nil, err
-			case !fresh(reply.SweepInfo): // the age is per reply, so any page can go stale
+			case !Fresh(reply.SweepInfo): // the age is per reply, so any page can go stale
 				return nil, unavailable("the %s sweep is %.0f s old, interval %.0f s",
 					reply.Family, reply.SweepAgeSeconds, reply.SweepIntervalSeconds)
 			case snapshot != nil && *snapshot != reply.SnapshotID: // an ID is reply text, so it is not named
 				return nil, unavailable("pages came from two snapshots")
+			}
+			if len(metadata) > 0 {
+				if reply.LastAttemptSucceeded == nil || !*reply.LastAttemptSucceeded {
+					return nil, unavailable("latest source attempt did not succeed")
+				}
+				*metadata[0] = reply.SweepInfo
 			}
 			snapshot, pages, total = &reply.SnapshotID, pages+1, total+len(reply.Units)
 			units = append(units, reply.Units...)
@@ -198,8 +204,8 @@ read:
 	}
 }
 
-// The probe is the only v1 user of these bound-call and freshness helpers,
-// so they live here. A run-wide clock and the sweep target math arrive with
+// The bound-call and freshness helpers live here; fleet-up's empty-site check
+// reads Fresh too. A run-wide clock and the sweep target math arrive with
 // their second users in later changes.
 
 var (
@@ -237,8 +243,16 @@ func bounded[T any](ctx context.Context, until time.Time, call func(context.Cont
 	return v, err
 }
 
-// fresh reports whether a sweep is at most two intervals old. NaN is never
+// Fresh reports whether a sweep is at most two intervals old. NaN is never
 // fresh.
-func fresh(s probeapi.SweepInfo) bool {
+func Fresh(s probeapi.SweepInfo) bool {
 	return s.SweepIntervalSeconds > 0 && s.SweepAgeSeconds >= 0 && s.SweepAgeSeconds <= 2*s.SweepIntervalSeconds
+}
+
+// SnapshotUnits preserves the complete source metadata and requires explicit
+// latest-attempt success on every page. Older probe contracts fail closed.
+func SnapshotUnits(ctx context.Context, p Probe, until time.Time, f probeapi.Filter) ([]probeapi.Unit, probeapi.SweepInfo, error) {
+	var metadata probeapi.SweepInfo
+	units, err := allUnits(ctx, p, until, f, nil, readPages, readUnits, &metadata)
+	return units, metadata, err
 }

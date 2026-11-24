@@ -19,13 +19,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue, MetricFamily};
 use eyre::{Report, WrapErr, eyre};
 use futures_util::StreamExt;
 use model::firmware::loggable_url;
@@ -225,11 +226,13 @@ pub(crate) enum DownloadFinished {
 /// errors or exposing the credentials in their URLs.
 fn redacted_error_chain(error: &(dyn Error + 'static)) -> String {
     let chain: Vec<_> = std::iter::successors(Some(error), |&error| error.source()).collect();
-    let mut message = chain
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(": ");
+    let mut message = String::new();
+    for (index, error) in chain.iter().enumerate() {
+        if index > 0 {
+            message.push_str(": ");
+        }
+        write!(message, "{error}").expect("writing to a String cannot fail");
+    }
     // Custom redirect policies can return another reqwest error with its own URL.
     // Keep the typed sources intact and redact each URL when presenting them.
     let mut urls: Vec<_> = chain
@@ -484,9 +487,9 @@ pub enum ArtifactStatus {
 
 /// Coordinates background firmware downloads and cache verification. Clones
 /// share one worker pool and cache state; separately constructed values do not.
-/// `Default` uses the same independent default pool as [`Self::new`].
 #[derive(Clone, Debug)]
 pub struct FirmwareDownloader {
+    instrumentation: Instrumentation,
     // Actual structure wrapped in an Arc so that we can clone the FirmwareDownloader and have the clones all point to one instance.
     actual: Arc<Mutex<FirmwareDownloaderActual>>,
     capacity: Arc<Semaphore>,
@@ -504,6 +507,7 @@ struct FirmwareDownloaderActual {
 
 /// Holds one destination's registration until all filesystem work stops.
 struct DownloadAttempt {
+    instrumentation: Instrumentation,
     actual: Arc<Mutex<FirmwareDownloaderActual>>,
     filename: PathBuf,
     span: tracing::Span,
@@ -645,24 +649,28 @@ impl StagedDownload {
     }
 }
 
-impl Default for FirmwareDownloader {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FirmwareDownloader {
     /// Creates an independent coordinator and worker pool with default limits.
     /// Clone this value to share its limits. HTTP client initialization is
     /// deferred until needed; initialization failure is reported by `available`.
-    pub fn new() -> FirmwareDownloader {
-        Self::from_config(FirmwareDownloadConfig::default(), None, None)
+    /// Event metrics use `instrumentation`; retain its provider while downloads run.
+    pub fn new(instrumentation: Instrumentation) -> FirmwareDownloader {
+        Self::from_config(
+            FirmwareDownloadConfig::default(),
+            None,
+            None,
+            instrumentation,
+        )
     }
 
     /// Validates limits and initializes legacy and no-redirect managed clients
     /// before work is admitted. Invalid settings or initialization errors are returned
     /// to the caller, so service startup can fail before accepting work.
-    pub fn with_config(config: FirmwareDownloadConfig) -> eyre::Result<Self> {
+    /// Event metrics use `instrumentation`; retain its provider while downloads run.
+    pub fn with_config(
+        config: FirmwareDownloadConfig,
+        instrumentation: Instrumentation,
+    ) -> eyre::Result<Self> {
         config.validate()?;
         let client = config.client()?;
         let managed_client = config.managed_client()?;
@@ -670,6 +678,7 @@ impl FirmwareDownloader {
             config,
             Some(client),
             Some(managed_client),
+            instrumentation,
         ))
     }
 
@@ -677,8 +686,10 @@ impl FirmwareDownloader {
         config: FirmwareDownloadConfig,
         client: Option<Client>,
         managed_client: Option<Client>,
+        instrumentation: Instrumentation,
     ) -> Self {
         FirmwareDownloader {
+            instrumentation,
             actual: Arc::new(Mutex::new(FirmwareDownloaderActual {
                 downloading: HashSet::new(),
                 failures: HashMap::new(),
@@ -723,6 +734,7 @@ impl FirmwareDownloader {
                 .expect("firmware downloader state mutex poisoned");
             if state.downloading.insert(filename.to_path_buf()) {
                 Some(Arc::new(DownloadAttempt {
+                    instrumentation: self.instrumentation.clone(),
                     actual: self.actual.clone(),
                     filename: filename.to_path_buf(),
                     span: span.clone(),
@@ -745,7 +757,11 @@ impl FirmwareDownloader {
                 let _capacity = capacity;
                 tracing::dispatcher::with_default(&dispatch, || {
                     span.in_scope(|| match attempt {
-                        Some(attempt) => cached_file_status(&attempt.filename, &checksum),
+                        Some(attempt) => cached_file_status(
+                            &attempt.filename,
+                            &checksum,
+                            &attempt.instrumentation,
+                        ),
                         None => {
                             // The active attempt owns removal and publication. Other
                             // callers can still use a valid cache entry while it runs.
@@ -781,7 +797,7 @@ impl FirmwareDownloader {
         };
 
         if url.is_empty() {
-            emit(FirmwareArtifactMissingUrl {
+            self.instrumentation.emit(FirmwareArtifactMissingUrl {
                 reason: ArtifactUnavailableReason::MissingUrl,
                 firmware_path: format!("{filename:?}"),
             });
@@ -907,6 +923,7 @@ impl FirmwareDownloader {
                 return Err("managed firmware destination already has a physical owner".to_owned());
             }
             let attempt = Arc::new(DownloadAttempt {
+                instrumentation: self.instrumentation.clone(),
                 actual: self.actual.clone(),
                 filename,
                 span: tracing::Span::current(),
@@ -957,7 +974,7 @@ fn record_download_result(
         },
         attempt.filename.display().to_string(),
     );
-    emit(match &failure {
+    attempt.instrumentation.emit(match &failure {
         None => DownloadFinished::Ok {
             took,
             url,
@@ -1064,11 +1081,13 @@ async fn download_and_publish(
     // No await after verification: a cancelled owner cannot leave behind a
     // blocking worker that publishes the file after a new attempt starts.
     std::fs::rename(&staged.path, &staged.attempt.filename)
-        .wrap_err(format!(
-            "unable to rename {} to {}",
-            staged.path.display(),
-            staged.attempt.filename.display()
-        ))
+        .wrap_err_with(|| {
+            format!(
+                "unable to rename {} to {}",
+                staged.path.display(),
+                staged.attempt.filename.display()
+            )
+        })
         .map_err(fail(DownloadOutcome::Io))?;
     staged.published = true;
     Ok(())
@@ -1080,7 +1099,11 @@ enum CachedFileStatus {
     Unusable { error: String },
 }
 
-fn cached_file_status(filename: &Path, sha256: &str) -> CachedFileStatus {
+fn cached_file_status(
+    filename: &Path,
+    sha256: &str,
+    instrumentation: &Instrumentation,
+) -> CachedFileStatus {
     if !filename.exists() {
         return CachedFileStatus::NeedsDownload;
     }
@@ -1095,7 +1118,7 @@ fn cached_file_status(filename: &Path, sha256: &str) -> CachedFileStatus {
             );
 
             if let Err(err) = std::fs::remove_file(filename) {
-                emit(FirmwareStaleCachedArtifactRemovalFailed {
+                instrumentation.emit(FirmwareStaleCachedArtifactRemovalFailed {
                     reason: ArtifactUnavailableReason::StaleCacheRemovalFailed,
                     filename: filename.display().to_string(),
                     error: err.to_string(),
@@ -1155,10 +1178,12 @@ async fn download(
         .get(url)
         .send()
         .await
-        .wrap_err(format!(
-            "FirmwareDownloader got error trying to download {}",
-            loggable_url(url)
-        ))
+        .wrap_err_with(|| {
+            format!(
+                "FirmwareDownloader got error trying to download {}",
+                loggable_url(url)
+            )
+        })
         .map_err(fail(DownloadOutcome::Fetch))?;
     if !res.status().is_success() {
         return Err(fail(DownloadOutcome::Status)(eyre!(
@@ -1198,32 +1223,33 @@ fn verify_sha256(filename: &Path, checksum: &str) -> Result<(), Report> {
         return Ok(());
     }
 
-    let mut file = std::fs::File::open(filename)?;
-    verify_sha256_file(&mut file, &checksum)
-}
-
-/// Binds bytes to their expected SHA-256 identity and detects corruption. This
-/// is not publisher authentication or a substitute for firmware signatures.
-/// Reads from the file's current position and leaves its cursor at EOF.
-pub(crate) fn verify_sha256_file(file: &mut File, checksum: &str) -> Result<(), Report> {
-    let mut context = Sha256::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let read = std::io::Read::read(file, &mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        context.update(&buffer[..read]);
-    }
-
-    let checksum_actual = hex::encode(context.finalize());
-
+    let file = std::fs::File::open(filename)?;
+    let checksum_actual = hex::encode(sha256_file::<std::io::Error>(&file, || Ok(()))?);
     if checksum_actual != checksum {
         return Err(eyre!(
             "checksum mismatch: expected {checksum} downloaded {checksum_actual}"
         ));
     }
     Ok(())
+}
+
+/// Check the caller's lifecycle before each read from the current position.
+/// A blocking read already in progress must finish. The digest identifies
+/// the bytes without authenticating their publisher.
+pub(crate) fn sha256_file<E: From<std::io::Error>>(
+    mut file: impl std::io::Read,
+    mut before_read: impl FnMut() -> Result<(), E>,
+) -> Result<[u8; 32], E> {
+    let mut context = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        before_read()?;
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(context.finalize().into());
+        }
+        context.update(&buffer[..read]);
+    }
 }
 
 #[cfg(test)]
@@ -1265,9 +1291,14 @@ mod lifecycle_tests {
         );
         let activate = |settings: &str| -> Result<(), String> {
             let config = toml::from_str(settings).map_err(|error| error.to_string())?;
-            FirmwareDownloader::with_config(config)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            FirmwareDownloader::with_config(
+                config,
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
         };
         carbide_test_support::scenarios!(activate:
             "accepted bounds" {
@@ -1321,6 +1352,7 @@ mod lifecycle_tests {
                 .insert(filename.to_path_buf())
         );
         Arc::new(DownloadAttempt {
+            instrumentation: downloader.instrumentation.clone(),
             actual: downloader.actual.clone(),
             filename: filename.to_path_buf(),
             span: tracing::Span::current(),
@@ -1379,10 +1411,15 @@ mod lifecycle_tests {
         let directory = tempfile::tempdir().unwrap();
         let filename = directory.path().join("fw.bin");
         let partial = directory.path().join("fw.bin.download");
-        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-            max_concurrent_downloads: 1,
-            ..Default::default()
-        })
+        let downloader = FirmwareDownloader::with_config(
+            FirmwareDownloadConfig {
+                max_concurrent_downloads: 1,
+                ..Default::default()
+            },
+            carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
         .unwrap();
         let attempt = claim(&downloader, &filename);
         let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
@@ -1454,10 +1491,15 @@ mod lifecycle_tests {
                 let directory = tempfile::tempdir().unwrap();
                 let filename = directory.path().join("fw.bin");
                 let partial = directory.path().join("fw.bin.download");
-                let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-                    max_concurrent_downloads: 1,
-                    ..Default::default()
-                })
+                let downloader = FirmwareDownloader::with_config(
+                    FirmwareDownloadConfig {
+                        max_concurrent_downloads: 1,
+                        ..Default::default()
+                    },
+                    carbide_instrument::Instrumentation::from_meter_provider(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    ),
+                )
                 .unwrap();
                 let checksum = hex::encode(Sha256::digest(b"firmware"));
                 let mut server = mockito::Server::new_async().await;
@@ -1644,7 +1686,10 @@ mod lifecycle_tests {
             let filename = directory.path().join("fw.bin");
             std::fs::write(&filename, b"firmware").unwrap();
             let checksum = hex::encode(Sha256::digest(b"firmware"));
-            let downloader = FirmwareDownloader::new();
+            let downloader =
+                FirmwareDownloader::new(carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ));
             let (started_rx, release_tx, blocker) = blocking_gate();
             started_rx.await.unwrap();
             let mut first = Box::pin(downloader.available(&filename, "", &checksum));
@@ -1677,10 +1722,15 @@ mod lifecycle_tests {
             let filename = directory.path().join("fw.bin");
             std::fs::write(&filename, b"firmware").unwrap();
             let checksum = hex::encode(Sha256::digest(b"firmware"));
-            let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-                max_concurrent_downloads: 2,
-                ..Default::default()
-            })
+            let downloader = FirmwareDownloader::with_config(
+                FirmwareDownloadConfig {
+                    max_concurrent_downloads: 2,
+                    ..Default::default()
+                },
+                carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
             .unwrap();
             let (started_rx, release_tx, blocker) = blocking_gate();
             started_rx.await.unwrap();
@@ -1714,7 +1764,10 @@ mod lifecycle_tests {
         let filename = directory.path().join("fw.bin");
         let partial = directory.path().join("fw.bin.download");
         std::fs::write(&partial, b"partial").unwrap();
-        let downloader = FirmwareDownloader::new();
+        let downloader =
+            FirmwareDownloader::new(carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ));
         let staged = StagedDownload {
             path: partial.clone(),
             attempt: claim(&downloader, &filename),
@@ -1888,7 +1941,10 @@ mod lifecycle_tests {
                 .await;
             let directory = tempfile::tempdir().unwrap();
             let filename = directory.path().join("fw.bin");
-            let downloader = FirmwareDownloader::new();
+            let downloader =
+                FirmwareDownloader::new(carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ));
             let records = SpanRecords::default();
             carbide_instrument::testing::keep_callsites_enabled();
             let subscriber = tracing_subscriber::registry().with(records.clone());
@@ -1974,9 +2030,8 @@ mod lifecycle_tests {
     /// Public cache checks and background downloads retain the caller span across worker boundaries.
     #[tokio::test]
     async fn public_download_events_keep_the_request_parent() {
-        // This log-only proof emits the same counters as the metric tests, so
-        // it must share their serialized capture window.
-        let _metrics = carbide_instrument::testing::MetricsCapture::start();
+        let instrumentation_test_meter =
+            carbide_utils::test_support::test_meter::TestMeter::default();
         let directory = tempfile::tempdir().unwrap();
         let filename = directory.path().join("fw.bin");
         let unusable = directory.path().join("unusable.bin");
@@ -1990,14 +2045,17 @@ mod lifecycle_tests {
             .create_async()
             .await;
         let url = format!("{}/fw.bin", server.url());
-        let downloader = FirmwareDownloader::new();
+        let downloader = FirmwareDownloader::new(carbide_instrument::Instrumentation::new(
+            instrumentation_test_meter.meter(),
+        ));
         let records = SpanRecords::default();
         carbide_instrument::testing::keep_callsites_enabled();
         let subscriber =
             tracing::Dispatch::new(tracing_subscriber::registry().with(records.clone()));
         // Another untraced worker can register the completion callsite first.
-        std::thread::spawn(|| {
-            emit(DownloadFinished::Ok {
+        let instrumentation = downloader.instrumentation.clone();
+        std::thread::spawn(move || {
+            instrumentation.emit(DownloadFinished::Ok {
                 took: Duration::ZERO,
                 url: String::new(),
                 filename: String::new(),

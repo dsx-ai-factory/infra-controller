@@ -13,9 +13,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,7 @@ import (
 
 	"go.uber.org/goleak"
 	coordv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -87,6 +90,21 @@ func endless(status int, wait time.Duration) http.HandlerFunc {
 
 func object(kind, name, version, uid string) string {
 	return fmt.Sprintf(`{"kind":%q,"metadata":{"name":%q,"resourceVersion":%q,"uid":%q}}`, kind, name, version, uid)
+}
+
+func podList(next string, names ...string) string {
+	items := make([]string, len(names))
+	for i, n := range names {
+		items[i] = object("Pod", n, "1", "u-"+n)
+	}
+	return `{"kind":"PodList","metadata":{"resourceVersion":"9","continue":"` + next + `"},"items":[` + strings.Join(items, ",") + `]}`
+}
+
+func podNames(pods []PodInfo) (out []string) {
+	for _, p := range pods {
+		out = append(out, p.Name)
+	}
+	return out
 }
 
 // seen keeps what a handler saw, safe to read from the test.
@@ -160,11 +178,109 @@ func (c stuckDeadline) Deadline() (time.Time, bool) { return c.at, true }
 
 const leasePath = "/apis/coordination.k8s.io/v1/namespaces/ns/leases"
 
+func TestListsHaveFleetHeadroom(t *testing.T) {
+	const services = 88_000
+	var pages atomic.Int32
+	k := served(t, map[string]http.HandlerFunc{"GET /api/v1/namespaces/ns/services": func(w http.ResponseWriter, r *http.Request) {
+		pages.Add(1)
+		start, _ := strconv.Atoi(r.URL.Query().Get("continue"))
+		next := ""
+		if start+listPage < 2*services {
+			next = strconv.Itoa(start + listPage)
+		}
+		_, _ = fmt.Fprintf(w, `{"metadata":{"resourceVersion":"9","continue":%q},"items":[%s{}]}`, next, strings.Repeat("{},", listPage-1))
+	}})
+	// Empty objects exercise the same paged reader without retaining thousands of irrelevant Service fields.
+	items, err := listAll[struct{}](bg, k, k.url(core, "ns", "services", ""), managedByMat, maxListItems)
+	is(t, []any{err, len(items), int(pages.Load()), k.listTimeout >= 2*(services/listPage)*CallTimeout},
+		[]any{nil, 2 * services, 2 * services / listPage, true}, "at least twice the fleet's objects and full page timeouts")
+}
+
 func TestKube(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		run  func(t *testing.T)
 	}{
+		{"a list dispatches no page once its deadline has passed", func(t *testing.T) {
+			// listUntil is already elapsed at entry, so the pre-page check must
+			// stop the list before any page is sent, not hand k.call an expired
+			// bound that it would only cancel after dispatch.
+			k := served(t, nil)
+			k.listTimeout = 0
+			var calls atomic.Int32
+			k.client.Transport = roundTrip(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(podList("c1", "p"))), Header: http.Header{}}, nil
+			})
+			_, err := listAll[corev1.Pod](bg, k, k.url(core, "ns", "pods", ""), "app=x", 1000)
+			is(t, [2]any{hasKind(err, Timeout, 0), calls.Load()}, [2]any{true, int32(0)}, "deadline stops dispatch")
+		}},
+		{"lists are read in pages and capped", func(t *testing.T) {
+			var asked seen
+			pages := map[string]string{"": podList("c1", "a", "b"), "c1": podList("c2", "c", "d"), "c2": podList("", "e")}
+			k := served(t, map[string]http.HandlerFunc{"GET /api/v1/namespaces/ns/pods": func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query()
+				asked.add("limit=" + q.Get("limit") + " continue=" + q.Get("continue") + " " + q.Get("labelSelector"))
+				_, _ = io.WriteString(w, pages[q.Get("continue")])
+			}})
+			pods, err := k.ListPods(bg, "ns", "app=x")
+			is(t, [2]any{podNames(pods), err}, [2]any{[]string{"a", "b", "c", "d", "e"}, nil}, "pods")
+			is(t, asked.all(), []string{"limit=500 continue= app=x", "limit=500 continue=c1 app=x", "limit=500 continue=c2 app=x"}, "pages")
+			_, err = listAll[corev1.Pod](bg, k, k.url(core, "ns", "pods", ""), "app=x", 3)
+			is(t, err, error(Error{Kind: Invalid, Text: "the list holds over 3 objects"}), "capped")
+			// A page that is not a list of the API, and a token that does not move.
+			k2 := served(t, map[string]http.HandlerFunc{"GET /api/v1/namespaces/ns/pods": reply(200, `{"items":[]}`)})
+			_, err = k2.ListPods(bg, "ns", "app=x")
+			is(t, err, error(Error{Kind: Invalid, Text: "the reply is not a list of the API"}), "no list version")
+			k3 := served(t, map[string]http.HandlerFunc{"GET /api/v1/namespaces/ns/pods": reply(200, podList("c1", "a"))})
+			_, err = k3.ListPods(bg, "ns", "app=x")
+			is(t, err, error(Error{Kind: Invalid, Text: "the list continue token did not move on"}), "stuck token")
+		}},
+		{"each list page has its own deadline inside the list's", func(t *testing.T) {
+			// Pages that each answer in 400 ms, every one with a next page.
+			k := served(t, map[string]http.HandlerFunc{"GET /api/v1/namespaces/ns/pods": func(w http.ResponseWriter, r *http.Request) {
+				time.Sleep(400 * time.Millisecond)
+				page, _ := strconv.Atoi(r.URL.Query().Get("continue"))
+				_, _ = io.WriteString(w, podList(strconv.Itoa(page+1), "p"+strconv.Itoa(page)))
+			}})
+			k.listTimeout = 2 * time.Second
+			// Four pages take 1.6 s, past the 1 s call timeout, but under the list.
+			_, err := listAll[corev1.Pod](bg, k, k.url(core, "ns", "pods", ""), "app=x", 3)
+			is(t, err, error(Error{Kind: Invalid, Text: "the list holds over 3 objects"}), "the fourth page is read")
+			// A list that never ends stops at the list's own time.
+			started := time.Now()
+			_, err = listAll[corev1.Pod](bg, k, k.url(core, "ns", "pods", ""), "app=x", 1000)
+			is(t, [2]any{err, time.Since(started) < 3*time.Second}, [2]any{error(Error{Kind: Timeout, Secs: 2}), true}, "endless")
+			is(t, listTimeout, maxListItems/listPage*CallTimeout, "the list allows a full call timeout per page")
+		}},
+		{"a service and a pod map their fields", func(t *testing.T) {
+			svc := `{"metadata":{"name":"host-1","labels":{"nvidia-infra-controller/mat-machine-type":"host",` +
+				`"nvidia-infra-controller/mat-machine-id":"m1","nvidia-infra-controller/mat-id":"7"},` +
+				`"annotations":{"nvidia-infra-controller/mat-bmc-ip":"10.0.0.1","nvidia-infra-controller/mat-hardware-type":"gb200"}},` +
+				`"spec":{"externalIPs":["10.0.0.1","bad","2001:db8::1"]}}`
+			pod := `{"metadata":{"name":"mat-0","uid":"u-0","creationTimestamp":"2026-01-02T03:04:05Z","labels":{"app":"x"}},` +
+				`"status":{"phase":"Running","podIP":"10.1.2.3","conditions":[{"type":"Ready","status":"True"}],` +
+				`"containerStatuses":[{"restartCount":2}],"initContainerStatuses":[{"restartCount":3}]}}`
+			list := func(kind, item string) http.HandlerFunc {
+				return reply(200, `{"kind":"`+kind+`","metadata":{"resourceVersion":"9"},"items":[`+item+`]}`)
+			}
+			k := served(t, map[string]http.HandlerFunc{
+				"GET /api/v1/namespaces/ns/services": list("ServiceList", svc),
+				"GET /api/v1/namespaces/ns/pods":     list("PodList", pod),
+			})
+			svcs, err1 := k.ListMatServices(bg)
+			pods, err2 := k.ListPods(bg, "ns", "app=x")
+			at, _ := time.Parse(time.RFC3339, "2026-01-02T03:04:05Z")
+			is(t, [2]any{svcs[0], err1}, [2]any{MatService{
+				Name: "host-1", MachineType: "host", MachineID: "m1", MatID: "7",
+				BmcIP: netip.MustParseAddr("10.0.0.1"), HardwareType: "gb200",
+				ExternalIPs: []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("2001:db8::1")},
+			}, nil}, "service")
+			is(t, [2]any{pods[0], err2}, [2]any{PodInfo{
+				Name: "mat-0", UID: "u-0", Labels: map[string]string{"app": "x"}, Phase: "Running",
+				Ready: true, CreatedAt: at.UTC(), Restarts: 5, IP: "10.1.2.3",
+			}, nil}, "pod")
+		}},
 		{"a lease converts both ways", func(t *testing.T) {
 			// The API keeps microseconds, also before the epoch.
 			for _, raw := range []string{"1969-12-31T23:59:59.250001Z", "1969-12-31T23:59:59.5Z", "2300-01-01T00:00:00.25Z"} {

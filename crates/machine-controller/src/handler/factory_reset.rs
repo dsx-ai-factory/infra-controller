@@ -74,12 +74,17 @@
 //!   non-`NotSupported` error and the instance parks for operator attention
 //!   rather than silently attempting a speculative unlock.
 
+use bmc_platform::PlatformError;
+use carbide_credential_rotation::bmc_accounts::{
+    apply_bmc_root_policy, change_bmc_root_password, probe_bmc_credentials,
+};
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_redfish::libredfish::RedfishAuth;
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
+use db::TransactionVending as _;
 use eyre::eyre;
-use libredfish::RedfishError;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::machine::{
@@ -91,6 +96,7 @@ use state_controller::state_handler::{
 };
 
 use crate::context::MachineStateHandlerContextObjects;
+use crate::redfish::reset_bmc_to_factory_defaults;
 
 /// Small intra-tick delay between the two credential probes, mirroring
 /// site-explorer's `BMC_AUTH_RETRY_DURATION`, so a BMC that throttles after a
@@ -437,12 +443,9 @@ async fn reset_to_defaults(
 
     // The BMC is still on its normal (per-device / site-wide) credential here, so
     // a stored-credential client authenticates.
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
-    match redfish_client.bmc_reset_to_defaults().await {
+    match reset_bmc_to_factory_defaults(&bmc).await {
         Ok(()) => {
             tracing::info!(
                 %host_bmc_mac,
@@ -454,17 +457,16 @@ async fn reset_to_defaults(
         }
         // A BMC that does not support factory reset cannot be sanitized this way;
         // skip the restore and continue the release rather than blocking it.
-        Err(RedfishError::NotSupported(msg)) => {
+        Err(PlatformError::Unsupported) => {
             tracing::warn!(
                 %host_bmc_mac,
-                %msg,
                 "BMC does not support factory reset; skipping BMC sanitize and continuing tenant release"
             );
             Ok(transition_to_factory_reset_bmc(
                 FactoryResetBmcState::RemoveSuppression,
             ))
         }
-        Err(e) => Err(redfish_error("bmc_reset_to_defaults", e)),
+        Err(e) => Err(platform_error("bmc_reset_to_defaults", e)),
     }
 }
 
@@ -562,13 +564,28 @@ async fn restore_credentials(
     }
 
     let (host, port) = bmc_host_port(mh_snapshot)?;
-    let redfish = ctx.services.bmc_credential_ops.clone();
+    let report = match parse_uri_host_ip(&host) {
+        Some(ip) => db::explored_endpoints::find_report_by_ip(&ctx.services.db_pool, ip).await?,
+        None => None,
+    };
+    let access = BmcAccessInfo {
+        host,
+        port,
+        mac_address: host_bmc_mac,
+    };
+    let connector = ctx.services.bmc_connector.clone();
 
     // Step 1: verify the factory credentials. Until they authenticate we never
     // mutate and never park.
-    if !redfish
-        .bmc_credentials_valid(&host, port, factory_creds.clone())
-        .await?
+    if !probe_bmc_credentials(
+        &connector,
+        &access,
+        report.as_ref(),
+        factory_creds.clone(),
+        false,
+    )
+    .await
+    .map_err(|e| platform_error("accounts.list", e))?
     {
         // Factory creds rejected: normally the BMC just is not ready yet. Rarely,
         // a prior attempt already restored the per-device credential and crashed
@@ -580,9 +597,9 @@ async fn restore_credentials(
         // needed.
         if retry_count.is_multiple_of(CRASH_RECOVERY_PROBE_INTERVAL)
             && let Some(per_device) = read_per_device_bmc_cred(ctx, host_bmc_mac).await?
-            && redfish
-                .bmc_credentials_valid(&host, port, per_device)
-                .await?
+            && probe_bmc_credentials(&connector, &access, report.as_ref(), per_device, false)
+                .await
+                .map_err(|e| platform_error("accounts.list", e))?
         {
             tracing::warn!(
                 %host_bmc_mac,
@@ -625,16 +642,18 @@ async fn restore_credentials(
         ..
     } = per_device.clone();
 
-    // Resolve the exact dispatch vendor, then change the device from factory
-    // default back to its previous per-device password.
-    let vendor = redfish
-        .probe_bmc_vendor(&host, port, factory_creds.clone())
+    let restored = async {
+        change_bmc_root_password(
+            &connector,
+            &access,
+            report.as_ref(),
+            factory_creds,
+            &per_device_password,
+        )
         .await?;
-
-    match redfish
-        .set_bmc_root_password(&host, port, vendor, factory_creds, per_device_password)
-        .await
-    {
+        apply_bmc_root_policy(&connector, &access, report.as_ref(), per_device.clone()).await
+    };
+    match restored.await {
         Ok(()) => {
             flush_bmc_session(ctx, host_bmc_mac).await?;
             tracing::info!(
@@ -651,9 +670,9 @@ async fn restore_credentials(
             // credential a prior attempt succeeded and we crashed before
             // advancing. Verify before parking.
             tokio::time::sleep(std::time::Duration::from_secs(BMC_AUTH_PROBE_DELAY_SECS)).await;
-            if redfish
-                .bmc_credentials_valid(&host, port, per_device)
-                .await?
+            if probe_bmc_credentials(&connector, &access, report.as_ref(), per_device, false)
+                .await
+                .map_err(|e| platform_error("accounts.list", e))?
             {
                 flush_bmc_session(ctx, host_bmc_mac).await?;
                 tracing::warn!(
@@ -664,7 +683,7 @@ async fn restore_credentials(
                     FactoryResetBmcState::RemoveSuppression,
                 ));
             }
-            Err(StateHandlerError::from(change_err))
+            Err(platform_error("accounts.change_password", change_err))
         }
     }
 }
@@ -679,7 +698,12 @@ async fn remove_suppression(
     // the deletion transaction, so no row lock is held across the Redfish call.
     let power_cycle = transition_to_power_cycle(ctx, mh_snapshot).await?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     site_explorer_pause::resume_after_credential_change(
         &mut txn,
         &[host_bmc_mac],

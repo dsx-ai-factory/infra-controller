@@ -18,6 +18,7 @@
 use axum::body::Body;
 use axum::response::Response;
 use carbide_test_harness::TestHarness;
+use db::TransactionVending as _;
 use http_body_util::BodyExt;
 use hyper::http::StatusCode;
 use model::resource_pool::{
@@ -52,7 +53,7 @@ fn pool_cells<'a>(body: &'a str, name: &str) -> Vec<&'a str> {
 #[crate::sqlx_test]
 async fn resource_pool_pages_show_counts_and_unavailable_backends(pool: sqlx::PgPool) {
     let harness = TestHarness::builder(pool.clone()).build().await;
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
 
     // Allocate one of two fixture VNIs to exercise a populated percentage.
     db::resource_pool::allocate(
@@ -98,7 +99,7 @@ async fn resource_pool_pages_show_counts_and_unavailable_backends(pool: sqlx::Pg
         })
     );
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     for selection in [
         // An empty Integrated pool has a known size of zero.
         ResourcePoolSelection {

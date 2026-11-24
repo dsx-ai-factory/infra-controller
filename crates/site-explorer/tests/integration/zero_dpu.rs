@@ -26,6 +26,7 @@ use carbide_site_explorer::{EndpointExplorationService, SiteExplorer};
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::expected_machine::{
     ExpectedInterface, ExpectedInterfaceRole, ExpectedMachine, ExpectedMachineData, HostDpuPolicy,
@@ -79,12 +80,14 @@ async fn init(pool: PgPool) -> ZeroDpuEnv {
             test_harness.test_meter.meter(),
             endpoint_exploration_service,
             endpoint_explorer.clone(),
+            Default::default(),
             api.common_pools().clone(),
             api.work_lock_manager_handle(),
             api.runtime_config.rack_profiles.clone(),
             None,
             api.credential_manager().clone(),
             false,
+            api.instrumentation().clone(),
         ),
         endpoint_explorer,
     );
@@ -103,7 +106,7 @@ async fn register_zero_dpu_expected_machine(
     env: &ZeroDpuEnv,
     managed_host: &ManagedHostConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
@@ -166,7 +169,7 @@ async fn test_site_explorer_records_boot_interface_id_onto_non_dpu_nic(
             .into_endpoints(),
     );
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
@@ -184,8 +187,7 @@ async fn test_site_explorer_records_boot_interface_id_onto_non_dpu_nic(
         .machine_id
         .expect("the in-band NIC DHCP should promote the zero-DPU host prediction");
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[machine_id]).await?;
+    let interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[machine_id]).await?;
     let nic = interfaces
         .get(&machine_id)
         .into_iter()
@@ -197,7 +199,6 @@ async fn test_site_explorer_records_boot_interface_id_onto_non_dpu_nic(
         Some("NIC.Embedded.1-1-1"),
         "exploration should record a non-DPU NIC's Redfish interface id on its row",
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -237,13 +238,12 @@ async fn test_predicted_interface_hands_boot_interface_id_to_real_row(
             .into_endpoints(),
     );
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&env.pool, inband_mac)
         .await?
         .expect("zero-DPU ingest should have minted a predicted interface");
     // The fixture report names the embedded NIC's Redfish id.
@@ -253,7 +253,7 @@ async fn test_predicted_interface_hands_boot_interface_id_to_real_row(
         "predicted interface should hold the report-derived boot interface id"
     );
     let desired = db::machine_desired_boot_interface::get(
-        txn.as_mut(),
+        &env.pool,
         &predicted.machine_id.try_into().unwrap(),
     )
     .await?
@@ -266,7 +266,6 @@ async fn test_predicted_interface_hands_boot_interface_id_to_real_row(
         }),
         "the desired target should be ready before the predicted NIC's first DHCP",
     );
-    txn.rollback().await?;
 
     // The in-band NIC's first DHCP promotes the prediction into a
     // machine_interfaces row.
@@ -281,8 +280,7 @@ async fn test_predicted_interface_hands_boot_interface_id_to_real_row(
         .into_inner();
     assert!(host_dhcp_response.machine_id.is_some());
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, inband_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
         interfaces[0].boot_interface_id.as_deref(),
@@ -290,12 +288,11 @@ async fn test_predicted_interface_hands_boot_interface_id_to_real_row(
         "promotion should land the predicted boot interface id on the promoted row"
     );
     assert!(
-        db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, inband_mac)
             .await?
             .is_none(),
         "the prediction should be consumed by promotion"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -316,7 +313,7 @@ async fn test_predicted_live_boot_interface_id_outranks_retained_at_promotion(
 
     // A prior row for this MAC was deleted with its boot pair retained --
     // the id names a slot the NIC occupied before the migration.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::retained_boot_interface::upsert(txn.as_mut(), inband_mac, "NIC.Old.9-9-9").await?;
     txn.commit().await?;
 
@@ -342,13 +339,12 @@ async fn test_predicted_live_boot_interface_id_outranks_retained_at_promotion(
             .into_endpoints(),
     );
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&env.pool, inband_mac)
         .await?
         .expect("zero-DPU ingest should have minted a predicted interface");
     assert_eq!(
@@ -356,7 +352,6 @@ async fn test_predicted_live_boot_interface_id_outranks_retained_at_promotion(
         Some("NIC.Embedded.1-1-1"),
         "the prediction holds the live-report id, never the retained one"
     );
-    txn.rollback().await?;
 
     // The in-band NIC's first DHCP promotes the prediction. Creation
     // recovers the retained id onto the brand-new row first -- the
@@ -369,8 +364,7 @@ async fn test_predicted_live_boot_interface_id_outranks_retained_at_promotion(
         )
         .await?;
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, inband_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
         interfaces[0].boot_interface_id.as_deref(),
@@ -378,12 +372,11 @@ async fn test_predicted_live_boot_interface_id_outranks_retained_at_promotion(
         "the live predicted id outranks the retained id on the promoted row"
     );
     assert!(
-        db::retained_boot_interface::find_by_mac(txn.as_mut(), inband_mac, None)
+        db::retained_boot_interface::find_by_mac(&env.pool, inband_mac, None)
             .await?
             .is_none(),
         "the retention record is consumed by promotion regardless"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -411,7 +404,7 @@ async fn test_zero_dpu_recovers_primary_from_retained_boot_interface(
     // keyed by its MAC. Assert the precondition this test turns on: the
     // registered machine declares no primary, so the retained fallback -- not
     // the declared-primary path -- is what settles the boot interface below.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let registered =
         db::expected_machine::find_by_bmc_mac_address(&mut *txn, mock_host.bmc_mac_address)
             .await?
@@ -443,15 +436,14 @@ async fn test_zero_dpu_recovers_primary_from_retained_boot_interface(
             .into_endpoints(),
     );
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
     // The predicted interface for the retained boot MAC is flagged primary, so
     // the controller has a boot target before the host's first DHCP.
-    let mut txn = env.pool.begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&env.pool, inband_mac)
         .await?
         .expect("zero-DPU ingest should mint a predicted interface for the host NIC");
     assert!(
@@ -459,7 +451,6 @@ async fn test_zero_dpu_recovers_primary_from_retained_boot_interface(
         "a zero-DPU host with no declared primary should recover its primary from \
          retained_boot_interfaces, so the controller has a boot target",
     );
-    txn.rollback().await?;
 
     // Promotion consumes the primary NIC's retention record. Record retained
     // metadata for the other NIC before the next exploration: every deleted
@@ -472,14 +463,13 @@ async fn test_zero_dpu_recovers_primary_from_retained_boot_interface(
                 .tonic_request(),
         )
         .await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::retained_boot_interface::upsert(txn.as_mut(), other_retained_mac, "NIC.Embedded.2-1-1")
         .await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let promoted = db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac)
+    let promoted = db::machine_interface::find_by_mac_address(&env.pool, inband_mac)
         .await?
         .into_iter()
         .next()
@@ -489,20 +479,19 @@ async fn test_zero_dpu_recovers_primary_from_retained_boot_interface(
         "an exploration refresh must preserve the settled primary after retention is consumed",
     );
     assert!(
-        db::retained_boot_interface::find_by_mac(txn.as_mut(), inband_mac, None)
+        db::retained_boot_interface::find_by_mac(&env.pool, inband_mac, None)
             .await?
             .is_none(),
         "promotion should consume the retained fallback before the refresh",
     );
     let other_prediction =
-        db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), other_retained_mac)
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, other_retained_mac)
             .await?
             .expect("the other reported NIC should remain a pending prediction");
     assert!(
         !other_prediction.primary_interface,
         "retained metadata for another NIC must not replace the settled primary",
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -521,7 +510,7 @@ async fn test_predicted_live_boot_interface_id_outranks_preallocated_retained_ro
     register_zero_dpu_expected_machine(&env, &mock_host).await?;
 
     // A prior row retained an obsolete boot interface id for this MAC.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::retained_boot_interface::upsert(txn.as_mut(), inband_mac, "NIC.Old.9-9-9").await?;
     txn.commit().await?;
 
@@ -546,13 +535,13 @@ async fn test_predicted_live_boot_interface_id_outranks_preallocated_retained_ro
             .into_endpoints(),
     );
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
     let static_ip: std::net::IpAddr = "192.0.3.77".parse()?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     // A `fixed_ip` declaration creates the row on the same
     // HostInband segment before the NIC ever DHCPs; creation
@@ -577,15 +566,13 @@ async fn test_predicted_live_boot_interface_id_outranks_preallocated_retained_ro
         )
         .await?;
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, inband_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
         interfaces[0].boot_interface_id.as_deref(),
         Some("NIC.Embedded.1-1-1"),
         "the live predicted id outranks the preallocation-recovered retained id"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -605,7 +592,7 @@ async fn test_dhcp_created_interface_recovers_retained_boot_interface_id(
 
     // A prior interface row for this MAC was deleted with its boot pair
     // retained; seed that record directly.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::retained_boot_interface::upsert(txn.as_mut(), inband_mac, "NIC.Retained.7-1-1").await?;
     txn.commit().await?;
 
@@ -619,8 +606,7 @@ async fn test_dhcp_created_interface_recovers_retained_boot_interface_id(
         )
         .await?;
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, inband_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
         interfaces[0].boot_interface_id.as_deref(),
@@ -628,12 +614,11 @@ async fn test_dhcp_created_interface_recovers_retained_boot_interface_id(
         "the new row should recover the retained boot interface id"
     );
     assert!(
-        db::retained_boot_interface::find_by_mac(txn.as_mut(), inband_mac, None)
+        db::retained_boot_interface::find_by_mac(&env.pool, inband_mac, None)
             .await?
             .is_none(),
         "the retention record should be consumed once applied"
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -677,13 +662,12 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         .insert_endpoint_result(host_bmc_ip, Ok(id_less_report));
 
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&env.pool, inband_mac)
         .await?
         .expect("zero-DPU ingest should have minted a predicted interface");
     assert!(
@@ -691,7 +675,7 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         "an id-less report can't give the prediction a boot interface id"
     );
     let desired = db::machine_desired_boot_interface::get(
-        txn.as_mut(),
+        &env.pool,
         &predicted.machine_id.try_into().unwrap(),
     )
     .await?
@@ -701,7 +685,6 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         MachineBootInterfaceTarget::MacOnly(inband_mac),
         "the missing Redfish id should not prevent target initialization",
     );
-    txn.rollback().await?;
 
     // Second exploration: machine creation is disabled, but the BMC now
     // resolves the id. The always-running reconciliation pass still enriches
@@ -711,8 +694,7 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         .insert_endpoint_result(host_bmc_ip, Ok(mock_host.clone().into()));
     env.site_explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&env.pool, inband_mac)
         .await?
         .expect("the prediction should still be pending");
     assert_eq!(
@@ -721,7 +703,7 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         "the next exploration that resolves the id refreshes the prediction"
     );
     let desired = db::machine_desired_boot_interface::get(
-        txn.as_mut(),
+        &env.pool,
         &predicted.machine_id.try_into().unwrap(),
     )
     .await?
@@ -734,13 +716,12 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         }),
         "the existing-object pass should commit same-MAC id enrichment",
     );
-    txn.rollback().await?;
 
     // An existing host also remains repairable without its ExpectedMachine.
     // Clear the target to model an older or independently registered row,
     // restore the creation setting, and verify that reconciliation is not
     // hidden behind the ExpectedMachine gate.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
         .bind(predicted.machine_id)
         .execute(txn.as_mut())
@@ -800,6 +781,106 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
     Ok(())
 }
 
+/// Existing zero-DPU hosts gain reported NICs independently of the creation
+/// flag, the creation cap, and the presence of an ExpectedMachine entry.
+#[sqlx_test]
+async fn test_zero_dpu_interface_refresh_is_independent_of_creation_policy(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = init(pool).await;
+    let host = zero_dpu_host();
+    register_zero_dpu_expected_machine(&env, &host).await?;
+    let response = env
+        .api()
+        .discover_dhcp(
+            rpc::forge::DhcpDiscovery::builder(
+                host.bmc_mac_address,
+                env.underlay_segment.relay_address,
+            )
+            .vendor_string("SomeVendor")
+            .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let bmc_ip = response.address.parse()?;
+    env.site_explorer
+        .insert_endpoint_result(bmc_ip, Ok(host.clone().into()));
+    env.site_explorer.run_single_iteration().await?;
+    let mut txn = env.pool.txn_begin().await?;
+    db::explored_endpoints::set_preingestion_complete(bmc_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    env.site_explorer.run_single_iteration().await?;
+    let original =
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, host.non_dpu_macs[0])
+            .await?
+            .expect("initial creation predicted the host NIC");
+
+    for (scenario, creation_enabled, remove_expected, suffix) in [
+        ("creation disabled", false, false, 0x81),
+        ("zero creation cap", true, false, 0x82),
+        (
+            "expected machine removed with a zero creation cap",
+            true,
+            true,
+            0x83,
+        ),
+    ] {
+        if remove_expected {
+            let mut txn = env.pool.txn_begin().await?;
+            db::expected_machine::delete_by_mac(txn.as_mut(), host.bmc_mac_address).await?;
+            txn.commit().await?;
+        }
+        let mac_address = MacAddress::new([0x02, 0, 0, 0, 0, suffix]);
+        let mut report: model::site_explorer::EndpointExplorationReport = host.clone().into();
+        report.systems[0]
+            .ethernet_interfaces
+            .push(model::site_explorer::EthernetInterface {
+                id: Some("NIC.Additional.1".to_string()),
+                mac_address: Some(mac_address),
+                ..Default::default()
+            });
+        let explorer = super::env::test_site_explorer(
+            &env.test_harness,
+            SiteExplorerConfig {
+                explorations_per_run: 1,
+                create_machines: Arc::new(creation_enabled.into()),
+                machines_created_per_run: 0,
+                ..Default::default()
+            },
+        );
+        explorer.insert_endpoint_result(bmc_ip, Ok(report));
+        explorer.run_single_iteration().await?;
+
+        let prediction =
+            db::predicted_machine_interface::find_by_mac_address(&env.pool, mac_address)
+                .await?
+                .expect("the reconciler must add the reported NIC");
+        assert_eq!(prediction.machine_id, original.machine_id, "{scenario}");
+        assert_eq!(
+            prediction.boot_interface_id.as_deref(),
+            Some("NIC.Additional.1"),
+            "{scenario}"
+        );
+        let original_after =
+            db::predicted_machine_interface::find_by_mac_address(&env.pool, original.mac_address)
+                .await?
+                .expect("the original prediction is preserved");
+        assert_eq!(original_after.id, original.id, "{scenario}");
+        assert_eq!(
+            original_after.primary_interface, original.primary_interface,
+            "{scenario}"
+        );
+        let machine_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM machines")
+            .fetch_one(&env.pool)
+            .await?;
+        assert_eq!(
+            machine_count, 1,
+            "{scenario}: a refresh must not create another machine"
+        );
+    }
+    Ok(())
+}
+
 /// A BMC may report onboard System interfaces first and learn the declared
 /// boot NIC later through supplemental adapter-Port inventory. The refresh
 /// must add that hardware-discovered NIC to the existing predicted host and
@@ -825,7 +906,7 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
         ..ManagedHostConfig::default()
     };
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
@@ -866,12 +947,12 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
     env.site_explorer
         .insert_endpoint_result(host_bmc_ip, Ok(mock_host.clone().into()));
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let initial_prediction =
         db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), system_macs[0])
             .await?
@@ -912,13 +993,13 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
         .retain(|interface| interface.mac_address != Some(system_macs[0]));
     refreshed_report.chassis[0].network_adapters[0].port_mac_addresses =
         vec![declared_port_mac, unrelated_port_mac];
+    env.create_machines.store(false, Ordering::Relaxed);
     env.site_explorer
         .insert_endpoint_result(host_bmc_ip, Ok(refreshed_report));
     env.site_explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
     let predictions =
-        db::predicted_machine_interface::find_by_machine_id(txn.as_mut(), &machine_id).await?;
+        db::predicted_machine_interface::find_by_machine_id(&env.pool, &machine_id).await?;
     assert_eq!(predictions.len(), system_macs.len() + 1);
     let declared_prediction = predictions
         .iter()
@@ -942,7 +1023,7 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
         "an undeclared supplemental Port must not become a Host prediction",
     );
     let desired =
-        db::machine_desired_boot_interface::get(txn.as_mut(), &machine_id.try_into().unwrap())
+        db::machine_desired_boot_interface::get(&env.pool, &machine_id.try_into().unwrap())
             .await?
             .expect("the declared Port prediction should settle the boot target");
     assert_eq!(
@@ -955,14 +1036,13 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
          WHERE machine_id = $1",
     )
     .bind(machine_id)
-    .fetch_one(txn.as_mut())
+    .fetch_one(&env.pool)
     .await?;
     assert_eq!(
         selection_source,
         BootInterfaceSelectionSource::ExpectedMachine,
         "the refresh must retain that ExpectedMachine selected the declared Port",
     );
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -999,9 +1079,8 @@ async fn test_zero_dpu_multi_nic_no_declaration_adopts_without_primary_collision
             .await?;
     }
 
-    let mut txn = env.pool.begin().await?;
     for nic in [nic_a, nic_b] {
-        let row = db::machine_interface::find_by_mac_address(txn.as_mut(), nic)
+        let row = db::machine_interface::find_by_mac_address(&env.pool, nic)
             .await?
             .into_iter()
             .next()
@@ -1015,7 +1094,6 @@ async fn test_zero_dpu_multi_nic_no_declaration_adopts_without_primary_collision
             "anonymous DHCP rows default to primary"
         );
     }
-    txn.rollback().await?;
 
     // Ingest the host. Adoption must reconcile the two primary rows.
     let host_bmc_response = env
@@ -1037,24 +1115,22 @@ async fn test_zero_dpu_multi_nic_no_declaration_adopts_without_primary_collision
             .into_endpoints(),
     );
     env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
     txn.commit().await?;
     env.site_explorer.run_single_iteration().await?;
 
     // Both NICs are now owned by the same host, with at most one primary.
-    let mut txn = env.pool.begin().await?;
-    let row_a = db::machine_interface::find_by_mac_address(txn.as_mut(), nic_a)
+    let row_a = db::machine_interface::find_by_mac_address(&env.pool, nic_a)
         .await?
         .into_iter()
         .next()
         .expect("nic_a should still have a row after ingestion");
-    let row_b = db::machine_interface::find_by_mac_address(txn.as_mut(), nic_b)
+    let row_b = db::machine_interface::find_by_mac_address(&env.pool, nic_b)
         .await?
         .into_iter()
         .next()
         .expect("nic_b should still have a row after ingestion");
-    txn.rollback().await?;
     let machine_a = row_a
         .machine_id
         .expect("ingestion should have adopted nic_a onto the host");

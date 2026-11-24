@@ -36,8 +36,10 @@ carbide-macros = { path = "../macros" }
 carbide-network = { path = "../network", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-health-report = { path = "../health-report" }
+carbide-hw-identification = { path = "../hw-identification" }
+carbide-instrument = { path = "../instrument" }
 carbide-ipxe-renderer = { path = "../ipxe-renderer" }
-carbide-utils = { path = "../utils", features = ["sqlx"] }
+carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 dns-record = { path = "../dns-record" }
 libnmxm = { path = "../libnmxm" }
@@ -45,6 +47,7 @@ nras = { path = "../nras" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 #these are alphabetized
+arrayvec = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
@@ -86,10 +89,8 @@ version-compare = { workspace = true }
 [features]
 test-support = []
 
-[build-dependencies]
-carbide-version = { path = "../version" }
-
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }

@@ -24,9 +24,9 @@ use model::dpu_remediation::{
     NewAppliedRemediation, NewRemediation, Remediation, RemediationApplicationStatus,
     RevokeRemediation,
 };
-use sqlx::Postgres;
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[cfg(test)]
@@ -38,7 +38,7 @@ mod test_retry_budget;
 
 pub async fn persist_remediation(
     value: NewRemediation,
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<Remediation> {
     let (query, intermediate_query) = if let Some(metadata) = value.metadata.as_ref() {
         let query = "INSERT INTO dpu_remediations (metadata_name, metadata_description, metadata_labels, script, retries, script_author) VALUES ($1, $2, $3, $4, $5, $6)
@@ -64,7 +64,7 @@ pub async fn persist_remediation(
     intermediate_query
         .bind(&value.script)
         .bind(value.retries)
-        .bind(value.author.to_string())
+        .bind(value.author.as_str())
         .fetch_one(txn.deref_mut())
         .await
         .map_err(|err| DatabaseError::new(query, err))
@@ -98,28 +98,28 @@ impl ColumnInfo<'_> for EnabledColumn {
 /// Only `id` is read, so incompatible `metadata_labels` JSON does not fail this
 /// lookup. [`find_remediations_by_ids`] still reports that data as an error.
 pub async fn find_remediation_ids(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<RemediationId>, DatabaseError> {
     let query = "SELECT id FROM dpu_remediations";
     sqlx::query_scalar::<_, RemediationId>(query)
-        .fetch_all(txn.deref_mut())
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query, e))
 }
 
 pub async fn find_remediations_by_ids(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    conn: impl DbReader<'_>,
     remediation_ids: &[RemediationId],
 ) -> Result<Vec<Remediation>, DatabaseError> {
     let remediations = find_remediations_by(
-        txn,
+        conn,
         ObjectColumnFilter::List(RemediationIdColumn, remediation_ids),
     )
     .await?;
     Ok(remediations)
 }
 pub async fn find_remediations_by<'a, C: ColumnInfo<'a, TableType = Remediation>>(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<Remediation>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
@@ -131,22 +131,29 @@ pub async fn find_remediations_by<'a, C: ColumnInfo<'a, TableType = Remediation>
     .filter(&filter);
     query
         .build_query_as()
-        .fetch_all(txn.deref_mut())
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
 
-pub async fn find_next_remediation_for_machine(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+pub async fn find_next_remediation_for_machine<DB>(
+    conn: &mut DB,
     machine_id: DpuMachineId,
-) -> Result<Option<Remediation>, DatabaseError> {
-    for remediation in find_remediations_by(txn, ObjectColumnFilter::List(EnabledColumn, &[true]))
-        .await?
-        .into_iter()
+) -> Result<Option<Remediation>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    for remediation in
+        find_remediations_by(&mut *conn, ObjectColumnFilter::List(EnabledColumn, &[true]))
+            .await?
+            .into_iter()
     {
-        let remediations_applied =
-            find_remediations_by_remediation_id_and_machine(txn, remediation.id, &machine_id)
-                .await?;
+        let remediations_applied = find_remediations_by_remediation_id_and_machine(
+            &mut *conn,
+            remediation.id,
+            &machine_id,
+        )
+        .await?;
 
         let attempted_so_far = remediations_applied.len();
         // `retries` excludes the initial attempt, so equality permits one more.
@@ -164,13 +171,14 @@ pub async fn find_next_remediation_for_machine(
 }
 
 pub async fn remediation_applied(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    txn: &mut crate::Transaction<'_>,
     machine_id: DpuMachineId,
     remediation_id: RemediationId,
     status: RemediationApplicationStatus,
 ) -> Result<(), DatabaseError> {
     let remediations_applied_so_far =
-        find_remediations_by_remediation_id_and_machine(txn, remediation_id, &machine_id).await?;
+        find_remediations_by_remediation_id_and_machine(&mut *txn, remediation_id, &machine_id)
+            .await?;
 
     let attempt_for_this_remediation = match remediations_applied_so_far.first() {
         Some(last_applied_remediation) => last_applied_remediation.attempt + 1,
@@ -193,7 +201,7 @@ pub async fn remediation_applied(
 
 pub async fn persist_applied_remediation(
     value: NewAppliedRemediation,
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<AppliedRemediation, DatabaseError> {
     let query = format!(
         "INSERT INTO applied_dpu_remediations (id, dpu_machine_id, attempt, succeeded, status) VALUES ($1, $2, $3, $4, $5)
@@ -229,7 +237,7 @@ pub enum AppliedRemediationIdQueryType {
 /// lookup. [`find_remediations_by_remediation_id_and_machine`] still reports it
 /// as an error.
 pub async fn find_applied_remediation_ids(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    conn: impl DbReader<'_>,
     id_query_args: AppliedRemediationIdQueryType,
 ) -> Result<(Vec<RemediationId>, Vec<DpuMachineId>), DatabaseError> {
     let ids = match id_query_args {
@@ -237,7 +245,7 @@ pub async fn find_applied_remediation_ids(
             let query = "SELECT id FROM applied_dpu_remediations WHERE dpu_machine_id = $1";
             let remediation_ids = sqlx::query_scalar::<_, RemediationId>(query)
                 .bind(machine_id)
-                .fetch_all(txn.deref_mut())
+                .fetch_all(conn)
                 .await
                 .map_err(|e| DatabaseError::new(query, e))?;
 
@@ -247,7 +255,7 @@ pub async fn find_applied_remediation_ids(
             let query = "SELECT dpu_machine_id FROM applied_dpu_remediations WHERE id = $1";
             let machine_ids = sqlx::query_scalar::<_, DpuMachineId>(query)
                 .bind(remediation_id)
-                .fetch_all(txn.deref_mut())
+                .fetch_all(conn)
                 .await
                 .map_err(|e| DatabaseError::new(query, e))?;
 
@@ -259,7 +267,7 @@ pub async fn find_applied_remediation_ids(
 }
 
 pub async fn find_remediations_by_remediation_id_and_machine(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    conn: impl DbReader<'_>,
     remediation_id: RemediationId,
     machine_id: &DpuMachineId,
 ) -> Result<Vec<AppliedRemediation>, DatabaseError> {
@@ -271,7 +279,7 @@ pub async fn find_remediations_by_remediation_id_and_machine(
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(remediation_id)
         .bind(machine_id)
-        .fetch_all(txn.deref_mut())
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(&query, e))
 }
@@ -284,7 +292,7 @@ pub async fn find_remediations_by_remediation_id_and_machine(
 /// remediation results while preventing competing changes to this row.
 pub async fn persist_approve_remediation(
     value: ApproveRemediation,
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<(), DatabaseError> {
     let existing_query = "SELECT
             id, script, retries, enabled, script_reviewed_by, script_author, creation_time,
@@ -295,15 +303,15 @@ pub async fn persist_approve_remediation(
         .fetch_optional(txn.deref_mut())
         .await
         .map_err(|e| DatabaseError::new(existing_query, e))?
-        .ok_or(DatabaseError::NotFoundError {
+        .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "dpu_remediations.id",
             id: value.id.to_string(),
         })?;
 
-    if existing_remediation.author.to_string().as_str() == value.reviewer.to_string().as_str() {
+    if existing_remediation.author.as_str() == value.reviewer.as_str() {
         return Err(DatabaseError::InvalidArgument("Reviewer cannot be the same person as Author for remediation, must be different person.".to_string()));
     } else if let Some(reviewer) = existing_remediation.reviewer.as_ref() {
-        let reviewer = reviewer.to_string();
+        let reviewer = reviewer.as_str();
         if !reviewer.is_empty() {
             return Err(DatabaseError::InvalidArgument(format!(
                 "Reviewer is already set to '{reviewer}', cannot overwrite.  Revoke if necessary.",
@@ -313,7 +321,7 @@ pub async fn persist_approve_remediation(
 
     let update_query = "UPDATE dpu_remediations SET script_reviewed_by=$1 WHERE id=$2";
     let _ = sqlx::query(update_query)
-        .bind(value.reviewer.to_string())
+        .bind(value.reviewer.as_str())
         .bind(value.id)
         .execute(txn.deref_mut())
         .await
@@ -324,7 +332,7 @@ pub async fn persist_approve_remediation(
 
 pub async fn persist_revoke_remediation(
     value: RevokeRemediation,
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<(), DatabaseError> {
     let update_query =
         "UPDATE dpu_remediations SET script_reviewed_by=NULL,enabled=false WHERE id=$1";
@@ -342,7 +350,7 @@ pub async fn persist_revoke_remediation(
 /// that approval between the check and the write.
 pub async fn persist_enable_remediation(
     value: EnableRemediation,
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<(), DatabaseError> {
     let existing_query = "SELECT
             id, script, retries, enabled, script_reviewed_by, script_author, creation_time,
@@ -353,7 +361,7 @@ pub async fn persist_enable_remediation(
         .fetch_optional(txn.deref_mut())
         .await
         .map_err(|e| DatabaseError::new(existing_query, e))?
-        .ok_or(DatabaseError::NotFoundError {
+        .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "dpu_remediations.id",
             id: value.id.to_string(),
         })?;
@@ -376,7 +384,7 @@ pub async fn persist_enable_remediation(
 
 pub async fn persist_disable_remediation(
     value: DisableRemediation,
-    txn: &mut sqlx::Transaction<'_, Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<(), DatabaseError> {
     let update_query = "UPDATE dpu_remediations SET enabled=false WHERE id=$1";
     let _ = sqlx::query(update_query)

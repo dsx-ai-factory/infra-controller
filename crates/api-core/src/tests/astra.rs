@@ -62,6 +62,7 @@ async fn create_astra_status_fixture(pool: sqlx::PgPool) -> AstraStatusFixture {
             pci_name: "0000:cc:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Astra,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -75,6 +76,7 @@ async fn create_astra_status_fixture(pool: sqlx::PgPool) -> AstraStatusFixture {
             pci_name: "0000:dd:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -160,6 +162,7 @@ async fn add_second_astra(fixture: &AstraStatusFixture) -> DpaInterface {
             pci_name: "0000:ee:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Astra,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -200,18 +203,14 @@ async fn unsuccessful_astra_reports_clear_readiness_and_preserve_svpc(pool: sqlx
             Some(astra_status(&fixture.astra, AstraPhase::PhaseReady)),
         )
         .await;
-        let mut txn = fixture.env.db_txn().await;
-        let machine = fixture.host.host().db_machine(&mut txn).await;
-        txn.commit().await.unwrap();
+        let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
         assert!(fixture.astra.managed_host_network_config_version_synced(
             &None,
             &machine.status.spx_status_observation,
         ));
 
         record_astra_status(&fixture, status).await;
-        let mut txn = fixture.env.db_txn().await;
-        let machine = fixture.host.host().db_machine(&mut txn).await;
-        txn.commit().await.unwrap();
+        let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
         assert_eq!(
             fixture.astra.managed_host_network_config_version_synced(
                 &None,
@@ -243,18 +242,16 @@ async fn unsuccessful_astra_reports_clear_readiness_and_preserve_svpc(pool: sqlx
     )
     .await;
     let unknown_vni = 1;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert!(
         db::spx_partition::find_by(
-            txn.as_mut(),
+            &fixture.env.pool,
             db::ObjectColumnFilter::List(db::spx_partition::VniColumn, &[unknown_vni]),
         )
         .await
         .expect("look up unassigned Astra VNI")
         .is_empty()
     );
-    txn.commit().await.unwrap();
     assert!(
         fixture.astra.managed_host_network_config_version_synced(
             &None,
@@ -265,9 +262,7 @@ async fn unsuccessful_astra_reports_clear_readiness_and_preserve_svpc(pool: sqlx
     let mut status = astra_status(&fixture.astra, AstraPhase::PhaseReady);
     status.astra_attachments_status[0].vni = unknown_vni;
     record_astra_status(&fixture, Some(status)).await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert!(
         !fixture.astra.managed_host_network_config_version_synced(
             &None,
@@ -312,9 +307,7 @@ async fn mixed_astra_report_retains_only_ready_interfaces_and_svpc(pool: sqlx::P
         .astra_attachments_status
         .extend(second_status.astra_attachments_status.clone());
     record_astra_status(&fixture, Some(status)).await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     for astra in [&fixture.astra, &second_astra] {
         assert!(astra.managed_host_network_config_version_synced(
             &None,
@@ -338,9 +331,7 @@ async fn mixed_astra_report_retains_only_ready_interfaces_and_svpc(pool: sqlx::P
         .extend(second_status.astra_attachments_status);
     status.astra_attachments_status.push(svpc_status);
     record_astra_status(&fixture, Some(status)).await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert!(
         !fixture.astra.managed_host_network_config_version_synced(
             &None,
@@ -384,9 +375,7 @@ async fn astra_reports_remove_deleted_interfaces_and_preserve_svpc(pool: sqlx::P
         .astra_attachments_status
         .extend(astra_status(&second_astra, AstraPhase::PhaseReady).astra_attachments_status);
     record_astra_status(&fixture, Some(status.clone())).await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     for astra in [&fixture.astra, &second_astra] {
         assert!(astra.managed_host_network_config_version_synced(
             &None,
@@ -428,9 +417,7 @@ async fn astra_reports_remove_deleted_interfaces_and_preserve_svpc(pool: sqlx::P
         .expect("delete first Astra interface");
     // A delayed Ready entry for a deleted interface must not restore it.
     record_astra_status(&fixture, Some(status)).await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert!(
         !fixture.astra.managed_host_network_config_version_synced(
             &None,
@@ -469,9 +456,7 @@ async fn astra_reports_remove_deleted_interfaces_and_preserve_svpc(pool: sqlx::P
         .expect("delete last Astra interface");
     // An in-flight empty report can arrive after removal; fresh configs omit Astra.
     record_astra_status(&fixture, Some(AstraConfigStatus::default())).await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert_eq!(
         machine
             .status
@@ -532,9 +517,7 @@ async fn astra_report_preserves_svpc_committed_while_waiting_for_host(pool: sqlx
     .await
     .expect("Astra report finishes after the concurrent SVPC report commits");
 
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert!(
         fixture.astra.managed_host_network_config_version_synced(
             &None,
@@ -568,6 +551,7 @@ async fn older_svpc_report_preserves_newer_observation_for_same_mac(pool: sqlx::
             pci_name: "0000:dd:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -653,9 +637,7 @@ async fn older_svpc_report_preserves_newer_observation_for_same_mac(pool: sqlx::
         .await
         .expect("older SVPC report finishes after the newer acknowledgment commits");
 
-    let mut txn = env.db_txn().await;
-    let machine = host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = host.host().db_machine(&env.pool).await;
     assert!(
         current_svpc.managed_host_network_config_version_synced(
             &None,
@@ -682,9 +664,7 @@ async fn svpc_report_does_not_restore_astra_cleared_while_waiting_for_host(pool:
         Some(astra_status(&fixture.astra, AstraPhase::PhaseReady)),
     )
     .await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert!(
         fixture.astra.managed_host_network_config_version_synced(
             &None,
@@ -746,9 +726,7 @@ async fn svpc_report_does_not_restore_astra_cleared_while_waiting_for_host(pool:
     .await
     .expect("SVPC report finishes after Astra readiness is cleared");
 
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     let observation = machine.status.spx_status_observation.as_ref().unwrap();
     let svpc = observation
         .spx_attachments
@@ -783,9 +761,7 @@ async fn astra_report_rejects_interface_deleted_while_waiting_for_host(pool: sql
         Some(astra_status(&fixture.astra, AstraPhase::PhaseReady)),
     )
     .await;
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert!(
         fixture.astra.managed_host_network_config_version_synced(
             &None,
@@ -824,9 +800,7 @@ async fn astra_report_rejects_interface_deleted_while_waiting_for_host(pool: sql
     .await
     .expect("Astra report finishes after the interface is deleted");
 
-    let mut txn = fixture.env.db_txn().await;
-    let machine = fixture.host.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = fixture.host.host().db_machine(&fixture.env.pool).await;
     assert_eq!(
         machine
             .status

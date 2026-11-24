@@ -14,6 +14,7 @@ use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
 
 use super::machine_update_module::MachineUpdateModule;
+use super::metrics::FirmwareUpdateProgress;
 use crate::CarbideResult;
 
 #[cfg(test)]
@@ -48,8 +49,11 @@ impl MachineUpdateModule for NicFirmwareUpdate {
         Ok(HashSet::new())
     }
 
-    async fn clear_completed_updates(&self, _txn: &mut PgConnection) -> CarbideResult<()> {
-        Ok(())
+    async fn clear_completed_updates(
+        &self,
+        _txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>> {
+        Ok(Vec::new())
     }
 
     async fn update_metrics(

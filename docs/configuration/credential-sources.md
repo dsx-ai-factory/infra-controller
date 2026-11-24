@@ -39,6 +39,19 @@ Unknown fields in either table fail the boot.
 
 With `ufm_source = "local"` and InfiniBand management enabled, startup requires a local `ufm_auth_by_fabric` entry for every configured fabric and fails naming the missing fabric. With InfiniBand management disabled, startup succeeds because UFM is dormant. In this mode a Vault import configured by `[secrets] import_from` skips the `ufm/` subtree, so local ownership survives the import.
 
+An empty UFM password selects the default SPIFFE client certificate only when
+the source that supplies the credential returns it. Vault and the environment
+and file sources return an empty password. Postgres reads the newest entry with
+an empty password as no credential, which also hides an earlier token stored
+there. When Postgres is the only source that supplies a fabric's credential,
+`credential add-ufm` without `--token` leaves the fabric without a credential:
+UFM client creation fails and the fabric monitor cannot load the fabric. To use
+the SPIFFE certificate with Postgres storage, put the fabric's entry with an
+empty password in the environment or file source and set `ufm_source` to
+`"local_first"` or `"local"`; with `"backend"`, local UFM entries are ignored.
+Native Postgres support is tracked by
+[#9232](https://github.com/dsx-ai-factory/infra-controller/issues/9232).
+
 ### Site-wide BMC Root Version 0 Ownership Policy
 
 | `bmc_site_wide_root_source` | Version 0 reads | `credential add-bmc --kind=site-wide-root` and delete |
@@ -124,7 +137,12 @@ machine_identity:
     kv1: <base64-encoded 32-byte key>
 ```
 
-The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`. For UFM, the password is the bearer token, and an empty password selects the default SPIFFE client certificate.
+The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`.
+
+UFM passwords have two supported forms: an empty or whitespace-only password
+selects the default SPIFFE client certificate, and any other value is the bearer
+token. The credential source affects whether an empty password is returned; see
+[UFM Ownership Policy](#ufm-ownership-policy).
 
 The watcher reloads the file on filesystem events and on every `poll_interval`, so a Kubernetes projected Secret that is replaced atomically takes effect without restarting NICo. A valid reload replaces the whole snapshot, and entries removed from the file stop resolving. A reload that is malformed or unreadable keeps the last valid snapshot and logs the failure with the secret values redacted. A file that is missing, unreadable, or malformed at startup, or a zero `poll_interval`, fails startup with an error that redacts the secret values in the same way.
 
@@ -167,6 +185,43 @@ backend because the local-file schema has no versioned BMC root key.
 ### Legacy Variables
 
 Sites that enabled the file source before `[credentials.file]` existed use `CARBIDE_CREDENTIALS_FILE_ENABLED=true` and `CARBIDE_CREDENTIALS_FILE_PATH`, default `secrets.yaml`. They keep working after an upgrade with the same behavior. When both are configured, `[credentials.file]` wins. Because `ufm_source` defaults to `local_first`, an existing site's environment or file UFM entry keeps overriding the backend after an upgrade, and nothing changes silently.
+
+## DSX Exchange Consumer Credential
+
+The `dsx-exchange-consumer` service reads its MQTT credential, `mqtt_auth_by_credential_type.DsxExchangeConsumer`, only when `mqtt.auth.auth_mode` is `basic_auth` or `oauth2`. With `auth_mode = none` it reads no credential and needs no environment, file, or Vault setting.
+
+Otherwise it consults, in order, the [environment source](#environment-source), the [file source](#file-source), and Vault. These settings select the sources:
+
+| Source | Selected by |
+| --- | --- |
+| Environment | `CARBIDE_CREDENTIALS_ENV_ENABLED=true` |
+| File | `CARBIDE_CREDENTIALS_FILE_ENABLED=true`; `CARBIDE_CREDENTIALS_FILE_PATH` is optional and defaults to `secrets.yaml` |
+| Vault | `VAULT_ADDR` |
+
+The consumer builds a Vault client only when `VAULT_ADDR` is set. When it is set, the consumer also requires `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, `VAULT_PKI_ROLE_NAME`, and a Vault root CA bundle (`VAULT_CACERT`, default `/var/run/secrets/forge-roots/ca.crt`). A mounted Kubernetes service-account token selects Kubernetes authentication, which needs a Vault auth role for the pod's service account and ignores `VAULT_TOKEN`; `VAULT_TOKEN` applies only when the pod has no service-account token. An incomplete Vault configuration fails startup instead of dropping Vault from the chain.
+
+When `auth_mode` requires a credential and no source supplies it, the consumer fails with `Missing MQTT credentials for mqtt/dsx-exchange-consumer/auth: none of the environment, file, or Vault sources provides it` for `basic_auth` at startup, or with `Missing MQTT OAuth2 credentials for mqtt/dsx-exchange-consumer/auth` for `oauth2` when it first requests a token.
+
+To run without Vault, create a Secret whose key holds the file in the [File Source](#file-source) format, and set `credentials.secretName` and `credentials.key` in the `nico-dsx-exchange-consumer` chart. The chart mounts the whole Secret as a directory and sets both file variables. Sites that keep Vault set the `VAULT_*` variables through the chart's `extraEnv`, mount the Vault CA through `extraVolumes` and `extraVolumeMounts`, and change nothing else.
+
+For the environment source, set both fields of the credential. The type name is case-insensitive in the variable name:
+
+```bash
+export CARBIDE_CREDENTIALS_ENV_ENABLED=true
+export CARBIDE_STATIC_CREDENTIAL__MQTT_AUTH_BY_CREDENTIAL_TYPE__DSXEXCHANGECONSUMER__USERNAME=consumer
+export CARBIDE_STATIC_CREDENTIAL__MQTT_AUTH_BY_CREDENTIAL_TYPE__DSXEXCHANGECONSUMER__PASSWORD=example
+```
+
+Rotation takes effect as follows:
+
+| `auth_mode` | Source | Rotation |
+| --- | --- | --- |
+| `oauth2` | File | The watcher reloads the file. The consumer re-reads the credential at its next token fetch, so a rotated Secret applies without a restart. |
+| `oauth2` | Vault | Each lookup reads Vault, so a rotated credential applies at the next token fetch without a restart. |
+| `oauth2` | Environment | Restart the consumer; the environment is read once at startup. |
+| `basic_auth` | Any | Restart the consumer; it reads the credential once at startup. |
+
+A failed file reload is reported by `carbide_static_credential_watcher_failures_total`; the consumer keeps the last valid snapshot.
 
 ## Helm Values
 

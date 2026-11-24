@@ -4,12 +4,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -148,13 +148,13 @@ func (f *templatedProxyFixture) bindProxyClient(psc *proxySiteClient) {
 	f.scp.IDClientMap[f.site.ID.String()] = psc.client
 }
 
-func (f *templatedProxyFixture) newEchoContext(method, body string, params map[string]string) (echo.Context, *httptest.ResponseRecorder) {
+func (f *templatedProxyFixture) newEchoContext(method string, body []byte, params map[string]string) (echo.Context, *httptest.ResponseRecorder) {
 	return f.newEchoContextForUser(method, body, params, f.tnu)
 }
 
-func (f *templatedProxyFixture) newEchoContextForUser(method, body string, params map[string]string, user *cdbm.User) (echo.Context, *httptest.ResponseRecorder) {
+func (f *templatedProxyFixture) newEchoContextForUser(method string, body []byte, params map[string]string, user *cdbm.User) (echo.Context, *httptest.ResponseRecorder) {
 	e := echo.New()
-	req := httptest.NewRequest(method, "/", strings.NewReader(body))
+	req := httptest.NewRequest(method, "/", bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)
@@ -250,7 +250,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		body, merr := json.Marshal(createReq)
 		require.NoError(t, merr)
 
-		ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+		ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 		h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 		require.NoError(t, h.Handle(ec))
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -290,7 +290,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		body, merr := json.Marshal(updateReq)
 		require.NoError(t, merr)
 
-		ec, rec := f.newEchoContext(http.MethodPatch, string(body), map[string]string{"orgName": f.tnOrg, "id": osID})
+		ec, rec := f.newEchoContext(http.MethodPatch, body, map[string]string{"orgName": f.tnOrg, "id": osID})
 		h := UpdateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 		require.NoError(t, h.Handle(ec))
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -315,7 +315,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		psc := newProxySiteClient(t, deleteOperatingSystemMethod, nil, nil)
 		f.bindProxyClient(psc)
 
-		ec, rec := f.newEchoContext(http.MethodDelete, "", map[string]string{"orgName": f.tnOrg, "id": osID})
+		ec, rec := f.newEchoContext(http.MethodDelete, nil, map[string]string{"orgName": f.tnOrg, "id": osID})
 		h := DeleteOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 		require.NoError(t, h.Handle(ec))
 		require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
@@ -330,6 +330,77 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		osDAO := cdbm.NewOperatingSystemDAO(f.dbSession)
 		_, gerr := osDAO.GetByID(f.ctx, nil, parsedID, nil)
 		assert.ErrorIs(t, gerr, cdb.ErrDoesNotExist, "OS should be soft-deleted once every site is cleaned up")
+	})
+
+	t.Run("metadata update resends a failed artifact change", func(t *testing.T) {
+		// A failed proxy call leaves the new definition saved; the next PATCH must resend it.
+		osDAO := cdbm.NewOperatingSystemDAO(f.dbSession)
+		os, err := osDAO.Create(f.ctx, nil, cdbm.OperatingSystemCreateInput{
+			Name:           "artifact-retry-os",
+			Org:            f.tnOrg,
+			TenantID:       &f.tn.ID,
+			OsType:         cdbm.OperatingSystemTypeTemplatedIPXE,
+			IpxeTemplateId: cutil.GetPtr(f.tmpl.ID.String()),
+			IpxeOSHash:     cutil.GetPtr("previous-definition-hash"),
+			IpxeTemplateArtifacts: []cdbm.OperatingSystemIpxeArtifact{
+				{Name: "kernel", URL: "http://example.com/original-kernel", CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCacheAsNeeded},
+			},
+			Status:    cdbm.OperatingSystemStatusReady,
+			CreatedBy: f.tnu.ID,
+		})
+		require.NoError(t, err)
+		common.TestBuildOperatingSystemSiteAssociation(t, f.dbSession, os.ID, f.site.ID, cutil.GetPtr(os.ID.String()), cdbm.OperatingSystemSiteAssociationStatusSynced, f.tnu)
+
+		for _, step := range []struct {
+			name              string
+			request           model.APIOperatingSystemUpdateRequest
+			proxyError        error
+			associationStatus string
+			osStatus          string
+		}{
+			{
+				name: "artifact update fails after saving the definition",
+				request: model.APIOperatingSystemUpdateRequest{
+					IpxeTemplateArtifacts: &model.APIOperatingSystemIpxeArtifacts{
+						{Name: "kernel", URL: "http://example.com/replacement-kernel", CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCacheAsNeeded},
+					},
+				},
+				proxyError:        errors.New("proxy workflow temporarily unavailable"),
+				associationStatus: cdbm.OperatingSystemSiteAssociationStatusError,
+				osStatus:          cdbm.OperatingSystemStatusError,
+			},
+			{
+				name:              "metadata update resends the saved artifact definition",
+				request:           model.APIOperatingSystemUpdateRequest{Description: cutil.GetPtr("updated description")},
+				associationStatus: cdbm.OperatingSystemSiteAssociationStatusSynced,
+				osStatus:          cdbm.OperatingSystemStatusReady,
+			},
+		} {
+			psc := newProxySiteClient(t, updateOperatingSystemMethod, nil, step.proxyError)
+			f.bindProxyClient(psc)
+			body, err := json.Marshal(step.request)
+			require.NoError(t, err, step.name)
+			ec, rec := f.newEchoContext(http.MethodPatch, body, map[string]string{"orgName": f.tnOrg, "id": os.ID.String()})
+			h := UpdateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
+			require.NoError(t, h.Handle(ec), step.name)
+			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", step.name, rec.Body.String())
+			psc.client.AssertExpectations(t)
+			psc.workflow.AssertExpectations(t)
+
+			var forwarded corev1.UpdateOperatingSystemRequest
+			require.NoError(t, protojson.Unmarshal(psc.captured.RequestJSON, &forwarded))
+			require.NotNil(t, forwarded.IpxeTemplateArtifacts)
+			require.Len(t, forwarded.IpxeTemplateArtifacts.Items, 1)
+			require.Equal(t, "http://example.com/replacement-kernel", forwarded.IpxeTemplateArtifacts.Items[0].Url, step.name)
+			assert.Equal(t, step.request.Description, forwarded.Description, step.name)
+			assert.Nil(t, forwarded.IpxeTemplateDefinitionHash, step.name)
+			persisted, err := osDAO.GetByID(f.ctx, nil, os.ID, nil)
+			require.NoError(t, err)
+			require.Len(t, persisted.IpxeTemplateArtifacts, 1)
+			require.Equal(t, "http://example.com/replacement-kernel", persisted.IpxeTemplateArtifacts[0].URL, step.name)
+			require.Equal(t, step.associationStatus, f.osAssociationStatus(t, os.ID), step.name)
+			require.Equal(t, step.osStatus, persisted.Status, step.name)
+		}
 	})
 }
 
@@ -349,7 +420,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_ProviderCreateOmitsTenantOrganizat
 
 	ec, rec := f.newEchoContextForUser(
 		http.MethodPost,
-		string(body),
+		body,
 		map[string]string{"orgName": f.ipOrg},
 		f.ipu,
 	)
@@ -411,7 +482,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_UpdateRejectsMultipleSites(t *test
 	require.NoError(t, err)
 	ec, rec := f.newEchoContext(
 		http.MethodPatch,
-		string(body),
+		body,
 		map[string]string{"orgName": f.tnOrg, "id": os.ID.String()},
 	)
 
@@ -439,7 +510,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_ProxyCreateExecuteError(t *testing
 	body, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+	ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 	h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 	require.NoError(t, h.Handle(ec))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -473,7 +544,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_ProxyCreateTimeout(t *testing.T) {
 	body, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+	ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 	h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 	require.NoError(t, h.Handle(ec))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -519,7 +590,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_TemplateNotAvailableAtSite(t *test
 	body, merr := json.Marshal(createReq)
 	require.NoError(t, merr)
 
-	ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+	ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 	h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 	require.NoError(t, h.Handle(ec))
 	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())

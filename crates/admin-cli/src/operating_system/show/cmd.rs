@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::fmt::Write;
+
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge::{
     IpxeTemplateArtifactCacheStrategy, OperatingSystemSearchFilter, OperatingSystemType,
@@ -97,20 +99,26 @@ async fn list_all(
         let params_str = if os.ipxe_template_parameters.is_empty() {
             "-".to_string()
         } else {
-            os.ipxe_template_parameters
-                .iter()
-                .map(|p| format!("{}={}", p.name, p.value))
-                .collect::<Vec<_>>()
-                .join("\n")
+            let mut parameters = String::new();
+            for (index, parameter) in os.ipxe_template_parameters.iter().enumerate() {
+                if index != 0 {
+                    parameters.push('\n');
+                }
+                write!(parameters, "{}={}", parameter.name, parameter.value)?;
+            }
+            parameters
         };
         let artifacts_str = if os.ipxe_template_artifacts.is_empty() {
             "-".to_string()
         } else {
-            os.ipxe_template_artifacts
-                .iter()
-                .map(|a| format!("{}: {}", a.name, a.url))
-                .collect::<Vec<_>>()
-                .join("\n")
+            let mut artifacts = String::new();
+            for (index, artifact) in os.ipxe_template_artifacts.iter().enumerate() {
+                if index != 0 {
+                    artifacts.push('\n');
+                }
+                write!(artifacts, "{}: {}", artifact.name, artifact.url)?;
+            }
+            artifacts
         };
         let id_str = os.id.map(|u| u.to_string()).unwrap_or_default();
         table.add_row(Row::new(vec![
@@ -125,7 +133,7 @@ async fn list_all(
             Cell::new(
                 &os.ipxe_template_id
                     .map(|id| id.to_string())
-                    .unwrap_or("-".to_string()),
+                    .unwrap_or_else(|| "-".to_string()),
             ),
             Cell::new(&params_str),
             Cell::new(&artifacts_str),
@@ -173,12 +181,10 @@ async fn show_one(
         "Org:                 {}",
         os.tenant_organization_id.as_deref().unwrap_or_default()
     );
-    println!(
-        "Type:                {}",
-        OperatingSystemType::try_from(os.r#type)
-            .map(|t| t.as_str_name().to_string())
-            .unwrap_or_else(|_| os.r#type.to_string())
-    );
+    match OperatingSystemType::try_from(os.r#type) {
+        Ok(os_type) => println!("Type:                {}", os_type.as_str_name()),
+        Err(_) => println!("Type:                {}", os.r#type),
+    }
     println!("Status:              {}", os.status);
     println!("Active:              {}", os.is_active);
     println!("Allow Override:      {}", os.allow_override);

@@ -77,15 +77,38 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// Initialize ExpectedSwitch DAO (used for reconciliation of expected instances)
 	esDAO := cdbm.NewExpectedSwitchDAO(mei.dbSession)
 
-	// Fetch ALL existing expected switches for site
-	filterInput := cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}}
-	existingExpectedSwitches, _, err := esDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get ExpectedSwitches for Site from DB")
-		return err
+	// The deletion sweep only considers Expected Switches that existed before this page is applied,
+	// and only deletes one that has not changed since.
+	var siteExpectedSwitchIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
+	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
+		siteExpectedSwitchIDsAndUpdated, err = esDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitch IDs and Updated timestamps for Site from DB")
+			return err
+		}
 	}
 
-	// Build a map of all existing Expected Switches by UUID (unique identifier)
+	// Look up only the Expected Switches this page reports. Pages run concurrently, so loading
+	// the whole Site here would make each page's memory grow with the Site's Expected Switch count.
+	pageExpectedSwitchIDs := []uuid.UUID{}
+	for _, res := range expectedSwitchInventory.GetExpectedSwitches() {
+		id, serr := uuid.Parse(res.GetExpectedSwitchId().GetValue())
+		if serr == nil {
+			pageExpectedSwitchIDs = append(pageExpectedSwitchIDs, id)
+		}
+	}
+
+	existingExpectedSwitches := []cdbm.ExpectedSwitch{}
+	if len(pageExpectedSwitchIDs) > 0 {
+		filterInput := cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedSwitchIDs: pageExpectedSwitchIDs}
+		existingExpectedSwitches, _, err = esDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitches for Site from DB")
+			return err
+		}
+	}
+
+	// Build a map of the page's existing Expected Switches by UUID (unique identifier)
 	existingByID := map[uuid.UUID]*cdbm.ExpectedSwitch{}
 	for _, es := range existingExpectedSwitches {
 		existingByID[es.ID] = &es
@@ -149,6 +172,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 				Description:           reported.Description,
 				NvosMacAddresses:      reported.NvosMacAddresses,
 				NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+				NvosIpAddress:         reported.NvosIpAddress,
 				Labels:                reported.Labels,
 				CreatedBy:             siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
@@ -185,6 +209,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
 			!slices.Equal(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
 			!util.PtrsEqual(cur.NvosPrimaryMacAddress, reported.NvosPrimaryMacAddress) ||
+			!util.PtrsEqual(cur.NvosIpAddress, reported.NvosIpAddress) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
 				// Lock and re-read before writing so an API change after the
@@ -197,7 +222,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 					return nil
 				}
 
-				if _, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
+				_, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
 					ExpectedSwitchID:      cur.ID,
 					BmcMacAddress:         &reported.BmcMacAddress,
 					SwitchSerialNumber:    &reported.SwitchSerialNumber,
@@ -207,20 +232,22 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 					Description:           reported.Description,
 					NvosMacAddresses:      reported.NvosMacAddresses,
 					NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+					NvosIpAddress:         reported.NvosIpAddress,
 					Labels:                reported.Labels,
-				}); uerr != nil {
+				})
+				if uerr != nil {
 					return uerr
 				}
 
-				// Update preserves the stored primary when the selector is nil,
-				// so a reconcile that reports no primary (a switch with no
-				// ports) must clear it explicitly instead of leaving the stale
-				// selector behind.
-				if reported.NvosPrimaryMacAddress == nil {
-					if _, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+				// Update preserves nil values, so explicitly clear NVOS fields
+				// removed from Core's authoritative interface configuration.
+				if reported.NvosPrimaryMacAddress == nil || reported.NvosIpAddress == nil {
+					_, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
 						ExpectedSwitchID:      cur.ID,
-						NvosPrimaryMacAddress: true,
-					}); cerr != nil {
+						NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress == nil,
+						NvosIpAddress:         reported.NvosIpAddress == nil,
+					})
+					if cerr != nil {
 						return cerr
 					}
 				}
@@ -236,7 +263,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
-		for _, es := range existingExpectedSwitches {
+		for _, es := range siteExpectedSwitchIDsAndUpdated {
 			if _, keep := reportedIDs[es.ID]; keep {
 				continue
 			}

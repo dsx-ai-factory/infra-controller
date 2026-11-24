@@ -58,8 +58,8 @@ func NewGetAllInstanceNVLinkInterfaceHandler(dbSession *cdb.Session, tc temporal
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param instanceId path string true "ID of Instance"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Instance', 'Subnet'"
+// @Param status query []string false "Filter NVLink Interfaces by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one status." collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Instance', 'Subnet'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -109,12 +109,12 @@ func NewGetAllNVLinkInterfaceHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param siteId query string true "ID of Site"
-// @Param instanceId path string true "ID of Instance"
-// @Param nvlinkLogicalPartitionId path string true "ID of NVLinkLogicalPartition"
-// @Param nvLinkDomainId path string true "ID of NVLinkDomain"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'NVLinkLogicalPartition, Instance'"
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param instanceId query []string false "Filter by Instance IDs" collectionFormat(multi)
+// @Param nvLinkLogicalPartitionId query []string false "Filter by NVLink Logical Partition IDs" collectionFormat(multi)
+// @Param nvLinkDomainId query []string false "Filter by NVLink Domain IDs" collectionFormat(multi)
+// @Param status query []string false "Filter NVLink Interfaces by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one status." collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'NVLinkLogicalPartition, Instance'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -207,7 +207,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 			// Check if Tenant has access to Site
 			err := common.ValidateTenantSiteAccess(ctx, nil, gaish.dbSession, &tenant, siteID)
 			if errors.Is(err, cdb.ErrDoesNotExist) {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Site: %s specified in query doesn't exist or Tenant doesn't have access to it", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Site: %s specified in query doesn't exist or Tenant doesn't have access to it", siteID), nil)
 			}
 			if err != nil {
 				logger.Error().Err(err).Msg("error checking Tenant access to Site")
@@ -259,12 +259,12 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 			instance, ok := instanceIDMap[instanceID]
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Instance with ID: %s specified in %s",
-					instanceID.String(), lo.Ternary(instanceIDFromPath, "request", "query")), nil)
+					instanceID, lo.Ternary(instanceIDFromPath, "request", "query")), nil)
 			}
 
 			if instance.TenantID != tenant.ID {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Instance: %s specified in %s doesn't belong to current Tenant",
-					instanceID.String(), lo.Ternary(instanceIDFromPath, "request", "query")), nil)
+					instanceID, lo.Ternary(instanceIDFromPath, "request", "query")), nil)
 			}
 		}
 	}
@@ -303,11 +303,11 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 		for _, nvllpID := range nvlinkLogicalPartitionIDs {
 			nvllp, ok := nvllpIDMap[nvllpID]
 			if !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find NVLink Logical Partition with ID: %s specified in query", nvllpID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find NVLink Logical Partition with ID: %s specified in query", nvllpID), nil)
 			}
 
 			if nvllp.TenantID != tenant.ID {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("NVLink Logical Partition: %s specified in query doesn't belong to current Tenant", nvllpID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("NVLink Logical Partition: %s specified in query doesn't belong to current Tenant", nvllpID), nil)
 			}
 		}
 	}
@@ -339,7 +339,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", status))
 		_, ok := cdbm.NVLinkInterfaceStatusMap[status]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+			logger.Warn().Msgf("invalid value in status query: %v", status)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Status value: %s in query", status), nil)
 		}
 		statuses = append(statuses, status)

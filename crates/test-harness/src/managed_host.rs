@@ -23,13 +23,15 @@ use carbide_api_core::test_support::fixture_config::FixtureDefault as _;
 use carbide_site_explorer::test_support::TestSiteExplorer;
 use carbide_uuid::machine::PredictedHostMachineId;
 use chrono::Utc;
+use db::db_read::DbReader;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::HardwareInfo;
-use model::machine::ManagedHostState;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
+use model::machine::{ManagedHostState, ManagedHostStateSnapshot};
 use model::site_explorer::EndpointExplorationReport;
 use model::test_support::ManagedHostConfig;
+use tonic::IntoRequest;
 
 use crate::TestHarness;
 use crate::db_machine::DbMachineExt as _;
@@ -48,6 +50,25 @@ pub struct TestManagedHost {
 }
 
 impl TestManagedHost {
+    /// Reloads this host and its instance using the caller's database reader.
+    pub async fn snapshot<DB>(&self, db: &mut DB) -> ManagedHostStateSnapshot
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        db::managed_host::load_snapshot(db, &self.host.id.into(), Default::default())
+            .await
+            .unwrap()
+            .expect("managed host should exist")
+    }
+
+    /// Creates an instance builder using this managed host and the supplied harness runtime.
+    pub fn instance_builder<'a>(
+        &'a self,
+        harness: &'a TestHarness,
+    ) -> crate::TestInstanceBuilder<'a> {
+        crate::TestInstanceBuilder::new(harness, self)
+    }
+
     pub fn dpu(&self, dpu_index: usize) -> &TestDpuMachine {
         self.dpus
             .get(dpu_index)
@@ -80,8 +101,7 @@ impl TestManagedHost {
     pub async fn advance_state(&self, state: ManagedHostState) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         let machine = self.host.db_machine(&mut txn).await;
@@ -100,8 +120,7 @@ impl TestManagedHost {
     pub async fn advance_to_converged_ready(&self) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         let machine = self.host.db_machine(&mut txn).await;
@@ -133,7 +152,11 @@ impl TestManagedHost {
 
     pub async fn report_dpu_network_status(&self) {
         for dpu in &self.dpus {
-            dpu.record_network_status().await;
+            let status = dpu.network_status().build().await;
+            self.api
+                .record_dpu_network_status(status.into_request())
+                .await
+                .expect("DPU network status should be recorded");
         }
     }
 }

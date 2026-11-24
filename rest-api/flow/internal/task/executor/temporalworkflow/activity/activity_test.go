@@ -6,11 +6,13 @@ package activity
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
@@ -24,6 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestActivitiesReturnErrorWhenComponentManagerRegistryIsMissing(t *testing.T) {
@@ -77,9 +80,15 @@ func TestActivityCallsManagerWhenCapabilityIsSupported(t *testing.T) {
 		capability.CapabilityPowerControl,
 	)
 
-	err := acts.PowerControl(
+	target := newActivityTestTarget()
+	target.TraceID = "1234567890abcdef1234567890abcdef"
+	raw, err := json.Marshal(target)
+	require.NoError(t, err)
+	var restored common.Target
+	require.NoError(t, json.Unmarshal(raw, &restored))
+	err = acts.PowerControl(
 		context.Background(),
-		newActivityTestTarget(),
+		restored,
 		operations.PowerControlTaskInfo{
 			Operation: operations.PowerOperationPowerOn,
 		},
@@ -87,6 +96,32 @@ func TestActivityCallsManagerWhenCapabilityIsSupported(t *testing.T) {
 
 	require.NoError(t, err)
 	require.True(t, manager.called)
+	md, _ := metadata.FromOutgoingContext(manager.context)
+	require.Equal(t, []string{target.TraceID}, md.Get("x-nico-trace-id"))
+}
+
+func TestActivities_ResetCorrelation(t *testing.T) {
+	for _, name := range []string{NamePrepareFactoryReset, NameSubmitFactoryReset, NameNVOSResetCompleted, NameSDNResetCompleted} {
+		t.Run(name, func(t *testing.T) {
+			acts, manager := newCapabilityTestActivities(t, capability.CapabilityComponentReset)
+			target := newActivityTestTarget()
+			target.TraceID = "1234567890abcdef1234567890abcdef"
+			var err error
+			switch name {
+			case NamePrepareFactoryReset:
+				err = acts.PrepareFactoryReset(context.Background(), target)
+			case NameSubmitFactoryReset:
+				err = acts.SubmitFactoryReset(context.Background(), target, "sdn")
+			case NameNVOSResetCompleted:
+				_, err = acts.NVOSResetCompleted(context.Background(), target)
+			case NameSDNResetCompleted:
+				_, err = acts.SDNResetCompleted(context.Background(), target)
+			}
+			require.NoError(t, err)
+			md, _ := metadata.FromOutgoingContext(manager.context)
+			require.Equal(t, []string{target.TraceID}, md.Get("x-nico-trace-id"))
+		})
+	}
 }
 
 func TestFirmwareControlDataCipherAvailability(t *testing.T) {
@@ -311,6 +346,7 @@ func capabilityCheckedActivityCalls(
 }
 
 type capabilityTestManager struct {
+	context               context.Context
 	descriptor            cmcatalog.Descriptor
 	called                bool
 	firmwareInfo          operations.FirmwareControlTaskInfo
@@ -331,10 +367,11 @@ func (m *capabilityTestManager) InjectExpectation(
 }
 
 func (m *capabilityTestManager) PowerControl(
-	context.Context,
-	common.Target,
-	operations.PowerControlTaskInfo,
+	ctx context.Context,
+	_ common.Target,
+	_ operations.PowerControlTaskInfo,
 ) error {
+	m.context = ctx
 	m.called = true
 	return nil
 }
@@ -369,6 +406,26 @@ func (m *capabilityTestManager) GetFirmwareStatus(
 ) (map[string]operations.FirmwareUpdateStatus, error) {
 	m.called = true
 	return nil, nil
+}
+
+func (m *capabilityTestManager) PrepareFactoryReset(ctx context.Context, _ common.Target) error {
+	m.context = ctx
+	return nil
+}
+
+func (m *capabilityTestManager) SubmitFactoryReset(ctx context.Context, _ common.Target, _ string) error {
+	m.context = ctx
+	return nil
+}
+
+func (m *capabilityTestManager) NVOSResetCompleted(ctx context.Context, _ common.Target) (bool, error) {
+	m.context = ctx
+	return true, nil
+}
+
+func (m *capabilityTestManager) SDNResetCompleted(ctx context.Context, _ common.Target) (bool, error) {
+	m.context = ctx
+	return true, nil
 }
 
 func newActivityTestCipher(t *testing.T) *secret.Cipher {
@@ -466,5 +523,49 @@ func newActivityTestTarget() common.Target {
 	return common.Target{
 		Type:        devicetypes.ComponentTypeCompute,
 		Identifiers: []string{"machine-1"},
+	}
+}
+
+func (m *capabilityTestManager) GetFirmwareStatusWithCredentials(ctx context.Context, _ common.Target, credentials *corev1.ComponentCredentialOverrides) (map[string]operations.FirmwareUpdateStatus, error) {
+	m.called = true
+	m.context = ctx
+	m.firmwareInfo.CredentialOverrides = credentials
+	return nil, nil
+}
+
+func TestActivities_DeviceCredentialLifecycle(t *testing.T) {
+	cipher := newActivityTestCipher(t)
+	encrypted, err := firmwareauth.EncryptDeviceCredentials(cipher, &pb.DeviceCredentialOverrides{Bmc: &pb.DeviceLogin{Username: "operator", Password: "device-value"}})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		cipher   *secret.Cipher
+		wantCall bool
+	}{
+		{"decrypt at execution", cipher, true}, {"missing key blocks execution", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acts, manager := newCapabilityTestActivities(t, capability.CapabilityFirmwareControl, capability.CapabilityFirmwareStatus)
+			acts.dataCipher = tc.cipher
+			info := operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, DeviceCredentials: encrypted, OverrideReadinessCheck: true}
+			err := acts.FirmwareControl(context.Background(), newActivityTestTarget(), info)
+			require.Equal(t, tc.wantCall, manager.called)
+			if !tc.wantCall {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, "device-value", manager.firmwareInfo.CredentialOverrides.GetBmc().GetPassword())
+			manager.called = false
+			target := newActivityTestTarget()
+			target.TraceID = "1234567890abcdef1234567890abcdef"
+			_, err = acts.GetFirmwareStatusWithCredentials(context.Background(), target, encrypted)
+			require.NoError(t, err)
+			require.True(t, manager.called)
+			require.Equal(t, "device-value", manager.firmwareInfo.CredentialOverrides.GetBmc().GetPassword())
+			md, _ := metadata.FromOutgoingContext(manager.context)
+			require.Equal(t, []string{target.TraceID}, md.Get("x-nico-trace-id"))
+			require.Nil(t, info.CredentialOverrides)
+		})
 	}
 }

@@ -40,27 +40,44 @@ use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 mod test_decode;
 #[cfg(test)]
 mod test_explicit_columns;
+#[cfg(test)]
+mod test_updated_migration;
 
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
 /// SKUs can maintain backward compatibility
 pub const CURRENT_SKU_VERSION: u32 = 5;
 
-/// Find a SKU that matches the specified SKU using the same comparison that
-/// the SKU validation code uses. (i.e. the description, id and others are not compared)
-///
-/// The specified SKU must not exist in the DB (otherwise it will always be the match).
+/// Find a stored SKU whose requirements match the supplied observed hardware
+/// according to [`diff_skus`]. Authored storage groups and patterns need not
+/// match themselves; this is not a component-definition identity check.
 pub async fn find_matching(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     sku: &Sku,
 ) -> Result<Option<Sku>, DatabaseError> {
-    find_matching_with_exclusion(txn, sku, None).await
+    find_matching_with_exclusion(conn, sku, None).await
 }
 
+/// Apply the same observed-hardware comparison as [`find_matching`], excluding
+/// the specified stored ID. Mutation duplicate checks also compare definitions.
 pub async fn find_matching_with_exclusion(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     sku: &Sku,
     excluded_sku_id: Option<&String>,
+) -> Result<Option<Sku>, DatabaseError> {
+    find_matching_sku(conn, sku, excluded_sku_id, SkuMatch::ObservedHardware).await
+}
+
+enum SkuMatch {
+    ObservedHardware,
+    DuplicateDefinition,
+}
+
+async fn find_matching_sku(
+    conn: impl DbReader<'_>,
+    sku: &Sku,
+    excluded_sku_id: Option<&String>,
+    match_kind: SkuMatch,
 ) -> Result<Option<Sku>, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new(format!(
         "SELECT {} FROM machine_skus",
@@ -71,19 +88,25 @@ pub async fn find_matching_with_exclusion(
         builder.push_bind(excluded_sku_id);
     }
 
-    let sql = builder.sql().as_str().to_string();
-    let mut sku_stream = builder.build_query_as().fetch(txn);
+    let sql = builder.sql();
+    let mut sku_stream = builder.build_query_as::<Sku>().fetch(conn);
 
     while let Some(result) = sku_stream.next().await {
         match result {
             Ok(existing_sku) => {
-                let diffs = diff_skus(sku, &existing_sku);
-                if diffs.is_empty() {
+                // `diff_skus` treats each candidate storage entry as one drive.
+                // Groups with count > 1 or anchored patterns can miss themselves.
+                // Definition checks add equality; hardware matching stays unchanged.
+                let is_exact_duplicate = matches!(match_kind, SkuMatch::DuplicateDefinition)
+                    && sku.id != existing_sku.id
+                    && sku.schema_version == existing_sku.schema_version
+                    && sku.components == existing_sku.components;
+                if is_exact_duplicate || diff_skus(sku, &existing_sku).is_empty() {
                     return Ok(Some(existing_sku));
                 }
             }
             Err(sqlx::Error::RowNotFound) => {}
-            Err(e) => return Err(DatabaseError::query(&sql, e)),
+            Err(e) => return Err(DatabaseError::query(sql.as_str(), e)),
         }
     }
 
@@ -134,6 +157,11 @@ fn validate_storage_for_create(
     Ok(())
 }
 
+/// `create` saves a current-version SKU with valid storage constraints and a
+/// nonempty ID. Invalid input or a duplicate returns [`DatabaseError::InvalidArgument`].
+/// A duplicate has equal components in the same schema version under another ID,
+/// or matches through [`diff_skus`]. Description and device type are not compared.
+/// An existing ID without such a match returns [`DatabaseError::AlreadyFoundError`].
 pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
     if sku.schema_version != CURRENT_SKU_VERSION {
         return Err(DatabaseError::InvalidArgument(
@@ -157,7 +185,9 @@ pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseErr
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    if let Some(existing_sku) = find_matching(&mut inner_txn, sku).await? {
+    if let Some(existing_sku) =
+        find_matching_sku(&mut inner_txn, sku, None, SkuMatch::DuplicateDefinition).await?
+    {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",
             existing_sku.id
@@ -218,7 +248,7 @@ pub async fn get_sku_ids(txn: impl DbReader<'_>) -> Result<Vec<String>, Database
 }
 
 pub async fn find(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     sku_ids: &[impl AsRef<str>],
 ) -> Result<Vec<Sku>, DatabaseError> {
     if sku_ids.is_empty() {
@@ -232,7 +262,7 @@ pub async fn find(
 
     let skus: Vec<Sku> = sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(sku_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>())
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find skus", e))?;
 
@@ -252,20 +282,20 @@ pub async fn update_metadata(
         ));
     }
 
-    let mut builder = sqlx::QueryBuilder::new("UPDATE machine_skus SET ".to_string());
+    let mut builder = sqlx::QueryBuilder::new("UPDATE machine_skus SET ");
     if let Some(description) = description {
         builder.push(" description = ");
         builder.push_bind(description);
-        if device_type.is_some() {
-            builder.push(",");
-        }
+        builder.push(", ");
     }
 
     if let Some(device_type) = device_type {
         builder.push(" device_type = ");
         builder.push_bind(device_type);
+        builder.push(", ");
     }
 
+    builder.push(" updated = NOW()");
     builder.push(" WHERE id = ");
     builder.push_bind(sku_id);
     builder.push(" RETURNING id");
@@ -286,6 +316,8 @@ pub async fn update_metadata(
 /// The schema version must equal [`CURRENT_SKU_VERSION`]. An empty ID, unsupported
 /// schema version, invalid storage constraints, or definition matching another
 /// SKU returns [`DatabaseError::InvalidArgument`] before checking for absence.
+/// Another SKU matches when its components and schema version are equal, or when
+/// [`diff_skus`] finds no differences. The target's own ID is excluded.
 /// A valid replacement that does not match another SKU returns
 /// [`DatabaseError::NotFoundError`] when its target ID is absent. Other SQLx
 /// errors are preserved.
@@ -385,14 +417,16 @@ async fn lock_for_replacement(txn: &mut PgConnection) -> Result<(), DatabaseErro
 /// The caller must hold the table lock from `lock_for_replacement` so the
 /// duplicate check and replacement cannot race another SKU writer.
 async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
-    if let Some(existing_sku) = find_matching_with_exclusion(txn, sku, Some(&sku.id)).await? {
+    if let Some(existing_sku) =
+        find_matching_sku(&mut *txn, sku, Some(&sku.id), SkuMatch::DuplicateDefinition).await?
+    {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",
             existing_sku.id
         )));
     }
 
-    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4 WHERE id=$5 RETURNING id";
+    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4, updated=NOW() WHERE id=$5 RETURNING id";
 
     sqlx::query_as::<_, ()>(query)
         .bind(&sku.description)
@@ -448,11 +482,11 @@ fn memory_components_from_hardware_info(
             total_mem = total_mem.saturating_add((cap as u64).saturating_mul(mem.count as u64));
             let key = (mem.mem_type.clone().unwrap_or_default(), cap);
             mem_components
-                .entry(key.clone())
+                .entry(key)
                 .and_modify(|entry| entry.count = entry.count.saturating_add(mem.count))
-                .or_insert(SkuComponentMemory {
+                .or_insert_with_key(|key| SkuComponentMemory {
                     capacity_mb: key.1,
-                    memory_type: key.0,
+                    memory_type: key.0.clone(),
                     count: mem.count,
                 });
         }
@@ -507,13 +541,12 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
 
     let mut gpu_components: BTreeMap<(String, String), SkuComponentGpu> = BTreeMap::default();
     for gpu in &hardware_info.gpus {
-        let vendor = "NVIDIA".to_string();
         let key = (gpu.name.clone(), gpu.total_memory.clone());
         gpu_components
             .entry(key)
             .and_modify(|entry| entry.count = entry.count.saturating_add(1))
-            .or_insert(SkuComponentGpu {
-                vendor,
+            .or_insert_with(|| SkuComponentGpu {
+                vendor: "NVIDIA".to_string(),
                 model: gpu.name.clone(),
                 count: 1,
                 total_memory: gpu.total_memory.clone(),
@@ -558,7 +591,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
             storage
                 .entry(block_device.model.clone())
                 .and_modify(|s| s.count += 1)
-                .or_insert(SkuComponentStorage {
+                .or_insert_with(|| SkuComponentStorage {
                     model: block_device.model.clone(),
                     count: 1,
                     min_size_mb: None,
@@ -576,6 +609,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
         id: format!("{} {}", chassis.model, Utc::now()),
         description,
         created,
+        updated: None,
         components: SkuComponents {
             chassis,
             cpus: hardware_info
@@ -637,7 +671,7 @@ pub fn generate_base_sku_from_hardware(
         .gpu
         .into_iter()
         .map(|g| SkuComponentGpu {
-            vendor: g.vendor.unwrap_or("NVIDIA".to_owned()),
+            vendor: g.vendor.unwrap_or_else(|| "NVIDIA".to_owned()),
             model: g.name,
             total_memory: g.memory_capacity.unwrap_or_default(),
             count: g.count,
@@ -676,6 +710,7 @@ pub fn generate_base_sku_from_hardware(
         id: format!("{} {}", chassis.model, Utc::now()),
         description,
         created,
+        updated: None,
         components: SkuComponents {
             chassis,
             cpus,
@@ -731,7 +766,7 @@ pub async fn generate_sku_from_machine_at_version_2(
         storage
             .entry(s.model.clone())
             .and_modify(|s| s.count += 1)
-            .or_insert(SkuComponentStorage {
+            .or_insert_with(|| SkuComponentStorage {
                 model: s.model.clone(),
                 count: 1,
                 min_size_mb: None,
@@ -784,7 +819,7 @@ pub async fn generate_sku_from_machine_at_version_3(
         storage
             .entry(nvme.model.clone())
             .and_modify(|s| s.count += 1)
-            .or_insert(SkuComponentStorage {
+            .or_insert_with(|| SkuComponentStorage {
                 model: nvme.model.clone(),
                 count: 1,
                 min_size_mb: None,
@@ -836,7 +871,7 @@ pub async fn generate_sku_from_machine_at_version_4(
         storage
             .entry(nvme.model.clone())
             .and_modify(|s| s.count += 1)
-            .or_insert(SkuComponentStorage {
+            .or_insert_with(|| SkuComponentStorage {
                 model: nvme.model.clone(),
                 count: 1,
                 min_size_mb: None,

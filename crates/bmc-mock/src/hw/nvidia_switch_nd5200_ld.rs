@@ -40,7 +40,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
             vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
             product: Some("P3809"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -106,7 +106,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
         let system_id = "System_0";
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
@@ -126,7 +126,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
                 base_bios: None,
                 serial_console: None,
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

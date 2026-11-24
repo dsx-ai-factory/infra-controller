@@ -138,6 +138,9 @@ func (s *PostgresStore) GetTask(
 ) (*taskdef.Task, error) {
 	taskDao, err := model.GetTask(ctx, s.idb(ctx), id)
 	if err != nil {
+		if stderrors.Is(err, sql.ErrNoRows) {
+			return nil, errors.GRPCErrorNotFound("task not found")
+		}
 		return nil, errors.GRPCErrorInternal(err.Error())
 	}
 	return taskFromDAO(taskDao)
@@ -157,6 +160,9 @@ func (s *PostgresStore) GetTasks(
 
 		taskDao, err := model.GetTask(ctx, s.pg.DB, id)
 		if err != nil {
+			if stderrors.Is(err, sql.ErrNoRows) {
+				return nil, errors.GRPCErrorNotFound("task not found")
+			}
 			return nil, errors.GRPCErrorInternal(err.Error())
 		}
 
@@ -394,9 +400,7 @@ func normalizedUUIDs(ids []uuid.UUID) []uuid.UUID {
 	for id := range unique {
 		result = append(result, id)
 	}
-	slices.SortFunc(result, func(a, b uuid.UUID) int {
-		return strings.Compare(a.String(), b.String())
-	})
+	operation.SortComponentUUIDs(result)
 	return result
 }
 
@@ -413,7 +417,7 @@ func taskComponentsAnyPredicate(ids []uuid.UUID) string {
 	for i, id := range ids {
 		predicates[i] = fmt.Sprintf(
 			`t.attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
-			id.String(),
+			id,
 		)
 	}
 	return "(" + strings.Join(predicates, " OR ") + ")"
@@ -439,9 +443,9 @@ func (s *PostgresStore) UpdateScheduledTask(
 func (s *PostgresStore) UpdateTaskStatus(
 	ctx context.Context,
 	arg *taskdef.TaskStatusUpdate,
-) error {
+) (bool, error) {
 	taskDao := &model.Task{ID: arg.ID}
-	err := taskDao.UpdateTaskStatus(
+	updated, err := taskDao.UpdateTaskStatus(
 		ctx,
 		s.idb(ctx),
 		arg.Status,
@@ -450,10 +454,10 @@ func (s *PostgresStore) UpdateTaskStatus(
 		arg.QueueExpiresAt,
 	)
 	if err != nil {
-		return errors.GRPCErrorInternal(err.Error())
+		return false, errors.GRPCErrorInternal(err.Error())
 	}
 
-	return nil
+	return updated, nil
 }
 
 // UpdateTaskReport replaces the stored report with the snapshot in arg.

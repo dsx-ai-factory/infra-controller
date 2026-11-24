@@ -15,10 +15,9 @@
  * limitations under the License.
  */
 
-mod cancel;
 mod coverage;
-mod get;
-mod list;
+mod job;
+mod machines;
 mod profile;
 mod trigger;
 
@@ -60,14 +59,25 @@ async fn write_output<T: Serialize>(
 // a list of subcommands
 #[derive(Dispatch, Parser, Debug)]
 pub(crate) enum Cmd {
-    #[clap(about = "Cancel attestation for a given machine id")]
-    Cancel(cancel::args::Args),
     #[clap(about = "Show which hardware classes the site has and what would attest each")]
     Coverage(coverage::args::Args),
-    #[clap(about = "Get SPDM attestation details for a given machine id")]
-    Get(get::args::Args),
-    #[clap(about = "List SPDM attestation machine statuses")]
-    List(list::args::Args),
+    #[dispatch]
+    #[clap(
+        subcommand,
+        about = "Manage SPDM attestation jobs",
+        visible_alias = "jobs"
+    )]
+    Job(job::Cmd),
+    #[dispatch]
+    #[clap(
+        subcommand,
+        about = "Inspect predicted fleet statuses or assess one machine using current attesters",
+        defer = |command| {
+            // Machine predictions always use machine-ID order.
+            command.mut_arg("sort_by", |arg| arg.hide(true))
+        }
+    )]
+    Machines(machines::Cmd),
     #[dispatch]
     #[clap(
         subcommand,

@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use carbide_site_health_probe_api::metrics::{
     EXPECTED_RECORDS, GAUGES, Gauge, HOST_FIRMWARE_REQUESTS, HOST_PREDICATES_KNOWN, HOST_READ_MODE,
@@ -46,14 +46,20 @@ use prometheus::{GaugeVec, Opts};
 use tokio::time::Instant;
 
 use crate::readers::rest_inventory::{REST_RESOURCES, RestTotalsData, SiteMatchData};
-use crate::snapshot::{AnySnapshot, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData};
+use crate::snapshot::{
+    AnySnapshot, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData, unix_millis,
+};
 use crate::state::store::{ALL_FAMILIES, SnapshotStore};
 
 /// How long a vanished label set is published as 0 before it is dropped.
 pub(crate) const RETIRE_AFTER: Duration = Duration::from_secs(15 * 60);
 
 /// Gauges that are never published as 0 for a vanished label set.
-const NOT_RETIRED: &[&str] = &[REST_TOTALS.name];
+const NOT_RETIRED: &[&str] = &[
+    REST_TOTALS.name,
+    carbide_site_health_probe_api::metrics::FIRMWARE_CONFIG_REVISION.name,
+    carbide_site_health_probe_api::metrics::HOST_FIRMWARE_CONFIG_REVISION.name,
+];
 
 const FAILURE_KINDS: [FailureKind; 5] = [
     FailureKind::Timeout,
@@ -67,11 +73,11 @@ fn flag(value: bool) -> String {
     value.to_string()
 }
 
-/// Unix seconds as the collector publishes them.
+/// Unix seconds at millisecond precision, as the collector publishes them.
+/// VictoriaMetrics rounds finer values, and clients compare the stored value
+/// with the API value bit for bit (#9483).
 pub(crate) fn unix_seconds(at: SystemTime) -> f64 {
-    at.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
+    unix_millis(at) as f64 / 1000.0
 }
 
 pub(crate) fn units_of(snap: &dyn AnySnapshot) -> Option<&UnitsData> {
@@ -226,6 +232,14 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
             if let Some(data) = units_of(snap) {
                 unit_series(&data.units, series);
                 host_series(&data.units, series);
+                if let Some(config) = &data.firmware_config {
+                    set(
+                        series,
+                        carbide_site_health_probe_api::metrics::HOST_FIRMWARE_CONFIG_REVISION.name,
+                        vec![],
+                        config.revision as f64,
+                    );
+                }
                 for (mode, on) in [
                     ("full", !data.compact_host_read),
                     ("compact", data.compact_host_read),
@@ -320,11 +334,20 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                 }
             }
         }
-        // Read by no reader until the firmware and instance tests (#8154,
-        // #8152).
-        Family::RestInstances
+        Family::ConfigNicoApi => {
+            if let Some(data) = crate::readers::nico_config::data(snap) {
+                set(
+                    series,
+                    carbide_site_health_probe_api::metrics::FIRMWARE_CONFIG_REVISION.name,
+                    vec![],
+                    data.revision as f64,
+                );
+            }
+        }
+        // Cached REST unit lists and config do not add count series.
+        Family::RestMachines
+        | Family::RestInstances
         | Family::RestTenantInstances
-        | Family::ConfigNicoApi
         | Family::ConfigRest => {}
     }
 }
@@ -355,6 +378,34 @@ fn host_series(units: &[Arc<Unit>], series: &mut Series) {
             ],
             1.0,
         );
+        use carbide_site_health_probe_api::metrics::{
+            HOSTS_FIRMWARE, firmware_phase, firmware_ready, vendor_label,
+        };
+        use carbide_site_health_probe_api::{Component, FirmwarePhase};
+        for component in [Component::Bmc, Component::Uefi] {
+            let observed_phase = firmware_phase(unit, component);
+            let observed_ready = firmware_ready(unit);
+            for phase in [
+                FirmwarePhase::Unknown,
+                FirmwarePhase::Behind,
+                FirmwarePhase::Updating,
+                FirmwarePhase::Failed,
+                FirmwarePhase::Current,
+            ] {
+                for ready in [false, true] {
+                    let labels = vec![
+                        vendor_label(host),
+                        model_label(host),
+                        wire(component),
+                        wire(phase),
+                        ready.to_string(),
+                    ];
+                    let value =
+                        f64::from(u8::from(observed_phase == phase && observed_ready == ready));
+                    add(series, HOSTS_FIRMWARE.name, labels, value);
+                }
+            }
+        }
         let eligible = flag_label(host.update_eligible);
         let reason = host
             .update_blocking_reason
@@ -419,7 +470,7 @@ impl Collector for StateCollector {
 /// The readers' sink: counts each delivery on the OTel meter, then stores
 /// it.
 pub(crate) struct CountingSink {
-    store: Arc<SnapshotStore>,
+    pub(crate) store: Arc<SnapshotStore>,
     sweeps: Counter<u64>,
     unknown_states: Counter<u64>,
 }
@@ -480,11 +531,13 @@ fn reader_of(family: Family) -> Option<Reader> {
         | Family::Instance
         | Family::Expected
         | Family::HostFirmwareRequests => Some(Reader::Devices),
-        Family::RestTotals | Family::RestSiteMatch => Some(Reader::RestInventory),
-        Family::RestInstances
-        | Family::RestTenantInstances
-        | Family::ConfigNicoApi
-        | Family::ConfigRest => None,
+        Family::RestTotals
+        | Family::RestSiteMatch
+        | Family::RestMachines
+        | Family::RestInstances
+        | Family::ConfigRest => Some(Reader::RestInventory),
+        Family::ConfigNicoApi => Some(Reader::NicoConfig),
+        Family::RestTenantInstances => None,
     }
 }
 
@@ -515,6 +568,7 @@ impl SnapshotSink for CountingSink {
 #[cfg(test)]
 mod tests {
     use std::thread;
+    use std::time::UNIX_EPOCH;
 
     use carbide_site_health_probe_api::metrics::PREFIX;
     use carbide_site_health_probe_api::{
@@ -590,6 +644,10 @@ mod tests {
 
     fn host_fields(model: &str, bmc: &str) -> HostFields {
         HostFields {
+            firmware_window: None,
+            firmware_policy_eligible: None,
+            firmware_policy_blocking_reason: None,
+            firmware: None,
             vendor: Some("NVIDIA".to_string()),
             model: Some(model.to_string()),
             instance_type: None,
@@ -613,6 +671,8 @@ mod tests {
 
     fn unit(unit_type: UnitType, id: &str, state: &str, stage: Stage) -> Unit {
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: id.to_string(),
             unit_type,
             source: Source::NicoApi,
@@ -848,6 +908,9 @@ carbide_site_health_probe_unresolved_units{type="dpu"} 1
 
     /// Every state gauge's descriptor: name, labels in order, help.
     const DESCRIPTORS: &str = r#"
+carbide_site_health_probe_hosts_firmware [vendor,model,component,phase,ready] Hosts per vendor, model, firmware component, phase and native readiness.
+carbide_site_health_probe_firmware_config_revision [] Latest successful firmware configuration revision.
+carbide_site_health_probe_host_firmware_config_revision [] Configuration revision pinned to host firmware evidence.
 carbide_site_health_probe_units [type,stage,state] Units per type, stage (registered, ready, error) and state, from the newest complete sweep.
 carbide_site_health_probe_hosts [model,instance_type,state,allocatable,update_complete] Hosts per model, instance type, state, allocatability and update completion.
 carbide_site_health_probe_hosts_update_eligible [model,eligible,reason] Hosts per model and firmware update eligibility (true, false, unknown) with the blocking reason.
@@ -1038,6 +1101,11 @@ carbide_site_health_probe_host_predicates_known [predicate] 1 when the current h
         let out = exposition(&setup.registry);
         let got: Vec<&str> = out
             .lines()
+            .filter(|line| {
+                !line.contains("carbide_site_health_probe_hosts_firmware")
+                    && !line.contains("carbide_site_health_probe_firmware_config_revision")
+                    && !line.contains("carbide_site_health_probe_host_firmware_config_revision")
+            })
             .filter(|line| {
                 line.starts_with(PREFIX)
                     || line.starts_with(&format!("# HELP {PREFIX}"))
@@ -1308,7 +1376,7 @@ carbide_site_health_probe_host_predicates_known [predicate] 1 when the current h
         );
         assert_eq!(
             samples(&out, "sweeps_total", &[]).len(),
-            4,
+            6,
             "enabled swept families times 2 results"
         );
 
@@ -1349,6 +1417,8 @@ carbide_site_health_probe_host_predicates_known [predicate] 1 when the current h
             .iter()
             .take(500)
             .map(|u| Unit {
+                controller_instance_id: None,
+                rest_machine: None,
                 unit_type: UnitType::HostFirmwareRequest,
                 ..u.clone()
             })

@@ -43,7 +43,6 @@ bmc-vendor = { path = "../bmc-vendor" }
 
 bytes = { workspace = true }
 arc-swap = { workspace = true }
-ctor = { workspace = true }
 lazy_static = { workspace = true }
 tokio = { workspace = true, features = [
   "tokio-macros",
@@ -67,7 +66,7 @@ russh = { workspace = true }
 http = { workspace = true }
 tonic = { workspace = true, features = ["default"] }
 ringbuf = { workspace = true }
-nix = { features = ["process", "term", "fs"], workspace = true }
+nix = { features = ["process", "term", "fs", "resource"], workspace = true }
 libc = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
@@ -86,16 +85,18 @@ size = { features = ["serde"], workspace = true }
 surge-ping = { workspace = true }
 
 [dev-dependencies]
-bmc-mock = { path = "../bmc-mock" }
 carbide-machine-a-tron = { path = "../machine-a-tron" }
 carbide-test-support = { path = "../test-support" }
-temp-dir = { workspace = true }
-futures = { workspace = true }
+
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-ssh-console-mock-api-server = { path = "../ssh-console-mock-api-server" }
+ctor = { workspace = true }
 eyre = { workspace = true }
+futures = { workspace = true }
 indoc = { workspace = true }
 prometheus-text-parser = { path = "../prometheus-text-parser" }
+temp-dir = { workspace = true }
 
 [lints]
 workspace = true

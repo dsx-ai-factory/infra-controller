@@ -30,6 +30,7 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     CredentialKey, CredentialReader, CredentialWriter, Credentials,
 };
+use db::TransactionVending as _;
 use db::work_lock_manager::{self, AcquireLockError, KeepaliveConfig, WorkLockManagerHandle};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -124,15 +125,26 @@ fn manager(
     pool: &sqlx::PgPool,
     routing: SecretRouting,
     kms: Arc<dyn KmsBackend>,
+    test_meter: &carbide_utils::test_support::test_meter::TestMeter,
 ) -> PostgresCredentialManager {
-    PostgresCredentialManager::new(pool.clone(), routing, kms)
+    PostgresCredentialManager::new(
+        pool.clone(),
+        routing,
+        kms,
+        carbide_instrument::Instrumentation::new(test_meter.meter()),
+    )
 }
 
 async fn start_test_work_lock_manager(pool: &sqlx::PgPool) -> (WorkLockManagerHandle, JoinSet<()>) {
     let mut tasks = JoinSet::new();
-    let handle = work_lock_manager::start(&mut tasks, pool.clone(), Default::default())
-        .await
-        .expect("start work lock manager");
+    let handle = work_lock_manager::start(
+        &mut tasks,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::noop(),
+    )
+    .await
+    .expect("start work lock manager");
     (handle, tasks)
 }
 
@@ -153,7 +165,14 @@ fn cred(user: &str, pass: &str) -> Credentials {
 // returns the newest entry.
 #[crate::sqlx_test]
 async fn set_get_round_trip_and_journal_latest_wins(pool: sqlx::PgPool) {
-    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let metrics = carbide_instrument::testing::MetricsCapture::for_registry(test_meter.registry());
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
     let key = ufm_key("fab1");
 
     mgr.set_credentials(&key, &cred("admin", "first"))
@@ -170,13 +189,42 @@ async fn set_get_round_trip_and_journal_latest_wins(pool: sqlx::PgPool) {
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].credentials, cred("admin", "second"));
     assert_eq!(history[1].credentials, cred("admin", "first"));
+    for (operation, attempts, succeeded, failed) in [("set", 2u32, 2u32, 0u32), ("get", 1, 1, 0)] {
+        let labels = [("operation", operation)];
+        assert_eq!(
+            metrics.counter_delta("carbide_api_secrets_requests_total", &labels),
+            f64::from(attempts)
+        );
+        assert_eq!(
+            metrics.counter_delta("carbide_api_secrets_requests_succeeded_total", &labels),
+            f64::from(succeeded)
+        );
+        assert_eq!(
+            metrics.counter_delta("carbide_api_secrets_requests_failed_total", &labels),
+            f64::from(failed)
+        );
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_api_secrets_request_duration_milliseconds",
+                &labels
+            ),
+            u64::from(attempts)
+        );
+    }
 }
 
 // Verifies create-only semantics: the second create fails and leaves the
 // first value in place.
 #[crate::sqlx_test]
 async fn create_fails_when_credential_exists(pool: sqlx::PgPool) {
-    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let metrics = carbide_instrument::testing::MetricsCapture::for_registry(test_meter.registry());
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
     let key = ufm_key("fab1");
 
     mgr.create_credentials(&key, &cred("admin", "original"))
@@ -197,11 +245,34 @@ async fn create_fails_when_credential_exists(pool: sqlx::PgPool) {
 
     let current = mgr.get_credentials(&key).await.expect("get");
     assert_eq!(current, Some(cred("admin", "original")));
+    let labels = [("operation", "create")];
+    assert_eq!(
+        metrics.counter_delta("carbide_api_secrets_requests_total", &labels),
+        2.0
+    );
+    assert_eq!(
+        metrics.counter_delta("carbide_api_secrets_requests_succeeded_total", &labels),
+        1.0
+    );
+    assert_eq!(
+        metrics.counter_delta("carbide_api_secrets_requests_failed_total", &labels),
+        1.0
+    );
+    assert_eq!(
+        metrics.histogram_count_delta("carbide_api_secrets_request_duration_milliseconds", &labels),
+        2
+    );
 }
 
 #[crate::sqlx_test]
 async fn set_after_create_absence_check_remains_current(pool: sqlx::PgPool) {
-    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
     let key = ufm_key("create-set-race");
     let path = key.to_key_str().to_string();
     let seed_credentials = cred("seed", "initial");
@@ -215,7 +286,7 @@ async fn set_after_create_absence_check_remains_current(pool: sqlx::PgPool) {
 
     // Run `insert_if_missing`'s steps separately so the setter can run
     // after the absence check but before the insert.
-    let mut create_txn = pool.begin().await.expect("begin create transaction");
+    let mut create_txn = pool.txn_begin().await.expect("begin create transaction");
     db::secrets::lock_path(&mut create_txn, &path)
         .await
         .expect("lock credential path for create");
@@ -290,7 +361,13 @@ async fn set_after_create_absence_check_remains_current(pool: sqlx::PgPool) {
 // entry -- the same semantics Vault's delete gave callers.
 #[crate::sqlx_test]
 async fn delete_removes_all_journal_entries(pool: sqlx::PgPool) {
-    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
     let key = ufm_key("fab1");
 
     mgr.set_credentials(&key, &cred("admin", "first"))
@@ -314,7 +391,7 @@ async fn second_write_wins_on_created_at_ties(pool: sqlx::PgPool) {
     let routing = catch_all_routing("k1");
     let path = "tie/test/path";
 
-    let mut txn = pool.begin().await.expect("begin");
+    let mut txn = pool.txn_begin().await.expect("begin");
     let first = super::encrypt_envelope(&routing, kms.as_ref(), path, b"\"first\"")
         .await
         .expect("encrypt first");
@@ -352,7 +429,13 @@ async fn second_write_wins_on_created_at_ties(pool: sqlx::PgPool) {
 // makes the previous credential current again.
 #[crate::sqlx_test]
 async fn delete_by_id_restores_previous_credential(pool: sqlx::PgPool) {
-    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
     let key = ufm_key("fab1");
 
     mgr.set_credentials(&key, &cred("admin", "v1"))
@@ -385,7 +468,13 @@ async fn delete_by_id_restores_previous_credential(pool: sqlx::PgPool) {
 // and reads must answer None for it.
 #[crate::sqlx_test]
 async fn empty_password_reads_as_none(pool: sqlx::PgPool) {
-    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
     let key = ufm_key("fab1");
 
     mgr.set_credentials(&key, &cred("admin", "live"))
@@ -412,7 +501,13 @@ async fn empty_password_reads_as_none(pool: sqlx::PgPool) {
 // credential.
 #[crate::sqlx_test]
 async fn ciphertext_copied_to_another_path_does_not_decrypt(pool: sqlx::PgPool) {
-    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
     let key_a = ufm_key("fab-a");
     let key_b = ufm_key("fab-b");
 
@@ -443,10 +538,16 @@ async fn ciphertext_copied_to_another_path_does_not_decrypt(pool: sqlx::PgPool) 
 
 #[crate::sqlx_test]
 async fn bulk_secret_write_blocks_create_before_exists_check(pool: sqlx::PgPool) {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let key = ufm_key("bulk-write-create-race");
     let path = key.to_key_str().to_string();
-    let create_manager = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
-    let mut bulk_txn = pool.begin().await.expect("begin bulk transaction");
+    let create_manager = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
+    let mut bulk_txn = pool.txn_begin().await.expect("begin bulk transaction");
     db::secrets::lock_for_bulk_write(&mut bulk_txn)
         .await
         .expect("lock secrets for bulk write");
@@ -526,14 +627,23 @@ async fn bulk_secret_write_blocks_create_before_exists_check(pool: sqlx::PgPool)
 
 #[crate::sqlx_test]
 async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPool) {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let key = ufm_key("legacy-path-lock-race");
     let path = key.to_key_str().to_string();
-    let create_manager = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let create_manager = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
 
     // Model a create from an older replica: it takes the path advisory lock,
     // checks for an existing entry, and does not request its table-write lock
     // until the later INSERT.
-    let mut legacy_txn = pool.begin().await.expect("begin legacy create transaction");
+    let mut legacy_txn = pool
+        .txn_begin()
+        .await
+        .expect("begin legacy create transaction");
     db::secrets::lock_path_advisory(&mut legacy_txn, &path)
         .await
         .expect("take legacy path advisory lock");
@@ -574,7 +684,7 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
     .await
     .expect("create did not wait on the legacy path lock");
 
-    let mut bulk_txn = pool.begin().await.expect("begin bulk transaction");
+    let mut bulk_txn = pool.txn_begin().await.expect("begin bulk transaction");
     sqlx::query("SET LOCAL lock_timeout = '250ms'")
         .execute(&mut *bulk_txn)
         .await
@@ -619,9 +729,10 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
 async fn vault_import_missing_only_preserves_existing_and_marker_stops_late_batch(
     pool: sqlx::PgPool,
 ) {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let routing = catch_all_routing("k1");
     let kms = kms_with_keys(&[("k1", 1)]);
-    let pg_manager = manager(&pool, routing.clone(), kms.clone());
+    let pg_manager = manager(&pool, routing.clone(), kms.clone(), &test_meter);
     let existing_key = ufm_key("existing");
     let missing_key = ufm_key("missing");
     pg_manager
@@ -710,9 +821,10 @@ async fn vault_import_missing_only_preserves_existing_and_marker_stops_late_batc
 
 #[crate::sqlx_test]
 async fn vault_import_missing_only_restores_path_deleted_during_preparation(pool: sqlx::PgPool) {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let routing = catch_all_routing("k1");
     let kms = kms_with_keys(&[("k1", 1)]);
-    let pg_manager = manager(&pool, routing.clone(), kms.clone());
+    let pg_manager = manager(&pool, routing.clone(), kms.clone(), &test_meter);
     let existing_key = ufm_key("deleted-during-preparation");
     let missing_key = ufm_key("missing-during-preparation");
     pg_manager
@@ -799,19 +911,28 @@ async fn vault_import_missing_only_restores_path_deleted_during_preparation(pool
 
 #[crate::sqlx_test]
 async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx::PgPool) {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let keepalive_config = KeepaliveConfig {
         interval: Duration::from_secs(60),
         timeout: Duration::from_millis(100),
     };
     let mut work_lock_tasks = JoinSet::new();
-    let owner_manager =
-        work_lock_manager::start(&mut work_lock_tasks, pool.clone(), keepalive_config)
-            .await
-            .expect("start owner work lock manager");
-    let replacement_manager =
-        work_lock_manager::start(&mut work_lock_tasks, pool.clone(), keepalive_config)
-            .await
-            .expect("start replacement work lock manager");
+    let owner_manager = work_lock_manager::start(
+        &mut work_lock_tasks,
+        pool.clone(),
+        keepalive_config,
+        carbide_instrument::Instrumentation::noop(),
+    )
+    .await
+    .expect("start owner work lock manager");
+    let replacement_manager = work_lock_manager::start(
+        &mut work_lock_tasks,
+        pool.clone(),
+        keepalive_config,
+        carbide_instrument::Instrumentation::noop(),
+    )
+    .await
+    .expect("start replacement work lock manager");
     let work_key = "vault-import-takeover".to_string();
     let owner_lock = owner_manager
         .try_acquire_lock(work_key.clone())
@@ -900,7 +1021,7 @@ async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx
         }
     );
 
-    let pg_manager = manager(&pool, routing, replacement_kms);
+    let pg_manager = manager(&pool, routing, replacement_kms, &test_meter);
     assert_eq!(
         pg_manager
             .get_credentials(&first_key)
@@ -955,11 +1076,17 @@ async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx
 // the rows still decrypt afterwards, and a second run finds nothing to do.
 #[crate::sqlx_test]
 async fn re_wrap_stale_moves_rows_and_is_idempotent(pool: sqlx::PgPool) {
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let kms = kms_with_keys(&[("old-key", 1), ("new-key", 2)]);
     let (work_lock_manager, _work_lock_tasks) = start_test_work_lock_manager(&pool).await;
 
     // Write under old-key: two credentials, one with two journal entries.
-    let mgr_old = manager(&pool, catch_all_routing("old-key"), kms.clone());
+    let mgr_old = manager(
+        &pool,
+        catch_all_routing("old-key"),
+        kms.clone(),
+        &test_meter,
+    );
     mgr_old
         .set_credentials(&ufm_key("fab1"), &cred("admin", "one"))
         .await
@@ -986,7 +1113,7 @@ async fn re_wrap_stale_moves_rows_and_is_idempotent(pool: sqlx::PgPool) {
     );
 
     // Every row decrypts, and historical entries moved too.
-    let mgr_new = manager(&pool, routing.clone(), kms.clone());
+    let mgr_new = manager(&pool, routing.clone(), kms.clone(), &test_meter);
     assert_eq!(
         mgr_new
             .get_credentials(&ufm_key("fab1"))

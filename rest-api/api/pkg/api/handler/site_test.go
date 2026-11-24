@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -363,13 +364,13 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 		name                          string
 		fields                        fields
 		wantErr                       bool
-		body                          string
+		body                          []byte
 		expectedName                  string
 		expectedDescription           *string
 		expectedSerialConsoleHostname *string
 		respCode                      int
-		siteMgrErr                    bool
-		siteMgrDisabled               bool
+		siteManagerErr                bool
+		siteManagerDisabled           bool
 		verifyChildSpanner            bool
 		expectedLocation              *model.APISiteLocation
 		expectedContact               *model.APISiteContact
@@ -383,7 +384,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:                       false,
-			body:                          string(stcrJSON1),
+			body:                          stcrJSON1,
 			expectedName:                  stcr1.Name,
 			expectedDescription:           stcr1.Description,
 			expectedSerialConsoleHostname: stcr1.SerialConsoleHostname,
@@ -398,7 +399,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 			},
 			wantErr:  true,
 			respCode: http.StatusConflict,
-			body:     string(stcrJSON1),
+			body:     stcrJSON1,
 		},
 		{
 			name: "Error in Site create API when site manager return error",
@@ -409,14 +410,14 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:             true,
-			body:                string(stcrJSON4),
+			body:                stcrJSON4,
 			expectedName:        stcr4.Name,
 			expectedDescription: stcr4.Description,
-			siteMgrErr:          true,
+			siteManagerErr:      true,
 			respCode:            http.StatusInternalServerError,
 		},
 		{
-			name: "OK Site create API endpoint, sitemgr disabled",
+			name: "OK Site create API endpoint, Site Manager disabled",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -424,10 +425,10 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:             false,
-			body:                string(stcrJSON3),
+			body:                stcrJSON3,
 			expectedName:        stcr3.Name,
 			expectedDescription: stcr3.Description,
-			siteMgrDisabled:     true,
+			siteManagerDisabled: true,
 			verifyChildSpanner:  true,
 		},
 		{
@@ -438,11 +439,11 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				tnc:       tnc,
 				cfg:       cfg,
 			},
-			wantErr:          false,
-			body:             string(stcrJSON5),
-			expectedLocation: stcr5.Location,
-			siteMgrDisabled:  true,
-			expectedName:     stcr5.Name,
+			wantErr:             false,
+			body:                stcrJSON5,
+			expectedLocation:    stcr5.Location,
+			siteManagerDisabled: true,
+			expectedName:        stcr5.Name,
 		},
 		{
 			name: "create site with contact",
@@ -452,19 +453,19 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				tnc:       tnc,
 				cfg:       cfg,
 			},
-			wantErr:         false,
-			body:            string(stcrJSON6),
-			expectedContact: stcr6.Contact,
-			siteMgrDisabled: true,
-			expectedName:    stcr6.Name,
+			wantErr:             false,
+			body:                stcrJSON6,
+			expectedContact:     stcr6.Contact,
+			siteManagerDisabled: true,
+			expectedName:        stcr6.Name,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tcsm.forceErr = tt.siteMgrErr
+			tcsm.forceErr = tt.siteManagerErr
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tt.body))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -475,7 +476,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 
 			csh := NewCreateSiteHandler(tt.fields.dbSession, tt.fields.tc, tt.fields.tnc, tt.fields.cfg)
 
-			if tt.siteMgrDisabled {
+			if tt.siteManagerDisabled {
 				tt.fields.cfg.SetSiteManagerEnabled(false)
 				tt.fields.cfg.SetSiteManagerEndpoint("")
 			}
@@ -527,7 +528,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				assert.True(t, createdSite.Config.Flow)
 				assert.False(t, createdSite.Config.VpcSlaac)
 
-				if !tt.siteMgrDisabled {
+				if !tt.siteManagerDisabled {
 					assert.NotNil(t, rst.RegistrationToken)
 					assert.NotNil(t, rst.RegistrationTokenExpiration)
 				}
@@ -625,7 +626,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 		query              url.Values
 		wantStatus         *string
 		respMessage        string
-		siteMgrErr         bool
+		siteManagerErr     bool
 		csmEnabled         bool
 		verifyTenantUpdate bool
 		verifyChildSpanner bool
@@ -940,9 +941,9 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 					RenewRegistrationToken: cutil.GetPtr(true),
 				},
 			},
-			csmEnabled: true,
-			wantErr:    true,
-			siteMgrErr: true,
+			csmEnabled:     true,
+			wantErr:        true,
+			siteManagerErr: true,
 		},
 		{
 			name: "test Site update API endpoint error, SOL params specified and Site is not Registered",
@@ -1003,13 +1004,13 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tcsm.forceErr = tt.siteMgrErr
+		tcsm.forceErr = tt.siteManagerErr
 		cfg.SetSiteManagerEnabled(tt.csmEnabled)
 		t.Run(tt.name, func(t *testing.T) {
 			// Setup echo server/context
 			e := echo.New()
 			reqJSON, _ := json.Marshal(tt.args.reqData)
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(reqJSON)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(reqJSON))
 			if tt.query != nil {
 				req.URL.RawQuery = tt.query.Encode()
 			}
@@ -1025,6 +1026,12 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
+			var previousUpdated time.Time
+			if !tt.wantErr {
+				predecessor, getErr := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := ush.Handle(ec)
 			assert.Nil(t, err)
 
@@ -1136,7 +1143,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 				}
 
 				if updated {
-					assert.NotEqual(t, tt.args.site.Updated.String(), rst.Updated.String())
+					assert.False(t, rst.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rst.Updated)
 				}
 
 				if tt.wantStatus != nil {
@@ -2578,15 +2585,15 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 		user  *cdbm.User
 	}
 	tests := []struct {
-		name               string
-		fields             fields
-		args               args
-		wantErr            bool
-		remainSiteCnt      int
-		siteMgrErr         bool
-		siteMgrErrCode     *int
-		siteMgrDisabled    bool
-		verifyChildSpanner bool
+		name                string
+		fields              fields
+		args                args
+		wantErr             bool
+		remainSiteCnt       int
+		siteManagerErr      bool
+		siteManagerErrCode  *int
+		siteManagerDisabled bool
+		verifyChildSpanner  bool
 	}{
 		{
 			name: "ok Site deletion API endpoint",
@@ -2620,7 +2627,7 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 			remainSiteCnt: 6,
 		},
 		{
-			name: "error Site deletion API endpoint, sitemgr error",
+			name: "error Site deletion API endpoint, Site Manager error",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -2631,12 +2638,12 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 				id:   st3.ID.String(),
 				user: ipu,
 			},
-			wantErr:       true,
-			remainSiteCnt: 5,
-			siteMgrErr:    true,
+			wantErr:        true,
+			remainSiteCnt:  5,
+			siteManagerErr: true,
 		},
 		{
-			name: "ok Site deletion API endpoint, sitemgr site not found error",
+			name: "ok Site deletion API endpoint, Site Manager site not found error",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -2647,13 +2654,13 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 				id:   st3.ID.String(),
 				user: ipu,
 			},
-			wantErr:        false,
-			remainSiteCnt:  6,
-			siteMgrErr:     true,
-			siteMgrErrCode: cutil.GetPtr(http.StatusNotFound),
+			wantErr:            false,
+			remainSiteCnt:      6,
+			siteManagerErr:     true,
+			siteManagerErrCode: cutil.GetPtr(http.StatusNotFound),
 		},
 		{
-			name: "ok Site deletion API endpoint, sitemgr disabled",
+			name: "ok Site deletion API endpoint, Site Manager disabled",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -2664,9 +2671,9 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 				id:   st7.ID.String(),
 				user: ipu,
 			},
-			wantErr:         false,
-			remainSiteCnt:   5,
-			siteMgrDisabled: true,
+			wantErr:             false,
+			remainSiteCnt:       5,
+			siteManagerDisabled: true,
 		},
 		{
 			name: "ok Site deletion API endpoint, Temporal namespace was not found",
@@ -2680,9 +2687,9 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 				id:   st8.ID.String(),
 				user: ipu,
 			},
-			wantErr:         false,
-			remainSiteCnt:   4,
-			siteMgrDisabled: true,
+			wantErr:             false,
+			remainSiteCnt:       4,
+			siteManagerDisabled: true,
 		},
 		{
 			name: "ok Site deletion API endpoint with query",
@@ -2705,9 +2712,9 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tcsm.forceErr = tt.siteMgrErr
-			if tt.siteMgrErrCode != nil {
-				tcsm.errCode = *tt.siteMgrErrCode
+			tcsm.forceErr = tt.siteManagerErr
+			if tt.siteManagerErrCode != nil {
+				tcsm.errCode = *tt.siteManagerErrCode
 			}
 			// Setup echo server/context
 			e := echo.New()
@@ -2731,7 +2738,7 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 				tc:        tt.fields.tc,
 				cfg:       tt.fields.cfg,
 			}
-			if tt.siteMgrDisabled {
+			if tt.siteManagerDisabled {
 				tt.fields.cfg.SetSiteManagerEnabled(false)
 				tt.fields.cfg.SetSiteManagerEndpoint("")
 			}

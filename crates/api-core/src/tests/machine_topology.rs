@@ -20,7 +20,9 @@ use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::{create_managed_host, create_test_env};
-use db::{self};
+use db::{
+    TransactionVending as _, {self},
+};
 use model::allocation_type::AllocationType;
 use model::machine::machine_search_config::MachineSearchConfig;
 use rpc::forge::forge_server::Forge;
@@ -32,24 +34,19 @@ async fn test_topology_update_on_machineid_update(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let (host_machine_id, _dpu_machine_id) =
         common::api_fixtures::create_managed_host(&env).await.into();
-    let mut txn = env.pool.begin().await.unwrap();
-    let host = db::machine::find_one(
-        txn.as_mut(),
-        &host_machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let host = db::machine::find_one(&env.pool, &host_machine_id, MachineSearchConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
 
     assert!(host.status.hardware_info.as_ref().is_some());
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
 
     let query = r#"UPDATE machines SET id = $2 WHERE id=$1;"#;
 
     sqlx::query(query)
-        .bind(host.id.to_string())
+        .bind(host.id)
         .bind("fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg")
         .execute(&mut *txn)
         .await
@@ -58,17 +55,12 @@ async fn test_topology_update_on_machineid_update(pool: sqlx::PgPool) {
 
     let m_id =
         MachineId::from_str("fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg").unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
-    let host = db::machine::find_one(
-        txn.as_mut(),
-        &host_machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await
-    .unwrap();
+    let host = db::machine::find_one(&env.pool, &host_machine_id, MachineSearchConfig::default())
+        .await
+        .unwrap();
     assert!(host.is_none());
 
-    let host = db::machine::find_one(txn.as_mut(), &m_id, MachineSearchConfig::default())
+    let host = db::machine::find_one(&env.pool, &m_id, MachineSearchConfig::default())
         .await
         .unwrap()
         .unwrap();
@@ -87,7 +79,7 @@ async fn test_find_machine_ids_by_bmc_ips(db_pool: sqlx::PgPool) -> Result<(), e
     let bmc_interface = db::machine_interface_address::find_by_address(&env.pool, bmc_ip.parse()?)
         .await?
         .unwrap();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_interface_address::insert(
         &mut txn,
         bmc_interface.id,

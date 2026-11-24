@@ -103,7 +103,7 @@ Site Explorer combines PCIe and chassis inventory with configured DPU serials. H
 For each explored DPU endpoint, extract its pairing serial number and create a map: `DPU serial → explored endpoint`.
 
 **Step 2 — Collect PCIe and chassis inventory:**
-Collect devices from `system.pcie_devices` and chassis inventory. A BlueField chassis with a usable serial supplies its own identity; otherwise its network adapters supply the device serials. Trim whitespace, omit missing or blank serials, and deduplicate devices across both sources. Prefer records with a BlueField part number; PCIe wins when both sources supply conflicting BlueField part numbers.
+Collect devices from `system.pcie_devices` and chassis inventory. A BlueField chassis with a usable serial supplies its own identity; otherwise its network adapters supply the device serials. Trim whitespace, omit missing or blank serials, and deduplicate devices across both sources. Prefer records with a BlueField part number; PCIe wins when both sources supply conflicting BlueField part numbers. See [OEM part numbers for host–DPU pairing](../provisioning/boot-interfaces-and-dpu-modes.md#oem-part-numbers-for-hostdpu-pairing) to configure which inventory records identify a BlueField.
 
 **Step 3 — Match inventory devices:**
 Look up each inventory serial in the DPU serial map. A matching explored DPU BMC identifies the device as a DPU even when the host supplies no BlueField part number. Keep the inventory part number when present and use the DPU BMC report when it is missing.
@@ -287,7 +287,7 @@ NICo uses two Redfish client libraries concurrently. **nv-redfish** is replacing
 
 | Library | Version | Language | Used For | Location in Code |
 |---|---|---|---|---|
-| [libredfish](https://github.com/NVIDIA/libredfish) | v0.43.11 | Rust | Site Explorer: discovery, boot config, power control, BIOS, account management | `crates/site-explorer/`, via `crates/redfish/` |
+| [libredfish](https://github.com/NVIDIA/libredfish) | v0.43.11 | Rust | Site Explorer: vendor detection, boot config, power control, BIOS, account management | `crates/site-explorer/`, via `crates/redfish/` |
 | [nv-redfish](https://github.com/NVIDIA/nv-redfish) | 0.7.1 | Rust | Site Explorer exploration and hardware health inventory collection | `crates/site-explorer/`, `crates/redfish/`, `crates/health/src/` |
 
 **libredfish** provides a `Redfish` trait with vendor-specific implementations (Dell, HPE, Lenovo, Supermicro, NVIDIA DPU/GB200/GH200/Viking). It handles the full breadth of BMC operations.

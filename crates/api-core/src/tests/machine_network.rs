@@ -23,8 +23,10 @@ use ::rpc::forge::{
     InstanceDpuExtensionServiceConfig, InstanceDpuExtensionServicesConfig,
     ManagedHostNetworkConfigRequest, ManagedHostNetworkStatusRequest,
 };
+use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_dpf::DpuDeploymentType;
 use carbide_instrument::testing::MetricsCapture;
+use carbide_network::ip::IdentifyAddressFamily;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{AsMachineId, DpuMachineId, StableHostMachineId};
@@ -42,7 +44,7 @@ use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
 use model::instance::config::network::InstanceServiceInterfaceConfig;
-use model::machine::network::ManagedHostQuarantineMode;
+use model::machine::network::{ManagedHostQuarantineMode, ServiceVpcNetworkStatusObservation};
 use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -120,6 +122,8 @@ async fn replace_service_vpc_endpoints(
     assert_eq!(persisted.config.network.service_interfaces, endpoints);
 }
 
+mod authentication;
+
 async fn set_use_admin_network_changed(
     env: &api_fixtures::TestEnv,
     dpu_machine_id: DpuMachineId,
@@ -136,12 +140,10 @@ async fn use_admin_network_changed(
     env: &api_fixtures::TestEnv,
     dpu_machine_id: DpuMachineId,
 ) -> Option<bool> {
-    let mut txn = env.db_txn().await;
-    let dpu = db::machine::find_one(txn.deref_mut(), &dpu_machine_id, Default::default())
+    let dpu = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
         .await
         .unwrap()
         .unwrap();
-    txn.commit().await.unwrap();
     dpu.network_config.value.use_admin_network_changed
 }
 
@@ -195,6 +197,8 @@ async fn record_dpu_network_status(
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         }))
         .await
         .unwrap();
@@ -215,6 +219,7 @@ async fn create_admin_ipv6_test_env(pool: sqlx::PgPool) -> api_fixtures::TestEnv
     .with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig::default(),
     });
@@ -252,6 +257,7 @@ async fn create_dual_stack_admin_segment(
                         svi_ip: None,
                         free_ip_count_v2: None,
                         free_ip_count_saturated: false,
+                        dhcpv6_link_address: None,
                     },
                     rpc::forge::NetworkPrefix {
                         id: None,
@@ -262,6 +268,7 @@ async fn create_dual_stack_admin_segment(
                         svi_ip: None,
                         free_ip_count_v2: None,
                         free_ip_count_saturated: false,
+                        dhcpv6_link_address: None,
                     },
                 ],
                 subdomain_id: Some(env.domain.into()),
@@ -275,6 +282,266 @@ async fn create_dual_stack_admin_segment(
         .into_inner()
         .id
         .expect("created admin segment must have an id")
+}
+
+/// Reject either family move atomically, but allow it once no sibling is retained.
+#[crate::sqlx_test]
+async fn test_static_assignment_rejects_cross_segment_dual_stack(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_admin_ipv6_test_env(pool).await;
+    let source_id = create_dual_stack_admin_segment(
+        &env,
+        "SOURCE",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:1::/64",
+        3,
+        None,
+    )
+    .await;
+    let target_id = create_dual_stack_admin_segment(
+        &env,
+        "TARGET",
+        "192.0.12.0/24",
+        "192.0.12.1",
+        "2001:db8:2::/64",
+        3,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+
+    struct Case {
+        scenario: &'static str,
+        mac: &'static str,
+        ipv4: &'static str,
+        ipv6: &'static str,
+        requested: &'static str,
+        sibling: &'static str,
+    }
+    for Case {
+        scenario,
+        mac,
+        ipv4,
+        ipv6,
+        requested,
+        sibling,
+    } in [
+        Case {
+            scenario: "IPv4 move strands source IPv6",
+            mac: "aa:bb:cc:dd:ee:30",
+            ipv4: "192.0.2.42",
+            ipv6: "2001:db8:1::42",
+            requested: "192.0.12.42",
+            sibling: "2001:db8:1::42",
+        },
+        Case {
+            scenario: "IPv6 move strands source IPv4",
+            mac: "aa:bb:cc:dd:ee:31",
+            ipv4: "192.0.2.43",
+            ipv6: "2001:db8:1::43",
+            requested: "2001:db8:2::43",
+            sibling: "192.0.2.43",
+        },
+    ] {
+        let mut txn = env.db_txn().await;
+        let interface = db::machine_interface::validate_existing_mac_and_create(
+            &mut txn,
+            mac.parse()?,
+            &["192.0.2.1".parse()?],
+            None,
+            None,
+        )
+        .await?;
+        db::machine_interface_address::delete(&mut txn, &interface.id).await?;
+        for address in [ipv4, ipv6] {
+            db::machine_interface_address::insert(
+                &mut txn,
+                interface.id,
+                address.parse()?,
+                model::allocation_type::AllocationType::Dhcp,
+            )
+            .await?;
+        }
+        let before = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(before.segment_id, source_id, "{scenario}");
+        let before_allocations: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(to_jsonb(a) ORDER BY address) FROM machine_interface_addresses a WHERE interface_id = $1",
+        )
+        .bind(interface.id)
+        .fetch_one(&mut *txn)
+        .await?;
+        txn.commit().await?;
+
+        let error = env
+            .api
+            .assign_static_address(tonic::Request::new(
+                rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(interface.id),
+                    ip_address: requested.to_string(),
+                },
+            ))
+            .await
+            .expect_err("a cross-segment move must not retain an out-of-segment sibling");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+
+        // Reload independently after the rejected RPC, including allocation types and timestamps.
+        let mut txn = env.db_txn().await;
+        let after = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(after.segment_id, before.segment_id, "{scenario}");
+        assert_eq!(after.domain_id, before.domain_id, "{scenario}");
+        assert_eq!(after.hostname, before.hostname, "{scenario}");
+        let after_allocations: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(to_jsonb(a) ORDER BY address) FROM machine_interface_addresses a WHERE interface_id = $1",
+        )
+        .bind(interface.id)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(after_allocations, before_allocations, "{scenario}");
+        txn.rollback().await?;
+
+        let same_segment_address = if requested.parse::<std::net::IpAddr>()?.is_ipv4() {
+            ipv4
+        } else {
+            ipv6
+        };
+        env.api
+            .assign_static_address(tonic::Request::new(
+                rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(interface.id),
+                    ip_address: same_segment_address.to_string(),
+                },
+            ))
+            .await?;
+        let mut txn = env.db_txn().await;
+        let same_segment = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(same_segment.segment_id, source_id, "{scenario}");
+        assert_eq!(same_segment.addresses.len(), 2, "{scenario}");
+        assert!(
+            same_segment.addresses.contains(&sibling.parse()?),
+            "{scenario}"
+        );
+        db::machine_interface_address::delete_by_interface_family(
+            &mut txn,
+            interface.id,
+            sibling.parse::<std::net::IpAddr>()?.address_family(),
+            model::allocation_type::AllocationType::Dhcp,
+        )
+        .await?;
+        txn.commit().await?;
+        env.api
+            .assign_static_address(tonic::Request::new(
+                rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(interface.id),
+                    ip_address: requested.to_string(),
+                },
+            ))
+            .await?;
+        let moved = db::machine_interface::find_one(&env.pool, interface.id).await?;
+        assert_eq!(moved.segment_id, target_id, "{scenario}");
+        assert_eq!(
+            moved.addresses,
+            vec![requested.parse::<std::net::IpAddr>()?],
+            "{scenario}"
+        );
+    }
+    Ok(())
+}
+
+/// A sibling committed while assignment waits must participate in the segment check.
+#[crate::sqlx_test]
+async fn test_static_assignment_rechecks_sibling_after_waiting(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_admin_ipv6_test_env(pool.clone()).await;
+    let source_id = create_dual_stack_admin_segment(
+        &env,
+        "SOURCE",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:1::/64",
+        3,
+        None,
+    )
+    .await;
+    create_dual_stack_admin_segment(
+        &env,
+        "TARGET",
+        "192.0.12.0/24",
+        "192.0.12.1",
+        "2001:db8:2::/64",
+        3,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let interface = db::machine_interface::validate_existing_mac_and_create(
+        &mut txn,
+        "aa:bb:cc:dd:ee:32".parse()?,
+        &["192.0.2.1".parse()?],
+        None,
+        None,
+    )
+    .await?;
+    db::machine_interface_address::delete(&mut txn, &interface.id).await?;
+    db::machine_interface_address::insert(
+        &mut txn,
+        interface.id,
+        "192.0.2.44".parse()?,
+        model::allocation_type::AllocationType::Dhcp,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut holder = env.db_txn().await;
+    db::machine_interface::lock_for_address_assignment(&mut holder, interface.id).await?;
+    db::machine_interface_address::insert(
+        &mut holder,
+        interface.id,
+        "2001:db8:1::44".parse()?,
+        model::allocation_type::AllocationType::Dhcp,
+    )
+    .await?;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+    let assignment = env.api.assign_static_address(tonic::Request::new(
+        rpc::forge::AssignStaticAddressRequest {
+            interface_id: Some(interface.id),
+            ip_address: "192.0.12.44".to_string(),
+        },
+    ));
+    let commit_sibling = async {
+        crate::tests::wait_for_blocked_query(
+            &pool,
+            holder_pid,
+            "SELECT segment_id FROM machine_interfaces",
+        )
+        .await;
+        holder.commit().await
+    };
+    let (assignment, sibling_commit) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(assignment, commit_sibling)
+        })
+        .await?;
+    sibling_commit?;
+    assert_eq!(
+        assignment
+            .expect_err("the newly committed sibling must prevent the move")
+            .code(),
+        tonic::Code::FailedPrecondition,
+    );
+    let after = db::machine_interface::find_one(&env.pool, interface.id).await?;
+    assert_eq!(after.segment_id, source_id);
+    assert_eq!(after.addresses.len(), 2);
+    assert!(after.addresses.contains(&"192.0.2.44".parse()?));
+    assert!(after.addresses.contains(&"2001:db8:1::44".parse()?));
+    Ok(())
 }
 
 /// Configures service slots, one optional BF4 deployment, FNN loopbacks, IPv6 deny prefixes, and site prefixes
@@ -367,7 +634,7 @@ async fn mark_host_dpf_ingested(env: &api_fixtures::TestEnv, host_id: StableHost
     txn.commit().await.unwrap();
 
     // Reload the host so an ineffective fixture write cannot satisfy an inventory test.
-    let host = db::machine::find_one(&mut env.db_reader(), &host_id, Default::default())
+    let host = db::machine::find_one(&env.pool, &host_id, Default::default())
         .await
         .unwrap()
         .expect("fixture host remains persisted");
@@ -650,24 +917,21 @@ async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sql
     let dpu_machine_id = mh.dpu().id;
 
     set_use_admin_network_changed(&env, dpu_machine_id, true).await;
-    let mut txn = env.db_txn().await;
-    let stale_version = db::machine::find_one(txn.deref_mut(), &dpu_machine_id, Default::default())
+    let stale_version = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
         .await
         .unwrap()
         .unwrap()
         .network_config
         .version;
-    txn.commit().await.unwrap();
 
     bump_dpu_network_config_version(&env, dpu_machine_id).await;
 
-    let current_version =
-        db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
-            .await
-            .unwrap()
-            .unwrap()
-            .network_config
-            .version;
+    let current_version = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .network_config
+        .version;
 
     struct Case {
         scenario: &'static str,
@@ -707,7 +971,7 @@ async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sql
         txn.commit().await.unwrap();
         assert_eq!(result, case.expected, "{}", case.scenario);
 
-        let dpu = db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
+        let dpu = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
             .await
             .unwrap()
             .unwrap();
@@ -979,6 +1243,71 @@ async fn service_vpc_configured_zero_is_known_empty(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test]
+async fn test_managed_host_network_config_machine_identity(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let mh = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let message = ManagedHostNetworkConfigRequest {
+        dpu_machine_id: Some(mh.dpu().id),
+    };
+    let expected = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(message.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+
+    for (scenario, principal, expected_code) in [
+        (
+            "matching DPU",
+            Principal::SpiffeMachineIdentifier(mh.dpu().id.to_string()),
+            tonic::Code::Ok,
+        ),
+        (
+            "sibling DPU",
+            Principal::SpiffeMachineIdentifier(mh.dpu_n(1).id.to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "host credentials",
+            Principal::SpiffeMachineIdentifier(mh.id.to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "malformed machine identity",
+            Principal::SpiffeMachineIdentifier("invalid-machine-id".to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "administrative delegation",
+            Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-cli-client".to_string(),
+                None,
+            )),
+            tonic::Code::Ok,
+        ),
+        (
+            "service delegation",
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            tonic::Code::Ok,
+        ),
+    ] {
+        let mut request = tonic::Request::new(message.clone());
+        let mut context = crate::auth::AuthContext::default();
+        context.principals.push(principal);
+        request.extensions_mut().insert(context);
+
+        match env.api.get_managed_host_network_config(request).await {
+            Ok(response) => {
+                assert_eq!(expected_code, tonic::Code::Ok, "{scenario}");
+                assert_eq!(response.into_inner(), expected, "{scenario}");
+            }
+            Err(status) => assert_eq!(status.code(), expected_code, "{scenario}: {status}"),
+        }
+    }
+}
+
+#[crate::sqlx_test]
 // This test verifies parity between `addresses` and the compatibility fields,
 // plus presence-bearing site policy carried in the same response.
 #[allow(deprecated)]
@@ -1036,6 +1365,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
 
 /// Verifies complete FNN dual-stack projection, non-FNN IPv4-only gating, and a degraded
 /// V6-host/no-SVI response, because canonical, compatibility, and valid IPv4 must agree.
+/// Enabling L3-only admin must change only attachment mode so allocated addresses stay stable.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(pool: sqlx::PgPool) {
@@ -1069,9 +1399,8 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
 
     // Read the primary interface through the database API to prove provisioning persisted exactly
     // one address per family rather than trusting its return value.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -1080,7 +1409,6 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
     .into_iter()
     .find(|interface| interface.primary_interface)
     .expect("primary admin interface");
-    txn.rollback().await.unwrap();
     assert_eq!(persisted_interface.addresses.len(), 2);
     let persisted_ipv4 = persisted_interface
         .addresses
@@ -1152,6 +1480,48 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         ]
     );
 
+    // Enable routed admin in a second API using the same database and persisted host.
+    let mut routed_config = env.api.runtime_config.as_ref().clone();
+    routed_config
+        .fnn
+        .as_mut()
+        .expect("FNN configuration")
+        .admin_vpc
+        .as_mut()
+        .expect("admin FNN configuration")
+        .l3_only = true;
+    let routed_api = crate::test_support::builder::TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(std::sync::Arc::new(routed_config))
+    .build();
+
+    // Fetch the same host through the public RPC with L3-only admin enabled.
+    let routed_response = routed_api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .expect("routed admin configuration")
+        .into_inner();
+    // Compare every admin response field except the attachment choice.
+    assert!(admin_interface.is_l2_segment);
+    let mut expected_routed_interface = admin_interface.clone();
+    expected_routed_interface.is_l2_segment = false;
+    assert_eq!(
+        routed_response.admin_interface,
+        Some(expected_routed_interface)
+    );
+
+    // Reload the host interface after the routed configuration response.
+    let retained_interface = db::machine_interface::find_one(&env.pool, persisted_interface.id)
+        .await
+        .expect("persisted admin interface");
+    // The same interface must retain its allocated addresses.
+    assert_eq!(retained_interface.addresses, persisted_interface.addresses);
+
     // The same allocated segment must remain IPv4-only when admin FNN is disabled, even though
     // the database contains a complete IPv6 prefix/address pair.
     let mut txn = env.db_txn().await;
@@ -1163,11 +1533,13 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: false,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap();
@@ -1203,11 +1575,13 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: true,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();
@@ -1277,8 +1651,7 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         .await
         .unwrap();
 
-    let mut txn = env.db_txn().await;
-    let segment = db::network_segment::find_by_name(&mut txn, "ipv6-admin")
+    let segment = db::network_segment::find_by_name(&env.pool, "ipv6-admin")
         .await
         .unwrap();
     let [prefix] = segment.prefixes.as_slice() else {
@@ -1287,14 +1660,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
     assert!(prefix.gateway.is_none());
     assert!(prefix.dhcpv6_link_address.is_none());
     assert_eq!(prefix.svi_ip, Some("2001:db8:9::2".parse().unwrap()));
-    let unrelated = db::network_segment::find_by_name(&mut txn, "unrelated-ipv6-underlay")
+    let unrelated = db::network_segment::find_by_name(&env.pool, "unrelated-ipv6-underlay")
         .await
         .unwrap();
     assert_eq!(
         unrelated.prefixes[0].dhcpv6_link_address,
         Some(prefix.prefix.network())
     );
-    txn.rollback().await.unwrap();
 
     let mut host_config = env.managed_host_config();
     let dpu_oob_mac = host_config.get_and_assert_single_dpu().oob_mac_address;
@@ -1324,15 +1696,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
     let managed_host =
         dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
     let dpu_machine_id = managed_host.dpu().id;
-    let mut txn = env.db_txn().await;
     let dpu_interfaces =
-        db::machine_interface::find_by_mac_address(txn.as_mut(), dpu_config.oob_mac_address)
+        db::machine_interface::find_by_mac_address(&env.pool, dpu_config.oob_mac_address)
             .await
             .unwrap();
     let [dpu_interface] = dpu_interfaces.as_slice() else {
         panic!("DPU discovery requires exactly one out-of-band interface")
     };
-    txn.rollback().await.unwrap();
 
     // Site exploration creates the host link before the fixture submits DPU
     // discovery. Check the public RPC explicitly so that earlier setup cannot
@@ -1342,15 +1712,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         dpu_machine_id.into()
     );
 
-    let mut txn = env.db_txn().await;
     let interfaces = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         segment.id,
     )
     .await
     .unwrap();
-    txn.rollback().await.unwrap();
     let [interface] = interfaces.as_slice() else {
         panic!("discovery must persist exactly one host admin interface")
     };
@@ -1430,11 +1798,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: false,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &None,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();
@@ -1497,9 +1867,8 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
     let dpu_machine_id = managed_host.dpu().id;
 
     // Capture the primary interface, its source IPv6 address, and the shared admin VPC.
-    let mut txn = env.db_txn().await;
     let source_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         source_segment_id,
     )
@@ -1515,12 +1884,11 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
         .copied()
         .find(|address| address.is_ipv6())
         .expect("source admin interface must have IPv6");
-    let admin_vpc_id = db::vpc::find_by_segment(txn.as_mut(), source_segment_id)
+    let admin_vpc_id = db::vpc::find_by_segment(&env.pool, source_segment_id)
         .await
         .unwrap()
         .expect("source admin segment must belong to the admin VPC")
         .id;
-    txn.rollback().await.unwrap();
 
     // Add a second dual-stack admin segment to the same FNN VPC.
     let target_segment_id = create_dual_stack_admin_segment(
@@ -1539,17 +1907,21 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
         .await
         .unwrap();
 
-    // Public static assignment moves the interface to the target while replacing only IPv4.
+    // Simulate legacy inconsistent storage. The public assignment API now rejects this move.
     let target_ipv4: std::net::IpAddr = "192.0.12.42".parse().unwrap();
-    env.api
-        .assign_static_address(tonic::Request::new(
-            rpc::forge::AssignStaticAddressRequest {
-                interface_id: Some(primary_interface_id),
-                ip_address: target_ipv4.to_string(),
-            },
-        ))
+    let mut txn = env.db_txn().await;
+    db::machine_interface_address::assign_static(&mut txn, primary_interface_id, target_ipv4)
         .await
         .unwrap();
+    db::machine_interface::update_segment_id(
+        &mut txn,
+        primary_interface_id,
+        target_segment_id,
+        Some(env.domain.into()),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
 
     // Production reconciliation must not make the stale sibling-family allocation appear valid.
     let mut txn = env.db_txn().await;
@@ -1562,11 +1934,9 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
     txn.commit().await.unwrap();
 
     // Re-read persistence to establish the inconsistent but reachable projection input.
-    let mut txn = env.db_txn().await;
-    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), primary_interface_id)
+    let persisted_interface = db::machine_interface::find_one(&env.pool, primary_interface_id)
         .await
         .unwrap();
-    txn.rollback().await.unwrap();
     assert_eq!(persisted_interface.segment_id, target_segment_id);
     assert_eq!(
         persisted_interface
@@ -1643,9 +2013,8 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
     let dpu_machine_id = managed_host.dpu().id;
 
     // Re-read persistence to prove the host took the network endpoint before an SVI existed.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -1666,7 +2035,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
         .copied()
         .find(|address| address.is_ipv6())
         .expect("persisted IPv6 address");
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -1679,7 +2048,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
         .expect("persisted IPv6 prefix");
     assert_eq!(persisted_ipv6, ipv6_prefix.prefix.network());
     assert!(ipv6_prefix.svi_ip.is_none());
-    txn.rollback().await.unwrap();
 
     // Production startup attaches the existing segment and assigns its only other endpoint to SVI.
     crate::db_init::create_admin_vpc(&env.api, Some(10000))
@@ -1688,8 +2056,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
     crate::db_init::update_network_segments_svi_ip(&env.pool)
         .await
         .unwrap();
-    let mut txn = env.db_txn().await;
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -1701,7 +2068,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
         .find(|prefix| prefix.prefix.is_ipv6())
         .expect("persisted IPv6 prefix");
     assert_eq!(ipv6_prefix.svi_ip, Some("2001:db8:9::1".parse().unwrap()));
-    txn.rollback().await.unwrap();
 
     // The public payload retains IPv4 but suppresses the conflicting sidecar and canonical V6.
     let response = env
@@ -1811,9 +2177,8 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_svi_matches_vrr_
     let dpu_machine_id = managed_host.dpu().id;
 
     // Re-read persistence to prove this case exercises SVI=VRR independently.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -1834,7 +2199,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_svi_matches_vrr_
         .copied()
         .find(std::net::IpAddr::is_ipv6)
         .expect("persisted IPv6 address");
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -1848,7 +2213,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_svi_matches_vrr_
     let persisted_svi = ipv6_prefix.svi_ip.expect("persisted IPv6 SVI");
     assert_eq!(persisted_svi, ipv6_prefix.prefix.network());
     assert_ne!(persisted_ipv6, persisted_svi);
-    txn.rollback().await.unwrap();
 
     assert_admin_ipv6_omitted_while_ipv4_survives(&env, dpu_machine_id, persisted_ipv4).await;
 }
@@ -1888,9 +2252,8 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
     let dpu_machine_id = managed_host.dpu().id;
 
     // Read the public-assignment target and interface identity from persistence.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -1900,7 +2263,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
     .find(|interface| interface.primary_interface)
     .expect("primary admin interface");
     let primary_interface_id = persisted_interface.id;
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -1912,7 +2275,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
         .find(|prefix| prefix.prefix.is_ipv6())
         .and_then(|prefix| prefix.svi_ip)
         .expect("persisted IPv6 SVI");
-    txn.rollback().await.unwrap();
 
     // Public static assignment can select an SVI because it is not a machine-address owner.
     env.api
@@ -1926,8 +2288,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
         .unwrap();
 
     // Re-read persistence to prove this case exercises host=SVI independently.
-    let mut txn = env.db_txn().await;
-    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), primary_interface_id)
+    let persisted_interface = db::machine_interface::find_one(&env.pool, primary_interface_id)
         .await
         .unwrap();
     let persisted_ipv4 = persisted_interface
@@ -1944,7 +2305,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
         .expect("persisted IPv6 address");
     assert_eq!(persisted_interface.segment_id, admin_segment_id);
     assert_eq!(persisted_ipv6, persisted_svi);
-    txn.rollback().await.unwrap();
 
     assert_admin_ipv6_omitted_while_ipv4_survives(&env, dpu_machine_id, persisted_ipv4).await;
 }
@@ -1973,6 +2333,169 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
         use_admin_network_changed(&env, dpu_machine_id).await,
         Some(true)
     );
+}
+
+/// Persists service reports on a secondary Admin DPU without an instance version, and replaces
+/// their evidence on empty, legacy, or malformed reports without changing host-facing inventory.
+/// Reads committed observations directly because aggregate status omits service details.
+#[crate::sqlx_test]
+async fn service_vpc_network_status_persists_without_an_instance_version(pool: sqlx::PgPool) {
+    // Select a secondary Admin DPU so service reporting cannot depend on an instance version.
+    let env = api_fixtures::create_test_env(pool).await;
+    let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let dpu_machine_id = managed_host.dpu_ids[1];
+    let config = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .expect("secondary network config")
+        .into_inner();
+    assert!(config.use_admin_network);
+    assert!(!config.is_primary_dpu);
+    assert!(config.instance_network_config_version.is_empty());
+    let find_request = rpc::forge::MachinesByIdsRequest {
+        machine_ids: vec![dpu_machine_id.into()],
+        include_history: false,
+    };
+    let inventory_before = env
+        .api
+        .find_machines_by_ids(tonic::Request::new(find_request.clone()))
+        .await
+        .expect("find secondary DPU")
+        .into_inner()
+        .machines
+        .remove(0)
+        .status
+        .expect("secondary DPU status")
+        .interfaces;
+
+    // Stable identity and VPC NSG metadata drive persistence; all other status fields provide
+    // the existing machine acknowledgement and health inputs required by the handler.
+    let applied = rpc::forge::ServiceVpcNetworkStatusObservation {
+        interfaces: vec![rpc::forge::ServiceVpcInterfaceStatusObservation {
+            internal_uuid: Some(uuid::uuid!("40000000-0000-0000-0000-000000000001").into()), // Keep UUID validation satisfied before replacement.
+            network_security_group: Some(rpc::forge::NetworkSecurityGroupStatus {
+                source: rpc::forge::NetworkSecurityGroupSource::NsgSourceVpc.into(), // Keep NSG source validation satisfied.
+                id: "service-vpc-nsg".to_string(), // Seed the NSG ID checked after readback.
+                version: "V1-T1".to_string(),      // Seed the NSG version checked after readback.
+            }),
+        }],
+    };
+    // Convert the submitted report for comparisons with the committed typed observation.
+    let expected_applied = ServiceVpcNetworkStatusObservation::try_from(applied.clone())
+        .expect("valid applied service report");
+    let status = DpuNetworkStatus {
+        dpu_machine_id: Some(dpu_machine_id),
+        network_config_version: Some(config.managed_host_config_version.clone()), // Keep host ACK processing independent of service reporting.
+        instance_network_config_version: None, // Secondary Admin has no instance acknowledgement.
+        service_vpc_network_observation: Some(applied.clone()), // Make clearing observable by first persisting evidence.
+        dpu_health: Some(rpc::health::HealthReport {
+            source: health_report::HealthReport::DPU_AGENT_SOURCE.to_string(), // Satisfy required health validation.
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // Read the stored observation directly because FindMachinesByIds exposes interface inventory,
+    // but does not expose the complete machine network observation. The aggregate status RPC
+    // also omits service observations to limit response size.
+    let persisted_status = || async {
+        db::machine::find_dpu_network_status_inputs(&env.pool, &dpu_machine_id)
+            .await
+            .expect("read persisted network status")
+            .expect("secondary DPU exists")
+            .network_status_observation
+            .expect("persisted secondary DPU status")
+    };
+
+    // Each replacement starts with a populated report so clearing cannot pass on an already-empty fixture.
+    for (scenario, replacement, expected) in [
+        // Legacy omission must not claim successful reconciliation of an empty service set.
+        ("legacy omission", None, None),
+        // Explicit empty success must remove the previously reported service interface.
+        (
+            "present empty",
+            Some(rpc::forge::ServiceVpcNetworkStatusObservation::default()),
+            Some(ServiceVpcNetworkStatusObservation {
+                interfaces: vec![], // Distinguish successful empty evidence from omission.
+            }),
+        ),
+        // Malformed service metadata must not prevent the machine version from being acknowledged.
+        (
+            "malformed report",
+            Some(rpc::forge::ServiceVpcNetworkStatusObservation {
+                interfaces: vec![rpc::forge::ServiceVpcInterfaceStatusObservation::default()], // Isolate the required-UUID failure (no NSG is attached).
+            }),
+            None,
+        ),
+    ] {
+        // Persist and reread a populated report before exercising its replacement.
+        env.api
+            .record_dpu_network_status(tonic::Request::new(status.clone()))
+            .await
+            .expect("record applied service policy");
+        let initial = persisted_status().await;
+        assert_eq!(
+            initial.service_vpc_network_observation,
+            Some(expected_applied.clone()),
+            "{scenario}"
+        );
+        assert!(initial.instance_network_observation.is_none());
+
+        // Mark the existing host transition pending so a malformed service report must still clear it.
+        set_use_admin_network_changed(&env, dpu_machine_id, true).await;
+        let pending = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(dpu_machine_id),
+            }))
+            .await
+            .expect("pending Admin transition")
+            .into_inner();
+
+        // Report the selected service replacement with a matching host ACK to exercise
+        // acknowledgement processing independently of service validation.
+        env.api
+            .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+                network_config_version: Some(pending.managed_host_config_version.clone()), // Allow the matching host ACK to clear the pending flag.
+                service_vpc_network_observation: replacement, // Exercise service replacement alongside the host ACK.
+                ..status.clone()
+            }))
+            .await
+            .expect(scenario);
+
+        // Reread committed service evidence and the existing acknowledgement after handler completion.
+        let persisted = persisted_status().await;
+        assert_eq!(
+            persisted.service_vpc_network_observation, expected,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted
+                .network_config_version
+                .map(|version| version.version_string()),
+            Some(pending.managed_host_config_version),
+            "{scenario}"
+        );
+        assert_eq!(
+            use_admin_network_changed(&env, dpu_machine_id).await,
+            Some(false),
+            "{scenario}"
+        );
+        let inventory_after = env
+            .api
+            .find_machines_by_ids(tonic::Request::new(find_request.clone()))
+            .await
+            .expect("find secondary DPU after report")
+            .into_inner()
+            .machines
+            .remove(0)
+            .status
+            .expect("secondary DPU status")
+            .interfaces;
+        assert_eq!(inventory_after, inventory_before, "{scenario}");
+    }
 }
 
 #[crate::sqlx_test]
@@ -2135,7 +2658,7 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
         .await
         .unwrap();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     // A never-before-observed network config version registers as a change,
     // which is what prompts the host state-handler wakeup.
     record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version.clone())).await;
@@ -2422,6 +2945,14 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
         vni_self: true, // Each interface must substitute its own allocated VNI.
     };
 
+    // Share one conditional rule across both profiles to verify resolution for each VPC.
+    let conditional_export = crate::cfg::file::PrefixRouteTargetConfig {
+        prefix: "0.0.0.0/0".parse().expect("default route"),
+        match_type: carbide_network::virtualization::ExportPrefixMatchType::Exact,
+        max_prefix_length: None,
+        route_targets: vec![symbolic_target.clone()],
+    };
+
     // Configure two distinguishable FNN routing profiles.
     let env = api_fixtures::create_test_env_with_overrides(
         pool,
@@ -2437,6 +2968,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         access_tier: Some(1),
                         leak_default_route_from_underlay: Some(true),
                         route_target_imports: Some(vec![symbolic_target.clone()]),
+                        route_targets_on_exports_by_prefix: Some(vec![conditional_export.clone()]),
                         ..Default::default()
                     },
                 ),
@@ -2447,6 +2979,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         access_tier: Some(2),
                         leak_tenant_host_routes_to_underlay: Some(true),
                         route_targets_on_exports: Some(vec![symbolic_target.clone()]),
+                        route_targets_on_exports_by_prefix: Some(vec![conditional_export]),
                         ..Default::default()
                     },
                 ),
@@ -2549,12 +3082,11 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
         .await
         .unwrap()
         .into_inner();
-    let mut txn = env.db_txn().await;
-    let internal_vpc = db::vpc::find_by_segment(txn.as_mut(), internal_segment_id)
+    let internal_vpc = db::vpc::find_by_segment(&env.pool, internal_segment_id)
         .await
         .unwrap()
         .unwrap();
-    let external_vpc = db::vpc::find_by_segment(txn.as_mut(), external_segment_id)
+    let external_vpc = db::vpc::find_by_segment(&env.pool, external_segment_id)
         .await
         .unwrap()
         .unwrap();
@@ -2585,6 +3117,23 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
             vni_self: false,
         }]
     );
+
+    // The identical conditional rule must carry each interface VPC's concrete target.
+    for (vni, profile) in &profiles_by_vni {
+        assert_eq!(
+            profile.route_targets_on_exports_by_prefix,
+            vec![rpc::forge::PrefixRouteTarget {
+                prefix: "0.0.0.0/0".into(),
+                match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+                max_prefix_length: None,
+                route_targets: vec![rpc::common::RouteTarget {
+                    asn: symbolic_target.asn,
+                    vni: Some(*vni),
+                    vni_self: false,
+                }],
+            }]
+        );
+    }
 
     let external_profile = profiles_by_vni.get(&external_vni).unwrap();
     assert!(external_profile.leak_tenant_host_routes_to_underlay);
@@ -2668,15 +3217,12 @@ async fn service_vpc_endpoints_use_local_selected_vpc_state(pool: sqlx::PgPool) 
 
         // Read the secondary DPU's allocated ASN for the response-wide FNN assertions below.
         let secondary_dpu_asn = {
-            let mut txn = env.db_txn().await;
-            let asn = managed_host
+            managed_host
                 .dpu_n(1)
-                .db_machine(&mut txn)
+                .db_machine(&env.pool)
                 .await
                 .asn
-                .expect("FNN fixture DPU has an ASN");
-            txn.commit().await.unwrap();
-            asn
+                .expect("FNN fixture DPU has an ASN")
         };
         // Fetch both DPU views; the secondary remains on Admin without a host interface.
         let initial_primary_response = env
@@ -3281,15 +3827,13 @@ async fn service_vpc_endpoints_reject_invalid_retained_networks(pool: sqlx::PgPo
             .execute(&env.pool)
             .await
             .unwrap();
-        let mut txn = env.db_txn().await;
         assert!(
-            db::vpc_prefix::find_by_vpc(txn.as_mut(), service_vpc_id)
+            db::vpc_prefix::find_by_vpc(&mut env.db_reader(), service_vpc_id)
                 .await
                 .unwrap()
                 .iter()
                 .any(|prefix| prefix.id == ipv4_endpoint.vpc_prefix_id)
         );
-        txn.commit().await.unwrap();
 
         // Inject one schema-permitted incompatibility at a time to exercise retained-segment validation.
         let incompatible_segments = [
@@ -3596,13 +4140,13 @@ async fn service_vpc_endpoint_filtering_preserves_allocations(pool: sqlx::PgPool
 
         // Generated segments, network prefixes, VPC prefixes, and VPC/DPU loopback rows remain
         // reloadable after the deletion and termination rendering checks.
-        let mut txn = env.db_txn().await;
-        let retained_vpc_prefixes = db::vpc_prefix::find_by_vpc(txn.as_mut(), service_vpc_id)
+        let mut db_reader = env.db_reader();
+        let retained_vpc_prefixes = db::vpc_prefix::find_by_vpc(&mut db_reader, service_vpc_id)
             .await
             .unwrap();
         for endpoint in [&ipv4_endpoint, &ipv6_endpoint] {
             let segment = db::network_segment::find_by(
-                txn.as_mut(),
+                &mut db_reader,
                 db::ObjectColumnFilter::One(
                     db::network_segment::IdColumn,
                     &endpoint.network_segment_id,
@@ -3622,13 +4166,12 @@ async fn service_vpc_endpoint_filtering_preserves_allocations(pool: sqlx::PgPool
                     .any(|prefix| prefix.id == endpoint.vpc_prefix_id)
             );
             assert!(
-                db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+                db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                     .await
                     .unwrap()
                     .is_some()
             );
         }
-        txn.commit().await.unwrap();
     })
     .await;
 }
@@ -3667,13 +4210,11 @@ async fn service_vpc_endpoint_reuses_host_vpc_loopback(pool: sqlx::PgPool) {
                 .rpc(),
         )
         .await;
-    let mut txn = env.db_txn().await;
-    let shared_vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+    let shared_vpc_id = db::vpc::find_by_segment(&env.pool, host_segment_id)
         .await
         .unwrap()
         .expect("host segment belongs to a VPC")
         .id;
-    txn.commit().await.unwrap();
     let managed_host = create_managed_host(&env).await;
     mark_host_dpf_ingested(&env, managed_host.id).await;
     let (instance, _) = managed_host
@@ -3845,14 +4386,12 @@ async fn service_vpc_endpoint_reuses_host_vpc_loopback(pool: sqlx::PgPool) {
         retained.config.network.service_interfaces,
         vec![first_endpoint, second_endpoint]
     );
-    let mut txn = env.db_txn().await;
     let retained_loopback =
-        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu().id, &shared_vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &managed_host.dpu().id, &shared_vpc_id)
             .await
             .unwrap()
             .expect("surviving attachment retains the shared loopback");
     assert_eq!(retained_loopback.loopback_ip, persisted.loopback_ip);
-    txn.commit().await.unwrap();
 }
 
 /// Verifies a committed service endpoint renders without a tenant VRF loopback when allocation is disabled.
@@ -3889,13 +4428,11 @@ async fn service_only_vpc_without_loopbacks_does_not_allocate(pool: sqlx::PgPool
                 .rpc(),
         )
         .await;
-    let mut txn = env.db_txn().await;
-    let vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+    let vpc_id = db::vpc::find_by_segment(&env.pool, host_segment_id)
         .await
         .unwrap()
         .expect("host segment belongs to a VPC")
         .id;
-    txn.commit().await.unwrap();
     let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
     mark_host_dpf_ingested(&env, managed_host.id).await;
     let (instance, _) = managed_host
@@ -3925,14 +4462,12 @@ async fn service_only_vpc_without_loopbacks_does_not_allocate(pool: sqlx::PgPool
         vec![endpoint.clone()],
     )
     .await;
-    let mut txn = env.db_txn().await;
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &vpc_id)
             .await
             .unwrap()
             .is_none()
     );
-    txn.commit().await.unwrap();
 
     // Successful rendering must retain the endpoint while omitting its tenant VRF loopback.
     let response = env
@@ -3951,14 +4486,12 @@ async fn service_only_vpc_without_loopbacks_does_not_allocate(pool: sqlx::PgPool
     assert!(service.tenant_vrf_loopback_ip.is_none());
 
     // Reload the durable allocation after rendering to detect an unwanted side effect.
-    let mut txn = env.db_txn().await;
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &vpc_id)
             .await
             .unwrap()
             .is_none()
     );
-    txn.commit().await.unwrap();
 }
 
 /// Verifies two local service VPCs retain distinct policy and loopbacks, and a later endpoint failure rolls back earlier allocations.
@@ -4118,16 +4651,14 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
     .fetch_all(&env.pool)
     .await
     .unwrap();
-    let mut txn = env.db_txn().await;
     for endpoint in &endpoints {
         assert!(
-            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                 .await
                 .unwrap()
                 .is_none()
         );
     }
-    txn.commit().await.unwrap();
 
     // The second endpoint's diagnostic proves rendering progressed beyond the first allocation.
     let error = env
@@ -4161,16 +4692,14 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
     .unwrap();
     assert_eq!(pool_after, pool_before);
     assert_eq!(allocations_after, allocations_before);
-    let mut txn = env.db_txn().await;
     for endpoint in &endpoints {
         assert!(
-            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                 .await
                 .unwrap()
                 .is_none()
         );
     }
-    txn.commit().await.unwrap();
 
     // Restore the later prefix before retrying both independently selected VPCs.
     sqlx::query("UPDATE network_vpc_prefixes SET deleted = NULL WHERE id = $1")
@@ -4191,7 +4720,6 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
 
     // Each endpoint must retain its own VNI, prefixes, NSG, routing profile, and durable loopback.
     let mut loopbacks = Vec::new();
-    let mut txn = env.db_txn().await;
     for (endpoint, (vni, prefix, policy, rule_id, leak_host_routes)) in
         endpoints.iter().zip(&expected_policies)
     {
@@ -4226,7 +4754,7 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
             *leak_host_routes
         );
         let durable_loopback =
-            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                 .await
                 .unwrap()
                 .expect("each local VPC persists its own loopback");
@@ -4238,7 +4766,6 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
     }
     assert_ne!(expected_policies[0].0, expected_policies[1].0);
     assert_ne!(loopbacks[0], loopbacks[1]);
-    txn.commit().await.unwrap();
 }
 
 /// Verifies a service-only DPU returns resource exhaustion when its selected VPC cannot allocate a tenant VRF loopback.
@@ -4275,13 +4802,11 @@ async fn service_only_vpc_loopback_exhaustion_withholds_response(pool: sqlx::PgP
                 .rpc(),
         )
         .await;
-    let mut txn = env.db_txn().await;
-    let shared_vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+    let shared_vpc_id = db::vpc::find_by_segment(&env.pool, host_segment_id)
         .await
         .unwrap()
         .expect("host segment belongs to a VPC")
         .id;
-    txn.commit().await.unwrap();
     let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
     mark_host_dpf_ingested(&env, managed_host.id).await;
     let (instance, _) = managed_host
@@ -4334,14 +4859,12 @@ async fn service_only_vpc_loopback_exhaustion_withholds_response(pool: sqlx::PgP
         .await
         .expect_err("exhausted tenant VRF loopback pool must withhold service networking");
     assert_eq!(error.code(), tonic::Code::ResourceExhausted);
-    let mut txn = env.db_txn().await;
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu_ids[1], &shared_vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &managed_host.dpu_ids[1], &shared_vpc_id)
             .await
             .unwrap()
             .is_none()
     );
-    txn.commit().await.unwrap();
 }
 
 /// Verifies tenant-interface rendering rejects a retained negative VPC VNI so
@@ -4458,12 +4981,11 @@ async fn test_managed_host_network_config_omits_fnn_vrf_loopback_by_default(pool
     );
 
     // Verify the DB did not allocate a VPC/DPU loopback row.
-    let mut txn = env.db_txn().await;
-    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+    let vpc = db::vpc::find_by_segment(&env.pool, segment_id)
         .await
         .unwrap()
         .unwrap();
-    let loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_machine_id, &vpc.id)
+    let loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_machine_id, &vpc.id)
         .await
         .unwrap();
     assert!(loopback.is_none());
@@ -4543,12 +5065,11 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
     );
 
     // Verify the DB allocation matches the response.
-    let mut txn = env.db_txn().await;
-    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+    let vpc = db::vpc::find_by_segment(&env.pool, segment_id)
         .await
         .unwrap()
         .unwrap();
-    let loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_machine_id, &vpc.id)
+    let loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_machine_id, &vpc.id)
         .await
         .unwrap()
         .expect("loopback allocation should be persisted");
@@ -4566,6 +5087,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
@@ -4623,8 +5145,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     assert_eq!(response.routing_profile.as_ref(), Some(routing_profile));
 
     // Verify the admin VPC also did not allocate a VPC/DPU loopback row.
-    let mut txn = env.db_txn().await;
-    let admin_segment = db::network_segment::admin(txn.as_mut())
+    let admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .remove(0);
@@ -4632,14 +5153,14 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
         .config
         .vpc_id
         .expect("admin segment should be attached to an FNN VPC");
-    let loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_machine_id, &admin_vpc_id)
+    let loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_machine_id, &admin_vpc_id)
         .await
         .unwrap();
     assert!(loopback.is_none());
 }
 
 /// Verifies disabled admin FNN policy is omitted because no admin VPC exists
-/// to resolve its symbolic route targets.
+/// to resolve its symbolic route targets. L3-only opt-in must also remain inactive.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profile(
@@ -4649,6 +5170,7 @@ async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profi
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: false, // Prevents creation of the required admin VPC.
+        l3_only: true,  // Must remain inactive while admin FNN is disabled.
         vpc_vni: None,
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
@@ -4678,6 +5200,9 @@ async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profi
     assert_eq!(admin_interface.vpc_vni, 0);
     assert!(admin_interface.vpc_routing_profile.is_none());
     assert!(response.routing_profile.is_none());
+
+    // L3-only opt-in cannot change the attachment while admin FNN is disabled.
+    assert!(admin_interface.is_l2_segment);
 }
 
 #[crate::sqlx_test]
@@ -4737,6 +5262,7 @@ async fn test_managed_host_network_config_multi_dpu_fnn_ipv6_loopbacks(pool: sql
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig::default(),
     });
@@ -5124,6 +5650,8 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         }))
         .await
         .expect_err("Should fail");
@@ -5304,15 +5832,13 @@ async fn rejected_quarantine_write_keeps_health_report(pool: sqlx::PgPool) {
         let status = result.expect_err("a rejected quarantine write must fail the API request");
         assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{scenario}");
 
-        let mut txn = env.db_txn().await;
-        let after = mh.host().db_machine(&mut txn).await;
+        let after = mh.host().db_machine(&env.pool).await;
         assert_eq!(
             after.network_config.value, before.network_config.value,
             "{scenario}"
         );
         assert_eq!(after.network_config.version, winning_version, "{scenario}");
         assert_eq!(after.health_reports, before.health_reports, "{scenario}");
-        txn.commit().await.unwrap();
     }
 }
 
@@ -5321,10 +5847,9 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let env = api_fixtures::create_test_env(pool).await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
 
-    let network_config_version =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
-            .await?
-            .version;
+    let network_config_version = db::machine::get_network_config(&env.pool, &host_machine_id)
+        .await?
+        .version;
 
     // Get, make sure it's not set yet
     {
@@ -5403,9 +5928,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     }
 
     // Make sure the version got bumped
-    let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
-            .await?;
+    let network_config = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
     assert_eq!(
         network_config.version.version_nr(),
         network_config_version.version_nr() + 1,
@@ -5470,9 +5993,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     }
 
     // Make sure the version got bumped again
-    let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
-            .await?;
+    let network_config = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
     assert_eq!(
         network_config.version.version_nr(),
         network_config_version.version_nr() + 1,
@@ -5533,9 +6054,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     }
 
     // Make sure the network config version bumps again on clear
-    let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
-            .await?;
+    let network_config = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
     assert_eq!(
         network_config.version.version_nr(),
         network_config_version.version_nr() + 1,

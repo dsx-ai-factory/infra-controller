@@ -14,6 +14,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ExtractRuleID peeks at the "rule_id" field in a serialized operation info
@@ -74,6 +75,8 @@ func New(typ taskcommon.TaskType, info json.RawMessage) (Operation, error) {
 
 func newEmpty(typ taskcommon.TaskType) (Operation, error) {
 	switch typ {
+	case taskcommon.TaskTypeComponentReset:
+		return &ComponentResetTaskInfo{}, nil
 	case taskcommon.TaskTypePowerControl:
 		return &PowerControlTaskInfo{}, nil
 	case taskcommon.TaskTypeFirmwareControl:
@@ -295,8 +298,10 @@ type FirmwareControlTaskInfo struct {
 	// colliding with the carbide tray-level Component vocabulary used for
 	// OperationTargetSpec / ExecutionInfo.Components, which select tray
 	// INSTANCES rather than sub-parts of a tray.
-	// Names are lowercase and case-sensitive. Empty or nil means "update
-	// everything in the bundle" (the historical default). Mapping from
+	// Explicit names are partitioned by tray type before new executions. Types
+	// with no intersection skip their rule steps; unmatched names reject admission.
+	// Empty or nil retains backend defaults and does not opt into DPU updates.
+	// Mapping from
 	// these strings to component-manager-specific enums is done in each
 	// FirmwareControl implementation (see pkg/common/firmwarecomponents).
 	SubTargets []string `json:"sub_targets,omitempty"`
@@ -315,6 +320,10 @@ type FirmwareControlTaskInfo struct {
 	// it and sets AccessToken only on its in-memory copy.
 	AuthenticationData *secret.EncryptedData `json:"authentication_data,omitempty"`
 	AccessToken        string                `json:"-"`
+	// DeviceCredentials stays encrypted in persisted tasks and workflow histories.
+	DeviceCredentials *secret.EncryptedData `json:"device_credentials,omitempty"`
+	// CredentialOverrides is populated only in the activity's in-memory copy.
+	CredentialOverrides *corev1.ComponentCredentialOverrides `json:"-"`
 }
 
 func (t *FirmwareControlTaskInfo) Validate() error {
@@ -338,6 +347,11 @@ func (t *FirmwareControlTaskInfo) Clone() Operation {
 		authenticationData := *t.AuthenticationData
 		authenticationData.Ciphertext = slices.Clone(t.AuthenticationData.Ciphertext)
 		cloned.AuthenticationData = &authenticationData
+	}
+	if t.DeviceCredentials != nil {
+		envelope := *t.DeviceCredentials
+		envelope.Ciphertext = slices.Clone(envelope.Ciphertext)
+		cloned.DeviceCredentials = &envelope
 	}
 	return &cloned
 }

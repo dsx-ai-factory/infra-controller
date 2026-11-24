@@ -38,6 +38,15 @@ spec:
             capabilities:
               drop:
                 - ALL
+          env:
+            - name: CREDS_MANAGER_CLIENT_CERT_PATH
+              value: /etc/credsmgr-client/tls.crt
+            - name: CREDS_MANAGER_CLIENT_KEY_PATH
+              value: /etc/credsmgr-client/tls.key
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           args:
             - --listen-port=8100
             # This host name has to be one of nico-rest-cert-manager's
@@ -48,12 +57,15 @@ spec:
             - --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
             - --tls-cert-path=/etc/tls/tls.crt
             - --tls-key-path=/etc/tls/tls.key
-            - --namespace=nico-rest
+            - --namespace=$(POD_NAMESPACE)
             - --debug
           ports:
             - containerPort: 8100
               name: https
           volumeMounts:
+            - name: credsmgr-client
+              mountPath: /etc/credsmgr-client
+              readOnly: true
             - name: tls-certs
               mountPath: /etc/tls
               readOnly: true
@@ -84,18 +96,21 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
       volumes:
+        - name: credsmgr-client
+          secret:
+            secretName: site-manager-client-tls
         - name: tls-certs
           secret:
             secretName: site-manager-tls
         # Only the CA certificate is projected. The signing key lives in the
-        # same Secret and sitemgr has no business reading it.
+        # same Secret and Site Manager has no business reading it.
         - name: credsmgr-ca
           secret:
             secretName: ca-signing-secret
             items:
               - key: tls.crt
                 path: ca.crt
-        # sitemgr skips its own cert issuance while --tls-cert-path and
+        # Site Manager skips its own cert issuance while --tls-cert-path and
         # --tls-key-path are set. Dropping either flag sends it back to writing
         # /tmp/mgr.cert, so keep this writable alongside the read-only root
         # filesystem.

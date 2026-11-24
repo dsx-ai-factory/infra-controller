@@ -20,17 +20,19 @@ import (
 )
 
 type APIExpectedRackGroupMember struct {
-	Type         string `json:"type"`
-	Manufacturer string `json:"manufacturer"`
-	ID           string `json:"id"`
+	// CartridgeIndex is required in requests; legacy responses may contain null.
+	CartridgeIndex *uint32 `json:"cartridgeIndex"`
+	Type           string  `json:"type"`
+	Manufacturer   string  `json:"manufacturer"`
+	ID             string  `json:"id"`
 }
 
 func (member APIExpectedRackGroupMember) ToDBModel() cdbm.ExpectedRackGroupMember {
-	return cdbm.ExpectedRackGroupMember{Type: cdbm.ExpectedRackGroupMemberType(member.Type), Manufacturer: member.Manufacturer, ID: member.ID}
+	return cdbm.ExpectedRackGroupMember{Type: cdbm.ExpectedRackGroupMemberType(member.Type), Manufacturer: member.Manufacturer, ID: member.ID, CartridgeIndex: member.CartridgeIndex}
 }
 
 func (member *APIExpectedRackGroupMember) FromDBModel(value cdbm.ExpectedRackGroupMember) {
-	*member = APIExpectedRackGroupMember{Type: string(value.Type), Manufacturer: value.Manufacturer, ID: value.ID}
+	*member = APIExpectedRackGroupMember{Type: string(value.Type), Manufacturer: value.Manufacturer, ID: value.ID, CartridgeIndex: value.CartridgeIndex}
 }
 
 type APIExpectedRackGroupRack struct {
@@ -59,6 +61,11 @@ func (rack *APIExpectedRackGroupRack) FromDBModel(value cdbm.ExpectedRackGroupRa
 func (group APIExpectedRackGroup) validateRacks(_ interface{}) error {
 	dbModel := cdbm.ExpectedRackGroup{Racks: make([]cdbm.ExpectedRackGroupRack, 0, len(group.Racks))}
 	for _, rack := range group.Racks {
+		for _, member := range rack.Members {
+			if member.CartridgeIndex == nil {
+				return errors.New("member cartridgeIndex is required")
+			}
+		}
 		dbModel.Racks = append(dbModel.Racks, rack.ToDBModel())
 	}
 	return dbModel.Validate()

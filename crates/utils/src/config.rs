@@ -41,14 +41,14 @@ pub fn as_duration<S>(d: &Duration, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{}s", d.num_seconds()))
+    serializer.collect_str(&format_args!("{}s", d.num_seconds()))
 }
 
 pub fn as_std_duration<S>(d: &std::time::Duration, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{}s", d.as_secs()))
+    serializer.collect_str(&format_args!("{}s", d.as_secs()))
 }
 
 pub fn as_option_duration<S>(d: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
@@ -58,5 +58,30 @@ where
     match d {
         Some(d) => serializer.serialize_some(&format!("{}s", d.num_seconds())),
         None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_serializers_preserve_whole_seconds() {
+        assert_eq!(
+            as_duration(
+                &Duration::milliseconds(-1500),
+                serde_json::value::Serializer
+            )
+            .expect("signed duration serializes"),
+            serde_json::json!("-1s"),
+        );
+        assert_eq!(
+            as_std_duration(
+                &std::time::Duration::from_millis(1500),
+                serde_json::value::Serializer,
+            )
+            .expect("unsigned duration serializes"),
+            serde_json::json!("1s"),
+        );
     }
 }

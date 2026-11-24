@@ -14,8 +14,8 @@ nico-admin-cli expected-switch update
 [-u|--bmc-username] [-p|--bmc-password]
 [-s|--switch-serial-number] [--nvos-interface]
 [--nvos-username] [--nvos-password] [--meta-name]
-[--meta-description] [--label] [--rack_id]
-[--bmc-ip-address] [--extended] [--nvos-ip-address]
+[--extended] [--meta-description] [--label]
+[--rack_id] [--bmc-ip-address] [--nvos-ip-address]
 [--bmc-retain-credentials] [--sort-by]
 [-h|--help]
 ```
@@ -28,8 +28,8 @@ Select the switch by either BMC MAC address or ID. Supply at least one
 update field. Omitted fields and empty metadata names or descriptions
 remain unchanged. Supplied labels replace the whole label collection.
 Supplied NVOS ports (--nvos-interface) replace the stored set as a
-whole, so move the primary by resending every port with the new ,primary
-marker.
+whole, so move the primary by resending every port with the new
+',primary' marker.
 
 Supply a username, password, or both for BMC or NVOS. Each omitted
 credential field keeps its stored value. NVOS credentials must contain
@@ -76,9 +76,9 @@ Switch serial number of the expected switch
 `--nvos-interface <MAC[,primary]>`
 
 An NVOS ethernet port of the expected switch. Repeat for each port to
-replace the stored set. Append ,primary to mark the primary port (eth0);
-when none is marked the first is primary and a single port is always
-primary
+replace the stored set. Append ',primary' to mark the primary port
+(eth0); when none is marked the first is primary and a single port is
+always primary
 
 `--nvos-username <NVOS_USERNAME>`
 
@@ -91,6 +91,14 @@ NVOS password of the expected switch
 `--meta-name <META_NAME>`
 
 Replace the metadata name. An empty or omitted value leaves it unchanged
+
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
 
 `--meta-description <META_DESCRIPTION>`
 
@@ -112,14 +120,6 @@ Rack ID for this switch
 BMC IP address of the expected switch. Must not be unspecified,
 multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6
 form of each
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--nvos-ip-address <NVOS_IP_ADDRESS>`
 
@@ -154,7 +154,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

@@ -20,6 +20,7 @@ use std::iter;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use carbide_network::BaseMac;
 use carbide_uuid::machine::DpuMachineId;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -277,7 +278,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                             UefiDevicePath::from_str(&format!(
                                 "PciRoot(0x8)/Pci(0x2,0xa)/Pci(0x0,0x{:x})/MAC({},0x1)",
                                 index + 1,
-                                dpu.host_mac_address.to_string().replace(':', ""),
+                                BaseMac::from(dpu.host_mac_address),
                             ))
                             .unwrap(),
                         ),
@@ -305,6 +306,8 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                     link_status: None,
                     uefi_device_path: None,
                 }],
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 id: "System.Embedded.1".to_string(),
@@ -321,6 +324,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "System.Embedded.1".to_string(),
@@ -328,6 +332,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 model: Some("PowerEdge R750".to_string()),
                 part_number: Some("SB27A42862".to_string()),
                 serial_number: Some(value.serial),
+                assemblies: Vec::new(),
                 network_adapters,
                 compute_tray_index: None,
                 physical_slot_number: None,
@@ -361,7 +366,6 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            remediation_error: None,
             ..Default::default()
         }
     }

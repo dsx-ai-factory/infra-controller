@@ -136,6 +136,10 @@ pub struct FirmwareToolExecutor {
     supervisor_path: Option<std::path::PathBuf>,
     #[cfg(target_os = "linux")]
     owner_exit_behavior: ToolOwnerExitBehavior,
+    #[cfg(target_os = "linux")]
+    working_directory: Option<std::path::PathBuf>,
+    #[cfg(target_os = "linux")]
+    environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
 impl FirmwareToolExecutor {
@@ -146,7 +150,7 @@ impl FirmwareToolExecutor {
     pub fn with_supervisor_path(path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             supervisor_path: Some(path.into()),
-            owner_exit_behavior: ToolOwnerExitBehavior::default(),
+            ..Self::default()
         }
     }
 
@@ -155,6 +159,28 @@ impl FirmwareToolExecutor {
     #[cfg(not(target_os = "linux"))]
     pub fn with_supervisor_path(_path: impl Into<std::path::PathBuf>) -> Self {
         Self {}
+    }
+
+    /// `with_working_directory` selects the local helper's directory, inherited
+    /// by its tool and descendants. Omission inherits the caller's directory.
+    /// A missing or unusable directory prevents helper spawning and returns
+    /// `AttemptError::SupervisorNotStarted` before any tool is dispatched.
+    #[cfg(target_os = "linux")]
+    pub fn with_working_directory(mut self, directory: impl Into<std::path::PathBuf>) -> Self {
+        self.working_directory = Some(directory.into());
+        self
+    }
+
+    /// `with_environment` fixes per-executor overrides to the local helper's
+    /// inherited environment. Its tool and descendants inherit these values;
+    /// the command protocol cannot change them. Later duplicate keys win.
+    #[cfg(target_os = "linux")]
+    pub fn with_environment(
+        mut self,
+        environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Self {
+        self.environment.extend(environment);
+        self
     }
 
     /// Let accepted work finish under its existing deadline if its owner exits.
@@ -181,13 +207,7 @@ impl FirmwareToolExecutor {
     ) -> Result<Output, AttemptError> {
         #[cfg(target_os = "linux")]
         {
-            linux::run(
-                self.supervisor_path.as_deref(),
-                self.owner_exit_behavior,
-                command,
-                timeout,
-            )
-            .await
+            linux::run(self, command, timeout).await
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -221,8 +241,7 @@ mod linux {
     };
 
     pub(super) async fn run(
-        configured_helper: Option<&Path>,
-        owner_exit_behavior: ToolOwnerExitBehavior,
+        executor: &FirmwareToolExecutor,
         command: &CommandSpec,
         timeout: Duration,
     ) -> Result<Output, AttemptError> {
@@ -236,8 +255,14 @@ mod linux {
                 "invalid attempt deadline",
             ))
         })?;
-        let helper = helper_path(configured_helper).map_err(not_started)?;
-        let mut child = Command::new(&helper)
+        let helper = helper_path(executor.supervisor_path.as_deref()).map_err(not_started)?;
+        let owner_exit_behavior = executor.owner_exit_behavior;
+        let mut helper_command = Command::new(&helper);
+        if let Some(directory) = &executor.working_directory {
+            helper_command.current_dir(directory);
+        }
+        helper_command.envs(executor.environment.iter().map(|(key, value)| (key, value)));
+        let mut child = helper_command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -571,6 +596,43 @@ mod tests {
         );
     }
 
+    /// Local context reaches the tool family; a missing cwd never dispatches.
+    #[tokio::test]
+    async fn executor_context_preserves_inheritance_and_override_precedence() {
+        let directory = tempfile::tempdir().unwrap();
+        let executor = crate::runner::test_firmware_executor()
+            .with_working_directory(directory.path())
+            .with_environment([("LIBMLX_CONTEXT_VALUE".into(), "first".into())])
+            .with_environment([
+                ("LIBMLX_CONTEXT_VALUE".into(), "last".into()),
+                ("LIBMLX_CONTEXT_OTHER".into(), "present".into()),
+            ]);
+        let command = shell(
+            r#"printf '%s|%s|%s|%s\n' "$PWD" "$PATH" "$LIBMLX_CONTEXT_VALUE" "$LIBMLX_CONTEXT_OTHER"
+/bin/sh -c 'printf "%s|%s|%s|%s\n" "$PWD" "$PATH" "$LIBMLX_CONTEXT_VALUE" "$LIBMLX_CONTEXT_OTHER"' &
+wait"#,
+        );
+        let output = executor
+            .execute(&command, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let expected = format!(
+            "{}|{}|last|present\n",
+            directory.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        assert!(output.status.success());
+        assert_eq!(output.stdout, expected.repeat(2).into_bytes());
+        let error = executor
+            .with_working_directory(directory.path().join("missing"))
+            .execute(&command, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, AttemptError::SupervisorNotStarted { source, .. } if source.kind() == io::ErrorKind::NotFound)
+        );
+    }
+
     /// Both streams drain concurrently and independently accept the full 1 MiB limit.
     #[tokio::test]
     async fn drains_both_pipes_while_the_command_runs() {
@@ -606,24 +668,14 @@ mod tests {
         let helper = directory.path().join("invalid-after-deadline");
         // Capture the cancellation byte before EOF. The malformed result can
         // only arrive after the caller has enforced its attempt deadline.
-        // An isolated writer keeps writable descriptors out of concurrent forks.
-        let writer = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg("#!/bin/sh\nprintf 'MLX-SUPERVISOR-1\\n'\n/bin/cat > \"$0.request\"\nprintf '\\000\\000\\000\\001x'\n")
-                .kill_on_drop(true)
-                .status(),
+        crate::runner::write_fixture_executables(
+            directory.path(),
+            &[(
+                "invalid-after-deadline",
+                "#!/bin/sh\nprintf 'MLX-SUPERVISOR-1\\n'\n/bin/cat > \"$0.request\"\nprintf '\\000\\000\\000\\001x'\n",
+            )],
         )
-        .await
-        .expect("fixture writer must finish within its watchdog")
-        .expect("start isolated fixture writer");
-        assert!(writer.success(), "fixture writer failed: {writer}");
+        .await;
         let request_path = helper.with_extension("request");
         let executor = FirmwareToolExecutor::with_supervisor_path(helper).continue_on_owner_exit();
         let command = CommandSpec::new("/bin/true");

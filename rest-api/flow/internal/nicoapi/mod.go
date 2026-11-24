@@ -16,6 +16,10 @@ import (
 
 // Client allow us to have both a real implemenation and a mock implementation for unit tests which can be switched transparently
 type Client interface {
+	// GetComponentFirmwareDetails reads passive installed, expected and tracked
+	// firmware evidence through the shared connection. The shorter of the caller
+	// deadline and configured client timeout bounds the read.
+	GetComponentFirmwareDetails(context.Context, *corev1.GetComponentFirmwareDetailsRequest) (*corev1.GetComponentFirmwareDetailsResponse, error)
 	// GetComponentPowerDetails reads passive hardware, policy, and tracked actions
 	// through the shared Core connection, bounded by both caller and client timeouts.
 	GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error)
@@ -66,11 +70,11 @@ type Client interface {
 	// from one FindSwitchesByIds snapshot.
 	FindSwitchRuntimeStatuses(ctx context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error)
 
-	// FindSwitchNvosIPs returns the resolved NVOS host IP for each switch,
-	// keyed by Core SwitchId. Core populates nvos_info only once both the NVOS
-	// MAC and its assigned address resolve, so switches without a resolved NVOS
-	// endpoint are omitted from the result.
-	FindSwitchNvosIPs(ctx context.Context, switchIds []string) (map[string]string, error)
+	// FindSwitchNvosPorts returns all status.nvos_ports, keyed by Core SwitchId.
+	// An empty port list falls back to legacy nvos_info when available.
+	// Without either port source, a present status returns an empty slice;
+	// a missing status omits the switch.
+	FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error)
 
 	// GetObservedNVLinkDomainMemberships returns valid rack/domain observations
 	// from a complete snapshot of Core's active switch inventory. Switches without
@@ -197,6 +201,9 @@ type Client interface {
 	// ComponentPowerControl performs power control on component targets (switches, power shelves).
 	ComponentPowerControl(ctx context.Context, req *corev1.ComponentPowerControlRequest) (*corev1.ComponentPowerControlResponse, error)
 
+	ComponentReset(ctx context.Context, req *corev1.ComponentResetRequest) (*corev1.ComponentResetResponse, error)
+	GetComponentResetStatus(ctx context.Context, req *corev1.GetComponentResetStatusRequest) (*corev1.GetComponentResetStatusResponse, error)
+
 	// UpdateComponentFirmware queues firmware updates for component targets.
 	UpdateComponentFirmware(ctx context.Context, req *corev1.UpdateComponentFirmwareRequest) (*corev1.UpdateComponentFirmwareResponse, error)
 
@@ -284,7 +291,7 @@ type Client interface {
 	SetPowerShelfRackID(shelfID, rackID string)
 	SetSwitchControllerState(switchID, state string)
 	SetSwitchHealth(switchID string, health *types.HealthReport)
-	SetSwitchNvosIP(switchID, ip string)
+	SetSwitchNvosPorts(switchID string, ports []SwitchNvosPort)
 	SetObservedNVLinkDomainMemberships(memberships []NVLinkDomainMembership)
 	SetPowerShelfControllerState(shelfID, state string)
 	SetPowerShelfHealth(shelfID string, health *types.HealthReport)

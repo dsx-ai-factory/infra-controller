@@ -392,6 +392,68 @@ func TestExpectedPowerShelfSQLDAO_Get_includeRelations(t *testing.T) {
 	assert.NotNil(t, got.Site)
 }
 
+func TestExpectedPowerShelfSQLDAO_GetAllIDsAndUpdated(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedPowerShelfSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
+	epsd := NewExpectedPowerShelfDAO(dbSession)
+
+	createExpectedPowerShelf := func(site *Site, id uuid.UUID, bmcMacAddress string) ExpectedComponentIDAndUpdated {
+		t.Helper()
+		created, err := epsd.Create(ctx, nil, ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: id,
+			SiteID:               site.ID,
+			BmcMacAddress:        bmcMacAddress,
+			ShelfSerialNumber:    "SHELF-" + bmcMacAddress,
+			CreatedBy:            user.ID,
+		})
+		require.NoError(t, err)
+		return ExpectedComponentIDAndUpdated{ID: created.ID, Updated: created.Updated}
+	}
+
+	// The row created first has the higher ID, so creation order differs from ID order.
+	siteIDsAndUpdated := []ExpectedComponentIDAndUpdated{
+		createExpectedPowerShelf(site, uuid.MustParse("00000000-0000-0000-0000-000000000002"), "00:1B:44:11:3A:B7"),
+		createExpectedPowerShelf(site, uuid.MustParse("00000000-0000-0000-0000-000000000001"), "00:1B:44:11:3A:B8"),
+	}
+	createExpectedPowerShelf(site2, uuid.New(), "00:1B:44:11:3A:B9")
+
+	tests := []struct {
+		desc     string
+		filter   ExpectedPowerShelfFilterInput
+		expected []ExpectedComponentIDAndUpdated
+	}{
+		{
+			desc:     "Site filter excludes other Sites and keeps creation order",
+			filter:   ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteIDsAndUpdated,
+		},
+		{
+			desc:     "no matching ExpectedPowerShelves returns an empty slice",
+			filter:   ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []ExpectedComponentIDAndUpdated{},
+		},
+		{
+			desc:     "empty ExpectedPowerShelf ID filter returns an empty slice",
+			filter:   ExpectedPowerShelfFilterInput{ExpectedPowerShelfIDs: []uuid.UUID{}},
+			expected: []ExpectedComponentIDAndUpdated{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := epsd.GetAllIDsAndUpdated(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
 func TestExpectedPowerShelfSQLDAO_GetAll(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)

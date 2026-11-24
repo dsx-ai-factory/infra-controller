@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -115,6 +116,34 @@ func TestManageUser_GetUserDataFromNgc(t *testing.T) {
 
 	defer errServer.Close()
 
+	failedStatusBytes, err := json.Marshal(NgcUserResponse{
+		RequestStatus: NgcRequestStatus{StatusCode: "FAILED", RequestID: "test-request-id"},
+	})
+	assert.Nil(t, err)
+
+	// Answers 200 with a request status that is not a success
+	failedStatusServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+		res.WriteHeader(http.StatusOK)
+		_, _ = res.Write(failedStatusBytes)
+	}))
+
+	defer failedStatusServer.Close()
+
+	// Holds the request open until the client gives up
+	release := make(chan struct{})
+	hangServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+		select {
+		case <-req.Context().Done():
+		case <-release:
+		}
+	}))
+
+	defer hangServer.Close()
+	defer close(release)
+
+	deadlineCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	cfg := config.NewConfig()
 
 	tests := []struct {
@@ -125,6 +154,20 @@ func TestManageUser_GetUserDataFromNgc(t *testing.T) {
 		want    *NgcUser
 		wantErr bool
 	}{
+		{
+			name: "test get user data from ngc activity failure, context deadline ends a hung call",
+			fields: fields{
+				dbSession: dbSession,
+				cfg:       cfg,
+			},
+			server: hangServer,
+			args: args{
+				ctx:               deadlineCtx,
+				userID:            user.ID,
+				encryptedNgcToken: encryptedNgcToken,
+			},
+			wantErr: true,
+		},
 		{
 			name: "test get user data from ngc activity success",
 			fields: fields{
@@ -146,6 +189,20 @@ func TestManageUser_GetUserDataFromNgc(t *testing.T) {
 				cfg:       cfg,
 			},
 			server: errServer,
+			args: args{
+				ctx:               context.Background(),
+				userID:            user.ID,
+				encryptedNgcToken: encryptedNgcToken,
+			},
+			wantErr: true,
+		},
+		{
+			name: "test get user data from ngc activity failure, request status is not a success",
+			fields: fields{
+				dbSession: dbSession,
+				cfg:       cfg,
+			},
+			server: failedStatusServer,
 			args: args{
 				ctx:               context.Background(),
 				userID:            user.ID,

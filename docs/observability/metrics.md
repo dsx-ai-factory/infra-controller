@@ -127,9 +127,15 @@ exposes `carbide_hosts_usable_count` and `carbide_gpus_usable_count` showing hos
 GPUs available for allocation. The `carbide_available_ips_count` metric tracks IP
 address pool exhaustion.
 
-For multi-tenant deployments, `carbide_resource_pool_*` metrics break down capacity by
-resource pool. Watch for pools approaching zero availability before tenants start seeing
-allocation failures.
+The `carbide_resourcepool_free_count` and `carbide_resourcepool_used_count` gauges
+report available and allocated values, respectively, for each resource pool, identified
+by the `pool` label. Watch for pools approaching zero availability before tenants start
+seeing allocation failures.
+
+These counts are absent before the first successful statistics check, after a failed
+check, or when the data is too old. Also monitor `carbide_resourcepool_stats_available`
+and `carbide_resourcepool_stats_fresh` to check whether pool data is available and up
+to date. See the [metrics reference](core_metrics.md) for their meanings.
 
 ### Health: "What's broken right now?"
 
@@ -155,10 +161,14 @@ with BMCs or switches.
 
 ### Firmware management
 
-Firmware update metrics track the upgrade queue and active operations.
-`carbide_firmware_queue_length` shows pending updates while
-`carbide_firmware_active_updates` shows concurrent operations. The pre-ingestion manager
-metrics (`carbide_preingestion_*`) track firmware image preparation.
+Host firmware metrics count machines rather than operations.
+`carbide_pending_host_firmware_update_count` is the number of hosts the drift
+query currently selects as needing firmware work, and
+`carbide_active_host_firmware_update_count` is the number of hosts whose
+top-level state is `HostReprovision`; assigned-host firmware substates are not
+included. See the [host firmware guide](../operations/firmware-updates/host-firmware.md)
+for the full metric table. The pre-ingestion manager metrics
+(`carbide_preingestion_*`) track firmware image preparation.
 
 ### API performance
 
@@ -418,7 +428,7 @@ Enable via TOML configuration:
 enabled = true                    # default: false
 listen_address = "[::]:9091"      # dual-stack default
 # Defaults to all supported types; also valid: network_segment, vpc_prefix,
-# spdm_attestation, ib_partition
+# spdm_attestation, ib_partition, nvlink_domain
 object_types = ["machine", "switch", "power_shelf", "rack"]
 ```
 
@@ -443,6 +453,7 @@ service:
       - vpc_prefix
       - spdm_attestation
       - ib_partition
+      - nvlink_domain
 
 perObjectStateMetricsServiceMonitor:
   enabled: true
@@ -498,10 +509,16 @@ max by (object_type, object_id, reason)
     (time() - carbide_object_state_entered_timestamp_seconds{object_type="machine"})
     > 3600
 )
-  * on(object_type, object_id) group_left(rack, sku)
-    max by (object_type, object_id, rack, sku)
-        (carbide_object_info)
+  * on(object_type, object_id) group_left(rack_id, sku)
+    topk by (object_type, object_id) (1,
+      max by (object_type, object_id, rack_id, sku)
+          (carbide_object_info)
+    )
 ```
+
+`topk` keeps one info series per object so conflicting replica traits cannot
+break the join. Since info values are all `1`, selection among conflicting
+traits is arbitrary and does not identify the newest traits.
 
 For alerting rules using these metrics, see [alerts.md](alerts.md#5-per-object-alerting).
 
@@ -519,6 +536,9 @@ provisioning.
 | Object Lifecycle | `nico-lifecycle.json` | one object type's state machine in depth |
 | API Performance | `nico-api-performance.json` | control plane request rate and latency |
 | HW Health - BMC Performance | `nico-bmc-performance.json` | Redfish and BMC call behavior |
+
+Site Detail and Fleet include metrics from every NICo scrape job. Use separate Kubernetes
+dashboards for pod CPU, memory, restarts, and readiness.
 
 ### Site overview dashboard
 
@@ -543,10 +563,15 @@ PreventHostStateChanges, etc.).
 
 ### Site detail dashboard
 
-The site detail board (`nico-site-detail.json`) carries every subsystem a site
-operator needs when the overview shows a problem but not its cause. It uses the same
-`$job` variable as the overview, plus a `$namespace` variable for the Kubernetes
-workload panels at the end.
+The site detail board (`nico-site-detail.json`) carries every NICo subsystem a site
+operator needs when the overview shows a problem but not its cause.
+
+On a central Prometheus datasource, select a **Site** to filter every panel by its
+`forge_site` label across all NICo scrape jobs. The selector discovers sites from
+NICo metrics, including serial console metrics, without requiring API metrics.
+The default **All** includes every site and metrics without `forge_site`; leave it
+selected for site-local datasources that do not expose that label. On a central
+datasource, **All** combines sites rather than isolating one site.
 
 **Service health** - API status, build version, open tracing spans, Postgres connection
 pool and resource pool utilization. A pool at 100% utilization means new allocations from it fail.
@@ -586,7 +611,7 @@ token lifetime, Postgres secrets operations, inbound TLS handshakes, certificate
 reloads, and outbound TCP connect outcomes.
 
 **DPUs and firmware** - DPUs online compared with healthy, failing health checks,
-firmware and dpu-agent versions, host inventory component versions, and the DPU NIC and
+firmware and dpu-agent versions, DPU inventory component versions, and the DPU NIC and
 host firmware update backlogs.
 
 **Site explorer** - Whether exploration is enabled, last run status, endpoints explored
@@ -603,9 +628,7 @@ rates, dropped requests, DNS negative cache, and DHCP certificate expiry.
 **Serial console proxy** - BMC console connections tracked compared with healthy,
 connected clients, and stream errors.
 
-**Logs and Kubernetes workloads** - Log event rate by level, the noisiest components at
-WARN and ERROR, and per-container CPU, memory, restarts, and readiness. The Kubernetes
-panels need kube-state-metrics and cAdvisor.
+**Logs** - Log event rate by level and the noisiest NICo components at WARN and ERROR.
 
 ### Fleet dashboard
 
@@ -627,7 +650,7 @@ distinct API versions deployed.
 and tenant footprint across sites.
 
 **Deployed versions** - API build per site, sites per build, and the dpu-agent, DPU
-firmware and host inventory component version spread.
+firmware and DPU inventory component version spread.
 
 **Inventory and lifecycle** - Hosts, network segments and InfiniBand partitions managed
 per site, with the stuck objects of each type.
@@ -640,8 +663,7 @@ hosts missing a BIOS password, and unhealthy DPUs.
 mismatches per site.
 
 **API service level** - Availability, request and error rate, mean and p95 latency,
-controller iteration latency, Vault availability, warning and error log rate, and the
-busiest pods.
+controller iteration latency, Vault availability, and warning and error log rate.
 
 **Site explorer** - Hosts explored, managed hosts identified, failures, missing expected
 inventory, serial number mismatches, and incomplete preingestions per site.
@@ -726,8 +748,11 @@ Download the JSON files from `helm/observability/dashboards/` and import via Gra
 (Dashboards -> Import -> Upload JSON file). Set the Prometheus datasource when prompted.
 
 Each dashboard provides variables for datasource selection and metric prefix customization.
-The prefix defaults to `carbide_` (NICo's current emission prefix). If your site uses
-`alt_metric_prefix`, update the dashboard variable accordingly.
+The `metric_prefix` dashboard variable defaults to `carbide`, without a trailing underscore.
+Dashboard expressions add the separator: `${metric_prefix}_api_ready` becomes
+`carbide_api_ready`. Entering `carbide_` instead produces `carbide__api_ready`, which does not
+match the emitted metric. If your site uses `alt_metric_prefix`, set the dashboard variable
+to the alternative prefix without its trailing underscore.
 
 ## 6. Troubleshooting
 

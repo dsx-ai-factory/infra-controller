@@ -4,9 +4,9 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +116,9 @@ const (
 	// task pollers the Temporal worker runs. This service reads only from config.yaml
 	// (Helm-rendered) -- unlike Site Agent's old-style config, there's no env var override.
 	ConfigWorkerMaxConcurrentActivityPollers = "worker.maxConcurrentActivityPollers"
+	// ConfigWorkerMaxConcurrentActivityExecutionSize caps how many activities the Temporal
+	// worker executes at once.
+	ConfigWorkerMaxConcurrentActivityExecutionSize = "worker.maxConcurrentActivityExecutionSize"
 )
 
 const (
@@ -131,6 +134,13 @@ const (
 	// this further is unlikely to help and mainly risks pgx pool exhaustion on a worker that
 	// also serves the cloud task queue. Bump with fresh benchmark data if a real need appears.
 	MaxMaxConcurrentActivityPollers = 20
+	// DefaultMaxConcurrentActivityExecutionSize is the activity execution size a worker pod
+	// uses when config.yaml doesn't set worker.maxConcurrentActivityExecutionSize. It bounds
+	// the activities, and so the DB work, the pod runs at once.
+	DefaultMaxConcurrentActivityExecutionSize = 128
+	// MaxMaxConcurrentActivityExecutionSize caps the configurable activity execution size at
+	// the Temporal SDK default.
+	MaxMaxConcurrentActivityExecutionSize = 1000
 
 	// DefaultSiteNamespaceRetention matches the `72h` the setup scripts and the Temporal CLI create the
 	// `site` namespace with, so failed runs are kept as long as they were before
@@ -192,6 +202,7 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigTracingEnabled, false)
 
 	c.v.SetDefault(ConfigWorkerMaxConcurrentActivityPollers, DefaultMaxConcurrentActivityPollers)
+	c.v.SetDefault(ConfigWorkerMaxConcurrentActivityExecutionSize, DefaultMaxConcurrentActivityExecutionSize)
 
 	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
@@ -306,6 +317,10 @@ func (c *Config) Validate() {
 
 	if p := c.GetMaxConcurrentActivityPollers(); p < 1 || p > MaxMaxConcurrentActivityPollers {
 		log.Panic().Msgf("worker max concurrent activity pollers %d must be between 1 and %d", p, MaxMaxConcurrentActivityPollers)
+	}
+
+	if n := c.GetMaxConcurrentActivityExecutionSize(); n < 1 || n > MaxMaxConcurrentActivityExecutionSize {
+		log.Panic().Msgf("worker max concurrent activity execution size %d must be between 1 and %d", n, MaxMaxConcurrentActivityExecutionSize)
 	}
 }
 
@@ -448,6 +463,12 @@ func (c *Config) GetMaxConcurrentActivityPollers() int {
 	return c.v.GetInt(ConfigWorkerMaxConcurrentActivityPollers)
 }
 
+// GetMaxConcurrentActivityExecutionSize returns the maximum number of activities the Temporal
+// worker executes at once
+func (c *Config) GetMaxConcurrentActivityExecutionSize() int {
+	return c.v.GetInt(ConfigWorkerMaxConcurrentActivityExecutionSize)
+}
+
 // GetTemporalHost returns the hostname for Temporal
 func (c *Config) GetTemporalHost() string {
 	return c.v.GetString(ConfigTemporalHost)
@@ -543,7 +564,7 @@ func (c *Config) SetTemporalEncryptionKey() {
 	if err != nil {
 		log.Panic().Err(err).Msgf("failed to read encryption key file: %s", err)
 	}
-	encryptionKey := strings.TrimSpace(string(encryptionKeyBytes))
+	encryptionKey := string(bytes.TrimSpace(encryptionKeyBytes))
 
 	c.v.Set(ConfigTemporalEncryptionKey, encryptionKey)
 }

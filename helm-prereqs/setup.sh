@@ -20,6 +20,8 @@
 # Tool requirements:
 #   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
 #   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
+#   --skip-vault preflight also requires a python3 TOML parser (3.11 tomllib
+#   or the tomli package) to inspect the site config's [secrets] section.
 #
 # Required environment:
 #   KUBECONFIG            Optional only if the current kubectl context already
@@ -113,6 +115,14 @@
 #   NICO_SKIP_RMS          Skip the NVIDIA Rack Manager Service (rack-manager
 #                          chart, phase 5c), which installs by DEFAULT.
 #                          Same as --skip-rms. (NICO_INSTALL_RMS=false honored too.)
+#   NICO_SKIP_VAULT        Skip HashiCorp Vault (phases 3 and 4, the Vault
+#                          resources of nico-prereqs, and nico-api's Vault
+#                          client), which installs by DEFAULT. Certificates
+#                          are then issued by the cert-manager site-issuer and
+#                          credentials must live in Postgres ([secrets] in the
+#                          site config); preflight checks the Core values.
+#                          Never uninstalls a running Vault.
+#                          Same as --skip-vault. (NICO_INSTALL_VAULT=false honored too.)
 #   NICO_RMS_CHART         Local rack-manager chart path (directory or .tgz),
 #                          e.g. your own nv-rms checkout's helm/ dir. Default:
 #                          unset - the chart comes from the helm-prereqs/nv-rms
@@ -146,7 +156,8 @@
 #   export NICO_REST_IMAGE_TAG=<tag>       # unless using --skip-rest
 #   export REGISTRY_PULL_SECRET=<secret>  # optional
 #   ./setup.sh                          # prompts before deploying NICo Core and NICo REST
-#   ./setup.sh -y                       # skip all prompts, deploy everything automatically
+#   ./setup.sh -y                       # accept routine prompts; failed preflight checks still stop setup
+#   ./setup.sh -y --ignore-preflight-errors  # explicitly bypass ordinary preflight errors (database safety checks still stop setup)
 #   ./setup.sh --skip-core              # skip Phase 6 NICo Core (print command, deploy manually)
 #   ./setup.sh --skip-rest              # skip Phase 7 NICo REST entirely (no repo needed)
 #   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
@@ -157,6 +168,8 @@
 #   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
 #   ./setup.sh --skip-dpf               # skip DPF DPU provisioning (installed by default otherwise)
+#   ./setup.sh --skip-vault             # install without HashiCorp Vault (cert-manager PKI, Postgres credential store)
+#   ./setup.sh --install-vault          # install Vault (the default); overrides NICO_SKIP_VAULT=true in the environment
 #   ./setup.sh --with-observability     # also install the local monitoring stack (Loki, Tempo,
 #                                       #   OTEL collector, Prometheus, Grafana) after Core —
 #                                       #   see helm-prereqs/observability/README.md; can also be
@@ -200,6 +213,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 AUTO_YES=false
+IGNORE_PREFLIGHT_ERRORS=false
 SKIP_CORE=false
 SKIP_REST=false
 # DPF (DOCA Platform Framework) DPU provisioning installs by DEFAULT. Opt out
@@ -212,6 +226,14 @@ INSTALL_DPF="${NICO_INSTALL_DPF:-true}"
 # externally managed RMS). NICO_INSTALL_RMS=false is honored too.
 INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
 [[ "${NICO_SKIP_RMS:-false}" == "true" ]] && INSTALL_RMS=false
+# HashiCorp Vault installs by DEFAULT. Opt out with --skip-vault or
+# NICO_SKIP_VAULT=true for a site whose credentials live in Postgres and whose
+# certificates come from the cert-manager site-issuer. This is an explicit
+# choice that preflight validates against the Core values, never inferred,
+# and it never uninstalls a running Vault. NICO_INSTALL_VAULT=false is
+# honored too.
+INSTALL_VAULT="${NICO_INSTALL_VAULT:-true}"
+[[ "${NICO_SKIP_VAULT:-false}" == "true" ]] && INSTALL_VAULT=false
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
 INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
@@ -221,12 +243,15 @@ SITE_OVERLAY=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y)             AUTO_YES=true  ;;
+        --ignore-preflight-errors) IGNORE_PREFLIGHT_ERRORS=true ;;
         --skip-core)    SKIP_CORE=true ;;
         --skip-rest)    SKIP_REST=true ;;
         --install-dpf)  INSTALL_DPF=true ;;   # explicit; DPF is the default
         --skip-dpf)     INSTALL_DPF=false ;;
         --install-rms)  INSTALL_RMS=true ;;   # explicit; RMS is the default
         --skip-rms)     INSTALL_RMS=false ;;
+        --install-vault) INSTALL_VAULT=true ;; # explicit; Vault is the default
+        --skip-vault)   INSTALL_VAULT=false ;;
         --with-observability) WITH_OBSERVABILITY=true ;;
         --install-contour) INSTALL_CONTOUR=true ;;
         --debug)        set -x         ;;
@@ -250,17 +275,18 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--ignore-preflight-errors] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--skip-vault] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks — env vars, tools, config files. Resolves NICO_REST_DIR
-# (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Exits 1 if
-# user declines to continue.
+# (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Failed checks
+# stop setup unless --ignore-preflight-errors permits them; database safety
+# checks always stop setup.
 # ---------------------------------------------------------------------------
-export AUTO_YES SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS
+export AUTO_YES IGNORE_PREFLIGHT_ERRORS SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS INSTALL_VAULT
 # Validate INSTALL_DPF BEFORE sourcing preflight — preflight gates its DPF
 # checks on INSTALL_DPF==true, so a garbage NICO_INSTALL_DPF would otherwise
 # silently skip those checks before erroring here.
@@ -271,6 +297,18 @@ esac
 case "${INSTALL_RMS}" in
     true|false) ;;
     *) echo "Error: NICO_INSTALL_RMS must be true or false (got '${INSTALL_RMS}')"; exit 1 ;;
+esac
+# Validate INSTALL_VAULT BEFORE sourcing preflight for the same reason:
+# preflight runs its Vault-free Core values checks only when INSTALL_VAULT is
+# exactly false. NICO_SKIP_VAULT is checked too, because a misspelt value
+# ("yes") would otherwise silently install Vault.
+case "${INSTALL_VAULT}" in
+    true|false) ;;
+    *) echo "Error: NICO_INSTALL_VAULT must be true or false (got '${INSTALL_VAULT}')"; exit 1 ;;
+esac
+case "${NICO_SKIP_VAULT:-false}" in
+    true|false) ;;
+    *) echo "Error: NICO_SKIP_VAULT must be true or false (got '${NICO_SKIP_VAULT}')"; exit 1 ;;
 esac
 case "${INSTALL_CONTOUR}" in
     true|false) ;;
@@ -1128,108 +1166,334 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. cert-manager + Prometheus CRDs + Vault TLS bootstrap
-#    cert-manager must be up before we can issue certs for vault.
-#    Vault pods need TLS secrets (nicoca-vault-client, vault-raft-tls)
-#    BEFORE vault starts — so bootstrap them here via cert-manager.
+# 2. cert-manager + Prometheus CRDs + site CA / Vault TLS bootstrap
+#    cert-manager must be up before we can issue certs. The site-root CA and
+#    the site-issuer ClusterIssuer (templates/site-issuer.yaml) are created on
+#    every install. With Vault they sign Vault's own TLS secrets
+#    (nicoca-vault-client, vault-raft-tls), which must exist BEFORE vault
+#    starts. Without Vault (--skip-vault) site-issuer signs every NICo
+#    service certificate in place of vault-nico-issuer.
 # ---------------------------------------------------------------------------
-_SETUP_PHASE="[2/6] cert-manager + Vault TLS bootstrap"
-echo "=== [2/6] cert-manager + Vault TLS bootstrap ==="
+if "${INSTALL_VAULT}"; then
+    _SETUP_PHASE="[2/6] cert-manager + Vault TLS bootstrap"
+else
+    _SETUP_PHASE="[2/6] cert-manager + site CA bootstrap"
+fi
+echo "=== ${_SETUP_PHASE} ==="
 helmfile sync -l name=cert-manager
 
 kubectl apply --server-side -f operators/crds/ \
     --field-manager=helmfile --force-conflicts
 
-kubectl create namespace "${VAULT_NS}" 2>/dev/null || true
+_SITE_CA_RENDER_ARGS=(
+    --show-only templates/site-root-certificate.yaml
+)
+# Render in the same mode phase 5 installs, so the chart's toggles are read as
+# that sync reads them.
+_SITE_CA_MODE_ARGS=()
+if "${INSTALL_VAULT}"; then
+    kubectl create namespace "${VAULT_NS}" 2>/dev/null || true
+else
+    _SITE_CA_MODE_ARGS+=(--set vault.enabled=false)
+fi
+# templates/site-issuer.yaml renders nothing while certManager.siteIssuer.create
+# is false, or vault.tls.create is false on a Vault site (a site that provides
+# ClusterIssuer/site-issuer itself), and `helm template --show-only` fails on a
+# template that rendered nothing, so it is selected only when it renders.
+_SITE_ISSUER_RENDERED=true
+if _site_issuer_probe="$(helm template nico-prereqs . --namespace nico-system \
+        ${_SITE_CA_MODE_ARGS[@]+"${_SITE_CA_MODE_ARGS[@]}"} \
+        --show-only templates/site-issuer.yaml 2>&1)"; then
+    _SITE_CA_RENDER_ARGS+=(--show-only templates/site-issuer.yaml)
+elif grep -q 'could not find template' <<<"${_site_issuer_probe}"; then
+    _SITE_ISSUER_RENDERED=false
+    echo "templates/site-issuer.yaml renders nothing with the chart's toggles (certManager.siteIssuer.create false, or vault.tls.create false on a Vault site): not rendering site-issuer; ClusterIssuer/site-issuer must already exist"
+else
+    printf '%s\n' "${_site_issuer_probe}" >&2
+    exit 1
+fi
+if "${INSTALL_VAULT}"; then
+    _SITE_CA_RENDER_ARGS+=(--show-only templates/vault-tls-certs.yaml)
+fi
 helm template nico-prereqs . \
     --namespace nico-system \
     --set imagePullSecrets.ngcNicoPull="${REGISTRY_PULL_SECRET:-}" \
-    --show-only templates/site-root-certificate.yaml \
-    --show-only templates/vault-tls-certs.yaml \
+    "${_SITE_CA_RENDER_ARGS[@]}" ${_SITE_CA_MODE_ARGS[@]+"${_SITE_CA_MODE_ARGS[@]}"} \
     | kubectl apply --server-side --field-manager=helm -f -
 
 kubectl wait --for=condition=Ready certificate/site-root \
     -n "${CERT_MANAGER_NS}" --timeout=120s
-kubectl wait --for=condition=Ready certificate/nicoca-vault-client \
-    -n "${VAULT_NS}" --timeout=120s
-kubectl wait --for=condition=Ready certificate/vault-raft-tls \
-    -n "${VAULT_NS}" --timeout=120s
-echo "Vault TLS bootstrap complete"
+if "${INSTALL_VAULT}"; then
+    kubectl wait --for=condition=Ready certificate/nicoca-vault-client \
+        -n "${VAULT_NS}" --timeout=120s
+    kubectl wait --for=condition=Ready certificate/vault-raft-tls \
+        -n "${VAULT_NS}" --timeout=120s
+    echo "Vault TLS bootstrap complete"
+elif "${_SITE_ISSUER_RENDERED}"; then
+    echo "Site CA bootstrap complete (site-root CA, site-issuer ClusterIssuer)"
+else
+    echo "Site CA bootstrap complete (site-root CA; site-issuer is provided by the site)"
+fi
 
 # ---------------------------------------------------------------------------
-# 3. vault — TLS secrets exist, pods can start
+# 3. vault — TLS secrets exist, pods can start. Skipped with --skip-vault; an
+#    existing vault release is left as it is (never destroyed).
 # ---------------------------------------------------------------------------
 _SETUP_PHASE="[3/6] vault install"
-echo "=== [3/6] vault ==="
-helmfile sync -l name=vault \
-    --set server.dataStorage.storageClass="${NICO_STORAGE_CLASS}" \
-    --set server.auditStorage.storageClass="${NICO_STORAGE_CLASS}"
+if ! "${INSTALL_VAULT}"; then
+    echo "=== [3/6] vault === Skipped (Vault disabled via --skip-vault / NICO_SKIP_VAULT / NICO_INSTALL_VAULT=false)"
+else
+    echo "=== [3/6] vault ==="
+    helmfile sync -l name=vault \
+        --set server.dataStorage.storageClass="${NICO_STORAGE_CLASS}" \
+        --set server.auditStorage.storageClass="${NICO_STORAGE_CLASS}"
 
-# updateStrategy is OnDelete: a changed pod template (for example the probe
-# settings in operators/values/vault.yaml) reaches a running pod only when that
-# pod is deleted, so name the pods that still run the previous revision. The
-# controller can lag helmfile sync, so wait (up to 60s) for it to observe the
-# current generation first. Best effort: a missing StatefulSet is skipped, and
-# an unobserved generation or a failed query reports the revision as unknown
-# instead of comparing pods against stale status.
-vault_rev_unknown=""
-vault_gen=""
-vault_observed_gen=""
-for _vault_i in $(seq 1 12); do
-    if vault_gen_out="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
-        -o jsonpath='{.metadata.generation} {.status.observedGeneration}' 2>/dev/null)"; then
-        read -r vault_gen vault_observed_gen <<<"${vault_gen_out}"
-        vault_rev_unknown=""
-        if [[ -z "${vault_gen}" || "${vault_gen}" == "${vault_observed_gen}" ]]; then
-            break
+    # updateStrategy is OnDelete: a changed pod template (for example the probe
+    # settings in operators/values/vault.yaml) reaches a running pod only when that
+    # pod is deleted, so name the pods that still run the previous revision. The
+    # controller can lag helmfile sync, so wait (up to 60s) for it to observe the
+    # current generation first. Best effort: a missing StatefulSet is skipped, and
+    # an unobserved generation or a failed query reports the revision as unknown
+    # instead of comparing pods against stale status.
+    vault_rev_unknown=""
+    vault_gen=""
+    vault_observed_gen=""
+    for _vault_i in $(seq 1 12); do
+        if vault_gen_out="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+            -o jsonpath='{.metadata.generation} {.status.observedGeneration}' 2>/dev/null)"; then
+            read -r vault_gen vault_observed_gen <<<"${vault_gen_out}"
+            vault_rev_unknown=""
+            if [[ -z "${vault_gen}" || "${vault_gen}" == "${vault_observed_gen}" ]]; then
+                break
+            fi
+            echo "  vault StatefulSet generation ${vault_gen} not yet observed (${_vault_i}/12), retrying in 5s..."
+        else
+            vault_gen=""
+            vault_observed_gen=""
+            vault_rev_unknown="kubectl query failed"
+            echo "  vault StatefulSet query failed (${_vault_i}/12), retrying in 5s..."
         fi
-        echo "  vault StatefulSet generation ${vault_gen} not yet observed (${_vault_i}/12), retrying in 5s..."
-    else
-        vault_gen=""
-        vault_observed_gen=""
-        vault_rev_unknown="kubectl query failed"
-        echo "  vault StatefulSet query failed (${_vault_i}/12), retrying in 5s..."
+        sleep 5
+    done
+    vault_update_rev=""
+    vault_stale_pods=""
+    if [[ -n "${vault_gen}" && "${vault_gen}" != "${vault_observed_gen}" ]]; then
+        vault_rev_unknown="generation ${vault_gen} not observed within 60s"
+    elif [[ -z "${vault_rev_unknown}" ]]; then
+        vault_update_rev="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+            -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || vault_rev_unknown="kubectl query failed"
+        vault_stale_pods="$(kubectl -n "${VAULT_NS}" get pods -l app.kubernetes.io/name=vault,component=server \
+            -o jsonpath="{range .items[?(@.metadata.labels.controller-revision-hash!='${vault_update_rev}')]}{.metadata.name} {end}" \
+            2>/dev/null)" || vault_rev_unknown="kubectl query failed"
     fi
-    sleep 5
-done
-vault_update_rev=""
-vault_stale_pods=""
-if [[ -n "${vault_gen}" && "${vault_gen}" != "${vault_observed_gen}" ]]; then
-    vault_rev_unknown="generation ${vault_gen} not observed within 60s"
-elif [[ -z "${vault_rev_unknown}" ]]; then
-    vault_update_rev="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
-        -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || vault_rev_unknown="kubectl query failed"
-    vault_stale_pods="$(kubectl -n "${VAULT_NS}" get pods -l app.kubernetes.io/name=vault,component=server \
-        -o jsonpath="{range .items[?(@.metadata.labels.controller-revision-hash!='${vault_update_rev}')]}{.metadata.name} {end}" \
-        2>/dev/null)" || vault_rev_unknown="kubectl query failed"
-fi
-if [[ -n "${vault_rev_unknown}" ]]; then
-    echo "WARNING: could not verify the Vault StatefulSet revision (${vault_rev_unknown})."
-    echo "         If operators/values/vault.yaml changed the pod template, roll the pods"
-    echo "         as described in docs/manuals/upgrade.md."
-elif [[ -n "${vault_update_rev}" && -n "${vault_stale_pods// /}" ]]; then
-    echo "WARNING: Vault pods still running the previous StatefulSet revision: ${vault_stale_pods% }"
-    echo "         After this run, delete them one at a time, standbys first, wait for Running,"
-    echo "         and run helm-prereqs/unseal_vault.sh after each one. See docs/manuals/upgrade.md."
+    if [[ -n "${vault_rev_unknown}" ]]; then
+        echo "WARNING: could not verify the Vault StatefulSet revision (${vault_rev_unknown})."
+        echo "         If operators/values/vault.yaml changed the pod template, roll the pods"
+        echo "         as described in docs/manuals/upgrade.md."
+    elif [[ -n "${vault_update_rev}" && -n "${vault_stale_pods// /}" ]]; then
+        echo "WARNING: Vault pods still running the previous StatefulSet revision: ${vault_stale_pods% }"
+        echo "         After this run, delete them one at a time, standbys first, wait for Running,"
+        echo "         and run helm-prereqs/unseal_vault.sh after each one. See docs/manuals/upgrade.md."
+    fi
 fi
 
 # ---------------------------------------------------------------------------
 # 4. Initialize + unseal vault
 #    Also sets up nico-system namespace (Helm labels + ssh-host-key)
-#    so the NICo prereqs helm install can adopt it.
+#    so the NICo prereqs helm install can adopt it. Without Vault the
+#    namespace is prepared here instead: unseal_vault.sh is what normally
+#    labels it, and bootstrap_ssh_host_key.sh writes into it without
+#    creating it.
 # ---------------------------------------------------------------------------
-_SETUP_PHASE="[4/6] vault init + unseal"
-echo "=== [4/6] unseal vault ==="
-./unseal_vault.sh
+if "${INSTALL_VAULT}"; then
+    _SETUP_PHASE="[4/6] vault init + unseal"
+    echo "=== [4/6] unseal vault ==="
+    ./unseal_vault.sh
+else
+    _SETUP_PHASE="[4/6] nico-system namespace + SSH host key"
+    echo "=== [4/6] nico-system namespace + SSH host key ==="
+    # Same ownership markers as unseal_vault.sh, so the nico-prereqs release
+    # (phase 5) adopts the namespace instead of failing on an unowned one.
+    kubectl create namespace nico-system 2>/dev/null || true
+    kubectl label namespace nico-system \
+        app.kubernetes.io/managed-by=Helm --overwrite
+    kubectl annotate namespace nico-system \
+        meta.helm.sh/release-name=nico-prereqs \
+        meta.helm.sh/release-namespace=nico-system \
+        --overwrite
+fi
 ./bootstrap_ssh_host_key.sh
 
 # ---------------------------------------------------------------------------
 # 5. external-secrets + NICo prereqs
+#    nico-prereqs renders its Vault resources from NICO_PREREQS_VAULT_ENABLED
+#    (values/nico-prereqs-dynamic.yaml.gotmpl). Without Vault they go away,
+#    except while something still consumes them: a Deployment that mounts
+#    vault-cluster-info and the token Secrets, or a Certificate that
+#    vault-nico-issuer renews through the cert-manager Vault-auth
+#    ServiceAccount and token. Dropping them first would keep those pods from
+#    restarting and those certificates from renewing, so they are retained
+#    until no consumer references Vault (_release_retained_vault_resources,
+#    at the end of the run).
 # ---------------------------------------------------------------------------
+# Drops the Vault resources that phase 5 retained once nothing references
+# Vault any more, re-probing the cluster at the end of the run (preflight.sh
+# _vault_consumers); otherwise lists what still does and keeps them. A failed
+# re-probe or a failed sync keeps them too and never fails the run, which is
+# complete by then. Reads _VAULT_RESOURCES_RETAINED.
+_release_retained_vault_resources() {
+    local _remaining
+    "${_VAULT_RESOURCES_RETAINED}" || return 0
+    if ! _remaining="$(_vault_consumers)"; then
+        echo "WARNING: could not re-inspect the Vault consumers; the Vault resources stay in nico-prereqs."
+        echo "         Rerun setup.sh --skip-vault once cluster access is back to remove them."
+        return 0
+    fi
+    if [[ -z "${_remaining}" ]]; then
+        echo "No consumer references Vault any more: removing the Vault resources from nico-prereqs..."
+        export NICO_PREREQS_VAULT_ENABLED=false
+        # The run is complete at this point, so a failed sync keeps the (unused)
+        # resources and says so instead of ending the run as a setup failure.
+        if (cd "${SCRIPT_DIR}" && helmfile sync -l name=nico-prereqs); then
+            echo "Vault resources removed from nico-prereqs"
+        else
+            echo "WARNING: the nico-prereqs sync that removes the Vault resources failed, so they stay in the release;" >&2
+            echo "         everything else in this run is complete. Rerun setup.sh --skip-vault to remove them." >&2
+        fi
+    else
+        echo "These still reference Vault, so the Vault resources stay in nico-prereqs:"
+        printf '%s\n' "${_remaining}" | sed 's/^/  /'
+        echo "A later setup.sh --skip-vault run that redeploys them (or reissues those Certificates from"
+        echo "site-issuer) removes the Vault resources."
+    fi
+}
+
+# Reads the live AppRole credentials in nico-vault-approle-tokens and the token
+# in nico-vault-token and exports them for the retained nico-prereqs sync
+# (values/nico-prereqs-dynamic.yaml.gotmpl renders them in place of the chart's
+# empty placeholders and of the vaultroottoken read, so the sync does not need
+# the vault namespace). Only a missing Secret means there is nothing to carry
+# across; any other failure returns 1 so the caller stops before a sync that
+# would blank credentials this run could not read. Runs with xtrace off:
+# --debug (bash -x) would otherwise print the decoded secret_id and the token.
+_carry_retained_approle_credentials() {
+    local _restore_xtrace=false _rc=0
+    if [[ "$-" == *x* ]]; then
+        set +x
+        _restore_xtrace=true
+    fi
+    _carry_retained_approle_credentials_untraced || _rc=$?
+    if "${_restore_xtrace}"; then
+        set -x
+    fi
+    return "${_rc}"
+}
+_carry_retained_approle_credentials_untraced() {
+    local _approle_err _approle_out _role_id_b64="" _secret_id_b64=""
+    _approle_err="$(mktemp)"
+    # The two values are separated by a character base64 never contains, so an
+    # empty role_id cannot shift the secret_id into its place.
+    if _approle_out="$(kubectl get secret nico-vault-approle-tokens -n nico-system \
+            -o jsonpath='{.data.VAULT_ROLE_ID}{"|"}{.data.VAULT_SECRET_ID}' 2>"${_approle_err}")"; then
+        IFS='|' read -r _role_id_b64 _secret_id_b64 <<<"${_approle_out}"
+    elif ! grep -q 'NotFound' "${_approle_err}"; then
+        cat "${_approle_err}" >&2
+        rm -f "${_approle_err}"
+        echo "Error: could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync; fix cluster access and rerun" >&2
+        return 1
+    fi
+    rm -f "${_approle_err}"
+    # Each key is carried on its own, so a Secret that holds only one of them
+    # keeps that one. A value that does not decode, or decodes to nothing, must
+    # not reach the render as an empty credential: that would reset the live key.
+    local _key _b64 _decoded _carried=() _missing=()
+    for _key in VAULT_ROLE_ID VAULT_SECRET_ID; do
+        _b64="${_role_id_b64}"
+        [[ "${_key}" == VAULT_SECRET_ID ]] && _b64="${_secret_id_b64}"
+        if [[ -z "${_b64}" ]]; then
+            _missing+=("${_key}")
+            continue
+        fi
+        if ! _decoded="$(base64 -d <<<"${_b64}" 2>/dev/null)" || [[ -z "${_decoded}" ]]; then
+            unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID NICO_PREREQS_VAULT_TOKEN_B64
+            echo "Error: nico-vault-approle-tokens holds a ${_key} value that does not decode as base64; fix the Secret and rerun" >&2
+            return 1
+        fi
+        if [[ "${_key}" == VAULT_ROLE_ID ]]; then
+            export NICO_PREREQS_APPROLE_ROLE_ID="${_decoded}"
+        else
+            export NICO_PREREQS_APPROLE_SECRET_ID="${_decoded}"
+        fi
+        _carried+=("${_key}")
+    done
+    if [[ ${#_carried[@]} -eq 2 ]]; then
+        echo "Carrying the live AppRole credentials in nico-vault-approle-tokens across the sync"
+    elif [[ ${#_carried[@]} -eq 1 ]]; then
+        echo "WARNING: nico-vault-approle-tokens holds no ${_missing[0]}, so the sync renders the chart's empty placeholder for it and carries ${_carried[0]} across; health-check.sh reports ${_missing[0]} as missing until a run with Vault installed re-creates it"
+    else
+        echo "WARNING: nico-vault-approle-tokens holds no AppRole credentials, so the sync renders the chart's empty placeholders; health-check.sh reports its keys as missing until a run with Vault installed re-creates them"
+    fi
+    # nico-vault-token is re-rendered by the sync too, from vaultroottoken in the
+    # vault namespace, which a site on its way off Vault may already have
+    # removed. The token the consumers already hold is carried instead (as the
+    # base64 the Secret stores); the render reads vaultroottoken only without it.
+    local _token_err _token_b64=""
+    _token_err="$(mktemp)"
+    if _token_b64="$(kubectl get secret nico-vault-token -n nico-system -o jsonpath='{.data.token}' 2>"${_token_err}")"; then
+        if [[ -n "${_token_b64}" ]]; then
+            export NICO_PREREQS_VAULT_TOKEN_B64="${_token_b64}"
+            echo "Carrying the existing nico-vault-token across the sync"
+        else
+            echo "WARNING: nico-vault-token holds no token, so the sync reads vaultroottoken in the vault namespace instead"
+        fi
+    elif grep -q 'NotFound' "${_token_err}"; then
+        echo "nico-vault-token is absent, so the sync reads vaultroottoken in the vault namespace"
+    else
+        cat "${_token_err}" >&2
+        rm -f "${_token_err}"
+        echo "Error: could not read nico-vault-token to carry it across the nico-prereqs sync; fix cluster access and rerun" >&2
+        return 1
+    fi
+    rm -f "${_token_err}"
+}
+
 _SETUP_PHASE="[5/6] external-secrets + NICo prereqs"
 echo "=== [5/6] external-secrets + NICo prereqs ==="
+NICO_PREREQS_VAULT_ENABLED="${INSTALL_VAULT}"
+_VAULT_RESOURCES_RETAINED=false
+_NICO_PREREQS_SYNC_ARGS=()
+if ! "${INSTALL_VAULT}"; then
+    # A failed probe must never pass as "no consumers": that would drop
+    # resources a running consumer needs.
+    if ! _VAULT_CONSUMERS="$(_vault_consumers)"; then
+        echo "Error: could not inspect the Vault consumers (Deployments in nico-system and cert-manager Certificates) to decide whether the Vault resources can go; fix cluster access and rerun" >&2
+        exit 1
+    fi
+    if [[ -n "${_VAULT_CONSUMERS}" ]]; then
+        NICO_PREREQS_VAULT_ENABLED=true
+        _VAULT_RESOURCES_RETAINED=true
+        # The retained resources only have to exist for those consumers. The
+        # vault-pki-config Job is a post-upgrade hook that waits for an unsealed
+        # Vault, up to the release timeout, to configure a PKI nothing new will
+        # use, so it is left out of this sync; the completed Job from the Vault
+        # install stays, because Helm does not track hooks in the release.
+        _NICO_PREREQS_SYNC_ARGS+=(--set vault.configJob.enabled=false)
+        # That Job's patch step is also what writes the real AppRole credentials
+        # into nico-vault-approle-tokens after every sync re-applies the chart's
+        # empty placeholders, so the live values, and the existing token in
+        # nico-vault-token, are read now and handed to the render.
+        _carry_retained_approle_credentials || exit 1
+        echo "These still reference Vault:"
+        printf '%s\n' "${_VAULT_CONSUMERS}" | sed 's/^/  /'
+        echo "Keeping the Vault resources in nico-prereqs (the Vault ConfigMap and token Secrets, and the"
+        echo "cert-manager Vault-auth ServiceAccount and token that vault-nico-issuer renews through) until"
+        echo "no consumer references Vault."
+    fi
+fi
+export NICO_PREREQS_VAULT_ENABLED
 helmfile sync -l name=external-secrets
-helmfile sync -l name=nico-prereqs
+helmfile sync -l name=nico-prereqs ${_NICO_PREREQS_SYNC_ARGS[@]+"${_NICO_PREREQS_SYNC_ARGS[@]}"}
+unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID NICO_PREREQS_VAULT_TOKEN_B64
 
 # ---------------------------------------------------------------------------
 # Wait for postgres-operator to provision the cluster and ESO to sync creds
@@ -1283,16 +1547,20 @@ until kubectl get secret nico-system.nico.nico-pg-cluster.credentials \
 done
 echo "DB credentials ready"
 
-echo "Waiting for Vault AppRole credentials to be synced by ESO..."
-until ROLE_ID_B64="$(kubectl get secret nico-vault-approle-tokens \
-        -n nico-system -o jsonpath='{.data.VAULT_ROLE_ID}' 2>/dev/null)" && \
-      SECRET_ID_B64="$(kubectl get secret nico-vault-approle-tokens \
-        -n nico-system -o jsonpath='{.data.VAULT_SECRET_ID}' 2>/dev/null)" && \
-      [[ -n "${ROLE_ID_B64}" && -n "${SECRET_ID_B64}" ]]; do
-    echo "  AppRole credentials not yet synced — retrying in 5s..."
-    sleep 5
-done
-echo "Vault AppRole credentials ready"
+# nico-prereqs renders the AppRole Secret only while vault.enabled, so this
+# wait would never end without Vault.
+if "${INSTALL_VAULT}"; then
+    echo "Waiting for Vault AppRole credentials to be synced by ESO..."
+    until ROLE_ID_B64="$(kubectl get secret nico-vault-approle-tokens \
+            -n nico-system -o jsonpath='{.data.VAULT_ROLE_ID}' 2>/dev/null)" && \
+          SECRET_ID_B64="$(kubectl get secret nico-vault-approle-tokens \
+            -n nico-system -o jsonpath='{.data.VAULT_SECRET_ID}' 2>/dev/null)" && \
+          [[ -n "${ROLE_ID_B64}" && -n "${SECRET_ID_B64}" ]]; do
+        echo "  AppRole credentials not yet synced — retrying in 5s..."
+        sleep 5
+    done
+    echo "Vault AppRole credentials ready"
+fi
 
 # The commit helm-prereqs/<name> is pinned to: the gitlink in a git checkout of
 # this repo, else the helm-prereqs/<name>.pin file that ships with the packaged
@@ -1672,7 +1940,8 @@ fi
 #     :8801 with component-manager backends set to rms; this phase provides
 #     that server. Needs nico-pg-cluster + ESO (5: the rms database, user, and
 #     rms-db-eso sync are created by nico-prereqs when NICO_INSTALL_RMS=true)
-#     and the vault-nico-issuer ClusterIssuer (5) for the mTLS certificate.
+#     and a ClusterIssuer for the mTLS certificate: vault-nico-issuer (5), or
+#     site-issuer (2) when Vault is skipped.
 #     Runs before Core (6) only so rack operations work as soon as Core is up;
 #     Core's RMS client is lazy and tolerates RMS arriving later.
 # ---------------------------------------------------------------------------
@@ -1758,6 +2027,18 @@ if "${INSTALL_RMS}"; then
         --set-string "apiServer.image.repository=${NICO_RMS_IMAGE_REPO}"
         --set-string "global.image.tag=${NICO_RMS_IMAGE_TAG}"
     )
+    # values/rms.yaml names vault-nico-issuer; without Vault the cert-manager
+    # CA ClusterIssuer site-issuer (phase 2) signs rms-api-server-certificate,
+    # pinned with its kind and group like the Core, Flow, and site-agent issuers.
+    _RMS_ISSUER="vault-nico-issuer"
+    if ! "${INSTALL_VAULT}"; then
+        _RMS_ISSUER="site-issuer"
+        NICO_RMS_CMD+=(
+            --set "certificates.issuerRef.name=${_RMS_ISSUER}"
+            --set "certificates.issuerRef.kind=ClusterIssuer"
+            --set "certificates.issuerRef.group=cert-manager.io"
+        )
+    fi
     [[ -n "${NICO_RMS_NGC_API_KEY}" ]] && \
         NICO_RMS_CMD+=(--set "global.imagePullSecrets[0].name=rms-pull-secret")
     "${WITH_OBSERVABILITY}" && \
@@ -1773,13 +2054,14 @@ if "${INSTALL_RMS}"; then
 
     # The RMS binary refuses to start unless ca.crt is present in the TLS
     # Secret (it is the client-CA for mTLS). cert-manager's Vault issuer does
-    # not populate ca.crt under every role/chain configuration, so verify it
-    # here with a targeted message rather than letting the pod crashloop.
+    # not populate ca.crt under every role/chain configuration (the CA issuer
+    # always does), so verify it here with a targeted message rather than
+    # letting the pod crashloop.
     if [[ -z "$(kubectl get secret rms-api-server-certificate \
             -n "${_RMS_NS}" -o jsonpath='{.data.ca\.crt}' 2>/dev/null)" ]]; then
         echo "Error: the issued Secret rms-api-server-certificate has no ca.crt."
         echo "  → RMS requires ca.crt as the mTLS client CA and will not start without it."
-        echo "  → Check the vault-nico-issuer CA chain configuration, or pre-create a"
+        echo "  → Check the ${_RMS_ISSUER} CA chain configuration, or pre-create a"
         echo "    Secret with tls.crt/tls.key/ca.crt and set apiServer.tls.existingSecret."
         exit 1
     fi
@@ -1921,6 +2203,25 @@ else
         --set-string "global.image.tag=${NICO_CORE_IMAGE_TAG}"
         --timeout 600s --wait
     )
+    if ! "${INSTALL_VAULT}"; then
+        # Without Vault there is no vault-nico-issuer and nico-api must not
+        # build a Vault client: every service certificate comes from the
+        # cert-manager CA issuer site-issuer (pinned with its kind and group,
+        # so a values file naming another kind cannot point the name at a
+        # namespaced Issuer that does not exist), Scout, DPU, and UFM certificates
+        # go through cert-manager CertificateRequests (both flags are needed,
+        # whatever the site config says about InfiniBand), and the nico-api
+        # chart renders no Vault env or ConfigMap. preflight.sh checked the
+        # Core values against this contract (check-vault-free.py).
+        NICO_CORE_CMD+=(
+            --set "global.certificate.issuerRef.name=site-issuer"
+            --set "global.certificate.issuerRef.kind=ClusterIssuer"
+            --set "global.certificate.issuerRef.group=cert-manager.io"
+            --set "global.certificate.useCertManager=true"
+            --set "global.certificate.useCertManagerUfm=true"
+            --set "nico-api.vault.enabled=false"
+        )
+    fi
     if "${INSTALL_DPF}"; then
         # Create the nico-api-dpf Role/RoleBinding in dpf-operator-system so
         # carbide-api can manage DPF CRs (chart template dpf-rbac.yaml).
@@ -2124,6 +2425,8 @@ echo "=== [7/7] NICo REST ==="
 
 if "${SKIP_REST}"; then
     echo "Skipped (--skip-rest flag set)."
+    # Vault resources retained in phase 5 come out once nothing references Vault.
+    _release_retained_vault_resources
     echo ""
     echo "=== Setup complete (NICo REST skipped) ==="
     _SETUP_PHASE="complete"
@@ -2579,6 +2882,8 @@ if [[ "${_nico_reply:-Y}" =~ ^[Yy]$ ]]; then
 else
     rm -f "${_NICO_REST_CREDS_FILE}"
     echo "Skipped NICo REST. Re-run with -y or answer Y to deploy."
+    # Vault resources retained in phase 5 come out once nothing references Vault.
+    _release_retained_vault_resources
     echo ""
     echo "=== Setup complete (NICo REST skipped) ==="
     exit 0
@@ -2598,7 +2903,8 @@ fi
 #   - Temporal `flow` namespace (created in phase 7f above)
 #   - nico-rest-ca-issuer ClusterIssuer (installed by phase 7b — issues the
 #     temporal-client-certs)
-#   - vault-nico-issuer ClusterIssuer (issues the SPIFFE cert)
+#   - vault-nico-issuer ClusterIssuer (issues the SPIFFE cert; site-issuer
+#     takes its place with --skip-vault)
 #
 # Same pre-apply-cert dance as the site-agent: render the Certificate(s) ahead
 # of the helm install so cert-manager has time to issue them and the pod doesn't
@@ -2617,6 +2923,17 @@ NICO_FLOW_ARGS=(
     ## NICO_REST_IMAGE_TAG rather than NICO_CORE_IMAGE_TAG.
     --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
 )
+# Without Vault the Flow SPIFFE certificate is signed by site-issuer, the
+# same CA ClusterIssuer as the Core certificates (kind and group pinned
+# with the name); temporalCert keeps nico-rest-ca-issuer. --set wins over
+# the --flow-values file.
+if ! "${INSTALL_VAULT}"; then
+    NICO_FLOW_ARGS+=(
+        --set "global.certificate.issuerRef.name=site-issuer"
+        --set "global.certificate.issuerRef.kind=ClusterIssuer"
+        --set "global.certificate.issuerRef.group=cert-manager.io"
+    )
+fi
 
 # Site-specific Flow values. Every run resets the release to the chart
 # defaults plus the arguments above, so overrides must live in this file.
@@ -2862,6 +3179,16 @@ NICO_SITE_AGENT_ARGS=(
     --set global.image.repository="${NICO_IMAGE_REGISTRY}"
     --set global.image.tag="${NICO_REST_IMAGE_TAG}"
 )
+# values/nico-site-agent.yaml names vault-nico-issuer; without Vault the
+# client certificate comes from site-issuer, like the Core certificates
+# (kind and group pinned with the name).
+if ! "${INSTALL_VAULT}"; then
+    NICO_SITE_AGENT_ARGS+=(
+        --set "global.certificate.issuerRef.name=site-issuer"
+        --set "global.certificate.issuerRef.kind=ClusterIssuer"
+        --set "global.certificate.issuerRef.group=cert-manager.io"
+    )
+fi
 if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
     NICO_SITE_AGENT_ARGS+=(
         --set "global.imagePullSecrets[0].name=image-pull-secret"
@@ -2876,10 +3203,12 @@ echo "=== [7i/7] NICo REST site-agent (site UUID: ${NICO_SITE_UUID}) ==="
 # both the Certificate and the StatefulSet simultaneously, and the pod's
 # GetInitialCertMD5() call fails because the secret hasn't been projected yet.
 echo "Pre-applying NICo gRPC client certificate..."
-# Issue the cert from vault-nico-issuer (same CA as the NICo Core API) so that:
-#   1. the NICo Core API trusts the site-agent's client cert (Vault PKI CA)
-#   2. the ca.crt in the secret is the Vault PKI CA, which the site-agent uses
-#      as ServerCAPath to verify the NICo Core API server cert (also Vault-signed)
+# Issue the cert from the ClusterIssuer that also signs the NICo Core API
+# certificate (vault-nico-issuer, or site-issuer with --skip-vault; both sign
+# with the site-root CA) so that:
+#   1. the NICo Core API trusts the site-agent's client cert (same CA)
+#   2. the ca.crt in the secret is that CA, which the site-agent uses as
+#      ServerCAPath to verify the NICo Core API server cert
 # Use the same values file as the install step so the rendered Certificate is
 # byte-for-byte identical — preventing cert-manager from re-issuing the cert.
 helm template nico-rest-site-agent "${NICO_SITE_AGENT_CHART}" \
@@ -2930,29 +3259,38 @@ echo "NICo REST site-agent deployed and bootstrap complete (FLOW_GRPC_ENABLED=${
 # fails for any transient reason the NicoClient stays nil permanently and
 # all inventory activities panic.  Detect failure and restart the pod so it
 # gets a fresh attempt with the same correct config.
-echo "Verifying site-agent NICo Core gRPC connection..."
-_CONNECTED=false
-for _i in $(seq 1 24); do
-    _POD="$(kubectl get pods -n nico-rest \
-        -l "app.kubernetes.io/name=nico-rest-site-agent" \
-        -o name 2>/dev/null | head -1 || true)"
-    if [ -n "${_POD}" ] && \
-       kubectl logs -n nico-rest "${_POD}" --since=5m 2>/dev/null \
-           | grep -q "NicoClient: successfully connected to server"; then
-        _CONNECTED=true
-        echo "Site-agent successfully connected to NICo Core gRPC"
-        break
-    fi
-    echo "  Waiting for gRPC connection (${_i}/24)..."
-    sleep 5
-done
+_wait_for_site_agent_connection() {
+    local _i _pod
+    for _i in $(seq 1 24); do
+        _pod="$(kubectl get pods -n nico-rest \
+            -l "app.kubernetes.io/name=nico-rest-site-agent" \
+            -o name 2>/dev/null | head -1 || true)"
+        # Consume the log stream so pipefail cannot mistake SIGPIPE for failure.
+        if [ -n "${_pod}" ] && \
+           kubectl logs -n nico-rest "${_pod}" --since=5m 2>/dev/null \
+               | grep -F "CoreGrpcClient: Successfully connected to server" >/dev/null; then
+            echo "Site-agent successfully connected to NICo Core gRPC"
+            return 0
+        fi
+        echo "  Waiting for gRPC connection (${_i}/24)..."
+        sleep 5
+    done
+    return 1
+}
 
-if [ "${_CONNECTED}" = "false" ]; then
+echo "Verifying site-agent NICo Core gRPC connection..."
+if ! _wait_for_site_agent_connection; then
     echo "WARNING: site-agent did not confirm gRPC connection — restarting pod for retry..."
     kubectl rollout restart statefulset/nico-rest-site-agent -n nico-rest
     kubectl rollout status statefulset/nico-rest-site-agent -n nico-rest --timeout=120s
-    echo "Site-agent pod restarted — gRPC connection will be retried"
+    if ! _wait_for_site_agent_connection; then
+        echo "WARNING: Could not confirm the site-agent's NICo Core gRPC connection after restart. Setup will continue; verify connectivity manually." >&2
+    fi
 fi
+
+echo ""
+# Vault resources retained in phase 5 come out after nothing references Vault.
+_release_retained_vault_resources
 
 echo ""
 echo "========================================================================="

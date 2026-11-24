@@ -77,7 +77,7 @@ pub(super) fn tar_router(
                 TarGzOption::Disk(path) => {
                     _owned_gz_data = Some(
                         std::fs::read(path)
-                            .wrap_err(format!("cannot read file by path: {path:?}"))?,
+                            .wrap_err_with(|| format!("cannot read file by path: {path:?}"))?,
                     );
                     GzDecoder::new(_owned_gz_data.as_ref().unwrap().reader())
                 }
@@ -86,11 +86,7 @@ pub(super) fn tar_router(
             let mut entries = HashMap::new();
             for entry in tar::Archive::new(gz_decoder).entries()? {
                 let mut entry = entry?;
-                let name = entry
-                    .path()?
-                    .display()
-                    .to_string()
-                    .replace("/index.json", "");
+                let name = entry.path()?.to_string_lossy().replace("/index.json", "");
                 if name.ends_with('/') {
                     // ignore directories
                     continue;

@@ -21,11 +21,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
+use model::expected_machine::HostDpuPolicy;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgPool;
+use model::site_explorer::PreingestionState;
+use sqlx::{PgConnection, PgPool};
 
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
@@ -36,8 +39,10 @@ mod machine_creator;
 mod power_shelf_creator;
 mod switch_creator;
 
-pub(super) use machine_creator::ConfiguredIngestionCandidate;
 pub use machine_creator::MachineCreator;
+pub(super) use machine_creator::{
+    ConfiguredIngestionCandidate, attempt_deadline, reconcile_host_admin_addresses_after_commit,
+};
 pub use power_shelf_creator::PowerShelfCreator;
 pub use switch_creator::SwitchCreator;
 
@@ -54,6 +59,9 @@ pub struct Config {
     /// How often the switch and power shelf pass runs while hosts are still
     /// being created; zero disables the extra passes.
     pub switch_and_power_shelf_pass_interval: Duration,
+    /// Deadline of one managed host creation attempt once it holds its
+    /// admission permit.
+    pub machine_creation_timeout: Duration,
     /// Whether power shelf creation is enabled at runtime.
     pub create_power_shelves: Arc<AtomicBool>,
     /// Maximum number of power shelves created in one run.
@@ -64,6 +72,8 @@ pub struct Config {
     pub switches_created_per_run: u64,
     /// Whether host interfaces can use IPv6-only admin segments.
     pub admin_fnn_enabled: bool,
+    /// Site policy inherited by hosts without an explicit Nic or Ignore policy.
+    pub dpu_policy: Option<HostDpuPolicy>,
     /// How long retained boot interfaces remain applicable; `None` means forever.
     pub retained_boot_interface_window: Option<chrono::Duration>,
 }
@@ -77,22 +87,36 @@ pub(super) struct InventoryCreator {
 }
 
 impl InventoryCreator {
+    /// Stop new provider preparation on Site Explorer shutdown while existing
+    /// exploration and creation transactions retain their normal drain behavior.
+    pub(super) fn set_preparation_cancel_token(
+        &mut self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        self.machine_creator.preparation_cancel_token = cancel_token;
+    }
+
+    #[allow(clippy::too_many_arguments)] // The creator shares its parent's dependencies.
     pub(super) fn new(
         database_connection: PgPool,
         config: Config,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         dpf_enabled_at_site: bool,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
             machine_creator: MachineCreator::new(
                 database_connection.clone(),
                 config.clone(),
+                resource_pool_registry,
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
                 dpf_enabled_at_site,
+                instrumentation,
             ),
             power_shelf_creator: PowerShelfCreator::new(
                 database_connection.clone(),
@@ -103,14 +127,13 @@ impl InventoryCreator {
         }
     }
 
-    /// Creates or reconciles hosts, with periodic switch and power-shelf passes.
-    pub(super) async fn create_or_reconcile_hosts(
+    /// Creates hosts, with periodic switch and power-shelf passes.
+    pub(super) async fn create_hosts(
         &self,
         metrics: &mut SiteExplorationMetrics,
         identified_hosts: &mut [IdentifiedManagedHost],
         expected_endpoint_index: &ExploredEndpointIndex,
         already_ingested_bmc_ips: &HashSet<IpAddr>,
-        explored_this_run: &HashSet<IpAddr>,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) {
         if self.config.create_machines.load(Ordering::Relaxed) {
@@ -140,7 +163,6 @@ impl InventoryCreator {
                 identified_hosts,
                 expected_endpoint_index,
                 already_ingested_bmc_ips,
-                explored_this_run,
             );
             let mut create_machines_latency = Duration::ZERO;
             loop {
@@ -172,22 +194,6 @@ impl InventoryCreator {
             }
             metrics.create_machines_latency = Some(create_machines_latency);
             metrics.record_phase_latency("create_machines", create_machines_latency);
-        } else {
-            // `create_machines` revisits ingested hosts explored this run on
-            // its steady-state path; with it off, revisit them here so a
-            // pending admin address repair is still made.
-            let reconcile_admin_addresses_start = Instant::now();
-            self.machine_creator
-                .reconcile_explored_host_admin_addresses(
-                    identified_hosts,
-                    already_ingested_bmc_ips,
-                    explored_this_run,
-                )
-                .await;
-            metrics.record_phase_latency(
-                "reconcile_explored_host_admin_addresses",
-                reconcile_admin_addresses_start.elapsed(),
-            );
         }
     }
 
@@ -270,4 +276,37 @@ impl InventoryCreator {
 
         Ok(())
     }
+}
+
+/// Require completed preingestion for every allocated BMC address and the candidate IP.
+/// The caller must retain the interface locks through its inventory creation writes.
+async fn is_preingestion_complete(
+    txn: &mut PgConnection,
+    bmc_mac_address: MacAddress,
+    bmc_ip_address: IpAddr,
+) -> SiteExplorerResult<bool> {
+    // Re-read aliases under the shared interface lock because candidate selection can be stale.
+    let interfaces =
+        db::machine_interface::find_by_mac_address_for_update(txn, bmc_mac_address).await?;
+    let mut addresses = interfaces
+        .iter()
+        .flat_map(|interface| interface.addresses.iter().copied())
+        .collect::<HashSet<_>>();
+    addresses.insert(bmc_ip_address);
+    let endpoints =
+        db::explored_endpoints::find_by_ips(&mut *txn, addresses.iter().copied().collect()).await?;
+    for address in addresses {
+        if !endpoints.iter().any(|endpoint| {
+            endpoint.address == address
+                && endpoint.preingestion_state == PreingestionState::Complete
+        }) {
+            tracing::info!(
+                %bmc_mac_address,
+                bmc_ip_address = %address,
+                "Waiting for all BMC endpoints to complete preingestion",
+            );
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

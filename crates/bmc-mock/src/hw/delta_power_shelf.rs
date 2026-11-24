@@ -56,7 +56,7 @@ impl DeltaPowerShelf<'_> {
             vendor: redfish::oem::BmcVendor::Delta,
             product: None,
             redfish_version: "1.9.0",
-            exposes_computer_systems: false,
+            advertises_computer_systems: false,
         }
     }
 
@@ -84,11 +84,10 @@ impl DeltaPowerShelf<'_> {
         }
     }
 
-    /// Delta power shelves expose no `ComputerSystem`; the collection is empty
-    /// and (via the service-root config) is not advertised or
-    /// served. Site-explorer synthesizes a system from the chassis instead.
+    /// Delta power shelves neither advertise nor serve a Systems collection.
+    /// Site-explorer synthesizes a system from the chassis instead.
     pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
-        redfish::computer_system::Config { systems: vec![] }
+        redfish::computer_system::Config { systems: None }
     }
 
     pub(crate) fn chassis_config(&self) -> redfish::chassis::ChassisConfig {

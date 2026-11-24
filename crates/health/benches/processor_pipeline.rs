@@ -192,7 +192,7 @@ fn bench_pipeline_baseline(c: &mut Criterion) {
             Arc::new(EventProcessingPipeline::new(
                 processors,
                 sink,
-                metrics_manager.clone(),
+                metrics_manager,
             ))
         };
         let context = event_context();

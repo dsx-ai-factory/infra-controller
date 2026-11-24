@@ -76,6 +76,7 @@ type ExpectedMachine struct {
 	TrayIdx                  *int32                     `bun:"tray_idx"`
 	HostID                   *int32                     `bun:"host_id"`
 	IsDpfEnabled             *bool                      `bun:"is_dpf_enabled"`
+	RetainBmcCredentials     *bool                      `bun:"retain_bmc_credentials"`
 	Labels                   Labels                     `bun:"labels,type:jsonb"`
 	HostLifecycleProfile     HostLifecycleProfile       `bun:"host_lifecycle_profile,type:jsonb,notnull"`
 	Created                  time.Time                  `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -162,13 +163,19 @@ type HostLifecycleProfile struct {
 	// during lifecycle management. A nil value means the setting is unset, so
 	// Core preserves its existing value (patch semantics).
 	DisableLockdown *bool `json:"disable_lockdown,omitempty"`
+	// RetainHBNConfigOnBoot, when non-nil, controls whether the machine is designated as
+	// to retain HBN config on boot. This allows the machine to boot while
+	// NICO's DHCP and gRPC services are unavailable. A nil value means the
+	// setting is unset, so Core preserves
+	// its existing value (patch semantics).
+	RetainHBNConfigOnBoot *bool `json:"retain_hbn_config_on_boot,omitempty"`
 }
 
 // HasSetFields reports whether the profile carries at least one explicitly set
 // field. Keep this method in sync when adding fields to HostLifecycleProfile so
 // update paths do not mistake an empty patch object for a requested write.
 func (h HostLifecycleProfile) HasSetFields() bool {
-	return h.DisableLockdown != nil
+	return h.DisableLockdown != nil || h.RetainHBNConfigOnBoot != nil
 }
 
 // ToProto returns the workflow proto for this profile, or nil when no setting
@@ -177,7 +184,10 @@ func (h HostLifecycleProfile) ToProto() *corev1.HostLifecycleProfile {
 	if !h.HasSetFields() {
 		return nil
 	}
-	return &corev1.HostLifecycleProfile{DisableLockdown: h.DisableLockdown}
+	return &corev1.HostLifecycleProfile{
+		DisableLockdown:       h.DisableLockdown,
+		RetainHbnConfigOnBoot: h.RetainHBNConfigOnBoot,
+	}
 }
 
 // FromProto populates the receiver from a workflow proto profile. A nil proto
@@ -188,6 +198,7 @@ func (h *HostLifecycleProfile) FromProto(proto *corev1.HostLifecycleProfile) {
 		return
 	}
 	h.DisableLockdown = proto.DisableLockdown
+	h.RetainHBNConfigOnBoot = proto.RetainHbnConfigOnBoot
 }
 
 // ExpectedMachineCredentials carries the BMC credentials for one
@@ -247,6 +258,8 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	if em.IsDpfEnabled != nil {
 		proto.IsDpfEnabled = em.IsDpfEnabled
 	}
+	// A NULL value stays omitted.
+	proto.BmcRetainCredentials = em.RetainBmcCredentials
 	proto.HostLifecycleProfile = em.HostLifecycleProfile.ToProto()
 
 	if creds.Username != nil {
@@ -275,6 +288,12 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	proto.Metadata = metadata
 
 	return proto
+}
+
+// RetainsBmcCredentials reports the effective setting. A NULL value is
+// treated as false, matching Core.
+func (em *ExpectedMachine) RetainsBmcCredentials() bool {
+	return em.RetainBmcCredentials != nil && *em.RetainBmcCredentials
 }
 
 // FromProto populates this ExpectedMachine from a workflow proto reported
@@ -321,33 +340,66 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	em.HostID = proto.HostId
 	em.Labels.FromProto(proto.Metadata.GetLabels())
 	em.IsDpfEnabled = proto.IsDpfEnabled
+	em.RetainBmcCredentials = proto.BmcRetainCredentials
 	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
 }
 
-// ExpectedMachineCreateInput input parameters for Create method
+// ExpectedMachineCreateInput is also persisted by pending batch recovery. Keep
+// its explicit JSON names stable across Go field renames.
 type ExpectedMachineCreateInput struct {
-	ExpectedMachineID        uuid.UUID
-	SiteID                   uuid.UUID
-	BmcMacAddress            string
-	ChassisSerialNumber      string
-	SkuID                    *string
-	MachineID                *string
-	FallbackDpuSerialNumbers []string
-	Interfaces               []ExpectedMachineInterface
-	BmcIpAddress             *string
-	RackID                   *string
-	Name                     *string
-	Manufacturer             *string
-	Model                    *string
-	Description              *string
-	ServerName               *string
-	SlotID                   *int32
-	TrayIdx                  *int32
-	HostID                   *int32
-	Labels                   map[string]string
-	IsDpfEnabled             *bool
-	HostLifecycleProfile     HostLifecycleProfile
-	CreatedBy                uuid.UUID
+	ExpectedMachineID        uuid.UUID                  `json:"ExpectedMachineID"`
+	SiteID                   uuid.UUID                  `json:"SiteID"`
+	BmcMacAddress            string                     `json:"BmcMacAddress"`
+	ChassisSerialNumber      string                     `json:"ChassisSerialNumber"`
+	SkuID                    *string                    `json:"SkuID"`
+	MachineID                *string                    `json:"MachineID"`
+	FallbackDpuSerialNumbers []string                   `json:"FallbackDpuSerialNumbers"`
+	Interfaces               []ExpectedMachineInterface `json:"Interfaces"`
+	BmcIpAddress             *string                    `json:"BmcIpAddress"`
+	RackID                   *string                    `json:"RackID"`
+	Name                     *string                    `json:"Name"`
+	Manufacturer             *string                    `json:"Manufacturer"`
+	Model                    *string                    `json:"Model"`
+	Description              *string                    `json:"Description"`
+	ServerName               *string                    `json:"ServerName"`
+	SlotID                   *int32                     `json:"SlotID"`
+	TrayIdx                  *int32                     `json:"TrayIdx"`
+	HostID                   *int32                     `json:"HostID"`
+	Labels                   map[string]string          `json:"Labels"`
+	IsDpfEnabled             *bool                      `json:"IsDpfEnabled"`
+	RetainBmcCredentials     *bool                      `json:"RetainBmcCredentials"`
+	HostLifecycleProfile     HostLifecycleProfile       `json:"HostLifecycleProfile"`
+	CreatedBy                uuid.UUID                  `json:"CreatedBy"`
+}
+
+// ToExpectedMachine constructs the nonsecret record sent to Core or stored after confirmation.
+func (input ExpectedMachineCreateInput) ToExpectedMachine() ExpectedMachine {
+	return ExpectedMachine{
+		ID:                       input.ExpectedMachineID,
+		SiteID:                   input.SiteID,
+		BmcMacAddress:            input.BmcMacAddress,
+		ChassisSerialNumber:      input.ChassisSerialNumber,
+		SkuID:                    input.SkuID,
+		MachineID:                input.MachineID,
+		FallbackDpuSerialNumbers: input.FallbackDpuSerialNumbers,
+		Interfaces:               input.Interfaces,
+		BmcIpAddress:             input.BmcIpAddress,
+		RackID:                   input.RackID,
+		Name:                     input.Name,
+		Manufacturer:             input.Manufacturer,
+		Model:                    input.Model,
+		Description:              input.Description,
+		ServerName:               input.ServerName,
+		SlotID:                   input.SlotID,
+		TrayIdx:                  input.TrayIdx,
+		HostID:                   input.HostID,
+		Labels:                   input.Labels,
+		IsDpfEnabled:             input.IsDpfEnabled,
+		// Default omitted create inputs to false.
+		RetainBmcCredentials: cutil.GetPtr(input.RetainBmcCredentials != nil && *input.RetainBmcCredentials),
+		HostLifecycleProfile: input.HostLifecycleProfile,
+		CreatedBy:            input.CreatedBy,
+	}
 }
 
 // ExpectedMachineUpdateInput input parameters for Update method
@@ -371,6 +423,7 @@ type ExpectedMachineUpdateInput struct {
 	HostID                   *int32
 	Labels                   map[string]string
 	IsDpfEnabled             *bool
+	RetainBmcCredentials     *bool
 	HostLifecycleProfile     *HostLifecycleProfile
 }
 
@@ -452,6 +505,8 @@ type ExpectedMachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
 	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
@@ -503,30 +558,7 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 
 	// NOTE: since Expected Machine can be created by NICo or Cloud API the caller MUST provide the ID.
 	for _, input := range inputs {
-		em := ExpectedMachine{
-			ID:                       input.ExpectedMachineID,
-			SiteID:                   input.SiteID,
-			BmcMacAddress:            input.BmcMacAddress,
-			ChassisSerialNumber:      input.ChassisSerialNumber,
-			SkuID:                    input.SkuID,
-			MachineID:                input.MachineID,
-			FallbackDpuSerialNumbers: input.FallbackDpuSerialNumbers,
-			Interfaces:               input.Interfaces,
-			BmcIpAddress:             input.BmcIpAddress,
-			RackID:                   input.RackID,
-			Name:                     input.Name,
-			Manufacturer:             input.Manufacturer,
-			Model:                    input.Model,
-			Description:              input.Description,
-			ServerName:               input.ServerName,
-			SlotID:                   input.SlotID,
-			TrayIdx:                  input.TrayIdx,
-			HostID:                   input.HostID,
-			Labels:                   input.Labels,
-			IsDpfEnabled:             input.IsDpfEnabled,
-			HostLifecycleProfile:     input.HostLifecycleProfile,
-			CreatedBy:                input.CreatedBy,
-		}
+		em := input.ToExpectedMachine()
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, em.ID)
 	}
@@ -744,6 +776,35 @@ func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	return expectedMachines, expectedMachinePaginator.Total, nil
 }
 
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedMachines matching the filter,
+// ordered by creation time, then ID
+// The returned slice is empty but not nil when no ExpectedMachines match
+func (emsd ExpectedMachineSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetAllIDsAndUpdated")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
+
+	if filter.ExpectedMachineIDs != nil && len(filter.ExpectedMachineIDs) == 0 {
+		return idsAndUpdated, nil
+	}
+
+	query := db.GetIDB(tx, emsd.dbSession).NewSelect().Model((*ExpectedMachine)(nil)).Column("id", "updated")
+
+	query, err := emsd.setQueryWithFilter(filter, query, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("em.created", "em.id").Scan(ctx, &idsAndUpdated)
+	if err != nil {
+		return nil, err
+	}
+
+	return idsAndUpdated, nil
+}
+
 // GetDistinctLabelKeys returns paginated, distinct ExpectedMachine label keys.
 func (emsd ExpectedMachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) (_ []string, _ int, retErr error) {
 	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetDistinctLabelKeys")
@@ -866,6 +927,9 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 	bmcIPUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// Server names have the same omission semantics: update only supplied rows.
 	serverNameUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	// `retain_bmc_credentials` is applied only to rows that provide it, for the
+	// same reason as `bmc_ip_address`.
+	retainCredentialsUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// host_lifecycle_profile is applied in its own bulk update scoped to only the
 	// rows that set it (see below), so rows that omit it keep their existing value.
 	hlpUpdates := make([]*ExpectedMachine, 0, len(inputs))
@@ -951,6 +1015,12 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			em.IsDpfEnabled = input.IsDpfEnabled
 			columnsSet["is_dpf_enabled"] = true
 		}
+		if input.RetainBmcCredentials != nil {
+			retainCredentialsUpdates = append(retainCredentialsUpdates, &ExpectedMachine{
+				ID:                   input.ExpectedMachineID,
+				RetainBmcCredentials: input.RetainBmcCredentials,
+			})
+		}
 
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, input.ExpectedMachineID)
@@ -985,6 +1055,9 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		}
 		if len(serverNameUpdates) > 0 {
 			traceColumns = append(traceColumns, "server_name")
+		}
+		if len(retainCredentialsUpdates) > 0 {
+			traceColumns = append(traceColumns, "retain_bmc_credentials")
 		}
 		if len(hlpUpdates) > 0 {
 			traceColumns = append(traceColumns, "host_lifecycle_profile")
@@ -1021,6 +1094,17 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
 			Model(&serverNameUpdates).
 			Column("server_name").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(retainCredentialsUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&retainCredentialsUpdates).
+			Column("retain_bmc_credentials").
 			Bulk().
 			Exec(ctx)
 		if err != nil {

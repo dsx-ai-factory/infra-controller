@@ -15,17 +15,20 @@
  * limitations under the License.
  */
 
+use db::TransactionVending as _;
 mod metrics;
 
 use std::default::Default;
 use std::io;
 use std::sync::Arc;
 
+use carbide_instrument::Instrumentation;
 use carbide_machine_controller::config::machine_validation::MachineValidationConfig;
-use carbide_utils::managed_loop::{self, LoopManager};
+use carbide_utils::managed_loop::{LoopManager, ManagedLoopIteration};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use db::machine_validation::{StateColumn, ValidationNotActive};
 use db::{ConditionalWrite, ObjectColumnFilter};
+use itertools::Itertools;
 use model::machine::{FailureCause, FailureDetails, FailureSource};
 use model::machine_validation::{
     MachineValidation, MachineValidationRunItem, MachineValidationRunItemState,
@@ -122,6 +125,7 @@ impl carbide_instrument::DynamicLog for MachineValidationCompleted {
 }
 
 pub(crate) struct MachineValidationManager {
+    instrumentation: Instrumentation,
     database_connection: sqlx::PgPool,
     config: MachineValidationConfig,
     metric_holder: Arc<metrics::MetricHolder>,
@@ -132,6 +136,7 @@ impl MachineValidationManager {
         database_connection: sqlx::PgPool,
         mut config: MachineValidationConfig,
         meter: opentelemetry::metrics::Meter,
+        instrumentation: Instrumentation,
     ) -> Self {
         if config.stale_run_timeout < MachineValidationConfig::MIN_STALE_RUN_TIMEOUT {
             tracing::warn!(
@@ -150,6 +155,7 @@ impl MachineValidationManager {
         let metric_holder = Arc::new(metrics::MetricHolder::new(meter, hold_period));
 
         MachineValidationManager {
+            instrumentation,
             database_connection,
             config,
             metric_holder,
@@ -176,7 +182,10 @@ impl MachineValidationManager {
             } else {
                 self.cleanup_attempt_logs().await
             };
-            managed_loop::record_iteration(LoopManager::MachineValidationManager, &result);
+            self.instrumentation.emit(ManagedLoopIteration::from_result(
+                LoopManager::MachineValidationManager,
+                &result,
+            ));
 
             tokio::select! {
                 _ = tick.sleep() => {},
@@ -202,7 +211,7 @@ impl MachineValidationManager {
         // later phase restart from a lower MachineId while higher-ID locks
         // from an earlier phase were still held, recreating SQLSTATE 40P01
         // (`deadlock_detected`) with another ordered multi-machine writer.
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for validation in db::machine::MachineRowLockOrderIter::new(
             db::machine_validation::find_active(&mut txn).await?,
@@ -216,9 +225,11 @@ impl MachineValidationManager {
         txn.commit().await?;
         // Emit only after this phase is durable. Otherwise a rollback would
         // leave the validation active and a later retry would count it again.
-        completions.into_iter().for_each(carbide_instrument::emit);
+        completions
+            .into_iter()
+            .for_each(|completion| self.instrumentation.emit(completion));
 
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for stale_attempt in db::machine::MachineRowLockOrderIter::new(
             db::machine_validation_execution::find_stale_active_attempts(
@@ -243,9 +254,11 @@ impl MachineValidationManager {
             }
         }
         txn.commit().await?;
-        completions.into_iter().for_each(carbide_instrument::emit);
+        completions
+            .into_iter()
+            .for_each(|completion| self.instrumentation.emit(completion));
 
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for validation in db::machine::MachineRowLockOrderIter::new(stale_validations(
             db::machine_validation::find_active(&mut txn).await?,
@@ -308,7 +321,9 @@ impl MachineValidationManager {
         self.metric_holder.update_metrics(metrics);
 
         txn.commit().await?;
-        completions.into_iter().for_each(carbide_instrument::emit);
+        completions
+            .into_iter()
+            .for_each(|completion| self.instrumentation.emit(completion));
 
         Ok(())
     }
@@ -317,7 +332,7 @@ impl MachineValidationManager {
         // Attempt logs are diagnostic data. Sweep a bounded batch each pass so
         // retention never turns into an unbounded delete transaction.
         const ATTEMPT_LOG_CLEANUP_BATCH_SIZE: i64 = 1_000;
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let removed = db::machine_validation_execution::delete_expired_attempt_log_chunks(
             txn.as_pgconn(),
             self.config.attempt_logs.retention,
@@ -403,7 +418,6 @@ async fn reconcile_terminal_run_items(
             .iter()
             .filter(|item| item.state == MachineValidationRunItemState::Failed)
             .map(|item| item.display_name.as_str())
-            .collect::<Vec<_>>()
             .join(", ");
         let error_message = format!(
             "Machine validation run {} completed with failed run item(s): {}",
@@ -601,7 +615,7 @@ async fn record_failed_validation_side_effects(
         return Ok(completion);
     };
 
-    let Some(machine) = db::machine::find_by_validation_id(txn, &validation.id).await? else {
+    let Some(machine) = db::machine::find_by_validation_id(&mut *txn, &validation.id).await? else {
         tracing::warn!(
             machine_validation_id = %validation.id,
             machine_id = %validation.machine_id,
@@ -686,7 +700,7 @@ mod tests {
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
         let run_item_id = MachineValidationRunItemId::new();
         let attempt_id = MachineValidationAttemptId::new();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query(
             "INSERT INTO machine_validation (
                 id, machine_id, start_time, name, context, total, completed,
@@ -721,7 +735,7 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut monitor_txn = pool.begin().await?;
+        let mut monitor_txn = pool.txn_begin().await?;
         let selected = db::machine_validation_execution::find_stale_active_attempts(
             monitor_txn.as_mut(),
             heartbeat_timeout,
@@ -734,7 +748,7 @@ mod tests {
 
         // The API can commit a heartbeat after selection but before the
         // monitor acquires the parent run lock. Reuse that snapshot below.
-        let mut heartbeat_txn = pool.begin().await?;
+        let mut heartbeat_txn = pool.txn_begin().await?;
         assert_eq!(
             db::machine_validation_execution::record_heartbeat(
                 heartbeat_txn.as_mut(),
@@ -858,10 +872,12 @@ mod tests {
             ),
         ];
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
             for (outcome, cause, error) in combos {
-                carbide_instrument::emit(MachineValidationCompleted {
+                instrumentation.emit(MachineValidationCompleted {
                     outcome,
                     cause,
                     machine_id,
@@ -912,10 +928,6 @@ mod tests {
             assert_eq!(field(log, "error"), Some(error.to_string()));
         }
 
-        // The exact-delta assertion sticks to the one (outcome, cause) pair
-        // no DB-gated completion-flow test in this binary drives (the others
-        // emit from the product funnels without holding the capture lock), so
-        // a parallel run cannot inflate it.
         assert_eq!(
             metrics.counter_delta(
                 "carbide_machine_validation_outcomes_total",

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -205,7 +206,8 @@ func (r ApiDecommissionMachineRequest) Execute() (*MessageResponse, *http.Respon
 /*
 DecommissionMachine Decommission a Machine
 
-Start decommissioning a Machine. The Machine must be in Core's `Ready`
+Start decommissioning a Machine that is not assigned to an Instance.
+The Machine must be in Core's `Ready`
 state, and every attached DPU must support BFB installation through
 Redfish. The operation is asynchronous; use the Machine status to
 observe workflow progress.
@@ -393,7 +395,7 @@ type ApiDeleteMachineRequest struct {
 	allowDeleteWithAllocation   *bool
 }
 
-// Request forced deletion on the Site, including host, DPU, and BMC interfaces. Starting a new attempt requires a Registered Site; a confirmed-complete retained request is replayed locally. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
+// Request forced deletion on the Site, including host, DPU, and BMC interfaces. Requires a Registered Site. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
 func (r ApiDeleteMachineRequest) Force(force bool) ApiDeleteMachineRequest {
 	r.force = &force
 	return r
@@ -411,7 +413,7 @@ func (r ApiDeleteMachineRequest) AllowDeleteWithInstance(allowDeleteWithInstance
 	return r
 }
 
-// Requires force&#x3D;true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Machines with a recorded force-deletion attempt do not count toward capacity in later Allocation or deletion checks, even before inventory marks them missing. Does not imply either Instance or Instance Type deletion permission.
+// Requires force&#x3D;true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. A retained Machine keeps counting toward capacity in later Allocation and deletion checks until its Instance Type association is removed. Does not imply either Instance or Instance Type deletion permission.
 func (r ApiDeleteMachineRequest) AllowDeleteWithAllocation(allowDeleteWithAllocation bool) ApiDeleteMachineRequest {
 	r.allowDeleteWithAllocation = &allowDeleteWithAllocation
 	return r
@@ -424,11 +426,11 @@ func (r ApiDeleteMachineRequest) Execute() (*MessageResponse, *http.Response, er
 /*
 DeleteMachine Delete a Machine from a Site
 
-Requires Provider Admin access to the Machine's Infrastructure Provider. Regular deletion requires the Machine to be missing on Site for at least 24 hours, with no attached Instance or assigned Instance Type. The confirmed-complete retained-deletion recovery exception is described below.
-Starting forced deletion requires a Registered Site and the applicable overrides. Authoritative Core Instance-consent enforcement and the Instance Type override require Core builds containing https://github.com/dsx-ai-factory/infra-controller/pull/5394. Older Core ignores the new protobuf fields; REST-side checks against REST records do not establish Core's current ownership state or replace server-side enforcement. It also supports missing Machines without waiting 24 hours. Before contacting Core, REST records an attempt ID and makes the Machine unavailable for every Instance placement path and for new Allocation capacity. A timeout, transport failure, or unavailable workflow history keeps that attempt and quarantine. Retrying retrieves the exact recorded execution instead of issuing another Core deletion. If no result is available, including after a crash before dispatch, provide the attempt ID from the error to the Site operator; ordinary deletion remains blocked.
-A definitive Core precondition or validation rejection allows a corrected forced request to start a new attempt. A confirmed incomplete result returns HTTP 409 with `Retry-After: 5`; repeat the same forced DELETE after at least 5 seconds. No automatic continuation is scheduled. Only a confirmed complete result or an actual Core NotFound response records completion. Missing Temporal history is not completion.
-Forced deletion returns HTTP 202 only after confirmed Site completion. REST records are removed only when no Instance deletion was requested, no Instance remains attached, and remaining Allocation capacity is sufficient. Otherwise, owner records remain. Allocation Constraints are never deleted by this operation. Present inventory cannot clear the retained marker, and completed forced requests replay locally without deleting a newly rediscovered Core Machine. A later REST cleanup failure preserves completion proof for local replay without workflow history.
-After confirmed completion, owners may remove the retained Instance and all Machine Instance Type associations; existing quota guards may require them to reduce or rebalance Allocation Constraints before unlinking. Ordinary DELETE, with force omitted or false and no overrides, then removes only REST Machine records even if Core reports the Machine present and no missing inventory was observed. The Machine must be unassigned and have neither an Instance Type ID nor association rows. This cleanup never calls Core and returns HTTP 202; a later fresh inventory may restore the rediscovered Machine.
+Requires Provider Admin access to the Machine's Infrastructure Provider. Regular deletion requires the Machine to be missing on Site for at least 24 hours, with no attached Instance or assigned Instance Type.
+Forced deletion requires a Registered Site and the applicable overrides. Authoritative Core Instance-consent enforcement and the Instance Type override require Core builds containing https://github.com/dsx-ai-factory/infra-controller/pull/5394. Older Core ignores the new protobuf fields; REST-side checks against REST records do not establish Core's current ownership state or replace server-side enforcement. It also supports missing Machines without waiting 24 hours. Before contacting Core, REST reports the Machine as `Initializing` with the message `Machine is being force deleted` and marks it unusable by Tenants, so automatic and batch Instance placement skip it. A Machine already missing on Site keeps its status.
+Forced requests for the same Machine join a Core deletion that is still running. After a timeout or transport failure, repeat the forced DELETE. Core treats a Machine it has already deleted as a completed deletion. A confirmed incomplete result returns HTTP 409 with `Retry-After: 5`; repeat the same forced DELETE after at least 5 seconds. No automatic continuation is scheduled.
+Forced deletion returns HTTP 202 only after confirmed Site completion. REST records are removed only when no Instance deletion was requested, no Instance remains attached, and remaining Allocation capacity is sufficient. Otherwise, owner records remain and REST reports the Machine as missing on Site with status `Error`, as inventory would. A retained Machine keeps counting toward Allocation capacity. Allocation Constraints are never deleted by this operation.
+To remove retained REST records, have the owners remove the retained Instance. Then repeat the forced DELETE with allowDeleteWithInstanceType=true instead of allowDeleteWithInstance, since dropping allowDeleteWithInstance also drops the Instance Type removal it permits. Existing quota guards may require the owners to reduce or rebalance Allocation Constraints first. Ordinary DELETE also removes the records once the Machine has been missing on Site for 24 hours without an Instance or Instance Type. If Core rediscovers the Machine first, inventory restores it as a present Machine. A repeated forced DELETE then deletes it on the Site again.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -811,19 +813,19 @@ type ApiGetAllMachineRequest struct {
 	ApiService      *MachineAPIService
 	org             string
 	siteId          *string
-	id              *string
+	id              *[]string
 	hasInstanceType *bool
-	instanceTypeId  *string
-	tenantId        *string
+	instanceTypeId  *[]string
+	tenantId        *[]string
 	hasInstance     *bool
 	isMissingOnSite *bool
 	includeMetadata *bool
-	status          *string
+	status          *[]string
 	capabilityType  *string
-	capabilityName  *string
-	hwSkuDeviceType *string
+	capabilityName  *[]string
+	hwSkuDeviceType *[]string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -836,7 +838,7 @@ func (r ApiGetAllMachineRequest) SiteId(siteId string) ApiGetAllMachineRequest {
 }
 
 // Filter Machines by ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllMachineRequest) Id(id string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) Id(id []string) ApiGetAllMachineRequest {
 	r.id = &id
 	return r
 }
@@ -848,13 +850,13 @@ func (r ApiGetAllMachineRequest) HasInstanceType(hasInstanceType bool) ApiGetAll
 }
 
 // Filter Machines by Instance Type ID.  Can be specified multiple times to filter on more than one Instance Type ID.
-func (r ApiGetAllMachineRequest) InstanceTypeId(instanceTypeId string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) InstanceTypeId(instanceTypeId []string) ApiGetAllMachineRequest {
 	r.instanceTypeId = &instanceTypeId
 	return r
 }
 
 // Filter Machines by ID of tenant of assigned instance. Can be specified multiple times to filter on more than one Tenant ID.
-func (r ApiGetAllMachineRequest) TenantId(tenantId string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) TenantId(tenantId []string) ApiGetAllMachineRequest {
 	r.tenantId = &tenantId
 	return r
 }
@@ -878,7 +880,7 @@ func (r ApiGetAllMachineRequest) IncludeMetadata(includeMetadata bool) ApiGetAll
 }
 
 // Filter Machines by Status.  Can be specified multiple times to filter on more than one Status.
-func (r ApiGetAllMachineRequest) Status(status string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) Status(status []string) ApiGetAllMachineRequest {
 	r.status = &status
 	return r
 }
@@ -890,13 +892,13 @@ func (r ApiGetAllMachineRequest) CapabilityType(capabilityType string) ApiGetAll
 }
 
 // Filter Machines by Capability Name.  Can be specified multiple times to filter on more than one Capability Name.
-func (r ApiGetAllMachineRequest) CapabilityName(capabilityName string) ApiGetAllMachineRequest {
+func (r ApiGetAllMachineRequest) CapabilityName(capabilityName []string) ApiGetAllMachineRequest {
 	r.capabilityName = &capabilityName
 	return r
 }
 
-// Filter Machines by hardware SKU Device Type. Example values: \&quot;gpu\&quot;, \&quot;cpu\&quot;, \&quot;storage\&quot;, \&quot;cache\&quot;
-func (r ApiGetAllMachineRequest) HwSkuDeviceType(hwSkuDeviceType string) ApiGetAllMachineRequest {
+// Filter Machines by hardware SKU Device Type. Can be specified multiple times to filter on more than one Device Type. Example values: \&quot;gpu\&quot;, \&quot;cpu\&quot;, \&quot;storage\&quot;, \&quot;cache\&quot;
+func (r ApiGetAllMachineRequest) HwSkuDeviceType(hwSkuDeviceType []string) ApiGetAllMachineRequest {
 	r.hwSkuDeviceType = &hwSkuDeviceType
 	return r
 }
@@ -907,8 +909,8 @@ func (r ApiGetAllMachineRequest) Query(query string) ApiGetAllMachineRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllMachineRequest) IncludeRelation(includeRelation string) ApiGetAllMachineRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllMachineRequest) IncludeRelation(includeRelation []string) ApiGetAllMachineRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -981,16 +983,40 @@ func (a *MachineAPIService) GetAllMachineExecute(r ApiGetAllMachineRequest) ([]M
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
 	if r.id != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
+		t := *r.id
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "id", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "id", t, "form", "multi")
+		}
 	}
 	if r.hasInstanceType != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "hasInstanceType", r.hasInstanceType, "form", "")
 	}
 	if r.instanceTypeId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", r.instanceTypeId, "form", "")
+		t := *r.instanceTypeId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", t, "form", "multi")
+		}
 	}
 	if r.tenantId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
+		t := *r.tenantId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", t, "form", "multi")
+		}
 	}
 	if r.hasInstance != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "hasInstance", r.hasInstance, "form", "")
@@ -1002,22 +1028,54 @@ func (a *MachineAPIService) GetAllMachineExecute(r ApiGetAllMachineRequest) ([]M
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeMetadata", r.includeMetadata, "form", "")
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.capabilityType != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityType", r.capabilityType, "form", "")
 	}
 	if r.capabilityName != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityName", r.capabilityName, "form", "")
+		t := *r.capabilityName
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityName", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "capabilityName", t, "form", "multi")
+		}
 	}
 	if r.hwSkuDeviceType != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "hwSkuDeviceType", r.hwSkuDeviceType, "form", "")
+		t := *r.hwSkuDeviceType
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "hwSkuDeviceType", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "hwSkuDeviceType", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -1107,7 +1165,7 @@ type ApiGetAllMachineCapabilitiesRequest struct {
 	frequency       *string
 	capacity        *string
 	vendor          *string
-	inactiveDevices *string
+	inactiveDevices *[]int32
 	count           *string
 	pageNumber      *int32
 	pageSize        *int32
@@ -1157,7 +1215,7 @@ func (r ApiGetAllMachineCapabilitiesRequest) Vendor(vendor string) ApiGetAllMach
 }
 
 // Filter Capabilities by Inactive Devices value. Since the value is an array, multiple query parameters should be specified in the correct order. For example, to filter for [1, 3], specify inactiveDevices&#x3D;1&amp;inactiveDevices&#x3D;3
-func (r ApiGetAllMachineCapabilitiesRequest) InactiveDevices(inactiveDevices string) ApiGetAllMachineCapabilitiesRequest {
+func (r ApiGetAllMachineCapabilitiesRequest) InactiveDevices(inactiveDevices []int32) ApiGetAllMachineCapabilitiesRequest {
 	r.inactiveDevices = &inactiveDevices
 	return r
 }
@@ -1255,7 +1313,15 @@ func (a *MachineAPIService) GetAllMachineCapabilitiesExecute(r ApiGetAllMachineC
 		parameterAddToHeaderOrQuery(localVarQueryParams, "vendor", r.vendor, "form", "")
 	}
 	if r.inactiveDevices != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "inactiveDevices", r.inactiveDevices, "form", "")
+		t := *r.inactiveDevices
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "inactiveDevices", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "inactiveDevices", t, "form", "multi")
+		}
 	}
 	if r.count != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "count", r.count, "form", "")
@@ -2335,12 +2401,12 @@ type ApiGetMachineRequest struct {
 	ApiService      *MachineAPIService
 	org             string
 	machineId       string
-	includeRelation *string
+	includeRelation *[]string
 	includeMetadata *bool
 }
 
-// Related entity to expand
-func (r ApiGetMachineRequest) IncludeRelation(includeRelation string) ApiGetMachineRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetMachineRequest) IncludeRelation(includeRelation []string) ApiGetMachineRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -2403,7 +2469,15 @@ func (a *MachineAPIService) GetMachineExecute(r ApiGetMachineRequest) (*Machine,
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.includeMetadata != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeMetadata", r.includeMetadata, "form", "")
@@ -3311,6 +3385,17 @@ func (a *MachineAPIService) MachinePowerControlMachineExecute(r ApiMachinePowerC
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

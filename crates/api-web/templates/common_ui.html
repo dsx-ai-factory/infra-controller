@@ -1,0 +1,35 @@
+{#
+  Components shared by list and tool pages.
+  Import with {% import "common_ui.html" as common %} and use with
+  {% call common::name(args) %}{% endcall %}. Macros see only their arguments.
+#}
+
+{# Outline magnifier for search boxes. #}
+{% macro search_icon(size, stroke_width) %}<svg width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="{{ stroke_width }}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>{% endmacro %}
+
+{# HTTP status of a browser query: green 2xx, amber 3xx, red 4xx/5xx or no response (0). #}
+{% macro http_status_stat(code, text) %}
+<div class="entity-summary-stat">
+	<span class="entity-summary-label">Status</span>
+	<span class="bubble{% if code >= 200 && code < 300 %} success{% else if code >= 400 || code == 0 %} error{% else %} warning{% endif %}">{{ code }} {{ text }}</span>
+</div>
+{% endmacro %}
+
+{# Collapsible name/value table of a browser query's response headers. #}
+{% macro response_headers(headers) %}
+{% if !headers.is_empty() %}
+<details class="entity-summary-details">
+	<summary>Response headers ({{ headers.len() }})</summary>
+	<table class="data-table">
+		<tbody>
+			{% for header in headers %}
+			<tr>
+				<td class="cell-nowrap">{{ header.name }}</td>
+				<td><code class="code-wrap">{{ header.value }}</code></td>
+			</tr>
+			{% endfor %}
+		</tbody>
+	</table>
+</details>
+{% endif %}
+{% endmacro %}

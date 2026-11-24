@@ -44,7 +44,7 @@ impl NvidiaDgxH100<'_> {
             vendor: redfish::oem::BmcVendor::Ami,
             product: Some("AMI Redfish Server"),
             redfish_version: "1.11.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -156,14 +156,14 @@ impl NvidiaDgxH100<'_> {
             let id = format!("{:04X}", n + 10); // Starting with 000A
             // TODO should be taken from NIC:
             let pci_path = "PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)";
+            let [a, b, c, d, e, f] = nic.mac_address.bytes();
             redfish::boot_option::builder(&redfish::boot_option::resource(system_id, &id))
                 .boot_option_reference(format!("Boot{id}"))
                 // Real DisplayName: "UEFI P0: HTTP IPv4 Nvidia Network Adapter - 94:6D:AE:00:00:00"
                 .display_name(format!("UEFI Pn: HTTP IPv4 - {}", nic.mac_address))
                 .alias(redfish::schema::computer_system::BootSource::UefiHttp)
                 .uefi_device_path(format!(
-                    "{pci_path}/MAC({},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
-                    nic.mac_address.to_string().replace(":", "")
+                    "{pci_path}/MAC({a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"
                 ))
                 // libredfish model requires @odata.etag field.
                 .odata_etag("MakeLibRedfishHappy")
@@ -178,7 +178,7 @@ impl NvidiaDgxH100<'_> {
         .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     id: system_id.into(),
                     manufacturer: Some("NVIDIA".into()),
@@ -221,7 +221,7 @@ impl NvidiaDgxH100<'_> {
                     serial_console: None,
                     secure_boot_available: false,
                 },
-            ],
+            ]),
         }
     }
 

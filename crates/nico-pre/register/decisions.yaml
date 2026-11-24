@@ -1,0 +1,1111 @@
+# The decision register nico-pre compiles in: every decision a site makes, its options (by
+# the short `name` a site definition states, with the register's full `text`), its default,
+# whether it is `stated` in site-def.yaml or derived from a collateral named in `source`, and
+# the check that proves it. Edit here, in the same PR as the checks that read it.
+decisions:
+- id: staging-host
+  title: Staging host
+  section: Utility hosts (per provider, decided before anything else)
+  stated: true
+  source: Site Planning Document; NICo setup environment for the mirror knobs named below
+  options:
+  - name: Connected
+    text: 'Connected: the staging host reaches the internet, and the build host can be the same machine'
+  - name: Air-gapped with a transfer path
+    text: 'Air-gapped with a transfer path: nothing inside the site reaches the internet, but the staging
+      host is reachable by scp from outside through the jumphost'
+  - name: Strictly air-gapped
+    text: 'Strictly air-gapped: the staging host is disconnected and is fed from physical media'
+  check: '`nico-pre-stage` (new, stage 1c), run on the staging host before stage 2: tools present at usable
+    versions; the infra-controller checkout, its nv-rms submodule, and the doca-platform clone present
+    at the pinned tag and commit; helmfile installed; chart sources answer, a mirror when air-gapped or
+    the upstream repositories when connected; SSH to every site controller and its BMC; the registry host
+    reachable. In either air-gapped mode, also every item of the package above present at the pinned version,
+    against an scp-delivered or media-delivered manifest: images by tag in the registry, charts in the
+    mirror or as archives, the clone at its tag, the submodule, the helmfile binary, the BFB or ISO and
+    DOCA files. The connectivity mode selects which source checks run'
+- id: external-registry-access
+  title: External registry access
+  section: Utility hosts (per provider, decided before anything else)
+  stated: true
+  source: Site Planning Document; the provider's containerd drop-in on each site controller (`/etc/systemd/system/containerd.service.d/*.conf`),
+    `HTTPS_PROXY` in the staging host shell; with DPF the `[dpf.proxy]` table in the NICo TOML file
+  options:
+  - name: Direct
+    text: 'Direct: the site controllers and the staging host reach nvcr.io, ghcr.io, quay.io, docker.io,
+      registry.k8s.io and the Helm hosts without a proxy'
+  - name: Proxied
+    text: 'Proxied: through the datacenter egress proxy, which the provider configures on every site controller''s
+      containerd and in the staging host shell'
+  - name: Not applicable
+    text: 'Not applicable: air-gapped, every external image and chart is mirrored into the provider registry'
+  default: Direct
+  check: 'Direct, run first because a wrong answer blocks everything after it: `nico-pre-stage`, before
+    any chart or image is fetched, each external registry and Helm host answers directly from the staging
+    host; `nico-pre-host`, over SSH on every site controller before setup.sh phase 1, the same hosts answer
+    directly and containerd''s drop-ins carry no proxy environment. Proxied: `nico-pre-host`: every site
+    controller carries a containerd drop-in naming the same proxy, with `no_proxy` covering the provider
+    registry, the cluster and service CIDRs and `.cluster.local`; `nico-pre-stage`: `HTTPS_PROXY` set
+    in the staging shell and each external registry and Helm host answers through the proxy from both
+    vantage points; `nico-pre-config`, with DPF enabled: the `[dpf.proxy]` table is present with `https_proxy`
+    in a scheme containerd accepts and `no_proxy` covering the registry host, the DPU cluster VIP, the
+    host API VIP and `.cluster.local`, before the first start with DPF enabled. Not applicable: no external
+    reach is attempted; the mirrored set is checked by the Source of the NICo images and Staging host
+    entries. With DPF, every option, `nico-pre-fabric` from the DPU network: the provider registry host
+    answers, the TLS handshake succeeds with the trust the DPUs will carry, and each of the four NICo
+    `docker_repo_url` serves its tag; Direct: every external registry in the resolved service config and
+    the system-component image set answers directly from the DPU network, `[dpf.proxy]` absent; Proxied:
+    the proxy answers from the DPU network and forwards to every external registry; Not applicable, or
+    a connected site whose dts and doca_hbn `docker_repo_url` sit under the provider registry: `[dpf.proxy]`
+    absent, `DPFOperatorConfig` carries image overrides for every system component pointing at the provider
+    registry, the mirrored images are present there at the versions the operator pin expects, and the
+    tool reports any resolved image that still points outside the site'
+- id: source-of-the-nico-images
+  title: Source of the NICo images
+  section: Utility hosts (per provider, decided before anything else)
+  stated: false
+  source: 'NICo setup environment: `NICO_IMAGE_REGISTRY` (no scheme; the Core image is `<registry>/nvmetal-carbide`,
+    REST, Flow, and the site agent use the registry root), `NICO_CORE_IMAGE_TAG`, `NICO_REST_IMAGE_TAG`
+    (Flow reuses it), `NICO_RMS_IMAGE_REPO`; NICo Helm values: `bootArtifactContainers` in `values/nico-core.yaml`,
+    one init container per architecture naming `<registry>/boot-artifacts-x86_64:<tag>` and `boot-artifacts-aarch64:<tag>`,
+    plus the machine-validation image; for Pulled from NGC also the keys `REGISTRY_PULL_SECRET`, `NICO_RMS_NGC_API_KEY`,
+    `NICO_DPF_NGC_API_KEY`, `NICO_DPF_NICO_NGC_API_KEY`, each defaulting to the one before it; for Pulled
+    from a local registry with DPF also `NICO_DPF_HELM_REPO_CARBIDE` and, in the NICo TOML file, a `[dpf.services.<svc>]`
+    block per NICo DPUService (`dpu_agent`, `dhcp_server`, `fmds`, `otel`) with `helm_repo_url`, `helm_chart`,
+    `helm_version`, `docker_repo_url`, `docker_image_tag`, `docker_image_pull_secret` (`helm-prereqs/README.md`
+    "DPF images and registries", `dpf.md` §3.5)'
+  options:
+  - name: Pulled from a local registry
+    text: 'Pulled from a local registry: a provider-run registry inside the site holds the image set,
+      built from infra-controller and nv-rms on the provider''s build host'
+  - name: Pulled from NGC
+    text: 'Pulled from NGC: NVIDIA-internal only; NICo publishes no assets, so this needs a key entitled
+      to the NICo org''s private spaces'
+  default: Pulled from a local registry
+  check: 'Pulled from NGC, `nico-pre-build`: log in to nvcr.io and test pull access to every repository
+    of the image set at the chosen tags, boot artifacts included, reporting entitlement per artifact.
+    Pulled from a local registry: the build-side checks belong to the Build host entry; `nico-pre-install`
+    verifies every item of the image set is present in the registry at the chosen tags: Core `nvmetal-carbide`,
+    the REST image set (REST, Flow, site agent), `boot-artifacts-x86_64` and `boot-artifacts-aarch64`,
+    the machine-validation image, `rms-api` when RMS is in-cluster, and with DPF the four DPUService images
+    `forge-dpu-agent`, `forge-dhcp-server`, `carbide-fmds`, `otelcol-contrib` plus the four charts `nico-dpu-agent`,
+    `nico-dhcp-server`, `nico-fmds`, `nico-otelcol` at the versions the TOML names, in an OCI or HTTPS
+    Helm repository; and that `bootArtifactContainers` is not empty. With DPF, `nico-pre-config`: a `[dpf.services.<svc>]`
+    block exists for all four NICo services with `docker_repo_url` and `helm_repo_url` under the provider''s
+    registry, non-empty `helm_version` and `docker_image_tag`, `docker_image_pull_secret` naming the registry
+    Secret when the registry is private, and `NICO_DPF_HELM_REPO_CARBIDE` equal to that `helm_repo_url`;
+    `nico-pre-platform`: an Argo CD repository Secret in `dpf-operator-system` exists whose `url` equals
+    each `helm_repo_url`, with `enableOCI=true` for an `oci://` URL, and its credentials fetch the chart
+    index. Gap: setup.sh creates the repository Secrets only when `NICO_DPF_NGC_API_KEY` is set, always
+    with user `$oauthtoken` and the NGC key, so a provider registry never gets a usable one from setup.sh;
+    candidate issue. Either way, `nico-pre-ingest` fetches one x86_64 and one aarch64 boot artifact from
+    the nico-pxe VIP under `/public/blobs/internal` and fails on a 404, before any host is ingested. The
+    answer selects which source branch runs'
+- id: build-host
+  title: Build host
+  section: Utility hosts (per provider, decided before anything else)
+  stated: true
+  source: 'Site Planning Document (ref: `scripts/control-plane-dpu/README.md` Part 2)'
+  options:
+  - name: 'Yes'
+    text: 'Yes: validate the build host; `nico-pre-build` runs on it and checks the toolchains, checkouts,
+      artifact access, disk space, and push access to the registry host'
+  - name: 'No'
+    text: 'No: the provider builds the CP-DPU ISO and any images on its own responsibility; `nico-pre-build`
+      is skipped and the build-host questions below do not apply'
+  default: 'Yes'
+  check: 'Yes: `nico-pre-build` (stage 1a), run on the build host: CP-DPU toolchain present with the right
+    flavours; image toolchain present, the Rust toolchain pinned by `rust-toolchain.toml`, Go 1.26.x,
+    cargo-make, Docker; with DPF also the DPU service toolchain from `bluefield/`: the aarch64 cross-build
+    container builds and Docker runs an arm64 image through binfmt, and helm is present at a version that
+    packages and pushes OCI charts; artifact URLs answer with the credentials at hand; disk space against
+    artifact sizes; DOCA, HBN, and BFB form one supported combination. Registry: the registry CA is trusted
+    by Docker and helm on the build host, Docker login succeeds, and a scratch tag pushes to and deletes
+    from the registry host; with DPF a scratch chart pushes to the chart repository, OCI or HTTPS, with
+    the credentials `[dpf.services.*]` will rely on. The build host emits a manifest of what it produced,
+    the image set from the Source of the NICo images entry plus, with DPF, the five DPU images (`forge-dpu-agent`,
+    `forge-dhcp-server`, `carbide-fmds`, `forge-dpu-otel-agent`, `otelcol-contrib`) and the four charts,
+    and `nico-pre-stage` verifies it arrived in the registry. No skips the stage'
+- id: registry-host
+  title: Registry host
+  section: Utility hosts (per provider, decided before anything else)
+  stated: false
+  source: 'NICo setup environment: `NICO_IMAGE_REGISTRY`, `REGISTRY_PULL_SECRET`'
+  options:
+  - name: Provider-run
+    text: 'Provider-run: Provider-run registry inside the site; in an air-gapped site it is the landing
+      point for images copied in from the outside build host'
+  - name: None
+    text: 'None: NVIDIA-internal only; the site is connected and holds a key entitled to the NICo org,
+      and every image pulls from NGC'
+  default: Provider-run
+  check: '`nico-pre-stage`, once, on the served certificate: the chain is complete, no certificate in
+    it is expired or not yet valid, and the SAN contains the registry name exactly as `NICO_IMAGE_REGISTRY`
+    spells it, host name or IP; then a TLS handshake with the staging host trust store and an HTTP answer
+    from `/v2/`. `nico-pre-build`: Docker login from the build host. `nico-pre-platform`: handshake from
+    every site controller with the trust containerd uses, per-registry certificate directory or OS trust
+    store, the served fingerprint equal to the one recorded at stage, and the exact Core, REST, RMS, and
+    DPF image references pull with the pull secret (today `preflight.sh` section 9); when it serves BFB
+    or BF4 ISO, those URLs answer with the expected sizes; when it serves charts, each repository''s index
+    answers with the credential Argo CD will use. `nico-pre-fabric`, only with DPF installed: handshake
+    and reachability from a DPU-network vantage point'
+- id: registry-authentication
+  title: Registry authentication
+  section: Utility hosts (per provider, decided before anything else)
+  stated: false
+  source: 'NICo setup environment: `REGISTRY_PULL_SECRET`, `REGISTRY_PULL_USERNAME` (`$oauthtoken`*)'
+  options:
+  - name: Credentialed pulls
+    text: 'Credentialed pulls: `REGISTRY_PULL_SECRET` set, setup creates `imagepullsecret` and the REST
+      and Flow secrets'
+  - name: No secret from setup
+    text: 'No secret from setup: `REGISTRY_PULL_SECRET` unset; the registry is public, or the nodes already
+      authenticate by other means, a pre-existing secret, containerd credentials, or client certificates'
+  default: Credentialed pulls
+  check: '`nico-pre-install`: when set, log in to `NICO_IMAGE_REGISTRY` as `REGISTRY_PULL_USERNAME` with
+    the secret and fetch the Core manifest; when unset, fetch it from a site controller the way kubelet
+    will, whatever the mechanism, and confirm any `imagepullsecret` still referenced by the values exists
+    in every target namespace. `nico-pre-stage`: with a local registry and `REGISTRY_PULL_USERNAME` unset,
+    flag that the login would use NGC''s `$oauthtoken` convention'
+- id: dpu-in-the-site-controllers
+  title: DPU in the site controllers
+  section: Site topology
+  stated: true
+  source: 'Site Planning Document (ref: `docs/getting-started/prerequisites/hardware.md` "DPUs on Site
+    Controller"; quick-start "Site controller node DPU requirements")'
+  options:
+  - name: BF3 DPU in DPU mode
+    text: BF3 DPU in DPU mode (preferred, QA-tested)
+  - name: no DPU
+    text: no DPU (supported), which includes a BlueField left in NIC mode
+  default: BF3 DPU in DPU mode
+  check: 'changes which members run. With a DPU: `nico-pre-build` is required; `nico-pre-host`, through
+    the host BMC, checks a BlueField-3 in DPU mode with both ports present and `p0` visible at 200 Gb,
+    link state where the platform reports it, and through the DPU''s BMC over the OOB network, firmware
+    at or above the HCL pins, a BlueField-4 failing by name as unsupported on the control-plane path;
+    `nico-pre-config`: the MetalLB file carries BGPPeer and BGPAdvertisement and no `L2Advertisement`,
+    which is an error here; `nico-pre-fabric` runs from the DPU and requires `p0` and `p1` up with LLDP
+    neighbours on two different ToRs and BGP sessions established on both. Without a DPU: `nico-pre-build`
+    and the DPU rows are skipped; `nico-pre-host`, through the host BMC, checks the single NIC port present
+    and its link state instead; `nico-pre-config`: exactly one advertisement mode in the MetalLB file;
+    BGP, one BGPPeer per node with `nodeSelectors` naming real hostnames and `myASN` and `peerASN` as
+    the worksheet says; `L2Advertisement` accepted and reported as dev and test only, with the pools inside
+    the controllers'' own subnet; `nico-pre-fabric`, from each site controller and the cluster: each node''s
+    BGP session with its ToR established and `peerAddress` reachable from that node, the service VIP /32s
+    advertised by the speaker and reachable from the staging host, the single uplink up with the management
+    and Kubernetes VLANs present. The ToR''s export of 50100 and its imports are confirmed by the worksheet;
+    they are not visible from the site'
+- id: smn
+  title: SMN
+  section: Site topology
+  stated: false
+  source: 'NICo CP setup files: `scripts/control-plane-dpu/site-sample.yaml` `fnn:`; `build-dpu-install-iso.sh
+    --no-fnn`'
+  options:
+  - name: SMN on the control-plane DPU
+    text: 'SMN on the control-plane DPU: the `fnn` block in the CP-DPU site yaml renders startupSMN; the
+      DPU imports 900 and exports 50100'
+  - name: SMN on the ToR
+    text: 'SMN on the ToR: site controllers without a DPU; MetalLB peers with the ToR, and the datacenter
+      exports the VIPs and host prefixes with 50100 and performs the imports on the controllers'' behalf'
+  - name: No SMN
+    text: 'No SMN: `--no-fnn`, test-only, not validated'
+  default: SMN on the control-plane DPU
+  check: 'SMN on the control-plane DPU. `nico-pre-config`: the CP-DPU site yaml carries the `fnn` block
+    with `controlPlaneVni` and the three route targets. `nico-pre-fabric`, from the control-plane DPU
+    and the site controller once the DPU is provisioned: the BGP EVPN session with the leaf is established,
+    unnumbered as the worksheet says; type-5 routes carrying 900, 901, 50100, and every target in `routeTargetsToImport`
+    are received in the control-plane VRF; the managed-host BMC prefixes from the expected-machines manifest
+    are present in that VRF''s table and a sample BMC answers on TCP 443 from the site controller through
+    the DPU; the site controller''s /31 and the service VIP /32s are advertised with 50100, receipt confirmed
+    by the worksheet since the datacenter''s import is not visible from the site. SMN on the ToR: `nico-pre-fabric`,
+    from the site controllers and the cluster: the MetalLB rows of the DPU in the site controllers entry,
+    reach to a sample managed-host BMC through the ToR on TCP 443, and the worksheet confirming that the
+    ToR exports 50100 and imports 900 and 901 on the controllers'' behalf. No SMN: plain L3 reach to the
+    OOB prefixes and the DHCP relay path, reported as the test-only path and not validated in release
+    1'
+- id: managed-host-kinds-in-the-fleet
+  title: Managed host kinds in the fleet
+  section: Site topology
+  stated: true
+  source: 'NICo TOML file + Site Planning Document: site-wide `[site_explorer] dpu_policy`; `[networks.<name>]`
+    blocks of type `admin` and `hostinband`; per-host `dpu_policy` and `interfaces` on expected-machine
+    records (`boot-interfaces-and-dpu-modes.md` §2–3; `flat_vpcs_zero_dpu.md`)'
+  options:
+  - name: DPU hosts booting through the DPU on the Admin segment
+    text: 'DPU hosts booting through the DPU on the Admin segment: the standard host, `dpu_policy` manage
+      with no declared primary NIC'
+  - name: DPU hosts booting from an onboard NIC
+    text: 'DPU hosts booting from an onboard NIC: the DPUs stay managed for the data plane while the host
+      OS boots on HostInband'
+  - name: Zero-DPU hosts
+    text: 'Zero-DPU hosts: no DPU hardware, or a DPU that NICo ignores; the host boots on HostInband and
+      joins Flat VPCs only'
+  - name: DPU hosts NICo flips to NIC mode
+    text: 'DPU hosts NICo flips to NIC mode: site-explorer stages the mode change and power-cycles the
+      host, which then boots on HostInband and joins Flat VPCs only'
+  multiple: true
+  default: DPU hosts booting through the DPU on the Admin segment
+  check: 'DPU hosts on the Admin segment: `nico-pre-config`: an Admin segment with IPv4 and a gateway
+    exists and the site-wide `dpu_policy` is `manage`; the boot path itself is covered by the SMN, DPF,
+    and DHCP relay entries. Any HostInband kind: `nico-pre-config`: a HostInband segment exists on the
+    subnet those NICs are cabled to; `nico-pre-fabric`: DHCP relay from that subnet to the `nico-dhcp`
+    VIP and the PXE or HTTP boot URL reachable from it; the ToR port configuration for a HostInband NIC
+    and tenant isolation for Flat VPCs are worksheet rows; `nico-pre-ingest`: an expected-machine record
+    per such host with exactly one `host` interface marked primary on `network_segment_type` 3 and a valid
+    MAC unique across records, carrying the `dpu_policy` override when the site-wide policy is `manage`.
+    DPU hosts booting from an onboard NIC: the Admin segment still exists; a Vera Rubin host of this kind
+    is an error, because host initialisation runs `DisableOnboardNics` on that SKU; as a warning, the
+    onboard NIC''s network boot option is enabled in UEFI. Flipped to NIC mode: `nico-pre-ingest`: every
+    such host has a DPU whose BMC answers Redfish and a platform that accepts PowerCycle or ACPowercycle,
+    since site-explorer will issue them; on a rack-manager site the policy is set site-wide. Shared host
+    BMC, detected from the records: `nico-pre-config`: the prefix is declared once as HostInband and not
+    also as an underlay segment, allocation is dynamic when either interface is unreserved, the segment
+    has a DNS subdomain, and the prefix leaves two addresses per host above `reserve_first`; `nico-pre-ingest`:
+    the BMC MAC sits at the top level of the record with a matching `host_bmc` entry, and every host with
+    a shared BMC is of a zero-DPU or flipped kind, a DPU-booting host there is an error; relay from the
+    segment is the unconditional DHCP relay row; the shared choice is reported as an explicit security
+    decision'
+- id: dpf
+  title: DPF
+  section: Site topology
+  stated: false
+  source: 'NICo setup environment: the flags; with Install, the inputs `NICO_DPF_DPU_CLUSTER_VIP` and
+    `NICO_DPF_DPU_INTERFACE` (keepalived VIP on the site controllers, routable on its own, or `NICO_DPF_METALLB_POOL`
+    when it must be advertised through a MetalLB pool), and `NICO_DPF_K8S_API_VIP` with `_PORT` only when
+    the Kubernetes API address derived from the Endpoints is not reachable from the DPU network'
+  options:
+  - name: Install
+    text: Install
+  - name: Skip
+    text: 'Skip: `--skip-dpf`, `NICO_SKIP_DPF=true`, `NICO_INSTALL_DPF=false`'
+  default: Install
+  check: 'Install: `nico-pre-platform` verifies the DPU cluster VIP is free, the keepalived interface
+    exists on every site controller, no other VRRP instance uses router id 126 on that segment, and the
+    Kubernetes API endpoint the DPUs will use answers from a DPU-network vantage point; and `nico-pre-install`
+    verifies the BMC root password is seeded for the two-phase deploy; the DPF image, chart, clone, and
+    BFB entries add their own checks. Value-gated, not asked (agreed 2026-11-06): when `[dpu_config] service_vpc_slot_count`
+    is above zero, `nico-pre-config` also verifies the generated plus topology-derived HBN interfaces
+    total at most 32, the SF commitment (base SFs plus two per slot, the endpoint limit and `additional_managed_sf`)
+    fits `pf_total_sf_reserved` or, with intercept bridging, is recorded as a flavor change that reprovisions
+    the DPUs, a positive `max_active_service_vpc_interfaces_per_dpu` comes with a positive slot count,
+    every `service_vpc_enabled_address_families` entry has at least one slot and that family''s DHCP CNI
+    and raw NAD installed, and a `serviceVpcNetworks` overlay on `dhcp_server` names a non-empty chart
+    version; at zero none of these rows run. Skip: those checks are off, and what runs instead follows
+    the Managed-host DPU policy. With `nic` or `ignore` (zero-DPU hosts): the HostInband segment with
+    DHCP relay to the `nico-dhcp` VIP, the expected-machine records with a primary onboard-NIC interface,
+    the host boot path (DHCP option 67 or the Redfish-pinned URI), the `nico-pxe` VIP reachable from the
+    host subnets and `nico-static-pxe` resolving, and one x86_64 and one aarch64 boot artifact fetched
+    from the VIP, as the onboard-NIC, PXE, and image source entries say; tenant isolation is a worksheet
+    row, since Flat VPCs leave it to the fabric. With DPU hosts on the iPXE path: `nico-pre-config`: `[dpu_config]
+    bootstrap_ca_source` consistent with the non-DPF bootstrap CA entry; the DPU OS install method is
+    a value, folded 2026-11-06: with `dpu_enable_secure_boot = true` NICo pushes the BFB over Redfish
+    `SimpleUpdate` and every DPU BMC of a host must run 24.10 or later and reach `nico-pxe`, otherwise,
+    and by default, the DPU UEFI HTTP-boots `nico.efi` from `nico-pxe` with Secure Boot disabled, so `nico-pre-ingest`
+    checks the DPU BMC versions against the chosen value; `nico-pre-install`: the NICo BFB and, where
+    the firmware check uses it, the preingestion BFB are served by `nico-pxe` and fetch from the VIP with
+    the expected sizes, the bootstrap root CA endpoint answers for `legacy_download`, and the API gRPC
+    VIP answers from the Admin segment the DPU agent will use; `nico-pre-fabric`: DHCP relay from the
+    Admin segment to the `nico-dhcp` VIP; with Redfish BFB push, `nico-pre-ingest` confirms every DPU
+    BMC of a sample host reports 24.10 or later. Either way `nico-pre-ingest` warns when an expected machine''s
+    record disagrees with the policy'
+- id: managed-host-dpu-generation
+  title: Managed host DPU generation
+  section: Site topology
+  stated: false
+  source: 'NICo TOML file + Site Planning Document: `[dpf.deployments.<name>]` with `bfb_url` for BF3
+    or `bluefield_software` for BF4; `docs/hcl.md` for the tested DOCA and HBN pins'
+  options:
+  - name: BF3
+    text: 'BF3: provisioned from a BFB, the DPF built-in deployment and the only generation the non-DPF
+      iPXE path installs'
+  - name: BF4 generic
+    text: 'BF4 generic: provisioned from an OS ISO plus PLDM bundles through `[dpf.deployments.bf4_generic]`,
+      DPF required'
+  - name: BF4 Astra
+    text: 'BF4 Astra: as BF4 generic through `[dpf.deployments.bf4_astra]`, plus the `ra2.2-runtime` ConfigMap
+      and the Weave and Xplane extra services'
+  - name: Not applicable
+    text: 'Not applicable: no managed DPUs in the fleet'
+  multiple: true
+  default: BF3
+  check: '`nico-pre-config`: `[dpf.deployments.*]` carries `bfb_url` for BF3 or `bluefield_software` with
+    at least one PLDM bundle for BF4, never both, and the three identifiers are distinct across the active
+    deployments. BF4 generic or Astra ticked: `nico-pre-config`: `pldm_fw_bundle` holds an entry for every
+    BF4 PSID in the expected-machine inventory; `nico-pre-ingest`: every discovered BF4 DPU reports a
+    PSID the map covers. Astra ticked: `nico-pre-config`: `deployment_scoped_service_interfaces = true`,
+    `[ewethers_config]` present with `astra_enabled = true` and the Astra bit lengths set, and every Astra
+    host''s expected machine carries a CX9 interface and exactly one DPU; `nico-pre-platform`: the `ra2.2-runtime`
+    ConfigMap exists; `nico-pre-stage`: the BFB or ISO URLs answer; `nico-pre-ingest`: a DPU factory-default
+    credential is seeded for every ticked generation (`credential add-dpu-factory-default --model bf3|bf4`;
+    the BF4 entry ships commented out in `helm-prereqs/values.yaml`), and discovered DPU models fall within
+    the ticked generations'
+- id: custom-default-storageclass
+  title: Custom default StorageClass
+  section: Kubernetes and OS on the site controllers
+  stated: false
+  source: 'NICo setup environment: `NICO_MANAGE_DEFAULT_STORAGE_CLASS`; Site Planning Document for the
+    class name and capacity (`hardware.md` "Storage layout")'
+  options:
+  - name: 'No'
+    text: 'No: setup.sh installs local-path-provisioner on host path `/opt/local-path-provisioner` and
+      marks `local-path` the default StorageClass, with `local-path-persistent` (Retain) for the Vault
+      and Postgres PVCs'
+  - name: 'Yes'
+    text: 'Yes: the provider''s own class is the default; `NICO_MANAGE_DEFAULT_STORAGE_CLASS=false`, and
+      setup.sh still installs local-path-provisioner and its two classes but sets no default and checks
+      for none'
+  default: 'No'
+  check: 'No: `nico-pre-platform`: no StorageClass other than `local-path` is marked default, and every
+    site controller has `/opt/local-path-provisioner` with free space for the planned PVC sizes. Yes:
+    `nico-pre-config`: `NICO_MANAGE_DEFAULT_STORAGE_CLASS` is `false`; `nico-pre-platform`: exactly one
+    default StorageClass exists, it is not `local-path`, and it provisions a ReadWriteOnce test PVC; with
+    DPF `local-path` still exists for Kamaji'
+- id: custom-storage-classes-for-components
+  title: Custom storage classes for components
+  section: Kubernetes and OS on the site controllers
+  stated: false
+  source: 'NICo setup environment: `NICO_STORAGE_CLASS` (Vault data and audit PVCs); NICo Helm values:
+    `helm-prereqs/values.yaml` `postgresql.storageClass`'
+  options:
+  - name: 'No'
+    text: 'No: Vault and Postgres stay on `local-path-persistent`'
+  - name: 'Yes'
+    text: 'Yes: Vault, Postgres, or both are redirected to a class the provider runs'
+  default: 'No'
+  check: '`nico-pre-config`: Yes requires at least one of `NICO_STORAGE_CLASS` and `postgresql.storageClass`
+    to differ from `local-path-persistent`, else flagged as a missing override; No requires both at `local-path-persistent`,
+    else flagged as an unexpected override. The named classes are then checked by the "Storage classes"
+    rows'
+- id: evpn-overlay-peering
+  title: EVPN overlay peering
+  section: Network
+  stated: false
+  source: 'NICo TOML file + Site Planning Document: `network.md` "Overlay and EVPN Configuration"; siteConfig
+    `enable_route_servers`, `route_servers`'
+  options:
+  - name: Option 1
+    text: 'Option 1 ToR peering: Option 1 dual-stacked IPv4 and EVPN sessions with the ToRs; the code
+      default, `enable_route_servers` false and `route_servers` empty'
+  - name: Option 2
+    text: 'Option 2 route servers: Option 2 two or more external route servers, multi-hop eBGP, EVPN-only'
+  default: Option 1
+  check: '`nico-pre-fabric`: Option 1, from a DPU-network vantage point an EVPN session to each ToR establishes
+    and the ToR exports the expected type 5 routes; Option 2, each address in `route_servers` answers
+    BGP on port 179 over multiple hops from the DPU loopback prefix, there are at least two, and `enable_route_servers`
+    is true in the TOML; worksheet: the route-server ASN and that the route servers accept sessions from
+    the whole DPU ASN pool, EVPN address family only; `nico-pre-config`: the TOML keys match the option'
+- id: recursive-resolver-for-managed-machines
+  title: Recursive resolver for managed machines
+  section: Network
+  stated: false
+  source: 'NICo Helm values + Site Planning Document: `values/nico-core.yaml` unbound block; `helm-prereqs/README.md`
+    "DPU compatibility DNS"'
+  options:
+  - name: Built-in unbound
+    text: 'Built-in unbound: Option A, the `unbound` chart deployed by setup.sh with the `.forge` records
+      pre-populated from the service VIPs and its own VIP handed to the machines through DHCP option 6,
+      recommended for new sites'
+  - name: External DNS
+    text: 'External DNS: Option B, the provider''s existing DNS for the OOB network serves the `.forge`
+      zone with the same VIPs and is the resolver DHCP option 6 hands out; unbound stays off'
+  default: Built-in unbound
+  check: 'Option A: `nico-pre-config` verifies the unbound block is enabled with a `localData` record
+    per `.forge` name equal to the matching service VIP, a VIP for unbound itself, and forwarders set;
+    `nico-pre-ingest` resolves every `.forge` name through the unbound VIP from a BMC network and confirms
+    DHCP option 6 carries that VIP. Option B: `nico-pre-fabric` resolves every `.forge` name through the
+    provider''s resolver from the OOB network and confirms option 6 carries that resolver; `nico-pre-config`
+    verifies unbound is disabled. Either option: the `.forge` names are present in `certificate.extraDnsNames`'
+- id: pxe-and-http-boot-url
+  title: PXE and HTTP boot URL
+  section: Network
+  stated: false
+  source: 'NICo TOML file: `x86_pxe_boot_url_override`, `arm_pxe_boot_url_override`, `set_http_boot_uri_for_vendors`,
+    `pxe_public_base_url` (`crates/api-core/src/cfg/README.md` "Other top-level knobs")'
+  options:
+  - name: Custom PXE URL
+    text: 'Custom PXE URL: `x86_pxe_boot_url_override` and `arm_pxe_boot_url_override` point DHCP option
+      67 at an external artifact server instead of nico-pxe'
+  - name: BMC-pinned HTTP boot URL for some vendors
+    text: 'BMC-pinned HTTP boot URL for some vendors: `set_http_boot_uri_for_vendors` lists the BMC vendors
+      whose UEFI HTTP boot URL the state controller writes over Redfish, in addition to option 67'
+  multiple: true
+  check: 'Custom PXE URL ticked: `nico-pre-config`: both override keys set; `nico-pre-fabric`: each URL
+    reachable from the BMC and HostInband networks and serving `ipxe.efi` for its architecture; clear:
+    both keys unset. BMC-pinned ticked: `nico-pre-config`: the vendor list is non-empty and names only
+    vendors libredfish implements; `nico-pre-ingest`: the expected-machine records contain at least one
+    BMC of each listed vendor; clear: the list is empty. Either way: `nico-pre-ingest`: a DHCP discover
+    from the BMC and HostInband segments returns option 67 with the expected URL'
+- id: credential-store
+  title: Credential store
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo TOML file: `[secrets]` `backends`, `writer`, `import_from`, `import_approach`, `[secrets.kms.providers.*]`
+    (`docs/configuration/secrets-storage.md`); `day0-credential-store.md`'
+  options:
+  - name: Vault KV
+    text: 'Vault KV: no `[secrets]` section, or `backends = ["vault"]` with `writer = "vault"`'
+  - name: Postgres envelope-encrypted
+    text: 'Postgres envelope-encrypted: `[secrets]` with `backends`, `writer = "postgres"` and a KMS provider
+      from the next entry; optional one-shot `import_from = "vault"` for a migrated site'
+  default: Vault KV
+  check: 'Vault KV: `nico-pre-config`: no `[secrets]` section, or `backends` equals `["vault"]` and `writer`
+    is `vault`; `nico-pre-platform`: the Vault token Secret the chart names exists and the KV mount answers
+    with it. Postgres: `nico-pre-config`: `backends` non-empty with each name once, `writer` is `postgres`
+    and appears in `backends`, `import_from` unset or `vault` with an `import_approach`, exactly one `[secrets.kms.providers.*]`
+    is active and routes `/` to a `kek_id` it defines; `nico-pre-platform`: the key material that provider
+    needs is mounted in the nico-api pod, the Vault token Secret still exists when `vault` is in `backends`
+    or `import_from`, and the report reminds that the KEK is backed up apart from the database and that
+    a single-replica rollout keeps the old pod writing during its grace period'
+- id: key-wrapping-for-the-postgres-store
+  title: Key wrapping for the Postgres store
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo TOML file: `[secrets.kms] active`, `[secrets.kms.providers.<name>] type` with the per-type
+    fields, `[secrets.routing]` (`docs/configuration/secrets-storage.md`, `crates/api-core/src/cfg/README.md`
+    "ProviderConfig"); NICo setup environment: `NICO_KMIP_CLIENT_DIR` for the KMIP client Secret'
+  options:
+  - name: Integrated
+    text: 'Integrated: the KEK is loaded by nico-api from an environment variable or a mounted file'
+  - name: Transit
+    text: 'Transit: Vault or OpenBao Transit wraps server-side with a static token'
+  - name: KMIP
+    text: 'KMIP: an external KMIP 1.4 server over mTLS'
+  - name: Not applicable
+    text: 'Not applicable: the credential store is Vault KV'
+  multiple: true
+  check: 'Any provider ticked: `nico-pre-config`: `[secrets.kms] active` names a configured provider whose
+    `type` is ticked, every configured provider''s type is ticked and every ticked type has at least one
+    provider, `[secrets.routing]` has the `"/"` catch-all and every `kek_id` it names belongs to a configured
+    provider; `nico-pre-platform`: every `kek_id` recorded in the journal still has an unwrapping provider.
+    Credential store Postgres with no box ticked is an error. Integrated: `nico-pre-config`: each key
+    source is `env` or `file`, never `value`; `nico-pre-platform`: the variable is set or the file is
+    mounted in the nico-api pod and decodes to 32 bytes, and the report reminds that the key is backed
+    up apart from the database. Transit: `nico-pre-config`: `transit_mount` and `keys` set; `nico-pre-platform`:
+    the engine is enabled at the mount, each key exists, `VAULT_TOKEN` is a static token whose policy
+    grants `update` on the encrypt, decrypt and datakey paths of each key. KMIP: `nico-pre-config`: `endpoint`,
+    `ca_bundle`, `client_cert`, `client_key` and `keys` set, the three paths under an `extraVolumeMounts`
+    mount backed by a Secret; `nico-pre-platform`: the Secret `nico-kmip-client` exists in nico-system
+    with the three keys, the endpoint answers over mTLS with that material, lists KMIP 1.4, and each Unique
+    Identifier is an Active AES-256 key with Encrypt and Decrypt usage. Not applicable: no check
+
+
+    Background: Applies only with the Postgres credential store. Every credential there is encrypted with
+    a data key (DEK), and the DEK is wrapped by a key-encryption key (KEK). This entry decides where the
+    KEK lives.
+
+
+    **How the tables fit together.** Providers are named under `[secrets.kms.providers.<name>]` and tagged
+    by `type`. `[secrets.kms] active` names the provider that wraps new writes; every configured provider
+    still unwraps the `kek_id`s it holds, which is how a key is rotated or moved without re-encrypting
+    the journal first. `[secrets.routing]` chooses which `kek_id` wraps new writes under each credential
+    path prefix, longest prefix winning, with `"/"` as the required catch-all; reads ignore it, since
+    every entry records the `kek_id` that wrapped it, so one site normally has the single `"/"` line and
+    a second line only when, say, BMC credentials should move to a different key. A bad `[secrets]` section
+    fails the boot before any write or import.
+
+
+    **Integrated.** The KEK is a base64 256-bit key that the nico-api process loads itself. `keys` maps
+    each `kek_id` to a locator: `{ env = "NAME" }` reads an environment variable on the pod, `{ file =
+    "/path" }` reads a mounted file, `{ value = "<base64>" }` puts the key in the TOML. Simplest and dependency-free,
+    but the key material sits in the NICo process and its custody and backup are the operator''s. `value`
+    is development only, and the docs call even this `env` example "not a production custody recommendation".
+    The variable or file is delivered by the Core chart from a Kubernetes Secret (`envFrom` or `extraVolumes`).
+
+
+    ```toml
+
+    [secrets]
+
+    backends = ["postgres"]
+
+    writer = "postgres"
+
+
+    [secrets.kms]
+
+    active = "site"
+
+
+    [secrets.kms.providers.site]
+
+    type = "integrated"
+
+    keys = { "site-kek-1" = { env = "NICO_SECRETS_KEK" } }
+
+
+    [secrets.routing]
+
+    "/" = "site-kek-1"
+
+    ```
+
+
+    **Transit.** Vault or OpenBao Transit wraps and unwraps server-side, so the KEK never leaves Vault.
+    `keys` lists the Transit key names this provider answers for; `transit_mount` defaults to `transit`.
+    It reuses the Vault that setup.sh installs, but needs work helm-prereqs does not do: enable the engine
+    at the mount, create each key, and grant the token `update` on `transit/encrypt/<key>`, `transit/decrypt/<key>`
+    and `transit/datakey/plaintext/<key>`. The token must be static in `VAULT_TOKEN` (the chart sets it
+    from the Secret named by `envFrom.vaultToken.secretName`); the Kubernetes service-account login is
+    not supported for Transit. Shape from the field table; the docs ship no complete example:
+
+
+    ```toml
+
+    [secrets]
+
+    backends = ["postgres"]
+
+    writer = "postgres"
+
+
+    [secrets.kms]
+
+    active = "vault-transit"
+
+
+    [secrets.kms.providers.vault-transit]
+
+    type = "transit"
+
+    keys = ["site-kek-1"]
+
+    transit_mount = "transit"      # default
+
+
+    [secrets.routing]
+
+    "/" = "site-kek-1"
+
+    ```
+
+
+    ```bash
+
+    vault secrets enable -path=transit transit
+
+    vault write -f transit/keys/site-kek-1
+
+    ```
+
+
+    **KMIP.** An external KMIP 1.4 server, typically an enterprise HSM or KMS, holds non-exportable AES-256
+    keys and performs Encrypt and Decrypt for NICo over mTLS. `endpoint` is `host:port` (port 5696 when
+    omitted), `server_name` defaults to the host part, `ca_bundle`, `client_cert` and `client_key` are
+    PEM paths inside the pod, and `keys` maps each `kek_id` to the server''s Unique Identifier of an existing,
+    Active key. Startup verifies the server lists KMIP 1.4 and each key''s usage. setup.sh turns `NICO_KMIP_CLIENT_DIR`
+    (`ca.pem`, `client.pem`, `client.key`) into the Secret `nico-system/nico-kmip-client`, which nico-api
+    mounts through `extraVolumes`; preflight checks that the three paths lie under that mount. Merged,
+    but no KMIP server is qualified yet (dsx-ai-factory/infra-controller#3253).
+
+
+    ```toml
+
+    [secrets]
+
+    backends = ["postgres"]
+
+    writer = "postgres"
+
+
+    [secrets.kms]
+
+    active = "hsm"
+
+
+    [secrets.kms.providers.hsm]
+
+    type = "kmip"
+
+    endpoint = "kms.example.com:5696"
+
+    ca_bundle = "/etc/nico/kmip/ca.pem"
+
+    client_cert = "/etc/nico/kmip/client.pem"
+
+    client_key = "/etc/nico/kmip/client.key"
+
+    keys = { "site-kek-1" = "f0a1c2d3-5e6f-4a7b-8c9d-0e1f2a3b4c5d" }
+
+
+    [secrets.routing]
+
+    "/" = "site-kek-1"
+
+    ```
+
+
+    **Custody.** Back up the KEK apart from the database: a dump without every KEK its rows reference
+    is unreadable, and losing an Integrated KEK loses every credential it wrapped. With Transit or KMIP
+    the backup problem moves to the KMS.'
+- id: certificate-issuance
+  title: Certificate issuance
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo TOML file: `[certificates]` `use_cert_manager`, `use_cert_manager_ufm`, `backend`, `[certificates.cert_manager]`
+    `issuer_name`, `issuer_kind`, `namespace`, `max_ttl`, `request_timeout_secs`, `[certificates.dedicated_vault]`
+    (`crates/api-core/src/cfg/README.md` "CertificatesConfig"); NICo Helm values: `global.certificate.useCertManager`,
+    `useCertManagerUfm`, `nico-api.machineCertificates.issuerRef`'
+  options:
+  - name: cert-manager for machine certificates
+    text: 'cert-manager for machine certificates: `use_cert_manager = true`, Scout and DPU agent certificates
+      come from CSR-only CertificateRequests to the configured issuer'
+  - name: cert-manager for UFM certificates
+    text: 'cert-manager for UFM certificates: `use_cert_manager_ufm = true`, the same path for UFM, once
+      approval policy allows its DNS SANs'
+  multiple: true
+  check: 'Nothing ticked: `nico-pre-config`: both flags false or absent; `nico-pre-platform`: the PKI
+    mount and role answer with the token, `vault-nico-issuer` is Ready, the PKI CA equals `site-root`;
+    with `backend = "dedicated_vault"`: its address answers over TLS with the given CA, the mount and
+    role exist, a token or service-account login works. Machine box: `nico-pre-config`: `use_cert_manager
+    = true`, `[tls] root_cafile_path` set, `max_ttl` at least 8 days; `nico-pre-platform`: the named issuer
+    exists and is Ready and its CA chains to that root, the API service account holds create, get and
+    delete on `certificaterequests` in the request namespace, approval covers the profile, a test request
+    is issued and deleted. UFM box: the same, plus the approval policy allows the UFM DNS SANs and 365
+    days fits within `max_ttl`; conflicts with a cleared InfiniBand box in Optional components'
+- id: root-ca
+  title: Root CA
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo Helm values: `helm-prereqs/values.yaml` `certManager.siteRoot.create`, `certManagerNamespace`
+    (default `cert-manager`); `templates/site-root-certificate.yaml`, `templates/vault-config-job.yaml`'
+  options:
+  - name: Self-signed by setup.sh
+    text: 'Self-signed by setup.sh: cert-manager self-signs `site-root` (10 years) before Vault starts,
+      and the vault-config job imports certificate and key into the Vault PKI mount'
+  - name: Supplied CA
+    text: 'Supplied CA: `certManager.siteRoot.create: false` and a pre-created TLS Secret `site-root`
+      in the cert-manager namespace holding an organisation-issued intermediate with its private key'
+  default: Self-signed by setup.sh
+  check: 'Self-signed: `nico-pre-platform`: the `site-root` Certificate is Ready, the Secret holds a CA
+    certificate with ten-year validity, `site-issuer` and `vault-nico-issuer` are Ready, and the Vault
+    PKI mount''s CA equals the Secret''s certificate. Supplied: `nico-pre-platform`, before setup.sh phase
+    2: the Secret `site-root` exists in the cert-manager namespace with `tls.crt` and `tls.key`, the certificate
+    is a CA with a usable validity window, the key matches it, and the chain to the organisation root
+    is complete; after install the same issuer and Vault rows as Self-signed'
+- id: admin-client-ca
+  title: Admin client CA
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo Helm values: `nico-api.siteConfig.adminRootCertPem`, `nico-api.auth.adminRootCafilePath`
+    (default `/etc/forge/carbide-api/site/admin_root_cert_pem`); NICo TOML file: `[tls] admin_root_cafile_path`
+    (`docs/manuals/nico-api-auth.md`)'
+  options:
+  - name: 'No'
+    text: 'No: admin CLI users get client certificates from the site CA through the Vault issuance procedure
+      in `nico-api-auth.md`'
+  - name: 'Yes'
+    text: 'Yes: the organisation PKI''s admin CA bundle, public certificates only, in `nico-api.siteConfig.adminRootCertPem`,
+      rendered as `[tls] admin_root_cafile_path`'
+  default: 'No'
+  check: 'Yes: `nico-pre-config`: `adminRootCertPem` contains only PEM CERTIFICATE blocks, no private
+    key, `auth.adminRootCafilePath` names the mounted path the chart validates, and the rendered TOML
+    carries `[tls] admin_root_cafile_path`; `nico-pre-platform`: the bundle''s chain is complete and unexpired,
+    its issuer CN is unique across the combined trust store, and a test client certificate issued by that
+    CA completes the TLS handshake with nico-api and is rejected by authorization until a role is granted.
+    No: `adminRootCertPem` unset, so a bundle left in by mistake is flagged Either way: `nico-pre-config`:
+    `additionalIssuerCns` names the CN that signs the CLI certificates in use, `nico-cli-client` role
+    present when the Vault path is used.'
+- id: autonomous-bmc-and-uefi-rotation
+  title: Autonomous BMC and UEFI rotation
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo TOML file: `bmc_rotation_enabled`, `uefi_rotation_enabled`, `nic_lockdown_ikm_rotation_enabled`,
+    `[credentials] bmc_site_wide_root_source` (`docs/configuration/credential-sources.md`); staging with
+    `nico-admin-cli credential rotate --type bmc|host-uefi|dpu-uefi`'
+  options:
+  - name: BMC rotation
+    text: 'BMC rotation: `bmc_rotation_enabled = true`, Ready hosts converge on the staged site-wide BMC
+      root on their own'
+  - name: UEFI rotation
+    text: 'UEFI rotation: `uefi_rotation_enabled = true`, the same for host and DPU UEFI passwords'
+  multiple: true
+  check: 'BMC box: `nico-pre-config`: `bmc_rotation_enabled = true`, DPF is Skip (conflict otherwise),
+    `bmc_site_wide_root_source` consistent with the credential store; `nico-pre-platform`: a BMC root
+    version above 0 is staged in the backend. UEFI box: `nico-pre-platform`: a host UEFI target is staged.
+    Nothing ticked: both keys false or absent'
+- id: dpu-bootstrap-ca-non-dpf-path
+  title: DPU bootstrap CA, non-DPF path
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo TOML file: `[dpu_config] bootstrap_ca_source`; NICo Helm values: `nico-pxe.bootstrapRootCa.{configMapName|secretName,key}`
+    for a stable operator root in legacy mode (book "DPU Bootstrap CA Trust"; `docs/dpu-management/dpu_configuration.md`;
+    `docs/bootable_artifacts.md`)'
+  options:
+  - name: legacy_download
+    text: '`legacy_download`: the DPU fetches the NICo root CA from `http://<nico-pxe>/api/v0/tls/root_ca`
+      over HTTP, unauthenticated'
+  - name: embedded
+    text: '`embedded`: the bundle is built into a site BFB with `BOOTSTRAP_CA_PATH` and protected by Secure
+      Boot'
+  - name: mounted
+    text: '`mounted`: the provisioning environment places the bundle at `/opt/forge/forge_root.pem`'
+  - name: Not applicable
+    text: 'Not applicable: DPF is installed and no host stays on the iPXE path'
+  default: legacy_download
+  check: '`legacy_download`: `nico-pre-fabric`: the root CA endpoint answers from the DPU OOB network
+    and, when `bootstrapRootCa` names an object, that ConfigMap or Secret exists with the key. `embedded`:
+    `nico-pre-build`: the BFB was built with `BOOTSTRAP_CA_PATH` and the bundle it carries equals the
+    site root; `nico-pre-ingest`: Secure Boot is enabled on the DPUs. `mounted`: the provisioning environment
+    provides the bundle, reported as a worksheet row. Not applicable: no check'
+- id: dpu-agent-bootstrap-ca-dpf-path
+  title: DPU agent bootstrap CA, DPF path
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo TOML file: `[dpf.dpu_agent_bootstrap_ca]` `source`, `url`, `object_kind`, `name`, `key`
+    (`docs/manuals/dpf.md` "DPU Agent Bootstrap CA")'
+  options:
+  - name: legacy_download
+    text: '`legacy_download`: the agent init container downloads the NICo root CA, from `http://carbide-pxe.forge/api/v0/tls/root_ca`
+      unless `url` overrides it'
+  - name: mounted
+    text: '`mounted`: the CA is projected from a Secret or ConfigMap in the dpu-agent namespace of the
+      DPU cluster'
+  - name: Not applicable
+    text: 'Not applicable: DPF is skipped'
+  default: legacy_download
+  check: '`legacy_download`: `nico-pre-fabric`: the endpoint answers from the DPU OOB network. `mounted`:
+    `nico-pre-config`: `object_kind`, `name` and `key` set, `certsDir` at its default; `nico-pre-platform`:
+    the object exists in `dpf-operator-system` with that label (Secret) or in the dpu-agent namespace
+    of the DPU cluster (ConfigMap), its content is a certificate bundle, and the bundle contains the current
+    NICo root. Not applicable when DPF is Skip'
+- id: dpu-os-login-password-dpf
+  title: DPU OS login password (DPF)
+  section: Secrets, keys, and trust
+  stated: false
+  source: 'NICo TOML file: `[dpf].extra_bfcfg_parameters`, `[dpf.deployments.<name>].extra_bfcfg_parameters`
+    (`docs/manuals/dpf.md` "extra_bfcfg_parameters")'
+  options:
+  - name: 'No'
+    text: 'No: the DPU OS keeps the BFB''s stock `ubuntu` account policy, NICo sets no password'
+  - name: 'Yes'
+    text: 'Yes: `extra_bfcfg_parameters` carries `ubuntu_PASSWORD=''$6$...''`, a crypt(3) SHA-512 hash
+      from `openssl passwd -6`, site-wide under `[dpf]` or per deployment'
+  - name: Not applicable
+    text: 'Not applicable: DPF is skipped'
+  default: 'No'
+  check: 'Yes: `nico-pre-config`: an `ubuntu_PASSWORD=` entry exists in `[dpf].extra_bfcfg_parameters`
+    or in the `extra_bfcfg_parameters` of every active deployment, exactly one per deployment after resolution,
+    its value single-quoted and shaped like a `$6$` crypt hash, no `{{` anywhere in the lists; the report
+    reminds that the hash is readable from the CR. No: no `ubuntu_PASSWORD=` entry in any `extra_bfcfg_parameters`
+    list, so a password left in by mistake is flagged. Not applicable: no check'
+- id: machine-identity-spiffe-jwt-svid
+  title: Machine identity (SPIFFE JWT-SVID)
+  section: Authentication
+  stated: false
+  source: 'NICo TOML file: `[machine_identity]` `enabled`, `current_encryption_key_id`, `algorithm` (ES256
+    only), `token_ttl_*`, `trust_domain_allowlist`, `token_endpoint_domain_allowlist`, `token_endpoint_http_proxy`;
+    the KEK in the credential store at `machine_identity.encryption_keys.<id>` (`docs/getting-started/installation-options/day0-machine-identity.md`)'
+  options:
+  - name: Enabled
+    text: 'Enabled: tenants get SPIFFE JWT-SVIDs through IMDS and `SignMachineIdentity`, with a KEK named
+      by `current_encryption_key_id`'
+  - name: Disabled
+    text: 'Disabled: `[machine_identity] enabled = false`, the per-org identity APIs return 503 and IMDS
+      has no identity endpoint'
+  default: Enabled
+  check: 'Enabled: `nico-pre-config`: `current_encryption_key_id` set, allowlists parse, `token_endpoint_http_proxy`
+    well-formed when set; `nico-pre-platform`: the credential `machine_identity.encryption_keys.<id>`
+    resolves from the configured chain, the proxy answers when set, and the REST tenant-identity endpoint
+    returns 404 rather than 503. Disabled: `nico-pre-config`: `enabled = false`, reported as a tenant-visible
+    limitation'
+- id: rest-api-auth
+  title: REST API auth
+  section: Authentication
+  stated: false
+  source: 'NICo Helm values: `helm-prereqs/values/nico-rest.yaml` `nico-rest-api.config.keycloak.{enabled,baseURL,externalBaseURL,realm,clientID}`,
+    `config.issuers`; `helm-prereqs/keycloak/` (`helm/rest/README.md`; quick-start "REST API authentication")'
+  options:
+  - name: Bundled dev Keycloak
+    text: 'Bundled dev Keycloak: `keycloak.enabled: true`, realm `nico`, plain HTTP, no human users, what
+      helm-prereqs ships'
+  - name: Your own Keycloak
+    text: 'Your own Keycloak: `keycloak.enabled: true` pointed at the provider''s Keycloak over HTTPS'
+  - name: Generic OIDC issuers
+    text: 'Generic OIDC issuers: `keycloak.enabled: false` and one or more `issuers` entries with JWKS
+      and issuer URL'
+  default: Bundled dev Keycloak
+  check: 'Bundled: `nico-pre-install`: the Keycloak pod is up, the realm and the two clients exist, the
+    plain-HTTP `baseURL` reported as development only. Own Keycloak: `nico-pre-config`: `baseURL` and
+    `externalBaseURL` are HTTPS, realm and `clientID` set; `nico-pre-stage`: the realm''s OIDC discovery
+    document and JWKS fetch from the staging host. Issuers: `nico-pre-config`: `keycloak.enabled` false
+    and each entry carries the fields the chart README names; `nico-pre-stage`: every `jwks` URL fetches
+    and its `issuer` matches the discovery document'
+- id: optional-components
+  title: Optional components
+  section: Components to deploy
+  stated: false
+  source: 'NICo setup environment + NICo TOML file: `--skip-rest`; `--skip-rms`, `NICO_SKIP_RMS`; `--with-observability`,
+    `WITH_OBSERVABILITY`; `--install-contour`, `NICO_INSTALL_CONTOUR`; `--site-overlay`; `[ib_config]`,
+    `[ib_fabrics.default]`, `[nvlink_config]`, `[tracing]` in the site TOML (`helm-prereqs/setup.sh`;
+    `docs/playbooks/ib_runbook.md`; `docs/manuals/nvlink_partitioning.md`; `docs/observability/tracing.md`)'
+  options:
+  - name: REST group
+    text: 'REST API, Flow and site-agent on this site: the REST group that `--skip-rest` drops as a whole;
+      clear means a central REST elsewhere serves this site'
+  - name: RMS
+    text: 'RMS, in-cluster or external: the Rack Manager Service; which of the two is the RMS entry'
+  - name: Observability stack
+    text: 'Observability stack: `--with-observability`, kube-prometheus-stack, Loki and the OTel collector
+      installed together'
+  - name: Contour ingress
+    text: 'Contour ingress: `--install-contour`, the optional Contour and Envoy ingress controller'
+  - name: UFM
+    text: 'InfiniBand fabric management through UFM: `[ib_config] enabled = true`, one fabric `default`,
+      UFM 6.23.1-6 or later in HA mode, token or client-certificate auth'
+  - name: NVLink partitioning
+    text: 'NVLink partitioning through NMX-C: `[nvlink_config]`, tenant NVLink partitions on GB200 compute
+      nodes, NMX-C only, needs the rack-manager box'
+  - name: Tracing
+    text: 'Tracing: `[tracing] enabled = true` with an OTLP endpoint'
+  - name: Site overlay
+    text: 'Site overlay: `--site-overlay <kustomize dir>` applied after Core'
+  multiple: true
+  default: REST group ; RMS
+  check: 'REST ticked: `nico-pre-install`: the co-located REST, Temporal and Keycloak are up and the site
+    agent has registered with the local REST under this site''s UUID; clear: reported as unsupported,
+    since a central REST and the agent values are hand-built. Rack manager ticked: the RMS entry''s rows;
+    clear: `rms.enabled=false` is set in the helm-prereqs values and `nico-pre-ingest` fails when an expected
+    rack is GB200 or GB300 NVL72. Observability stack ticked: `nico-pre-stage`: the `helm-prereqs/observability/values-*.yaml`
+    files are present and their chart images resolve from the registry; `nico-pre-install`: kube-prometheus-stack,
+    Loki and the collector pods are ready, since setup.sh treats their failure as non-fatal; clear: the
+    Observability entry decides between no pipeline and the provider''s stack. Contour ticked: `nico-pre-platform`:
+    no Contour deployment in `projectcontour` that setup.sh does not own, since it refuses to adopt one.
+    InfiniBand ticked: `nico-pre-config`: `[ib_config] enabled = true`, `[ib_fabrics.default]` with exactly
+    one endpoint and a pkey range inside 0x0 to 0x7FFF, `allow_insecure` reported when true, and a UFM
+    credential resolving from the configured source, the UFM credential ownership row; `nico-pre-fabric`,
+    from the staging host: the endpoint answers with the configured token or client certificate, `/app/ufm_version`
+    is 6.23.1-6 or later, the pkey range overlaps no partition UFM already reports, and for mTLS the server
+    certificate carries the `default.ufm.nico` and `default.ufm.<site domain>` SANs; worksheet: UFM runs
+    in HA mode and the gv.cfg and opensm.conf security settings from the runbook are applied; clear: the
+    UFM credential and `use_cert_manager_ufm` rows are not applicable. NVLink ticked: `nico-pre-config`:
+    `[nvlink_config]` present with NMX-C endpoints, chassis mapping rack-derived or explicit, TLS mode
+    uniform across endpoints, `allow_insecure` unset; `nico-pre-platform`: the `nvSwitchTls` client certificate
+    Secret or issuer exists; `nico-pre-install`: each NMX-C endpoint answers over mTLS; and the NMX-C
+    certificate rotation rows folded here 2026-11-06: `[nvlink_config.nmx_c_certificate_rotation]` follows
+    `nvlink_config.enabled`, the CA at `nmx_c_tls_ca_cert_path` is the only trust root and `allow_insecure`
+    does not bypass it, each endpoint is HTTPS with a SAN matching `nmx_c_tls_authority`; with the rack-manager
+    box ticked rotation is automatic and needs `nvSwitchBackend` `rms`, RMS answering, the rack `Ready`
+    and the server certificate Secret in the RMS namespace rather than `nvSwitchTls.switchServer`; without
+    it rotation is monitoring only and the report says each renewal is installed by hand; clear: none
+    of this applies. Tracing ticked: `nico-pre-config`: `[tracing] enabled = true` with `otlp_endpoint`
+    set, or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in the environment; `nico-pre-platform`: the collector
+    answers OTLP gRPC from the cluster. Site overlay ticked: `nico-pre-stage`: the directory exists and
+    `kubectl kustomize` renders it without error'
+- id: rms
+  title: RMS
+  section: Components to deploy
+  stated: false
+  source: 'NICo setup environment + NICo Helm values: `--skip-rms`, `NICO_SKIP_RMS`; `rms.enabled` in
+    `helm-prereqs/values.yaml` (the RMS database prerequisites); for an external RMS the nico-api chart
+    values `rms.apiUrl`, `rms.enforceTls`, `rms.rootCaPath`, `rms.clientCert`, `rms.clientKey`, which
+    render the `[rms]` block'
+  options:
+  - name: In-cluster nv-rms
+    text: In-cluster nv-rms
+  - name: External RMS
+    text: 'External RMS: external RMS (`[rms] api_url` plus `--skip-rms`)'
+  - name: Not applicable
+    text: 'Not applicable: the rack-manager box in Optional components is clear'
+  default: In-cluster nv-rms
+  check: 'In-cluster: `nico-pre-install` verifies `NICO_RMS_IMAGE_TAG` is set, the image resolves, and
+    the RMS database prerequisites are present. External: `nico-pre-platform` verifies `[rms] api_url`
+    answers over TLS from the cluster. Not applicable: the rack-manager rows of Optional components Component
+    manager rows: with RMS, `nico-pre-config`: `componentManager.enabled` true, the three backends `rms`,
+    `rms.enforceTls` true, and `rms.apiUrl` answers over TLS in `nico-pre-install`; without RMS: `componentManager.enabled`
+    and `rms.enabled` both false in the nico-api values and no backend set to `rms`.'
+- id: rms-chart-source
+  title: RMS chart source
+  section: Components to deploy
+  stated: false
+  source: 'NICo setup environment: `NICO_RMS_CHART`'
+  options:
+  - name: Pinned submodule
+    text: 'Pinned submodule: The pinned `helm-prereqs/nv-rms` submodule, synced by setup.sh; works offline
+      when the checkout on the staging host already carries the submodule at the pinned commit'
+  - name: Local chart path
+    text: 'Local chart path: `NICO_RMS_CHART` pointing at a chart directory or `.tgz`, such as `<clone>/helm`
+      from an out-of-band nv-rms clone or a modified chart; setup.sh then skips the submodule sync'
+  - name: Not applicable
+    text: 'Not applicable: no in-cluster RMS'
+  default: Pinned submodule
+  check: '`nico-pre-stage`: default, the submodule directory is populated, clean, and at the commit the
+    checkout records; override, the path exists, `helm show chart` parses it, and its chart version equals
+    the pinned submodule''s, else a warning'
+- id: core-postgres
+  title: Core Postgres
+  section: Components to deploy
+  stated: false
+  source: 'NICo Helm values: `helm-prereqs/values.yaml` `postgresql.{enabled,instances,synchronousMode,volumeSize,storageClass,host,resources}`,
+    `rest.enabled`, `rms.enabled`; nico-api `envFrom.databaseCredentials.secretName`, `envFrom.databaseConfig.configMapName`,
+    `migrationJob.sslMode` (`helm-prereqs/README.md` "Using an external or out-of-band PostgreSQL"; `docs/getting-started/prerequisites/software.md`)'
+  options:
+  - name: Zalando HA in-cluster
+    text: 'Zalando HA in-cluster: `postgresql.enabled: true`, three instances, synchronous replication,
+      `local-path-persistent`, one `nico-pg-cluster` for Core, REST, Flow, the site agent, RMS, Temporal
+      and Keycloak'
+  - name: External Postgres
+    text: 'External Postgres: `postgresql.enabled: false`, the provider''s TLS-enabled Postgres behind
+      an ExternalName Service `nico-pg-cluster` in namespace `postgres`, with every database, user and
+      credentials Secret pre-created'
+  - name: Single instance for development
+    text: 'Single instance for development: `postgresql.instances: 1` with `synchronousMode: false`'
+  default: Zalando HA in-cluster
+  check: 'Zalando HA: `nico-pre-platform`: three schedulable nodes, `postgresql.resources.limits.memory`
+    at or above the band for the planned host count, the storage class exists (Storage classes item),
+    `synchronousMode` true with three instances; `nico-pre-install`: `nico-pg-cluster` Running with three
+    members and the credentials Secrets synced by External Secrets. External: `nico-pre-config`: `postgresql.enabled`
+    false, `rest.enabled` false when REST shares it; `nico-pre-platform`: the ExternalName Service `nico-pg-cluster`
+    resolves, TLS handshake, the Core, REST, Flow, RMS, Temporal and Keycloak databases and users exist,
+    `btree_gin` and `pg_trgm` installed, and the credentials Secrets and the database ConfigMap are present
+    in their namespaces. Single instance: `nico-pre-config`: `synchronousMode` false, reported as development
+    only'
+- id: rack-profiles
+  title: Rack profiles
+  section: Components to deploy
+  stated: false
+  source: 'NICo TOML file: `[rack_profiles.<name>]` with `product_family`, `rack_hardware_topology`, `rack_capabilities.{compute,switch,power_shelf}`
+    vendor and count, optional `firmware_object`; the two built-ins ship in the chart''s global TOML'
+  options:
+  - name: Built-in profiles
+    text: 'Built-in profiles: one of the thirteen profiles shipped in the chart''s global TOML matches
+      the racks: `NVL72` and `NVL72_GB300`, the `GB200_NVL72R1_C2G4_{NVIDIA,WIWYNN}`, `GB300_NVL72R1_C2G4_{NVIDIA,LENOVO,SMC}`
+      and `VR_NVL72R1_C2G4_NVIDIA` families, each with a `_NO_POWERSHELF` variant'
+  - name: Site-specific profile
+    text: 'Site-specific profile: at least one site-specific profile must be written, because a rack''s
+      vendors, counts, topology, or firmware source differ'
+  - name: Not applicable
+    text: 'Not applicable: no RMS'
+  default: Built-in profiles
+  check: 'Built-in profiles: `nico-pre-config`: every expected rack''s `rack_profile_id` names one of
+    the thirteen built-ins, and the rack''s trays, switches and shelves match that profile''s vendors
+    and counts; `nico-pre-ingest`: the discovered rack inventory matches the profile. Site-specific profile:
+    `nico-pre-config`: the `[rack_profiles.<name>]` block has `product_family`, a vendor for every role
+    whose backend is `rms`, counts for all three roles, and a reachable `firmware_object` URL when set;
+    the same inventory match at ingest. Not applicable: no check'
+- id: observability
+  title: Observability
+  section: Components to deploy
+  stated: false
+  source: 'NICo setup environment + NICo Helm values: `--with-observability`, `WITH_OBSERVABILITY`, `PROMETHEUS_OPERATOR`,
+    `NICO_SERVICEMONITORS`, `WITH_TEMPO`, `WITH_DPU`; per-chart `serviceMonitor.enabled`; `helm-prereqs/observability/values-*.yaml`;
+    `grafanaDashboards` in the umbrella values'
+  options:
+  - name: No pipeline
+    text: No pipeline
+  - name: Full local stack
+    text: 'Full local stack: `--with-observability`, set by the observability box in Optional components'
+  - name: External stack
+    text: 'External stack: the provider''s external stack, fed by NICo'
+  default: No pipeline
+  check: 'No pipeline: `nico-pre-config`: every chart''s `serviceMonitor.enabled` false and `NICO_SERVICEMONITORS`
+    not true, since the Core install fails on an unknown kind without the operator CRDs. Full local stack:
+    the Optional components rows, plus value rows folded 2026-11-06 from ServiceMonitors, Alerting hooks
+    and Log shipping: `PROMETHEUS_OPERATOR` false only when operator CRDs already exist in the cluster,
+    else true; `WITH_DPU` true requires `OTEL_RECEIVER_VIP` inside a MetalLB pool, the `site-issuer` ClusterIssuer
+    Ready and the `otel-receiver.forge` name resolving to that VIP; `perObjectStateMetricsServiceMonitor`
+    on only with `perObjectStateMetrics.enabled`; `[observability] per_object_metrics_for_classifications`
+    non-empty only with that listener on; Alertmanager enabled implies a receiver configured, and the
+    report notes that the shipped `nico-alerts.yaml` is applied by hand; the ssh-console Loki sidecar
+    on requires its image repository and tag. External stack: `nico-pre-platform`: a Prometheus or VictoriaMetrics
+    operator''s CRDs present before Core when ServiceMonitors are on; `nico-pre-config`: the collector''s
+    Loki endpoint and `[tracing] otlp_endpoint` well-formed when set; `nico-pre-fabric`: the OTLP receiver
+    name on the site network resolves and answers over mTLS with a site-CA certificate when DPU logs are
+    shipped'
+- id: measured-boot-attestation
+  title: Measured boot attestation
+  section: Firmware and hardware policy
+  stated: false
+  source: 'NICo TOML file: `attestation_enabled`; `nico-admin-cli tpm-ca {add,add-bulk,show,show-unmatched-ek,delete}`;
+    `nico-admin-cli measured-boot site trusted-machine|trusted-profile approve ... oneshot|persist [--pcr-registers]`
+    (`docs/provisioning/attestation_and_security.md`; quick-start Step 7)'
+  options:
+  - name: 'Off'
+    text: 'Off: `attestation_enabled = false`, as the helm-prereqs values ship'
+  - name: 'On'
+    text: 'On: `attestation_enabled = true`, with TPM EK CA certificates loaded by hand and an approval
+      rule: one-shot per machine, one-shot per profile, or site-wide `persist`'
+  default: 'Off'
+  check: 'On: `nico-pre-config`: `attestation_enabled = true`; `nico-pre-platform`: the TPM item passes,
+    at least one `tpm-ca show` entry exists, `tpm-ca show-unmatched-ek` is empty for the ingested BMCs,
+    and an approval rule exists for the machine, profile or site, with the site-wide `persist` form reported
+    as permissive; `nico-pre-ingest`: the first host of each model reaches `Ready` through `Measuring`.
+    Off: no check beyond the TPM item'
+- id: spdm-and-nras
+  title: SPDM and NRAS
+  section: Firmware and hardware policy
+  stated: false
+  source: 'NICo TOML file: `[spdm]` `enabled`, `[spdm.nras_config]` `nras_url`, `nras_gpu_url_suffix`,
+    `nras_jwks_url`, `validate_jwt_expiry` (`crates/api-core/src/cfg/README.md`; `docs/design/attestation/attestation-profiles.md`);
+    `nico-admin-cli attestation spdm {list,get,trigger,cancel,coverage,profile}`'
+  options:
+  - name: 'Off'
+    text: 'Off: `[spdm] enabled = false`, no device attestation'
+  - name: 'On'
+    text: 'On: `[spdm] enabled = true` with `[spdm.nras_config]`, GPU, ERoT and CPU evidence verified
+      by NVIDIA''s Remote Attestation Service'
+  default: 'Off'
+  check: 'On: `nico-pre-config`: the four `nras_config` fields set, staging host not air-gapped (conflict
+    otherwise); `nico-pre-stage`: `nras_url` and `nras_jwks_url` answer over HTTPS from the staging host
+    and, in `nico-pre-platform`, from the cluster through the site''s egress; `nico-pre-ingest`: at least
+    one SPDM profile exists and the first BMC of each model exposes `ComponentIntegrity`. Off: no check'
+- id: firmware-automation
+  title: Firmware automation
+  section: Firmware and hardware policy
+  stated: false
+  source: 'NICo TOML file: `[firmware_global]` `autoupdate`, `requires_manual_upgrade`, `instance_updates_manual_tagging`,
+    `no_reset_retries`, `firmware_directory`; `[machine_updater]` `max_concurrent_machine_updates_absolute`,
+    `_percent`; `host_models`; `explicit_start_needed` per catalog entry (`docs/operations/firmware-updates/configuration.md`,
+    `host-firmware.md`)'
+  options:
+  - name: 'Off'
+    text: 'Off: `[firmware_global] autoupdate = false`, as helm-prereqs ships; updates run only per machine
+      or by explicit start'
+  - name: 'On'
+    text: 'On: `autoupdate = true`, every host converges on the catalog''s default version, within the
+      concurrency cap'
+  default: 'Off'
+  check: 'On: `nico-pre-config`: `autoupdate = true`, a positive concurrency cap, `requires_manual_upgrade`
+    reported when the fleet has MNNVL hosts, `explicit_start_needed` models listed; `nico-pre-ingest`:
+    the merged catalog has a default version for every vendor and model in the expected-machine inventory.
+    Either way: `nico-pre-config`: every `host_models` entry parses and each `metadata.toml` under `firmware_directory`
+    merges without the "Failed to merge" log line; `nico-pre-install`: the firmware-config API answers
+    and its entries cover the models that have one'
+- id: provider-internal-tenant
+  title: Provider-internal tenant
+  section: Tenancy and fabric model
+  stated: false
+  source: 'NICo TOML file: `[fnn.routing_profiles.<name>]` with `internal = true` and `access_tier`; `default_tenant_routing_profile_type`;
+    assignment at run time with `nico-admin-cli tenant update <org> -p <profile>`'
+  options:
+  - name: None
+    text: None, every tenant gets the default profile
+  - name: Internal tenant
+    text: 'Internal tenant: a provider-owned tenant assigned an internal profile (`INTERNAL` or `PRIVILEGED_INTERNAL`)
+      with a lower access tier'
+  - name: a repair tenant on the MAINTENANCE profile
+    text: a repair tenant on the `MAINTENANCE` profile
+  default: None
+  check: 'Internal or repair tenant: `nico-pre-config`: the named profile exists with `internal = true`
+    and an `access_tier`, every production profile has an `access_tier` (the shipped examples have none),
+    the placeholder ASN 4266030000 and VNIs are replaced, and `default_tenant_routing_profile_type` names
+    an existing profile; `nico-pre-ingest`: the tenant exists and carries the profile. None: `nico-pre-config`:
+    the default profile exists and has an `access_tier`'
+- id: break-fix-and-repair-workflow
+  title: Break-fix and repair workflow
+  section: Tenancy and fabric model
+  stated: false
+  source: 'NICo TOML file: `[auto_machine_repair_plugin] enabled`; `[fnn.routing_profiles.MAINTENANCE]`;
+    run-time actions with `nico-admin-cli machine health-override` and the REST release-for-repair call'
+  options:
+  - name: Outside NICo
+    text: 'Outside NICo: the provider handles repair outside NICo, a tenant release with `machineHealthIssue`
+      only marks the machine `tenant-reported-issue`'
+  - name: Auto-repair
+    text: 'Auto-repair: `[auto_machine_repair_plugin] enabled = true`, the release also sets `repair-request`,
+      and a repair tenant with targeted instance creation claims, fixes and returns the machine'
+  default: Outside NICo
+  check: 'Auto-repair: `nico-pre-config`: `[auto_machine_repair_plugin] enabled = true` and a MAINTENANCE
+    routing profile present with its break-fix route targets; `nico-pre-ingest`: a repair tenant exists
+    with targeted instance creation granted, reported as a runtime step when missing. Outside NICo: `nico-pre-config`:
+    the plugin is off or absent'

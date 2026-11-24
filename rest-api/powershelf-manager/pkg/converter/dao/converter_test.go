@@ -4,6 +4,7 @@
 package dao
 
 import (
+	"bytes"
 	"net"
 	"testing"
 
@@ -88,6 +89,7 @@ func TestPmcTo(t *testing.T) {
 				t.Fatalf("pmc.New returned error: %v", err)
 			}
 
+			expectedMAC := append(net.HardwareAddr(nil), obj.GetMac()...)
 			daoObj := PmcTo(obj)
 			if tc.expectNil {
 				if daoObj != nil {
@@ -99,10 +101,10 @@ func TestPmcTo(t *testing.T) {
 			if daoObj == nil {
 				t.Fatalf("PmcTo returned nil for valid input")
 			}
-			if daoObj.MacAddress.String() != obj.GetMac().String() {
-				t.Errorf("MacAddress mismatch: got %q, want %q", daoObj.MacAddress.String(), obj.GetMac().String())
+			if !bytes.Equal(daoObj.MacAddress, expectedMAC) {
+				t.Errorf("MacAddress mismatch: got %q, want %q", daoObj.MacAddress.String(), expectedMAC.String())
 			}
-			if daoObj.IPAddress.String() != obj.GetIp().String() {
+			if !daoObj.IPAddress.IP().Equal(obj.GetIp()) {
 				t.Errorf("IPAddress mismatch: got %q, want %q", daoObj.IPAddress.String(), obj.GetIp().String())
 			}
 			if daoObj.Vendor != obj.GetVendor().Code {

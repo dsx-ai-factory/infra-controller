@@ -199,7 +199,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -210,7 +210,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -790,14 +790,88 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmc-backend"
+version = "0.1.0"
+dependencies = [
+ "bmc-drivers",
+ "bmc-platform",
+ "bmc-runtime",
+ "carbide-api-model",
+ "carbide-redfish",
+ "carbide-secrets",
+ "carbide-test-support",
+ "carbide-utils",
+ "http",
+ "libredfish",
+ "mac_address",
+ "nv-redfish",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "bmc-driver-validator"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bmc-drivers",
+ "bmc-explorer",
+ "bmc-platform",
+ "bmc-runtime",
+ "carbide-hw-identification",
+ "carbide-instrument",
+ "carbide-ipmi",
+ "carbide-redfish",
+ "carbide-secrets",
+ "clap",
+ "colored",
+ "futures",
+ "libc",
+ "mac_address",
+ "nv-redfish",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "strum",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bmc-drivers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "blake3",
+ "bmc-mock",
+ "bmc-platform",
+ "carbide-test-support",
+ "carbide-utils",
+ "hex",
+ "mac_address",
+ "nv-redfish",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "url",
+]
+
+[[package]]
 name = "bmc-explorer"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bmc-explorer",
  "bmc-mock",
+ "bmc-platform",
  "bmc-vendor",
  "carbide-api-model",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-network",
  "carbide-test-support",
@@ -816,6 +890,7 @@ name = "bmc-explorer-cli"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "carbide-instrument",
  "carbide-ipmi",
  "carbide-redfish",
  "carbide-secrets",
@@ -823,6 +898,7 @@ dependencies = [
  "clap",
  "libredfish",
  "mac_address",
+ "opentelemetry",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -835,6 +911,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "axum-server",
+ "bmc-platform",
  "bytes",
  "carbide-axum-utils",
  "chrono",
@@ -875,6 +952,51 @@ dependencies = [
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "bmc-platform"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "carbide-test-support",
+ "mac_address",
+ "nv-redfish",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "thiserror 2.0.18",
+ "tokio",
+ "version-compare 0.2.1",
+]
+
+[[package]]
+name = "bmc-runtime"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "bmc-drivers",
+ "bmc-mock",
+ "bmc-platform",
+ "carbide-api-model",
+ "carbide-instrument",
+ "carbide-ipmi",
+ "carbide-redfish",
+ "carbide-secrets",
+ "carbide-test-support",
+ "carbide-utils",
+ "eyre",
+ "mac_address",
+ "nv-redfish",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "url",
 ]
 
@@ -1157,11 +1279,16 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bmc-backend",
+ "bmc-drivers",
+ "bmc-explorer",
+ "bmc-mock",
+ "bmc-platform",
+ "bmc-runtime",
  "bmc-vendor",
  "byteorder",
  "carbide-api-db",
  "carbide-api-model",
- "carbide-api-test-helper",
  "carbide-authn",
  "carbide-credential-rotation",
  "carbide-dpa",
@@ -1188,6 +1315,7 @@ dependencies = [
  "carbide-mqtt-common",
  "carbide-network",
  "carbide-network-segment-controller",
+ "carbide-nvlink-domain-controller",
  "carbide-nvlink-manager",
  "carbide-power-shelf-controller",
  "carbide-preingestion-manager",
@@ -1196,6 +1324,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-resource-pool",
  "carbide-resource-pool-api",
+ "carbide-rms-mock",
  "carbide-rpc",
  "carbide-rpc-utils",
  "carbide-secrets",
@@ -1300,14 +1429,22 @@ dependencies = [
 name = "carbide-api-core-integration-tests"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
+ "bmc-backend",
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-authn",
+ "carbide-credential-rotation",
+ "carbide-health-metrics",
  "carbide-health-report",
  "carbide-ib-fabric",
  "carbide-instrument",
+ "carbide-ipmi",
+ "carbide-machine-controller",
+ "carbide-nvlink-manager",
  "carbide-rack",
+ "carbide-redfish",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-site-explorer",
@@ -1321,6 +1458,7 @@ dependencies = [
  "const_format",
  "data-encoding",
  "eyre",
+ "futures-util",
  "http",
  "ipnetwork",
  "itertools 0.14.0",
@@ -1328,6 +1466,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "state-controller",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1384,6 +1523,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "trace-propagation",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -1404,16 +1544,20 @@ dependencies = [
  "carbide-api-test-helper",
  "carbide-dhcp",
  "carbide-health",
+ "carbide-health-report",
+ "carbide-instrument",
  "carbide-kms-provider",
  "carbide-machine-a-tron",
  "carbide-nvlink-manager",
  "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
+ "carbide-site-explorer",
  "carbide-ssh-console",
  "carbide-tls",
  "carbide-utils",
  "carbide-uuid",
+ "config-version",
  "ctor",
  "eyre",
  "futures",
@@ -1440,10 +1584,13 @@ dependencies = [
 name = "carbide-api-model"
 version = "0.0.0"
 dependencies = [
+ "arrayvec",
  "async-trait",
  "base64",
  "bmc-vendor",
  "carbide-health-report",
+ "carbide-hw-identification",
+ "carbide-instrument",
  "carbide-ipxe-renderer",
  "carbide-libmlx-model",
  "carbide-macros",
@@ -1501,6 +1648,7 @@ dependencies = [
  "carbide-rms-mock",
  "carbide-rpc",
  "carbide-secrets",
+ "carbide-test-support",
  "carbide-tls",
  "carbide-utils",
  "carbide-uuid",
@@ -1514,6 +1662,7 @@ dependencies = [
  "lazy_static",
  "librms",
  "metrics-endpoint",
+ "opentelemetry",
  "rand 0.10.1",
  "serde",
  "serde_json",
@@ -1723,18 +1872,26 @@ dependencies = [
 name = "carbide-credential-rotation"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "axum",
+ "bmc-backend",
+ "bmc-drivers",
+ "bmc-mock",
+ "bmc-platform",
+ "bmc-runtime",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-instrument",
+ "carbide-ipmi",
  "carbide-macros",
  "carbide-redfish",
  "carbide-secrets",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
- "libredfish",
  "mac_address",
  "serde_json",
  "sqlx",
@@ -1803,6 +1960,7 @@ dependencies = [
  "carbide-rpc-utils",
  "carbide-test-support",
  "carbide-tls",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "clap",
@@ -1816,6 +1974,7 @@ dependencies = [
  "logfmt",
  "lru",
  "metrics-endpoint",
+ "opentelemetry",
  "prost",
  "serde",
  "serde_yaml",
@@ -1949,7 +2108,9 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",
+ "chrono",
  "clap",
+ "config-version",
  "dashmap",
  "derive_builder",
  "eyre",
@@ -1979,6 +2140,7 @@ dependencies = [
  "tower-test",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
@@ -2002,6 +2164,7 @@ dependencies = [
  "carbide-test-support",
  "governor",
  "http-body-util",
+ "metrics-endpoint",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -2017,6 +2180,7 @@ version = "0.0.1"
 dependencies = [
  "carbide-certs",
  "carbide-host-support",
+ "carbide-instrument",
  "carbide-rpc",
  "carbide-systemd",
  "carbide-tls",
@@ -2100,6 +2264,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-dpf",
  "carbide-machine-controller",
+ "carbide-test-support",
  "carbide-uuid",
  "config-version",
  "futures",
@@ -2124,11 +2289,13 @@ dependencies = [
  "carbide-macros",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
  "eyre",
  "futures-util",
  "hex",
  "http",
  "mockito",
+ "opentelemetry",
  "regex",
  "reqwest 0.13.4",
  "reqwest-middleware",
@@ -2216,6 +2383,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "figment",
+ "flate2",
  "futures",
  "http",
  "http-body-util",
@@ -2343,6 +2511,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-hw-identification"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
 name = "carbide-ib-fabric"
 version = "0.0.1"
 dependencies = [
@@ -2395,6 +2571,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ib-fabric",
  "carbide-instrument",
+ "carbide-resource-pool",
  "carbide-test-support",
  "carbide-uuid",
  "config-version",
@@ -2448,11 +2625,12 @@ dependencies = [
  "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
- "carbide-uuid",
  "eyre",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -2558,6 +2736,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tower",
@@ -2609,6 +2788,7 @@ dependencies = [
  "bmc-mock",
  "bytes",
  "carbide-api-model",
+ "carbide-instrument",
  "carbide-ipmi",
  "carbide-network",
  "carbide-nmxc-mock",
@@ -2659,7 +2839,14 @@ dependencies = [
 name = "carbide-machine-controller"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "axum",
+ "bmc-backend",
+ "bmc-drivers",
+ "bmc-mock",
+ "bmc-platform",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -2694,6 +2881,7 @@ dependencies = [
  "libredfish",
  "mac_address",
  "mockall",
+ "nv-redfish",
  "opentelemetry",
  "prometheus",
  "prost",
@@ -2710,6 +2898,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tonic-prost-build",
+ "trace-propagation",
  "tracing",
  "uuid",
  "version-compare 0.2.1",
@@ -2746,7 +2935,6 @@ dependencies = [
  "carbide-uuid",
  "proc-macro2",
  "quote",
- "sqlx-macros-core",
  "syn 2.0.117",
 ]
 
@@ -2816,11 +3004,11 @@ name = "carbide-mockdpa"
 version = "0.0.1"
 dependencies = [
  "carbide-dpa",
+ "carbide-instrument",
  "chrono",
  "clap",
  "mqttea",
  "prost",
- "prost-build",
  "rumqttc",
  "serde",
  "serde_json",
@@ -2837,6 +3025,7 @@ dependencies = [
  "async-trait",
  "carbide-instrument",
  "carbide-test-support",
+ "metrics-endpoint",
  "mqttea",
  "opentelemetry",
  "tokio",
@@ -2898,6 +3087,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-nvlink-domain-controller"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "carbide-api-db",
+ "carbide-api-model",
+ "carbide-instrument",
+ "carbide-macros",
+ "carbide-sqlx-testing",
+ "config-version",
+ "sqlx",
+ "state-controller",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "carbide-nvlink-manager"
 version = "0.0.1"
 dependencies = [
@@ -2953,11 +3160,13 @@ name = "carbide-power-shelf-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
  "carbide-health-metrics",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-rack",
  "carbide-redfish",
  "carbide-secrets",
@@ -2986,6 +3195,9 @@ name = "carbide-preingestion-manager"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-platform",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -3016,6 +3228,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tonic",
  "tracing",
  "version-compare 0.2.1",
 ]
@@ -3064,6 +3277,7 @@ dependencies = [
  "carbide-version",
  "clap",
  "http-body",
+ "httpdate",
  "hyper",
  "hyper-util",
  "logfmt",
@@ -3113,6 +3327,7 @@ dependencies = [
  "eyre",
  "librms",
  "mac_address",
+ "metrics-endpoint",
  "mqttea",
  "opentelemetry",
  "serde",
@@ -3174,6 +3389,7 @@ dependencies = [
  "axum",
  "axum-server",
  "bmc-mock",
+ "bmc-platform",
  "bmc-vendor",
  "carbide-api-model",
  "carbide-instrument",
@@ -3181,6 +3397,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "chrono",
+ "futures-util",
  "http",
  "libredfish",
  "mac_address",
@@ -3206,6 +3423,7 @@ dependencies = [
  "bytes",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-instrument",
  "carbide-macros",
  "carbide-resource-pool-api",
  "carbide-sqlx-testing",
@@ -3261,6 +3479,7 @@ dependencies = [
 name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
  "carbide-test-support",
  "eyre",
@@ -3304,6 +3523,7 @@ dependencies = [
  "dns-record",
  "eyre",
  "hickory-resolver",
+ "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -3314,6 +3534,8 @@ dependencies = [
  "mac_address",
  "nonempty",
  "once_cell",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "p256 0.14.0",
  "prettytable-rs",
  "prost",
@@ -3326,6 +3548,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "serial_test",
  "sha2 0.11.0",
  "sqlx",
  "tempfile",
@@ -3337,8 +3560,10 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tower",
+ "tower-http 0.7.0",
  "trace-propagation",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tryhard",
  "uuid",
@@ -3374,6 +3599,7 @@ name = "carbide-rvs"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "carbide-instrument",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -3451,6 +3677,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest 0.13.4",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3461,6 +3688,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
+ "tonic-prost",
  "tracing",
  "tryhard",
  "tss-esapi",
@@ -3479,6 +3707,7 @@ dependencies = [
  "bmc-vendor",
  "carbide-instrument",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "eyre",
  "figment",
@@ -3498,6 +3727,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "vaultrs",
 ]
@@ -3509,19 +3739,26 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum",
+ "bmc-backend",
+ "bmc-drivers",
  "bmc-explorer",
  "bmc-mock",
+ "bmc-platform",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-credential-rotation",
  "carbide-firmware",
  "carbide-health-report",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-metrics-utils",
  "carbide-network",
  "carbide-rack",
  "carbide-redfish",
+ "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-site-explorer",
@@ -3533,6 +3770,8 @@ dependencies = [
  "component-manager",
  "config-version",
  "duration-str",
+ "eyre",
+ "figment",
  "futures-util",
  "http",
  "itertools 0.14.0",
@@ -3552,6 +3791,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "trace-propagation",
  "tracing",
  "uuid",
  "version-compare 0.2.1",
@@ -3587,6 +3827,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "serde_yaml",
+ "sha2 0.11.0",
  "socket2",
  "tempfile",
  "tokio",
@@ -3614,12 +3855,18 @@ name = "carbide-spdm-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-health-report",
  "carbide-instrument",
+ "carbide-macros",
  "carbide-redfish",
+ "carbide-sqlx-testing",
  "carbide-test-support",
  "carbide-utils",
+ "carbide-uuid",
+ "chrono",
  "config-version",
  "itertools 0.14.0",
  "libredfish",
@@ -3628,6 +3875,7 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3757,6 +4005,8 @@ name = "carbide-switch-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-platform",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -3805,6 +4055,7 @@ dependencies = [
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-instrument",
  "carbide-macros",
  "carbide-network",
  "carbide-network-segment-controller",
@@ -3896,6 +4147,7 @@ dependencies = [
  "rcgen",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -4289,7 +4541,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4307,6 +4559,9 @@ name = "component-manager"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-platform",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -4318,6 +4573,7 @@ dependencies = [
  "carbide-secrets",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "futures-util",
@@ -5412,7 +5668,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5792,7 +6048,6 @@ version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dab9e9188e97a93276e1fe7b56401b851e2b45a46d045ca658100c1303ada649"
 dependencies = [
- "generic-array 0.14.7",
  "rustversion",
  "typenum",
 ]
@@ -6745,7 +7000,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7246,7 +7501,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.25#04e40498f99ce878d794961bf467eabd48f736dd"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.31#246db2d7962b7a271094fd4c31ebb9b1edfd6238"
 dependencies = [
  "chrono",
  "clap",
@@ -7384,6 +7639,7 @@ dependencies = [
  "criterion",
  "opentelemetry",
  "opentelemetry_sdk",
+ "tokio",
  "trace-propagation",
  "tracing",
  "tracing-opentelemetry",
@@ -7763,6 +8019,7 @@ dependencies = [
 name = "mqttea-example"
 version = "0.1.0"
 dependencies = [
+ "carbide-instrument",
  "chrono",
  "clap",
  "mqttea",
@@ -7890,6 +8147,7 @@ dependencies = [
  "bmc-vendor",
  "carbide-api-model",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-libmlx",
  "carbide-libmlx-model",
  "carbide-macros",
@@ -7919,16 +8177,16 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "libredfish",
- "librms",
  "mac_address",
  "pandoc",
  "prettytable-rs",
  "prost",
+ "regex",
  "reqwest 0.13.4",
- "rms-observability",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -7966,6 +8224,24 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nico-pre"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "clap",
+ "eyre",
+ "indexmap 2.14.0",
+ "ipnet",
+ "mac_address",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]
@@ -8115,7 +8391,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8224,9 +8500,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc30c999191bff8dfae8669d117bd109322833becc027e2da21ab84356a1adda"
+checksum = "d1e4a7bf9a7ea269a5d7a3bdf27b935638c77297c442e744d0d849449370186c"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8242,9 +8518,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-bmc-http"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64529e0a1df7a7728e8fc86a5830e043d7b20bb0327b4c97ed79ebfb9bcec6b1"
+checksum = "e187e123ee1df480fdc7722e86efd39e84539c5548e4eae295c6abad45003ff9"
 dependencies = [
  "bytes",
  "futures-core",
@@ -8265,9 +8541,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-core"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26655bc2acc57aec4d95893242c2d03b5daeb12ca88c81f21df9866f5b3e2d52"
+checksum = "eccb48644cc42e3e5c6bb49e3e3892ebdf93887e7690283123c3b806069f1ca6"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -8281,9 +8557,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-csdl-compiler"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bef7727ca258429b42e4ec552118787a550107b797e10629650f22211ea5602"
+checksum = "ad96edbb7b8bdf07309cab584008b6cd83c50f53fbc67323b3df95186533f9f3"
 dependencies = [
  "clap",
  "clap_derive",
@@ -8299,9 +8575,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-dispatcher"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56a82efcac6a4ff3a46f0613a61a3aa1508e28ab250377db174aa03980a32b7a"
+checksum = "0348da99833843c3ef79ac634b10e566606fd4ccfa27bfa26035fa979e010c9b"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8309,9 +8585,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-quirks"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "097eafbfdd6b86e79f9d1ac7aa48ba28882f51c9ca607d07e0c120b63bfd0581"
+checksum = "3013caab4f3aa20144e7d8e87eaa87eb7730da4aa904add6940da5f61b3cc3ac"
 dependencies = [
  "futures-util",
  "nv-redfish-core",
@@ -8322,18 +8598,18 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-schema"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f38563b90794aa3cb502ed27e339fcce8eb0930ef6b1c71875ccb85c136763b"
+checksum = "dde0dc0195625ceca17c3d89d2fc72479d2137d030c97b897c09f5310b030f93"
 dependencies = [
  "glob",
 ]
 
 [[package]]
 name = "nv-redfish-server-core"
-version = "0.22.0"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb353a2f7e793e5aef3a8febd7a8437d80510dec4c8426c22826586646066cca"
+checksum = "8d7df3130441a8b4521c8a481beac08b16e4f8e54eb78b30e98dddbf6deb65ee"
 dependencies = [
  "serde",
  "serde_json",
@@ -10167,9 +10443,9 @@ dependencies = [
 
 [[package]]
 name = "russh"
-version = "0.65.0"
+version = "0.65.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bb77a4b259312b2abbc541bca1c13cb4e9b61c560a7fd894068c3b92e0c9dc3"
+checksum = "94be3d86c71b9ed220a675c405e35c7a02565a009bf8da2e9cc13a700320a5c5"
 dependencies = [
  "aes 0.9.1",
  "aws-lc-rs",
@@ -10351,7 +10627,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10419,7 +10695,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11097,7 +11373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11441,6 +11717,7 @@ dependencies = [
  "carbide-api-db",
  "carbide-api-model",
  "carbide-health-metrics",
+ "carbide-instrument",
  "carbide-macros",
  "carbide-sqlx-testing",
  "carbide-utils",
@@ -11461,6 +11738,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -11678,10 +11956,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12300,11 +12578,14 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry_sdk",
+ "serde",
+ "serde_json",
  "tokio",
  "tower",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -12966,18 +13247,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -13016,7 +13297,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

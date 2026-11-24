@@ -167,6 +167,34 @@ impl<C: Callbacks> BmcState<C> {
         (created, entry)
     }
 
+    /// Record a completed host power command in the BMC's own event log, the
+    /// way HPE iLO's Integrated Event Log does. Backends call this once the
+    /// command has taken effect, not when the Redfish request is accepted;
+    /// a failed command is never logged. BMCs without such a log ignore it.
+    pub fn record_power_command_completed(&self, reset_type: crate::ResourceResetType) {
+        let Some(system) = self.system_state.primary_system_odata_id() else {
+            return;
+        };
+        let Some(draft) = LogEntryDraft::power_command_completed(&system, reset_type) else {
+            return;
+        };
+        let created = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        self.manager.record_integrated_event(draft, &created);
+    }
+
+    /// The virtual-media drive `device_id` of ComputerSystem `system_id`, or
+    /// `None` when the system has no such drive.
+    pub fn virtual_media_drive(
+        &self,
+        system_id: &str,
+        device_id: &str,
+    ) -> Option<crate::VirtualMediaDrive> {
+        self.system_state
+            .find(system_id)?
+            .virtual_media()?
+            .drive(device_id)
+    }
+
     /// Returns whether this BMC advertises an enabled SSH serial console.
     pub fn has_enabled_ssh_serial_console(&self) -> bool {
         self.system_state.has_enabled_ssh_serial_console()

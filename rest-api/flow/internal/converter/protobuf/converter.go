@@ -902,13 +902,14 @@ func RackTo(r *rack.Rack) *pb.Rack {
 	}
 
 	result := &pb.Rack{
-		Info:            DeviceInfoTo(&r.Info),
-		ExternalId:      r.ExternalID,
-		RackProfileId:   r.RackProfileID,
-		Location:        LocationTo(&r.Loc),
-		Components:      components,
-		OperationStatus: PhaseTo(r.OperationStatus),
-		Health:          HealthReportTo(r.Health),
+		Info:                   DeviceInfoTo(&r.Info),
+		ExternalId:             r.ExternalID,
+		RackProfileId:          r.RackProfileID,
+		Location:               LocationTo(&r.Loc),
+		Components:             components,
+		OperationStatus:        PhaseTo(r.OperationStatus),
+		OperationStatusDetails: r.OperationStatusDetails.ToProto(),
+		Health:                 HealthReportTo(r.Health),
 	}
 	if r.NVLDomainID != uuid.Nil {
 		result.NvlDomainIds = UUIDsTo([]uuid.UUID{r.NVLDomainID})
@@ -1659,6 +1660,9 @@ func ScheduledOperationFrom(
 		return &operations.BringUpTaskInfo{OpCode: taskcommon.OpCodeIngest}, ts, nil, r.Ingest.GetRuleId(), nil
 
 	case *pb.ScheduledOperation_UpgradeFirmware:
+		if r.UpgradeFirmware.GetDeviceCredentialOverrides() != nil {
+			return nil, operation.TargetSpec{}, nil, nil, fmt.Errorf("scheduled firmware operations do not support device credential overrides")
+		}
 		info := &operations.FirmwareControlTaskInfo{
 			Operation:              operations.FirmwareOperationUpgrade,
 			TargetVersion:          r.UpgradeFirmware.GetTargetVersion(),
@@ -1721,6 +1725,8 @@ func QueueOptionsFrom(
 // without a known API kind map to Unspecified.
 func TaskKindTo(kind taskcommon.TaskType) pb.TaskKind {
 	switch kind {
+	case taskcommon.TaskTypeComponentReset:
+		return pb.TaskKind_TASK_KIND_COMPONENT_RESET
 	case taskcommon.TaskTypePowerControl:
 		return pb.TaskKind_TASK_KIND_POWER_CONTROL
 	case taskcommon.TaskTypeFirmwareControl:

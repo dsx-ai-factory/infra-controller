@@ -12,8 +12,8 @@ of a stored attestation profile
 ```text
 nico-admin-cli attestation spdm profile update <--mode>
 [--exact] [--prefix] [--if-version-match]
-[--force] [--extended] [--sort-by]
-[-h|--help] <HARDWARE_CLASS>
+[--force] [--sort-by] [-h|--help]
+<HARDWARE_CLASS>
 ```
 
 ## DESCRIPTION
@@ -53,16 +53,8 @@ whatever is stored now
 
 `--force`
 
-Required to switch the any fallback to mode none, which stops attesting
-every class without a profile of its own
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
+Required to switch the 'any' fallback to mode none, which stops
+attesting every class without a profile of its own
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -76,7 +68,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HARDWARE_CLASS>`
 

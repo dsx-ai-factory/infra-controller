@@ -16,6 +16,33 @@ Before configuring the items on this page, complete:
 
 This page assumes the underlay and overlay routing decisions described in those pages have already been made.
 
+### DHCP Cutover Checklist
+
+Before connecting a rack for ingestion:
+
+1. Agree a cutover window with the site owner. Have the owner stop the
+   previous DHCP service from answering on the managed networks, including
+   through old relay destinations, and verify that its replies have stopped
+   before activating relay to NICo. Competing offers can give devices the
+   wrong address, boot server, or DNS settings.
+1. For networks using DHCPv4, activate IPv4 relay to the DHCPv4 VIP on UDP 67 (default LoadBalancer
+   Service: `nico-dhcp-external`), as described in
+   [BMC and Out-of-Band Setup](../getting-started/prerequisites/bmc-oob-setup.md).
+   If DHCPv6 is enabled, use a separate IPv6 VIP on UDP 547 (default
+   LoadBalancer Service: `nico-dhcp6-external`), following
+   [Deploy DHCPv6](dhcpv6-deployment.md).
+1. Verify the MAC-to-IP mapping for every Fixed allocation. A reservation for
+   the host BMC does not reserve addresses for the DPU BMC or DPU OS. Account
+   for each interface separately using
+   [Expected Interface IP Allocation](#13-expected-interface-ip-allocation).
+1. Exclude addresses still used by static devices or an external allocator
+   from NICo's allocatable ranges. NICo's address-uniqueness checks cannot
+   protect against another DHCP server or an unrecorded static assignment.
+1. Check relay traffic, the resulting leases, and device MACs before ingesting
+   the rest of the rack. If an IP has changed owners, follow the
+   [Stale Exploration Record](../playbooks/stuck_objects/host_ingestion_failures.md#stale-exploration-record)
+   checks before retrying discovery.
+
 ---
 
 ## 1. IP Pool Allocation
@@ -89,7 +116,7 @@ combinations and gateway omission rules, refer to
 ### 1.3 Expected Interface IP Allocation
 
 Expected Machine declarations can allocate addresses for host OS, DPU OS, DPU
-BMC, and host BMC interfaces. Every role supports three allocation policies:
+BMC, and host BMC interfaces. These physical roles support three allocation policies:
 
 | Policy | Behavior |
 |---|---|
@@ -97,10 +124,14 @@ BMC, and host BMC interfaces. Every role supports three allocation policies:
 | **Fixed** | NICo reserves the configured `fixed_ip` as Static for its address family before serving DHCP. The address normally selects the managed segment whose prefix contains it; [legacy inferred reservations](expected-machine-interfaces.md#network-segment-selection) can fall back to `static-assignments`. |
 | **Retained** | NICo selects an address through DHCP and immediately stores it as Static. It remains reserved until explicit removal or deletion of the machine-interface record. |
 
-All four interface roles (`host`, `dpu_os`, `dpu_bmc`, and `host_bmc`) support
+All four physical-interface roles (`host`, `dpu_os`, `dpu_bmc`, and `host_bmc`) support
 all three policies. The default is Dynamic for every role except `host_bmc`,
 which defaults to Retained. A declaration with `fixed_ip` and no explicit
 policy remains Fixed for backward compatibility.
+
+The separate `dpu_loopback` role reserves a Fixed address from `lo-ip` or
+`lo-ip-v6`, selected by the DPU OS/admin MAC. It does not participate in DHCP
+or physical-interface allocation. See [deterministic DPU loopback reservations](../manuals/networking/ip_resource_pools.md#deterministic-dpu-loopback-reservations).
 
 NICo applies the current configuration separately to each family's first
 successful DHCP or Static allocation. Mixing policies within the same site
@@ -170,8 +201,10 @@ segment.
 The conventional OOB management network is declared as one or more
 NICo-managed `Underlay` network segments in `siteConfig`
 `[networks.<name>]` blocks. Each segment has its own prefixes, MTU, and
-IPv4 gateway when applicable. The switches **must run a DHCP relay** pointed
-at the `nico-dhcp` LoadBalancer VIP; they must not assign addresses themselves. See
+IPv4 gateway when applicable. The switches **must relay DHCP traffic** to
+the VIP for the corresponding address family, as described in the
+[DHCP Cutover Checklist](#dhcp-cutover-checklist). They must not assign
+addresses themselves. Refer to
 [BMC and Out-of-Band Setup](../getting-started/prerequisites/bmc-oob-setup.md)
 for switch-side relay configuration.
 
@@ -346,7 +379,8 @@ Use `[networks.<name>]` blocks in `siteConfig` or the file specified by
 `initial_objects_file` to define the network segments that `nico-api` creates
 at startup. It creates missing segments and saves their initial definitions.
 Editing these definitions and restarting `nico-api` does not update existing
-segments.
+segments. To add IPv6 without replacing an IPv4 BMC segment, refer to
+[Add IPv6 to an Existing BMC Underlay](dhcpv6-deployment.md#add-ipv6-to-an-existing-bmc-underlay).
 
 A network prefix identifies a range of IP addresses using CIDR notation, such
 as `192.0.2.0/24` for IPv4 or `2001:db8:1::/64` for IPv6. An IPv4-only segment
@@ -489,27 +523,28 @@ To configure these flows:
    above. Each relay/link address must fall within the intended segment prefix,
    except a separately configured DHCPv6 link-address can select its segment by
    exact match.
-2. **Configure the DHCP relay on every applicable switch** to forward DHCP
-   traffic to the `nico-dhcp` LoadBalancer VIP (the IP assigned to the
-   `nico-dhcp` service by MetalLB in
-   [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips)).
+1. **Configure the DHCP relay for each address family in use.** Send DHCPv4
+   traffic to the `nico-dhcp-external` LoadBalancer VIP assigned in
+   [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips).
+   For optional DHCPv6, use the separate `nico-dhcp6-external` IPv6 VIP as
+   described in the [DHCP Cutover Checklist](#dhcp-cutover-checklist).
    The relay-facing interface must cover the L2 broadcast domain whose clients
    it serves. In the shared HostInband topology, both the host BMC and host OS
    paths must produce relay metadata for that HostInband prefix.
-3. **For Fixed policies**, upload `expected_machines.json` with the applicable
+1. **For Fixed policies**, upload `expected_machines.json` with the applicable
    interface reservations before the device first powers on. If the family
    already has a DHCP or Static allocation, changing the template does not
    replace it. Follow the targeted address update procedure in
    [Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime).
-4. **For reservation-only segments**, set
+1. **For reservation-only segments**, set
    `allocation_strategy = "reserved"` and configure every Fixed reservation
    before DHCP. Dynamic and Retained declarations cannot acquire their first
    address when no reservation exists.
-5. **Set `dhcp_servers`** in `siteConfig` to the list of DHCP server IPs
+1. **Set `dhcp_servers`** in `siteConfig` to the list of DHCP server IPs
    reachable from bare-metal hosts. This list is informational and is passed
    through to agents; it does not change how `nico-dhcp` itself serves leases.
    May be left as `[]`.
-6. **Set `ntp_servers`** in `siteConfig` to your IPv4 NTP server IPs. NICo uses this list to configure BMC NTP through Redfish during pre-ingestion, includes it in `DiscoverDhcp` responses, and passes it to DPU agents for DHCPv4 option 42.
+1. **Set `ntp_servers`** in `siteConfig` to your IPv4 NTP server IPs. NICo uses this list to configure BMC NTP through Redfish during pre-ingestion, includes it in `DiscoverDhcp` responses, and passes it to DPU agents for DHCPv4 option 42.
 
 The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, next-server, boot file, etc.) are sourced from:
 
@@ -527,13 +562,19 @@ NICo does not run a standalone NTP service. Point `siteConfig.ntp_servers` to yo
 
 After deployment, validate the DHCP path end-to-end:
 
-**Confirm the `nico-dhcp` service is reachable on its LoadBalancer VIP:**
+**Confirm DHCPv4 LoadBalancer VIP assignment:**
 
 ```bash
-kubectl get svc nico-dhcp -n nico-system
+kubectl get svc nico-dhcp-external -n nico-system
 ```
 
-Both EXTERNAL-IP and TYPE=`LoadBalancer` must be populated. A `<pending>` IP indicates a MetalLB issue — see the [Reference Installation](../getting-started/installation-options/reference-install.md) guides for MetalLB troubleshooting.
+The Service type must be `LoadBalancer`, with an assigned IPv4 `EXTERNAL-IP`.
+A `<pending>` IP indicates a MetalLB issue; refer to
+[Reference Installation](../getting-started/installation-options/reference-install.md)
+for troubleshooting. Address assignment alone does not prove that relay traffic
+works. For optional DHCPv6, follow
+[Deployment Verification](dhcpv6-deployment.md#deployment-verification-and-metrics)
+for the separate IPv6 service and relay path.
 
 **Tail `nico-dhcp` logs while a BMC powers on:**
 
@@ -587,9 +628,9 @@ For the record catalog these zones serve - machine, BMC, and instance names, plu
 To configure `nico-dns`:
 
 1. Set `initial_domain_name` in `siteConfig` to your site's DNS domain.
-2. Deploy the `nico-dns` StatefulSet; the binary listens on UDP/TCP 53 by default (`--listen=[::]:53`).
-3. Assign a stable LoadBalancer VIP to the `nico-dns` service that listens on UDP/TCP 53 (one per replica via `perPodAnnotations`; see [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips)).
-4. Delegate the `initial_domain_name` zone from your upstream DNS to those VIPs, or configure your recursive resolver to forward queries for the zone to them.
+1. Deploy the `nico-dns` StatefulSet; the binary listens on UDP/TCP 53 by default (`--listen=[::]:53`).
+1. Assign a stable LoadBalancer VIP to the `nico-dns` service that listens on UDP/TCP 53 (one per replica via `perPodAnnotations`; see [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips)).
+1. Delegate the `initial_domain_name` zone from your upstream DNS to those VIPs, or configure your recursive resolver to forward queries for the zone to them.
 
 ### 3.2 `unbound` Recursive Resolver for Managed Machines
 
@@ -606,8 +647,8 @@ The resolver is responsible for:
 To configure `unbound`:
 
 1. Populate the `local_data.conf` ConfigMap consumed by the `unbound` Helm chart with an A record for each IPv4 service VIP. To advertise the NTP fallback through DHCPv6 option 56, also add AAAA records for reachable IPv6 NTP endpoints, as described in [NICo DNS Service Endpoints](#33-nico-dns-service-endpoints). The chart derives the record type from each address in `unbound.localData`.
-2. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
-3. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
+1. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
+1. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
 
 The Unbound Deployment declares a ConfigMap Reloader annotation. Where that controller is installed, configuration changes trigger a rollout. Otherwise, restart the Deployment through the site's normal workflow. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes optional IPv6 DNS and metrics exposure, including the supplied-image contract and listener restart requirements. For external resolver VIPs, refer to [Unbound External Services](../configuration/dns.md#unbound-external-services).
 
@@ -622,21 +663,21 @@ Two TLD conventions exist:
 
 Choose the convention that matches your binaries. The stock names change both the first label and the TLD. For example, the NTP name is exactly `carbide-ntp.forge`, not `nico-ntp.forge`. Verify the name by checking what the agent actually resolves at startup with `kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-ntp.forge`.
 
-The required DNS records are shown with both NTP names where they differ:
+The required DNS records are shown with both PXE and NTP names where they differ:
 
 | Hostname | Port | Resolves to | Purpose | Configurable at runtime? |
 |---|---|---|---|---|
-| `nico-api.nico` | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Yes — `NICO_API_URL` env var on most clients |
-| `nico-pxe.nico` | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
+| `carbide-api.forge` (default) or `nico-api.nico` (rebranded image) | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Partly - there is no `NICO_API_URL` setting. Stock DPU agents use `carbide-api.forge` unless the interface is on the static-assignments segment and `external_api_url` is set; see [DNS Service Endpoints](../configuration/dns-service-endpoints.md) |
+| `carbide-pxe.forge` (stock) or `nico-pxe.nico` (rebranded image) | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. Stock DPU agents resolve `carbide-pxe.forge` at startup and stop if it does not resolve. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
 | `carbide-static-pxe.forge` (stock fallback) | 80 | Static PXE asset server VIP | Full Scout filesystem and update assets | **Yes, at boot.** Scout accepts `newrootfs=` for its full-image download and `pxe_uri=` for update checks. Embedded fallback URLs remain; see the [canonical endpoint reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server). |
 | `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
-| `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
+| `otel-receiver.forge` (default) | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
 
 The static-asset row describes Scout's stock fallback. Boot URL overrides
 select their own host, scheme, port, and destination.
 
-One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [DNS Service Endpoints](../configuration/dns-service-endpoints.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
+One additional hostname, `socks.forge` (stock) or `socks.nico` (rebranded image), is hardcoded into the DPU agent as the SOCKS5 proxy that containerd uses to pull extension service images. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [DNS Service Endpoints](../configuration/dns-service-endpoints.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
 
 > **Note:** The `.nico` service zone is private and is not a publicly
 > registered TLD. It can be served on the conventional isolated OOB network or
@@ -724,19 +765,24 @@ dig +short @<nico-dns-vip> <initial_domain_name>
 managed host's BMC web UI shell, or another client on its network), confirm the
 service zone resolves.
 
-The loop below assumes your deployment publishes the listed `.nico` records.
-Before running it, replace `nico-static-pxe.nico` with the hostname from
-Scout's effective full-image URL, and add the hostname from its effective
-update URL if different. The `newrootfs=` and `pxe_uri=` arguments select
-these URLs independently. Check `carbide-static-pxe.forge` for each stock
-fallback still in use. Omit the DNS check for any URL containing a literal IP
-address. An unused `nico-static-pxe.nico` alias does not need to resolve.
+The loop below assumes stock agents and that your deployment publishes the
+listed records. For an image rebuilt with the rebranded names, replace the
+complete `carbide-api.forge` and `carbide-pxe.forge` hostnames with
+`nico-api.nico` and `nico-pxe.nico` in the loop and the reachability checks.
+If `external_api_url` is set, also check its hostname from the
+static-assignments segment.
+The loop checks `carbide-static-pxe.forge`, Scout's stock fallback. If
+Scout's effective full-image or update URL names a different host, add that
+hostname, and drop the fallback once no URL uses it. The `newrootfs=` and
+`pxe_uri=` arguments select these URLs independently. Omit the DNS check for
+any URL containing a literal IP address. An unused `nico-static-pxe.nico`
+alias does not need to resolve.
 Refer to the [Static Boot Asset Server reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server)
 for URL selection.
 
 ```bash
-for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
-            unbound.nico otel-receiver.nico; do
+for name in carbide-api.forge carbide-pxe.forge carbide-static-pxe.forge \
+            unbound.nico otel-receiver.forge; do
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done
 
@@ -756,16 +802,16 @@ A `FAILED` or empty result for a required record type needs investigation:
 check resolver reachability and the hostname's authoritative records or
 forwarding configuration. Custom Scout hostnames do not necessarily use
 `local_data.conf`. If your environment also runs a SOCKS5 proxy, extend the
-loop with `socks.nico`.
+loop with `socks.forge` for stock agents or `socks.nico` for rebranded images.
 
 **Confirm reachability on the expected ports:**
 
 ```bash
 # nico-api gRPC (TLS handshake)
-openssl s_client -connect nico-api.nico:443 </dev/null 2>/dev/null | grep -E '^(subject|Verify)'
+openssl s_client -connect carbide-api.forge:443 </dev/null 2>/dev/null | grep -E '^(subject|Verify)'
 
 # nico-pxe
-curl -sf --max-time 5 http://nico-pxe.nico/ -o /dev/null && echo OK || echo FAILED
+curl -sf --max-time 5 http://carbide-pxe.forge/metrics -o /dev/null && echo OK || echo FAILED
 
 # unbound recursing externally
 dig +short +timeout=3 example.com @unbound.nico
@@ -795,11 +841,15 @@ expanding the rollout to the rest of the fleet:
       interface or compatible top-level `bmc_ip_address` configured for any
       host that needs a predefined BMC IP.
 - [ ] Every BMC-facing network, and every host-facing network for a host without
-      managed DPUs, configured with a DHCP relay pointing to the `nico-dhcp`
-      LoadBalancer VIP.
-- [ ] LoadBalancer VIPs assigned for `nico-api`, `nico-dhcp`, `nico-pxe`, `nico-dns` (one per replica), `nico-ssh-console-rs`, and `unbound`.
-- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`,
-      `nico-pxe`, `unbound`, and `otel-receiver` in the deployed `.nico` zone.
+      managed DPUs, configured with DHCP relay for each address family in use.
+      DHCPv4 relays use `nico-dhcp-external`. DHCPv6 relays use the separate
+      `nico-dhcp6-external` IPv6 VIP.
+- [ ] LoadBalancer VIPs assigned for `nico-api`, DHCPv4 (`nico-dhcp-external`), optional DHCPv6 (`nico-dhcp6-external`), `nico-pxe`, `nico-dns` (one per replica), `nico-ssh-console-rs`, and `unbound`.
+- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for
+      `carbide-api.forge` and `carbide-pxe.forge` (`nico-api.nico` and
+      `nico-pxe.nico` for rebranded images), `unbound.nico`, and the OTel
+      receiver hostname set by `otlpSiteEndpoint` (default
+      `otel-receiver.forge`).
       The resolver can also resolve each hostname used by Scout's effective
       full-image and update URLs in the required address family. An unused
       `nico-static-pxe.nico` alias is optional. Include A records for the exact

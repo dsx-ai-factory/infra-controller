@@ -46,6 +46,7 @@ impl TestNetworkController {
             .database(
                 api.database_connection.clone(),
                 api.work_lock_manager_handle(),
+                api.instrumentation(),
             )
             .meter("carbide_machines", test_meter.meter())
             .processor_id(processor_id)
@@ -90,6 +91,7 @@ impl TestNetworkController {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             subdomain_id: Some(domain.id),
             vpc_id: None,
@@ -137,6 +139,7 @@ impl TestNetworkController {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             subdomain_id: Some(domain.id),
             vpc_id: None,
@@ -199,6 +202,7 @@ impl TestNetworkController {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             subdomain_id: Some(domain.id),
             vpc_id: vpc.id,
@@ -264,6 +268,7 @@ impl TestNetworkController {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             subdomain_id: Some(domain.id),
             vpc_id: Some(vpc_id),
@@ -289,7 +294,8 @@ impl TestNetworkController {
         }
     }
 
-    async fn run_single_iteration(&self) {
+    /// Runs one iteration of the network segment controller.
+    pub async fn run_single_iteration(&self) {
         self.controller.lock().await.run_single_iteration().await;
     }
 }

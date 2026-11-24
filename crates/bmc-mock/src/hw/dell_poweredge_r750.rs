@@ -41,7 +41,7 @@ impl DellPowerEdgeR750<'_> {
             vendor: redfish::oem::BmcVendor::Dell,
             product: None,
             redfish_version: "1.18.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -144,7 +144,7 @@ impl DellPowerEdgeR750<'_> {
             .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R750".into()),
@@ -189,7 +189,7 @@ impl DellPowerEdgeR750<'_> {
                         "PxeDev1EnDis": "Disabled",
                         "HttpDev1Interface": "NIC.Slot.5-1",
                     }))),
-            }],
+            }]),
         }
     }
 

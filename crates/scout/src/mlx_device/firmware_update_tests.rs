@@ -507,7 +507,7 @@ fn core_options_with_usable_identity(fixture: &Path) -> Options {
     options.root_ca = write("core-ca.pem", &ca.pem());
     options.client_cert = write("core-client.pem", &client.pem());
     options.client_key = write("core-client-key.pem", &client_key.serialize_pem());
-    let transport = crate::client::forge_client_config(&options);
+    let transport = crate::client::carbide_client_config(&options);
     assert!(transport.root_ca_is_usable());
     assert!(transport.read_client_cert().is_some());
     assert!(
@@ -522,14 +522,16 @@ fn core_options_with_usable_identity(fixture: &Path) -> Options {
     options
 }
 
-/// The normal test prerequisite builds this cross-package binary beside `deps`.
+/// The normal test prerequisite builds this cross-package binary in the profile directory.
 fn supervisor_binary() -> PathBuf {
     let executable = std::env::current_exe().unwrap();
     let helper = executable
         .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("test executable has no fifth-level parent directory")
         .join("mlx-firmware-supervisor");
     assert!(
         helper.is_file(),
@@ -859,6 +861,7 @@ async fn deliver_command(
             publication = Some(request);
             std::future::ready(Ok(pb::PublishMlxObservationReportResponse::default()))
         },
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     let report = publication

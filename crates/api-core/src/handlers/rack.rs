@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
-use carbide_instrument::{Event, emit};
+use carbide_instrument::{Event, Instrumentation};
 use carbide_rack::firmware_object::{
     rack_maintenance_access_token_key, rms_access_token_or_noauth,
 };
@@ -38,6 +38,7 @@ use db::{
 };
 use futures_util::FutureExt;
 use health_report::HealthReportApplyMode;
+use itertools::Itertools;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::metadata::Metadata;
 use model::rack::{MaintenanceActivity, MaintenanceScope, RackState};
@@ -118,10 +119,8 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let racks = db::rack::find_by(
-        &mut txn,
+        api.pg_pool(),
         ObjectColumnFilter::List(db::rack::IdColumn, &rack_ids),
     )
     .await?;
@@ -130,8 +129,6 @@ pub(crate) async fn find_by_ids(
     for rack in racks {
         result.push(rack.into());
     }
-
-    txn.rollback_or_log("read-only load of racks by id").await;
 
     Ok(Response::new(rpc::RackList { racks: result }))
 }
@@ -156,10 +153,8 @@ pub(crate) async fn find_rack_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::Rack,
         &rack_ids,
     )
@@ -175,8 +170,6 @@ pub(crate) async fn find_rack_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(response))
 }
@@ -252,6 +245,7 @@ struct RackForceDeleteAccessTokenCleanupFailed {
 }
 
 async fn delete_rack_maintenance_access_token_after_force_delete(
+    instrumentation: &Instrumentation,
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) {
@@ -259,7 +253,7 @@ async fn delete_rack_maintenance_access_token_after_force_delete(
         .delete_credentials(&rack_maintenance_access_token_key(rack_id))
         .await
     {
-        emit(RackForceDeleteAccessTokenCleanupFailed {
+        instrumentation.emit(RackForceDeleteAccessTokenCleanupFailed {
             rack_id: rack_id.clone(),
             error: error.to_string(),
         });
@@ -297,6 +291,7 @@ pub(crate) async fn admin_force_delete_rack(
     txn.commit().await?;
 
     delete_rack_maintenance_access_token_after_force_delete(
+        &api.instrumentation,
         api.credential_manager.as_ref(),
         &rack_id,
     )
@@ -319,7 +314,7 @@ pub(crate) async fn list_rack_health_reports(
         .ok_or_else(|| CarbideError::MissingArgument("rack_id"))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -471,7 +466,7 @@ pub(crate) async fn get_rack_profile(
         .ok_or_else(|| CarbideError::MissingArgument("rack_id"))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -621,6 +616,7 @@ struct RackMaintenanceTerminationAccessTokenCleanupFailed {
 }
 
 async fn delete_rack_maintenance_access_token_after_termination(
+    instrumentation: &Instrumentation,
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) {
@@ -628,7 +624,7 @@ async fn delete_rack_maintenance_access_token_after_termination(
         .delete_credentials(&rack_maintenance_access_token_key(rack_id))
         .await
     {
-        emit(RackMaintenanceTerminationAccessTokenCleanupFailed {
+        instrumentation.emit(RackMaintenanceTerminationAccessTokenCleanupFailed {
             rack_id: rack_id.clone(),
             error: error.to_string(),
         });
@@ -688,6 +684,7 @@ pub(crate) async fn terminate_rack_maintenance(
     // The database request is durable before external credential cleanup. The
     // rack controller will still terminate if the credential store is unavailable.
     delete_rack_maintenance_access_token_after_termination(
+        &api.instrumentation,
         api.credential_manager.as_ref(),
         &rack_id,
     )
@@ -703,6 +700,8 @@ pub(crate) async fn on_demand_rack_maintenance(
 ) -> Result<Response<rpc::RackMaintenanceOnDemandResponse>, Status> {
     log_request_data_redacted("RackMaintenanceOnDemandRequest { redacted }");
 
+    let trace_id =
+        trace_propagation::correlation::from_headers(&request.metadata().clone().into_headers());
     let req = request.into_inner();
 
     let rack_id = req
@@ -710,7 +709,7 @@ pub(crate) async fn on_demand_rack_maintenance(
         .ok_or_else(|| CarbideError::InvalidArgument("rack_id is required".into()))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -807,6 +806,7 @@ pub(crate) async fn on_demand_rack_maintenance(
     }
 
     let scope = MaintenanceScope {
+        action_id: None,
         machine_ids: proto_scope
             .machine_ids
             .iter()
@@ -854,11 +854,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "machine(s) [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -885,11 +881,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "switch(es) [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -916,11 +908,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "power shelf/shelves [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -933,12 +921,15 @@ pub(crate) async fn on_demand_rack_maintenance(
             token,
         });
 
-    let schedule_result = request_rack_maintenance_via_state_controller(
-        &api.database_connection,
-        &rack_id,
-        scope,
-        RackMaintenanceEligibility::AllowErrorRecovery,
-        maintenance_access_token,
+    let schedule_result = trace_propagation::correlation::scope(
+        trace_id,
+        request_rack_maintenance_via_state_controller(
+            api,
+            &rack_id,
+            scope,
+            RackMaintenanceEligibility::AllowErrorRecovery,
+            maintenance_access_token,
+        ),
     )
     .await;
 
@@ -1041,9 +1032,12 @@ mod tests {
             run = |delete_fails: bool| {
                 let credential_manager = TestCredentialManager::default();
                 credential_manager.set_delete_credentials_failure(delete_fails);
-                let metrics = MetricsCapture::start();
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                let instrumentation = Instrumentation::new(test_meter.meter());
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let logs = capture_logs(|| {
                     runtime.block_on(delete_rack_maintenance_access_token_after_force_delete(
+                        &instrumentation,
                         &credential_manager,
                         &rack_id,
                     ));

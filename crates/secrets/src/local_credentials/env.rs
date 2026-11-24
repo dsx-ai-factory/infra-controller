@@ -88,7 +88,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::credentials::{CredentialKey, CredentialType, Credentials};
+    use crate::credentials::{CredentialKey, CredentialType, Credentials, MqttCredentialType};
 
     fn env_name(parts: &[&str]) -> String {
         let mut name = "CARBIDE_STATIC_CREDENTIAL".to_string();
@@ -227,5 +227,51 @@ mod tests {
                 password: "initial".to_string(),
             })
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reads_mqtt_credentials_for_every_type_from_env() {
+        let cases = [
+            ("DPA", MqttCredentialType::Dpa),
+            (
+                "DSXEXCHANGEEVENTBUS",
+                MqttCredentialType::DsxExchangeEventBus,
+            ),
+            (
+                "DSXEXCHANGECONSUMER",
+                MqttCredentialType::DsxExchangeConsumer,
+            ),
+        ];
+        for (env_key, credential_type) in cases {
+            let section = format!("MQTT_AUTH_BY_CREDENTIAL_TYPE__{env_key}");
+            let user_env = env_name(&[section.as_str(), "USERNAME"]);
+            let pass_env = env_name(&[section.as_str(), "PASSWORD"]);
+            // SAFETY: `#[serial]` serializes participating tests; this test
+            // removes the variables before it returns.
+            unsafe {
+                std::env::set_var(&user_env, "mqtt-user");
+                std::env::set_var(&pass_env, "mqtt-pass");
+            }
+            let provider = EnvCredentials::new(EnvCredentialsConfig::default());
+            // SAFETY: as above.
+            unsafe {
+                std::env::remove_var(&user_env);
+                std::env::remove_var(&pass_env);
+            }
+            let found = provider
+                .expect("MQTT type key parses from the environment")
+                .get_credentials(&CredentialKey::MqttAuth { credential_type })
+                .await
+                .expect("read");
+            assert_eq!(
+                found,
+                Some(Credentials::UsernamePassword {
+                    username: "mqtt-user".to_string(),
+                    password: "mqtt-pass".to_string(),
+                }),
+                "{env_key}"
+            );
+        }
     }
 }

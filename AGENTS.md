@@ -128,6 +128,9 @@ Use the narrowest Rust visibility required by actual callers. Do not widen
 production APIs just for tests or to silence dead-code warnings; see
 [visibility](STYLE_GUIDE.md#visibility).
 
+Use `DbReader` for read-only database functions. See
+[read-only database queries](STYLE_GUIDE.md#read-only-database-queries).
+
 REST response fields preserve empty values. Use `omitempty` only for date-gated
 attribute removal or opt-in `includeRelation` expansions; see the scoped REST
 guide for those contracts. Paginated operations must order results before slicing

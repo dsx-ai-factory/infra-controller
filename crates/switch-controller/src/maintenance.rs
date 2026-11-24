@@ -24,7 +24,7 @@ use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{SwitchComponentResult, SwitchEndpoint};
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::switch::{
@@ -60,27 +60,37 @@ pub async fn handle_maintenance(
     };
     let request = request.as_ref();
 
-    match operation {
-        SwitchMaintenanceOperation::PowerOn => {
-            handle_power_on(switch_id, state, request, ctx).await
-        }
-        SwitchMaintenanceOperation::PowerOff { graceful } => {
-            handle_power_off(switch_id, state, request, ctx, *graceful).await
-        }
-        SwitchMaintenanceOperation::Reset => handle_reset(switch_id, state, request, ctx).await,
-        SwitchMaintenanceOperation::ReconfigureCertificate => {
-            handle_reconfigure_certificate(
-                switch_id,
-                state,
-                request,
-                ctx,
-                configure_certificate
-                    .clone()
-                    .unwrap_or(ConfigureCertificateState::Start),
-            )
-            .await
-        }
-    }
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        request.and_then(|request| request.action_id),
+        async {
+            match operation {
+                SwitchMaintenanceOperation::PowerOn => {
+                    handle_power_on(switch_id, state, request, ctx).await
+                }
+                SwitchMaintenanceOperation::PowerOff { graceful } => {
+                    handle_power_off(switch_id, state, request, ctx, *graceful).await
+                }
+                SwitchMaintenanceOperation::Reset { graceful } => {
+                    handle_reset(switch_id, state, request, ctx, *graceful).await
+                }
+                SwitchMaintenanceOperation::ReconfigureCertificate => {
+                    handle_reconfigure_certificate(
+                        switch_id,
+                        state,
+                        request,
+                        ctx,
+                        configure_certificate
+                            .clone()
+                            .unwrap_or(ConfigureCertificateState::Start),
+                    )
+                    .await
+                }
+            }
+        },
+    )
+    .await
 }
 
 async fn handle_power_on(
@@ -96,7 +106,6 @@ async fn handle_power_on(
         request,
         ctx,
         PowerAction::On,
-        "PowerOn",
         SwitchControllerState::Ready,
     )
     .await
@@ -121,7 +130,6 @@ async fn handle_power_off(
         request,
         ctx,
         action,
-        "PowerOff",
         SwitchControllerState::Ready,
     )
     .await
@@ -132,15 +140,20 @@ async fn handle_reset(
     state: &Switch,
     request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    tracing::info!(switch_id = %switch_id, "Switch maintenance: Reset");
+    let action = if graceful {
+        PowerAction::GracefulRestart
+    } else {
+        PowerAction::ForceRestart
+    };
+    tracing::info!(switch_id = %switch_id, graceful, "Switch maintenance: Reset");
     invoke_power_operation(
         switch_id,
         state,
         request,
         ctx,
-        PowerAction::ForceRestart,
-        "Reset",
+        action,
         SwitchControllerState::Ready,
     )
     .await
@@ -238,7 +251,12 @@ async fn finish_maintenance(
         return Ok(StateHandlerOutcome::transition(next_state));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     if let db::ConditionalWrite::NotApplied(reason) =
         db_switch::clear_switch_maintenance_requested(&mut txn, *switch_id, request).await?
     {
@@ -280,7 +298,6 @@ async fn invoke_power_operation(
     request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
     action: PowerAction,
-    operation_label: &'static str,
     success_state: SwitchControllerState,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
@@ -289,8 +306,7 @@ async fn invoke_power_operation(
             request,
             ctx,
             format!(
-                "Switch {} maintenance ({}): component manager not configured",
-                switch_id, operation_label
+                "Switch {switch_id} maintenance ({action:?}): component manager not configured"
             ),
         )
         .await;
@@ -301,10 +317,7 @@ async fn invoke_power_operation(
             switch_id,
             request,
             ctx,
-            format!(
-                "Switch {} maintenance ({}): switch has no rack association",
-                switch_id, operation_label
-            ),
+            format!("Switch {switch_id} maintenance ({action:?}): switch has no rack association"),
         )
         .await;
     };
@@ -323,10 +336,7 @@ async fn invoke_power_operation(
                 switch_id,
                 request,
                 ctx,
-                format!(
-                    "Switch {} maintenance ({}): {}",
-                    switch_id, operation_label, cause
-                ),
+                format!("Switch {switch_id} maintenance ({action:?}): {cause}"),
             )
             .await;
         }
@@ -350,7 +360,7 @@ async fn invoke_power_operation(
                 tracing::info!(
                     switch_id = %switch_id,
                     rack_id = %rack_id,
-                    operation = operation_label,
+                    operation = ?action,
                     backend = component_manager.nv_switch.name(),
                     "Switch power control succeeded; returning Switch to Ready"
                 );
@@ -364,26 +374,24 @@ async fn invoke_power_operation(
             tracing::warn!(
                 switch_id = %switch_id,
                 rack_id = %rack_id,
-                operation = operation_label,
+                operation = ?action,
                 backend = component_manager.nv_switch.name(),
                 summary = %summary,
                 "Switch power control returned a non-success result",
             );
             let cause = format!(
-                "Switch {} maintenance ({}): power control failed: {}",
-                switch_id, operation_label, summary
+                "Switch {switch_id} maintenance ({action:?}): power control failed: {summary}"
             );
             finish_maintenance_with_error(switch_id, request, ctx, cause).await
         }
         Err(error) => {
             let cause = format!(
-                "Switch {} maintenance ({}): power control failed: {}",
-                switch_id, operation_label, error
+                "Switch {switch_id} maintenance ({action:?}): power control failed: {error}"
             );
             tracing::warn!(
                 switch_id = %switch_id,
                 rack_id = %rack_id,
-                operation = operation_label,
+                operation = ?action,
                 backend = component_manager.nv_switch.name(),
                 error = %error,
                 "Switch power control transport error",

@@ -147,6 +147,8 @@ func (t *Task) UpdateScheduledTask(
 // UpdateTaskStatus updates the status of the task. Non-nil report and
 // queueExpiresAt values replace their corresponding stored columns. Finished
 // statuses clear queueExpiresAt because the deadline applies only while waiting.
+// The result reports whether a row changed. Terminal records retain their status,
+// reason and completion time despite delayed worker updates or reconciliation.
 func (t *Task) UpdateTaskStatus(
 	ctx context.Context,
 	idb bun.IDB,
@@ -154,7 +156,7 @@ func (t *Task) UpdateTaskStatus(
 	message string,
 	report json.RawMessage,
 	queueExpiresAt *time.Time,
-) error {
+) (bool, error) {
 	t.Status = status
 	t.Message = message
 	t.UpdatedAt = time.Now().UTC()
@@ -180,13 +182,21 @@ func (t *Task) UpdateTaskStatus(
 		}
 	}
 
-	_, err := idb.NewUpdate().
+	result, err := idb.NewUpdate().
 		Model(t).
 		Column(columns...).
 		Where("id = ?", t.ID).
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
 		Exec(ctx)
 
-	return err
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return count == 1, nil
 }
 
 // UpdateTaskReport updates the structured report without changing status or message.
@@ -225,7 +235,7 @@ func (f taskComponentIDFilter) ApplyTo(q *bun.SelectQuery) *bun.SelectQuery {
 	// and hyphens, so it cannot close the SQL string literal or inject.
 	expr := fmt.Sprintf(
 		`attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
-		f.componentID.String(),
+		f.componentID,
 	)
 	return q.Where("?", bun.Safe(expr))
 }
@@ -383,17 +393,54 @@ func ListPowerTasksForRack(
 	return tasks, nil
 }
 
+// ListFirmwareTasksForRack returns Waiting, Pending, and Running firmware tasks
+// for one rack, ordered by creation time then UUID, ascending. Recorded target
+// membership survives inventory removal. Only projection fields are loaded;
+// reports and free-form descriptions/messages are excluded. More than
+// MaxFirmwareTasksPerRack records returns *taskcommon.FirmwareTaskLimitError
+// without a partial list. The bound limits rows, not stored JSON bytes.
+func ListFirmwareTasksForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) ([]Task, error) {
+	tasks := make([]Task, 0)
+	query := idb.NewSelect().Model(&tasks).
+		Column("id", "type", "rack_id", "information", "attributes", "status", "created_at", "updated_at", "started_at").
+		Where("rack_id = ?", rackID).
+		Where("type = ?", taskcommon.TaskTypeFirmwareControl).
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
+		OrderExpr("created_at ASC, id ASC").
+		Limit(taskcommon.MaxFirmwareTasksPerRack + 1)
+	// End query hooks before decoding attributes: an unknown stored component
+	// key can appear in a scan error, and bunotel records hook errors verbatim.
+	rows, err := query.Rows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = query.DB().ScanRows(ctx, rows, &tasks)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) > taskcommon.MaxFirmwareTasksPerRack {
+		return nil, &taskcommon.FirmwareTaskLimitError{RackID: rackID}
+	}
+	return tasks, nil
+}
+
 // ListTaskContextForRack loads nonterminal metadata in creation/UUID order.
 // No operation payloads or reports are read. Overflow returns no partial list.
 func ListTaskContextForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) ([]Task, error) {
 	tasks := make([]Task, 0)
-	err := idb.NewSelect().Model(&tasks).
+	query := idb.NewSelect().Model(&tasks).
 		Column("id", "type", "rack_id", "attributes", "status", "created_at").
 		Where("rack_id = ?", rackID).
 		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
 		OrderExpr("created_at ASC, id ASC").
-		Limit(taskcommon.MaxTaskContextPerRack + 1).
-		Scan(ctx)
+		Limit(taskcommon.MaxTaskContextPerRack + 1)
+	// Attribute decoding can quote stored keys. Finish query hooks first so
+	// bunotel cannot record those values before the store sanitizes the error.
+	rows, err := query.Rows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = query.DB().ScanRows(ctx, rows, &tasks)
 	if err != nil {
 		return nil, err
 	}

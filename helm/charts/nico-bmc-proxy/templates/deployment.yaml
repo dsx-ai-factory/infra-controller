@@ -37,46 +37,6 @@ spec:
           command:
             {{- toYaml .Values.command | nindent 12 }}
           env:
-            - name: VAULT_ROLE_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.envFrom.vaultApproleTokens.secretName }}
-                  key: VAULT_ROLE_ID
-                  optional: true
-            - name: VAULT_SECRET_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.envFrom.vaultApproleTokens.secretName }}
-                  key: VAULT_SECRET_ID
-                  optional: true
-            - name: VAULT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.envFrom.vaultToken.secretName }}
-                  key: token
-            - name: VAULT_ADDR
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: VAULT_SERVICE
-            - name: VAULT_NAMESPACE
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: VAULT_NAMESPACE
-                  optional: true
-            - name: VAULT_KV_MOUNT_LOCATION
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: NICO_VAULT_MOUNT
-            - name: VAULT_PKI_MOUNT_LOCATION
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: NICO_VAULT_PKI_MOUNT
-            - name: VAULT_PKI_ROLE_NAME
-              value: {{ .Values.env.VAULT_PKI_ROLE_NAME | quote }}
             - name: DATASTORE_USER
               valueFrom:
                 secretKeyRef:

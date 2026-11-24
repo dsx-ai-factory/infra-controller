@@ -26,6 +26,9 @@ pub(crate) async fn create(
     api: &Api,
     request: Request<::rpc::forge::DpaInterfaceCreationRequest>,
 ) -> Result<Response<::rpc::forge::DpaInterface>, Status> {
+    if let Some(machine_id) = request.get_ref().machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
     if !api.runtime_config.is_ewethers_enabled() {
         return Err(CarbideError::InvalidArgument(
             "CreateDpaInterface cannot be done as ewethers_enabled is false".to_string(),
@@ -53,6 +56,9 @@ pub(crate) async fn ensure(
     api: &Api,
     request: Request<::rpc::forge::DpaInterfaceCreationRequest>,
 ) -> Result<Response<::rpc::forge::DpaInterface>, Status> {
+    if let Some(machine_id) = request.get_ref().machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
     if !api.runtime_config.is_ewethers_enabled() {
         return Err(CarbideError::InvalidArgument(
             "EnsureDpaInterface cannot be done as ewethers_enabled is false".to_string(),
@@ -93,9 +99,11 @@ pub(crate) async fn delete(
 
     let req = request.into_inner();
 
-    let id = req.id.ok_or(CarbideError::InvalidArgument(
-        "at least one ID must be provided to delete dpa interface".to_string(),
-    ))?;
+    let id = req.id.ok_or_else(|| {
+        CarbideError::InvalidArgument(
+            "at least one ID must be provided to delete dpa interface".to_string(),
+        )
+    })?;
 
     // Prepare our txn to grab the NetworkSecurityGroups from the DB
     let mut txn = api.txn_begin().await?;

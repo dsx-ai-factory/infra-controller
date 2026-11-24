@@ -38,7 +38,7 @@ impl WiwynnGB200Nvl<'_> {
             vendor: redfish::oem::BmcVendor::Wiwynn,
             product: Some("GB200 NVL"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -109,18 +109,18 @@ impl WiwynnGB200Nvl<'_> {
                 .uefi_device_path("HD(1,GPT,C07AA982-7D30-4663-9538-776771BBED85,0x800,0x219800)/\\EFI\\ubuntu\\shimaa64.efi")
                 .build(BootOptionKind::Disk)
         ].into_iter().chain([&self.dpu1, &self.dpu2].into_iter().enumerate().map(|(index, dpu)| {
-            let mac = dpu.host_mac_address.to_string().replace(":", "").to_uppercase();
-            let display_name = format!("UEFI HTTPv4 (MAC:{mac})");
+            let [a, b, c, d, e, f] = dpu.host_mac_address.bytes();
+            let display_name = format!("UEFI HTTPv4 (MAC:{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X})");
             boot_opt_builder(&format!("Boot{index:04X}"))
                 .display_name(&display_name)
-                .uefi_device_path(format!("MAC({mac},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
+                .uefi_device_path(format!("MAC({a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
                 .build(BootOptionKind::Network)
         })).collect::<Vec<_>>();
 
         let hgx_baseboard_id = "HGX_Baseboard_0";
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     id: system_id.into(),
                     manufacturer: Some("WIWYNN".into()),
@@ -178,7 +178,7 @@ impl WiwynnGB200Nvl<'_> {
                     serial_console: None,
                     secure_boot_available: false,
                 },
-            ],
+            ]),
         }
     }
 
@@ -222,6 +222,7 @@ impl WiwynnGB200Nvl<'_> {
                 manufacturer: Some("NVIDIA".into()),
                 part_number: Some("B81.11810.000D".into()),
                 model: Some("GB200 NVL".into()),
+                serial_number: Some(self.system_serial_number.to_string().into()),
                 sensors: Some(redfish::sensor::generate_chassis_sensors(
                     "Chassis_0",
                     Self::sensor_layout(),
@@ -229,8 +230,18 @@ impl WiwynnGB200Nvl<'_> {
                 leak_detectors: Some(redfish::leak_detector::generate_chassis_leak_detectors(4)),
                 assembly: Some(redfish::assembly::response(
                     "Chassis_0",
-                    "0",
-                    &self.chassis_serial_number,
+                    &[
+                        (
+                            "PDB Chassis FRU Assembly0",
+                            "Titania-Bianca Compute Tray PDB",
+                            &self.chassis_serial_number,
+                        ),
+                        (
+                            "PDB Board FRU Assembly1",
+                            "P5859 B01",
+                            &self.system_serial_number,
+                        ),
+                    ],
                 )),
                 ..redfish::chassis::SingleChassisConfig::defaults()
             }))

@@ -79,17 +79,32 @@ pub enum SwitchMaintenanceOperation {
         #[serde(default)]
         graceful: bool,
     },
-    /// Reset the switch (restart / AC power cycle).
-    Reset,
+    /// Restart the switch gracefully or forcibly.
+    Reset {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        graceful: bool,
+    },
     /// Reinstall or rotate the switch NVOS mTLS certificate via Component Manager.
     ReconfigureCertificate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct SwitchMaintenanceRequest {
+    /// Durable CM action reference, retained by admitted controller state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: SwitchMaintenanceOperation,
+}
+
+// Log correlation is not request identity: legacy controllers may omit it.
+impl PartialEq for SwitchMaintenanceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_at == other.requested_at
+            && self.initiator == other.initiator
+            && self.operation == other.operation
+    }
 }
 
 /// Set by an external entity to request switch reprovisioning. When the switch is in Ready state,
@@ -823,7 +838,7 @@ mod tests {
 
             "maintenance: reset" {
                 SwitchControllerState::Maintenance {
-                    operation: SwitchMaintenanceOperation::Reset,
+                    operation: SwitchMaintenanceOperation::Reset { graceful: false },
                     request: None,
                     configure_certificate: None,
                 } => Yields(
@@ -950,7 +965,7 @@ mod tests {
 
             "maintenance: reset" {
                 r#"{"state":"maintenance","operation":{"operation":"reset"}}"# => Yields(SwitchControllerState::Maintenance {
-                    operation: SwitchMaintenanceOperation::Reset,
+                    operation: SwitchMaintenanceOperation::Reset { graceful: false },
                     request: None,
                     configure_certificate: None,
                 }),
@@ -1001,7 +1016,8 @@ mod tests {
             }
 
             "reset" {
-                SwitchMaintenanceOperation::Reset => Yields(r#"{"operation":"reset"}"#.to_string()),
+                SwitchMaintenanceOperation::Reset { graceful: false } => Yields(r#"{"operation":"reset"}"#.to_string()),
+                SwitchMaintenanceOperation::Reset { graceful: true } => Yields(r#"{"operation":"reset","graceful":true}"#.to_string()),
             }
 
             "reconfigure certificate" {
@@ -1029,7 +1045,9 @@ mod tests {
             }
 
             "reset" {
-                r#"{"operation":"reset"}"# => Yields(SwitchMaintenanceOperation::Reset),
+                r#"{"operation":"reset"}"# => Yields(SwitchMaintenanceOperation::Reset { graceful: false }),
+                r#"{"operation":"reset","graceful":false}"# => Yields(SwitchMaintenanceOperation::Reset { graceful: false }),
+                r#"{"operation":"reset","graceful":true}"# => Yields(SwitchMaintenanceOperation::Reset { graceful: true }),
             }
 
             "reconfigure certificate" {

@@ -11,7 +11,11 @@ import (
 	"time"
 
 	"github.com/avast/retry-go/v4"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 const (
@@ -46,25 +50,27 @@ func BeginTx(ctx context.Context, dbSession *Session, txOptions *sql.TxOptions) 
 		return nil, err
 	}
 
+	wrappedTx := &Tx{tx: tx}
+
 	// Set a max lock timeout to 300s for the transaction
 	// so that no blocking attempt to acquire a lock
 	// will block indefinitely.
-	_, err = tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
 	if err != nil {
-		tx.Rollback()
+		wrappedTx.RollbackWithLog(ctx, log.Logger)
 		return nil, err
 	}
 
-	return &Tx{
-		tx: tx,
-	}, nil
+	return wrappedTx, nil
 }
 
-// RollbackTx is called deferred in functions that create a transaction
-// if transaction was committed, this will do nothing
+// RollbackTx rolls back an uncommitted transaction when committed is non-nil.
+// ctx must be the context passed to BeginTx; it controls cancellation filtering
+// and trace fields on rollback failure logs. Completed transactions and failures
+// after cancellation are quiet.
 func RollbackTx(ctx context.Context, tx *Tx, committed *bool) {
 	if committed != nil && !*committed {
-		tx.Rollback()
+		tx.RollbackWithLog(ctx, log.Logger)
 	}
 }
 
@@ -187,6 +193,19 @@ func (tx *Tx) Rollback() error {
 	return tx.tx.Rollback()
 }
 
+// RollbackWithLog rolls back the transaction and logs failures through logger.
+// ctx must be the context used to begin the transaction. Cleanup is always
+// attempted; completed transactions and failures after cancellation are quiet.
+// Trace fields are added when ctx carries a span. Use Rollback when the caller
+// needs to inspect or propagate the rollback error.
+func (tx *Tx) RollbackWithLog(ctx context.Context, logger zerolog.Logger) {
+	err := tx.Rollback()
+	if err != nil && !errors.Is(err, sql.ErrTxDone) && ctx.Err() == nil {
+		logger = cotel.LoggerWithTrace(ctx, logger)
+		logger.Error().Err(err).Msg("failed to rollback transaction")
+	}
+}
+
 // AcquireAdvisoryLock will "try" to take the specified advisory lock
 // on the transaction
 // Error case:
@@ -253,17 +272,19 @@ func GetIDB(tx *Tx, dbSession *Session) bun.IDB {
 	return dbSession.DB
 }
 
-// TryAcquireAdvisoryLock acquires an advisory lock
-// retrying (up to retryCnt times which defaults to 3) when the lock acquisition attempt fails
-// note, that each lock acquisition attempt is a non-blocking pg_try_advisory_xact_lock
-// retries will backoff exponentially starting with initial delay of 300ms (300ms, 600ms, 1200ms etc..)
-// with a max-jitter of 100ms.
+// TryAcquireAdvisoryLock acquires a transaction-level advisory lock using
+// non-blocking queries. By default it makes three total attempts, with exponential
+// backoff starting at 300ms plus up to 100ms of jitter. LockRetryOptions overrides
+// these defaults; Retries counts total attempts, and zero means unlimited attempts.
+// On exhaustion it returns only the final attempt's error, including
+// ErrXactAdvisoryLockFailed when that attempt finds the lock busy. If ctx is already
+// canceled or cancellation interrupts backoff, it returns context.Cause(ctx).
 func (tx *Tx) TryAcquireAdvisoryLock(ctx context.Context, lockID uint64, options *LockRetryOptions) error {
 	return tx.tryAcquireAdvisoryLock(ctx, lockID, options, advisoryLockExclusive)
 }
 
 // TryAcquireSharedAdvisoryLock acquires a shared transaction-level advisory
-// lock using the same non-blocking retry policy as TryAcquireAdvisoryLock.
+// lock using the same retry and error-selection policy as TryAcquireAdvisoryLock.
 func (tx *Tx) TryAcquireSharedAdvisoryLock(ctx context.Context, lockID uint64, options *LockRetryOptions) error {
 	return tx.tryAcquireAdvisoryLock(ctx, lockID, options, advisoryLockShared)
 }
@@ -294,6 +315,9 @@ func (tx *Tx) tryAcquireAdvisoryLock(ctx context.Context, lockID uint64, options
 	}
 	return retry.Do(
 		retriableFunc,
+		retry.Context(ctx),
+		// Earlier contention must not make a later failure match ErrXactAdvisoryLockFailed.
+		retry.LastErrorOnly(true),
 		retry.Attempts(retries),
 		retry.Delay(delay),
 		retry.MaxJitter(jitter),

@@ -1,7 +1,10 @@
 # Rack and Tray Firmware Updates
 
-Firmware updates for racks, compute trays, NVSwitches, and power shelves are
-explicit operations. NICo does not start them from the host or DPU drift
+This page describes on-demand firmware updates for racks, compute trays,
+NVSwitches, and power shelves. Automatic rack ingestion and ordinary
+reprovisioning use the
+[rack profile firmware object](configuration.md#rack-profile-firmware-object).
+NICo does not start these on-demand updates from the host or DPU drift
 detectors described elsewhere in this guide. A Provider Admin submits a REST
 request, and NICo Flow creates one or more asynchronous tasks to sequence the
 work.
@@ -46,7 +49,7 @@ request body and must identify a site owned by the provider organization.
 | Scope | Endpoint | Selection |
 |---|---|---|
 | One rack | [`PATCH /v2/org/{org}/nico/rack/{rack-id}/firmware`](api:PATCH/v2/org/{org}/nico/rack/{id}/firmware) | The rack in the URL. |
-| Several or all racks | [`PATCH /v2/org/{org}/nico/rack/firmware`](api:PATCH/v2/org/{org}/nico/rack/firmware) | Optional `filter.names`. No filter means every rack in the site. |
+| Several or all racks | [`PATCH /v2/org/{org}/nico/rack/firmware`](api:PATCH/v2/org/{org}/nico/rack/firmware) | Supply a nonempty `filter.names` list naming every intended rack, including for site-wide updates. |
 | One tray | [`PATCH /v2/org/{org}/nico/tray/{tray-id}/firmware`](api:PATCH/v2/org/{org}/nico/tray/{id}/firmware) | The tray in the URL. |
 | Several or all trays | [`PATCH /v2/org/{org}/nico/tray/firmware`](api:PATCH/v2/org/{org}/nico/tray/firmware) | Optional `filter`. No filter means all compute, NVSwitch, and power-shelf trays in every site rack. |
 
@@ -62,7 +65,7 @@ The batch tray filter supports:
 
 Rack selection cannot be combined with `ids` or `componentIds`. Prefer a
 single-rack or single-tray request for the first update of a new firmware
-bundle. An unfiltered batch request can affect the entire site.
+bundle. A batch request can affect the entire site.
 
 ## Describe the update
 
@@ -75,7 +78,9 @@ The request supports these controls in addition to `siteId`:
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
 | `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. Does not bypass readiness checks. |
-| `authenticationData` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
+| `downloadCredentials` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
+| `authenticationData` | Deprecated alias of `downloadCredentials`. Supply at most one non-null alias. |
+| `deviceCredentialOverrides` | Optional BMC/NVOS login pairs for direct tray firmware updates and status polling. Requires `overrideReadinessCheck: true`. See [Device login overrides](#device-login-overrides). |
 
 `version` carries the target firmware input. Its representation is a contract
 between the caller and the component backend selected for the target, so the
@@ -223,7 +228,7 @@ cross-component readiness checks in selected steps.
 
 ### Firmware authentication
 
-`authenticationData` accepts exactly one of `shared` (an opaque credential
+`downloadCredentials` accepts exactly one of `shared` (an opaque credential
 string) or `perComponent` (an object with optional `compute`, `nvswitch`, and
 `powershelf` credential strings). Unknown keys are rejected at both levels.
 Omission or `null` supplies no credentials; empty strings or an empty
@@ -236,6 +241,43 @@ For RMS-backed updates, the selected credential is the artifact access token.
 Without a token, Core sends `NOAUTH`. Non-empty credentials require Flow's
 [persisted firmware authentication](../../architecture/flow.md#persisted-firmware-authentication)
 encryption configuration. Keep credentials out of shell arguments and logs.
+
+### Device login overrides
+
+For single and batch tray firmware updates, `deviceCredentialOverrides` accepts
+`bmc` and `nvos` objects. Each supplied object requires nonempty `username` and
+`password` strings; at least one object is required. Unknown fields are rejected.
+`bmc` applies to compute/switch BMCs or power-shelf PMCs. `nvos` is supported only
+for switch trays. Every selected tray receives the same supplied login pairs.
+
+Omitting the field, supplying `null`, or omitting an individual pair retains the
+configured credential lookup for that pair. A failed login with a supplied pair
+does not fall back to stored credentials. These device logins are separate from
+`downloadCredentials`, which authenticates firmware file downloads.
+
+Device overrides require `overrideReadinessCheck: true` and a supported direct
+tray firmware path. Rack REST endpoints ignore `deviceCredentialOverrides` and
+do not forward it to Flow. Standalone compute reprovisioning, DPU updates,
+the Core compute backend, legacy compute controllers, schedules and operation-run
+templates do not support them. Devices targeted by BMC MAC must already be present in Flow
+inventory. An asynchronous task can fail if its resolved device or backend does
+not support the requested options. Power shelves also require an operation rule
+that includes their firmware step.
+
+Flow encrypts device overrides before persisting tasks or passing them through
+Temporal, and decrypts them inside firmware dispatch and status activities. Task
+reads and audit logs do not return the values. Core does not write overrides to
+its credential store; backend registration can persist them in its own store.
+The same Flow encryption key must remain available through retries and restarts.
+
+This protection begins at Flow. For the earlier REST API-to-site hop, refer to
+[proxy confidentiality limitations](../../architecture/flow.md#persisted-firmware-authentication).
+The shared proxy correction is tracked in [#9433](https://github.com/dsx-ai-factory/infra-controller/issues/9433).
+
+Deploy matching Core, Flow and REST versions, replacing older Flow workers before
+accepting tasks with device overrides. Existing clients can continue using
+`authenticationData`; sending both download-authentication aliases with non-null
+values is rejected.
 
 ## Submit an update
 
@@ -269,6 +311,117 @@ To update all racks named `A01` and `A02`, submit a batch rack request:
   "version": "<complete or layered firmware target serialized as a string>"
 }
 ```
+
+## Roll out an SOT from canary to production
+
+Use this procedure for RMS-backed racks when promoting a new SOT firmware
+object. The rollout has three gates: update the canary racks with an explicit
+SOT, promote that SOT as the ingestion default, then update the remaining
+existing racks.
+
+An explicit REST `version` changes only the requested update. It does not
+change `[rack_profiles.<profile-id>.firmware_object].url` or the document
+served there. If you update existing racks without promoting that source,
+newly ingested hardware can still receive the previous firmware.
+
+### Prepare the rollout
+
+Before submitting an update, prepare the following information:
+
+1. **Identify the site, canary rack IDs or names, remaining rack names, and
+   the rack profile used by each group.**
+   Group hardware by compatible SOT and operation rule; do not send one
+   platform's SOT to unrelated hardware.
+1. **Obtain the complete candidate SOT from the firmware release process.**
+   Preserve a copy of both the candidate and the previous production SOT,
+   along with their artifact locations and the profile's configured URL.
+   Keep the candidate unchanged throughout validation and rollout.
+1. **Confirm the maintenance scope, tenant impact, firmware-download
+   credentials, activation requirements, and canary acceptance criteria.**
+   Use the same operation rule and component scope for validation and the
+   corresponding production updates. The [built-in rule](#default-sequencing)
+   excludes power shelves and does not perform an activation power cycle.
+
+<Steps toc={true}>
+
+### Update and validate the canary racks
+
+Submit an on-demand update for a single canary rack, or use
+`PATCH /v2/org/{org}/nico/rack/firmware` with a nonempty `filter.names` list. For
+example, this request body selects only racks `A01` and `A02`:
+
+```json
+{
+  "siteId": "2b88bb63-9a21-4bad-b113-68a54aa6e3dd",
+  "filter": {
+    "names": ["A01", "A02"]
+  },
+  "version": "<complete candidate SOT firmware-object JSON serialized as a string>"
+}
+```
+
+Replace the example site and rack names with the canary selection. Serialize
+the complete candidate document as described in
+[SOT firmware-object JSON](#sot-firmware-object-json); the placeholder above
+is not firmware input. Supply `ruleId` and `downloadCredentials` when required
+by the selected rule and artifact source. Keep readiness and version checks
+enabled unless a diagnosed condition requires an approved override.
+
+[Monitor every returned task](#monitor-and-cancel-tasks) to a terminal result.
+Inspect the stage reports for failed or skipped work, verify installed
+firmware and any required activation, and complete the platform's canary
+acceptance checks. A task-creation response alone does not clear the canary.
+For each affected rack profile with switches, confirm that the candidate SOT
+contains an NVOS image whose firmware type matches `rack_hardware_class`.
+Use `prod` when `rack_hardware_class` is omitted.
+If any check fails, stop here and retain the previous ingestion SOT.
+
+### Promote the ingestion SOT
+
+After the canary passes, publish the exact validated SOT document at the URL
+configured under each affected rack profile's `firmware_object`. Use the
+artifact repository's publication process. If the repository uses immutable
+URLs, update the profile's `url` to the validated document through the site's
+configuration deployment process instead. Confirm that the running NICo
+configuration uses the intended URL.
+
+Read back the document from that URL and compare it with the validated SOT.
+Confirm that NICo can fetch it and that RMS can access its referenced
+artifacts with the configured credentials. Coordinate hardware admissions
+during the change: an ingestion already using the previous SOT needs separate
+verification. The [rack compute-tray pre-ingestion path](pre-ingestion.md#rack-compute-trays)
+and automatic rack maintenance consume the profile's SOT; changing the source
+does not retarget firmware jobs already submitted to the backend.
+
+From promotion until each rack's batch, coordinate or track ordinary
+reprovisioning of existing racks. Include any resulting firmware changes in
+the rollout record.
+
+Complete this step **before expanding the rollout**. Updating the ingestion
+default keeps newly admitted hardware aligned with the production target;
+it does not submit site-wide on-demand updates for existing racks.
+
+### Update and verify the remaining racks
+
+Submit on-demand updates for the remaining compatible racks using the same
+validated SOT in `version`. Use nonempty rack-name batches to control scope.
+For a site-wide rollout, explicitly list every intended compatible rack in
+those batches. An omitted, null, or empty filter, including an empty names
+list, is rejected before task creation; it does not select every rack.
+
+Monitor every task and verify installed and activated firmware for each
+selected component type. Also verify newly ingested hardware against the
+promoted SOT. Record the SOT identity, profile URLs, rack selection, task IDs,
+and validation results so partial completion is visible.
+
+If a production batch fails, pause further batches and inspect task reports,
+backend status, and component inventory before retrying. Failure or
+cancellation does not undo completed firmware work. Restoring the previous
+SOT source affects subsequent consumers; it does not roll back flashed
+hardware. Use the platform's approved recovery procedure before attempting a
+downgrade, and keep the ingestion target consistent with the recovery plan.
+
+</Steps>
 
 ## Default sequencing
 

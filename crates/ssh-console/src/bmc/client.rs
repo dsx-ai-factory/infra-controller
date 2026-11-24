@@ -16,7 +16,8 @@
  */
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use carbide_uuid::machine::MachineId;
@@ -24,7 +25,7 @@ use chrono::{DateTime, Utc};
 use opentelemetry::KeyValue;
 use russh::ChannelMsg;
 use tokio::net::TcpStream;
-use tokio::sync::{MutexGuard, broadcast, mpsc};
+use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -54,10 +55,18 @@ pub(super) struct BmcRecoveryAttempted;
 /// Spawn a connection to the given BMC in the background, returning a handle. Connections will
 /// be retried indefinitely, with exponential backoff, until a shutdown is signaled (ie. by dropping
 /// the ClientHandle.)
+///
+/// `probe_permits`, when given, bounds how many reachability probes the clients sharing it run
+/// at once. A client without it probes without waiting.
+///
+/// `pool_permit` is the client's slot in the pool. It is released when the client's task ends,
+/// after its BMC connection task and its console logger have stopped.
 pub(super) fn spawn(
     connection_details: ConnectionDetails,
     config: Arc<Config>,
     metrics: Arc<BmcPoolMetrics>,
+    probe_permits: Option<Arc<Semaphore>>,
+    pool_permit: OwnedSemaphorePermit,
     cancel_token: CancellationToken,
 ) -> ClientHandle {
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
@@ -101,10 +110,14 @@ pub(super) fn spawn(
         cancel_token,
         to_bmc_msg_rx,
         metrics,
+        probe_permits,
         logger_handle,
     };
 
-    let join_handle = tokio::spawn(bmc_client.run());
+    let join_handle = tokio::spawn(async move {
+        bmc_client.run().await;
+        drop(pool_permit);
+    });
 
     ClientHandle {
         to_bmc_msg_tx,
@@ -115,6 +128,7 @@ pub(super) fn spawn(
         connection_state,
         kind,
         console_log_client,
+        sessions: Arc::new(SessionTracker::new()),
     }
 }
 
@@ -126,6 +140,7 @@ struct BmcClient {
     broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
     to_bmc_msg_rx: mpsc::Receiver<ToBmcMessage>,
     metrics: Arc<BmcPoolMetrics>,
+    probe_permits: Option<Arc<Semaphore>>,
     logger_handle: Option<console_logger::ConsoleLoggerHandle>,
 }
 
@@ -183,7 +198,7 @@ impl BmcClient {
             if retries == 0 {
                 self.connection_state.store(connection::State::Connecting);
             } else {
-                carbide_instrument::emit(BmcRecoveryAttempted);
+                self.metrics.instrumentation.emit(BmcRecoveryAttempted);
                 self.connection_state
                     .store(connection::State::ConnectionError);
             }
@@ -195,6 +210,7 @@ impl BmcClient {
                 self.connection_details.addr(),
                 self.connection_details.kind(),
                 self.connection_details.machine_id(),
+                self.probe_permits.as_deref(),
                 self.cancel_token.clone(),
             )
             .await
@@ -307,7 +323,7 @@ impl BmcClient {
             let error_string = res
                 .err()
                 .map(|e| format!("{e:?}"))
-                .unwrap_or("<none>".to_string());
+                .unwrap_or_else(|| "<none>".to_string());
             tracing::warn!(
                 %machine_id,
                 error = error_string,
@@ -334,10 +350,14 @@ impl BmcClient {
 /// ASF Presence Ping works with most hardware vendors BMC and machine-a-tron simulations,
 /// but some BMCs (eg, NVIDIA DGX GB200) ignore it. Running both ICMP and UDP ASF pings in parallel
 /// provides fast detection in all environments.
+///
+/// With `probe_permits`, each probe holds a permit while it runs, so clients whose BMC is down
+/// wait for a slot instead of each keeping a pending connection open.
 async fn wait_until_host_is_up(
     addr: SocketAddr,
     kind: connection::Kind,
     machine_id: MachineId,
+    probe_permits: Option<&Semaphore>,
     cancel_token: CancellationToken,
 ) -> io::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -346,6 +366,15 @@ async fn wait_until_host_is_up(
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                let _permit = match probe_permits {
+                    Some(probe_permits) => {
+                        let Some(permit) = cancel_token.run_until_cancelled(probe_permits.acquire()).await else {
+                            break Ok(());
+                        };
+                        Some(permit.expect("probe semaphore is never closed"))
+                    }
+                    None => None,
+                };
                 match kind {
                     connection::Kind::Ssh => {
                         if let Some(Ok(Ok(_))) = cancel_token.run_until_cancelled(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))).await {
@@ -532,6 +561,37 @@ pub(super) struct ClientHandle {
     // Read by the pool's observable-gauge callbacks.
     pub(super) connection_state: Arc<AtomicConnectionState>,
     console_log_client: Option<console_logger::ConsoleLogClient>,
+    sessions: Arc<SessionTracker>,
+}
+
+/// Open console sessions on a BMC client, and when the last one ended.
+struct SessionTracker {
+    active: AtomicUsize,
+    last_session_end: Mutex<Instant>,
+}
+
+impl SessionTracker {
+    fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            last_session_end: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn begin(&self) {
+        self.active.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn end(&self) {
+        *self.last_session_end.lock().expect("lock poisoned") = Instant::now();
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Since when the client has had no console session, or `None` while one is open.
+    fn idle_since(&self) -> Option<Instant> {
+        (self.active.load(Ordering::SeqCst) == 0)
+            .then(|| *self.last_session_end.lock().expect("lock poisoned"))
+    }
 }
 
 impl ShutdownHandle<()> for ClientHandle {
@@ -545,6 +605,22 @@ impl ClientHandle {
         self.console_log_client.clone()
     }
 
+    /// Since when no console session has used this client, or `None` while one is open.
+    pub(super) fn idle_since(&self) -> Option<Instant> {
+        self.sessions.idle_since()
+    }
+
+    /// Shut the client down and wait for its task, which then releases its pool permit. A task
+    /// that panicked has released it already, so its failure is logged instead of raised.
+    pub(super) async fn close(self) {
+        let machine_id = self.machine_id;
+        let (drop_guard, join_handle) = self.into_parts();
+        drop(drop_guard);
+        if let Err(error) = join_handle.await {
+            tracing::error!(%machine_id, %error, "BMC client task failed before it shut down");
+        }
+    }
+
     pub(super) fn subscribe(&self, metrics: Arc<ServerMetrics>) -> BmcConnectionSubscription {
         tracing::debug!("new bmc subscription");
         metrics.total_clients.add(1, &[]);
@@ -552,6 +628,7 @@ impl ClientHandle {
             1,
             &[KeyValue::new("machine_id", self.machine_id.to_string())],
         );
+        self.sessions.begin();
 
         BmcConnectionSubscription {
             machine_id: self.machine_id,
@@ -559,6 +636,7 @@ impl ClientHandle {
             to_bmc_msg_tx: self.to_bmc_msg_tx.clone(),
             metrics,
             kind: self.kind,
+            sessions: self.sessions.clone(),
         }
     }
 }
@@ -573,6 +651,7 @@ pub(crate) struct BmcConnectionSubscription {
     // Not pub, to make sure we go through ClientHandle::subscribe() to build, so we get the
     // right metrics
     metrics: Arc<ServerMetrics>,
+    sessions: Arc<SessionTracker>,
 }
 
 impl Drop for BmcConnectionSubscription {
@@ -584,6 +663,7 @@ impl Drop for BmcConnectionSubscription {
             -1,
             &[KeyValue::new("machine_id", self.machine_id.to_string())],
         );
+        self.sessions.end();
     }
 }
 
@@ -697,7 +777,6 @@ mod tests {
     use prometheus::proto::MetricType;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
-    use tokio::process::Command;
 
     use super::*;
     use crate::bmc::connection_impl::{ipmi, ssh};
@@ -706,54 +785,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn recovery_counter_survives_client_recreation() {
-        const CHILD_PROCESS_ENV: &str = "CARBIDE_SSH_RECOVERY_METRICS_TEST_CHILD";
-
-        if std::env::var_os(CHILD_PROCESS_ENV).is_none() {
-            // A fresh process prevents other tests from replacing the provider,
-            // initializing the cached Event first, or changing its shared total.
-            let output_dir = temp_dir::TempDir::with_prefix("ssh-recovery-metrics")
-                .expect("create recovery test output directory");
-            let stdout_path = output_dir.path().join("stdout");
-            let stderr_path = output_dir.path().join("stderr");
-            let mut child = Command::new(std::env::current_exe().expect("current test executable"))
-                .args([
-                    "--exact",
-                    "bmc::client::tests::recovery_counter_survives_client_recreation",
-                    "--nocapture",
-                ])
-                .env(CHILD_PROCESS_ENV, "1")
-                .stdout(std::fs::File::create(&stdout_path).expect("create child stdout file"))
-                .stderr(std::fs::File::create(&stderr_path).expect("create child stderr file"))
-                .kill_on_drop(true)
-                .spawn()
-                .expect("run recovery metrics test child");
-            // Bound the whole child even if its runtime cannot poll the inner
-            // ten-second deadline. Files keep output from filling a pipe.
-            let wait_result = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
-            let timed_out = wait_result.is_err();
-            let status = match wait_result {
-                Ok(status) => status.expect("wait for recovery metrics test child"),
-                Err(_) => {
-                    child
-                        .start_kill()
-                        .expect("terminate recovery metrics test child");
-                    child
-                        .wait()
-                        .await
-                        .expect("reap recovery metrics test child")
-                }
-            };
-            let stdout = std::fs::read(stdout_path).expect("read child stdout");
-            let stderr = std::fs::read(stderr_path).expect("read child stderr");
-            let stdout = String::from_utf8_lossy(&stdout);
-            let stderr = String::from_utf8_lossy(&stderr);
-            assert!(
-                !timed_out && status.success() && stdout.contains("1 passed; 0 failed"),
-                "recovery metrics child failed (timed out: {timed_out}, status: {status})\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            );
-            return;
-        }
-
         tokio::time::timeout(Duration::from_secs(10), assert_recovery_metrics_lifecycle())
             .await
             .expect("recovery metrics lifecycle timed out");
@@ -761,7 +792,14 @@ mod tests {
 
     async fn assert_recovery_metrics_lifecycle() {
         let state = MetricsState::new();
-        let metrics = Arc::new(BmcPoolMetrics::for_test());
+        let metrics = Arc::new(BmcPoolMetrics::for_test(
+            &state.meter,
+            state.instrumentation.clone(),
+        ));
+        // Replacing the global provider must not redirect this pool's recovery counter.
+        let other_state = MetricsState::new();
+        let _other_pool =
+            BmcPoolMetrics::for_test(&other_state.meter, other_state.instrumentation.clone());
         let machine_id = MachineId::new(MachineIdSource::Tpm, [0; 32], MachineType::Host);
         assert_recovery_metrics(&state, machine_id, 0.0, None);
         let config = Arc::new(Config {
@@ -784,10 +822,13 @@ mod tests {
             }))
         };
         let cancel_token = CancellationToken::new();
+        let probe_permits = Some(Arc::new(Semaphore::new(1)));
         let handle = spawn(
             connection_details(listener.local_addr().expect("BMC listener address")),
             config.clone(),
             metrics.clone(),
+            probe_permits.clone(),
+            pool_permit(),
             cancel_token.clone(),
         );
 
@@ -820,6 +861,8 @@ mod tests {
             connection_details(addr),
             config.clone(),
             metrics.clone(),
+            probe_permits.clone(),
+            pool_permit(),
             cancel_token.clone(),
         );
         let mut messages = handle.broadcast_to_frontend_tx.subscribe();
@@ -833,7 +876,14 @@ mod tests {
         handle.shutdown_and_wait().await;
         assert_recovery_metrics(&state, machine_id, 2.0, Some(0.0));
 
-        let handle = spawn(connection_details(addr), config, metrics, cancel_token);
+        let handle = spawn(
+            connection_details(addr),
+            config,
+            metrics,
+            probe_permits,
+            pool_permit(),
+            cancel_token,
+        );
         let mut messages = handle.broadcast_to_frontend_tx.subscribe();
         assert!(matches!(
             next_connection_change(&mut messages).await,
@@ -855,6 +905,97 @@ mod tests {
         assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
         handle.shutdown_and_wait().await;
         assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
+        assert_recovery_metrics(&other_state, machine_id, 0.0, None);
+    }
+
+    #[tokio::test]
+    async fn reachability_probe_waits_for_a_probe_permit() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind BMC listener");
+        let addr = listener.local_addr().expect("BMC listener address");
+        let probe_permits = Arc::new(Semaphore::new(1));
+        let held = probe_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("take the only probe permit");
+        let config = Arc::new(Config {
+            console_logging_enabled: false,
+            ..Default::default()
+        });
+        let state = MetricsState::new();
+        let handle = spawn(
+            ConnectionDetails::Ssh(Arc::new(ssh::ConnectionDetails {
+                machine_id: MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host),
+                addr,
+                user: "test".to_string(),
+                password: "test".to_string(),
+                ssh_key_path: None,
+                bmc_vendor: SshBmcVendor::Dell,
+            })),
+            config,
+            Arc::new(BmcPoolMetrics::for_test(
+                &state.meter,
+                state.instrumentation.clone(),
+            )),
+            Some(probe_permits),
+            pool_permit(),
+            CancellationToken::new(),
+        );
+
+        // The client's first probe is due immediately, but no connection may reach the BMC while
+        // the only permit is held elsewhere.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "probe ran without a permit"
+        );
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("probe after the permit was released")
+            .expect("accept probe");
+        handle.shutdown_and_wait().await;
+    }
+
+    #[tokio::test]
+    async fn close_returns_when_the_client_task_panicked() {
+        let state = MetricsState::new();
+        let mut handle = spawn(
+            ConnectionDetails::Ssh(Arc::new(ssh::ConnectionDetails {
+                machine_id: MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host),
+                addr: "127.0.0.1:1".parse().expect("BMC address"),
+                user: "test".to_string(),
+                password: "test".to_string(),
+                ssh_key_path: None,
+                bmc_vendor: SshBmcVendor::Dell,
+            })),
+            Arc::new(Config {
+                console_logging_enabled: false,
+                ..Default::default()
+            }),
+            Arc::new(BmcPoolMetrics::for_test(
+                &state.meter,
+                state.instrumentation.clone(),
+            )),
+            None,
+            pool_permit(),
+            CancellationToken::new(),
+        );
+        handle.join_handle = tokio::spawn(async { panic!("client task failed") });
+
+        // The pool closes removed clients from its refresh loop, which must outlive one of them.
+        handle.close().await;
+    }
+
+    /// A pool permit for a client spawned outside a pool.
+    fn pool_permit() -> OwnedSemaphorePermit {
+        Arc::new(Semaphore::new(1))
+            .try_acquire_owned()
+            .expect("free permit")
     }
 
     #[derive(Debug)]

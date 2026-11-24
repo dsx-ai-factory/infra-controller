@@ -23,6 +23,7 @@ use carbide_test_harness::test_support::fixture_config::{
 };
 use chrono::{Duration, Utc};
 use config_version::ConfigVersion;
+use futures::FutureExt;
 use libredfish::EnabledDisabled;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{DisableOnboardNicsState, MachineState, ManagedHostState};
@@ -235,4 +236,253 @@ async fn onboard_nics_skipped_on_other_skus_with_managed_dpus(pool: PgPool) {
             .all_hosts()
             .is_empty()
     );
+}
+
+fn ac_cycle_state(
+    state: model::machine::AcPowercycleState,
+    request: &model::machine::MachineMaintenanceRequest,
+) -> ManagedHostState {
+    ManagedHostState::Maintenance {
+        operation: model::machine::MachineMaintenanceOperation::AcPowercycle { state },
+        request: Some(request.clone()),
+    }
+}
+
+async fn queue_ac_cycle(
+    env: &Env,
+    host: &TestManagedHost,
+) -> model::machine::MachineMaintenanceRequest {
+    let mut txn = env.test_harness.db_txn().await;
+    db::machine::set_machine_maintenance_requested(
+        &mut txn,
+        host.host.id,
+        "ac-cycle-test",
+        model::machine::MachineMaintenanceOperation::AcPowercycle {
+            state: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    db::machine::update_state(&mut txn, &host.host.id, &ManagedHostState::Ready)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    host.host
+        .machine()
+        .await
+        .machine_maintenance_requested
+        .unwrap()
+}
+
+#[sqlx_test]
+async fn ac_cycle_restores_onboard_nics_without_repeating_power_after_restart(pool: PgPool) {
+    use std::sync::Arc;
+
+    use component_manager::core_compute_manager::CoreComputeTrayManager;
+    use model::machine::AcPowercycleState;
+
+    use crate::maintenance::{component_manager, valid_credential_manager};
+
+    let mut env = Env::builder(pool.clone()).build().boxed_local().await;
+    let (host, bmc) = setup_host(&env, ManagedHostConfig::default())
+        .boxed_local()
+        .await;
+    host.advance_to_converged_ready().await;
+    let manager = component_manager(Arc::new(CoreComputeTrayManager::new(
+        env.redfish_sim.clone(),
+    )));
+    env = Env::builder(pool.clone())
+        .with_component_manager(manager.clone())
+        .with_credential_manager(valid_credential_manager())
+        .build_with_harness(env.test_harness, env.redfish_sim);
+    env.redfish_sim
+        .set_service_root_vendor(Some("NVIDIA".into()));
+    env.redfish_sim
+        .set_service_root_product(Some("VR NVL72".into()));
+    let request = queue_ac_cycle(&env, &host).await;
+    let actions = env.redfish_sim.timepoint();
+    env.run_single_iteration_without_requeue().await;
+    assert_eq!(
+        host.host.machine().await.state.value,
+        ac_cycle_state(AcPowercycleState::PowerCycle, &request)
+    );
+    // A failed platform check must not issue the AC command. Retry from the
+    // persisted PowerCycle phase once the BMC is available.
+    let before = host.host.machine().await;
+    env.redfish_sim
+        .set_create_client_error("BMC unavailable for platform detection");
+    env.run_single_iteration_without_requeue().await;
+    let failed = host.host.machine().await;
+    assert_eq!(failed.state.value, before.state.value);
+    assert_eq!(failed.state.version, before.state.version);
+    assert_eq!(failed.machine_maintenance_requested, Some(request.clone()));
+    assert!(matches!(failed.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Error { ref err, .. })
+            if err.contains("BMC unavailable for platform detection")));
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .for_host(&bmc)
+            .is_empty()
+    );
+    env.redfish_sim.clear_create_client_error();
+    env.run_single_iteration_without_requeue().await;
+    assert_eq!(
+        host.host.machine().await.state.value,
+        ac_cycle_state(
+            AcPowercycleState::DisableOnboardNics {
+                state: DisableOnboardNicsState::ConfigureOnboardNics { enable: true },
+            },
+            &request
+        )
+    );
+    assert_eq!(
+        env.redfish_sim.actions_since(&actions).for_host(&bmc),
+        vec![RedfishSimAction::Power(
+            libredfish::SystemPowerControl::ACPowercycle
+        )]
+    );
+    // Resume NIC restoration after a restart without another platform check or cycle.
+    env = Env::builder(pool.clone())
+        .with_component_manager(manager.clone())
+        .with_credential_manager(valid_credential_manager())
+        .build_with_harness(env.test_harness, env.redfish_sim);
+
+    for enable in [true, false] {
+        if !enable {
+            // Retry a failed NIC write after a controller restart.
+            env.redfish_sim
+                .fail_next_onboard_nics_write("temporary NIC write failure");
+            let before = host.host.machine().await;
+            env.run_single_iteration_without_requeue().await;
+            let failed = host.host.machine().await;
+            assert_eq!(failed.state.value, before.state.value);
+            assert_eq!(failed.state.version, before.state.version);
+            assert!(matches!(failed.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Error { ref err, .. })
+                    if err.contains("temporary NIC write failure")));
+            env = Env::builder(pool.clone())
+                .with_component_manager(manager.clone())
+                .with_credential_manager(valid_credential_manager())
+                .build_with_harness(env.test_harness, env.redfish_sim);
+        }
+        env.run_single_iteration_without_requeue().await;
+        let waiting = host.host.machine().await;
+        assert_eq!(
+            waiting.state.value,
+            ac_cycle_state(
+                AcPowercycleState::DisableOnboardNics {
+                    state: DisableOnboardNicsState::WaitForConfigToBeApplied {
+                        onboard_nics_disabled: !enable
+                    },
+                },
+                &request
+            )
+        );
+        env.run_single_iteration_without_requeue().await;
+        let still_waiting = host.host.machine().await;
+        assert_eq!(still_waiting.state.value, waiting.state.value);
+        assert_eq!(still_waiting.state.version, waiting.state.version);
+        assert!(matches!(still_waiting.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                if reason == "Waiting for onboard NIC configuration to be applied"));
+        expire_wait(&env, &host).await;
+        env.run_single_iteration_without_requeue().await;
+        let expected = if enable {
+            ac_cycle_state(
+                AcPowercycleState::DisableOnboardNics {
+                    state: DisableOnboardNicsState::ConfigureOnboardNics { enable: false },
+                },
+                &request,
+            )
+        } else {
+            ManagedHostState::Ready
+        };
+        assert_eq!(host.host.machine().await.state.value, expected);
+    }
+    assert!(
+        host.host
+            .machine()
+            .await
+            .machine_maintenance_requested
+            .is_none()
+    );
+    assert_eq!(
+        env.redfish_sim.actions_since(&actions).for_host(&bmc),
+        vec![
+            RedfishSimAction::Power(libredfish::SystemPowerControl::ACPowercycle),
+            RedfishSimAction::SetEnableOnboardNics(EnabledDisabled::Enabled),
+            RedfishSimAction::SetEnableOnboardNicsFailed(EnabledDisabled::Disabled),
+            RedfishSimAction::SetEnableOnboardNics(EnabledDisabled::Disabled),
+        ]
+    );
+}
+
+#[sqlx_test]
+async fn ac_cycle_skips_onboard_nics_unless_vera_rubin_with_managed_dpus(pool: PgPool) {
+    use std::sync::Arc;
+
+    use component_manager::core_compute_manager::CoreComputeTrayManager;
+    use model::machine::AcPowercycleState;
+
+    use crate::maintenance::{component_manager, valid_credential_manager};
+
+    let mut env = Env::builder(pool.clone()).build().boxed_local().await;
+    let manager = component_manager(Arc::new(CoreComputeTrayManager::new(
+        env.redfish_sim.clone(),
+    )));
+    env = Env::builder(pool)
+        .with_component_manager(manager)
+        .with_credential_manager(valid_credential_manager())
+        .build_with_harness(env.test_harness, env.redfish_sim);
+    let mut unmanaged = ManagedHostConfig::zero_dpu();
+    unmanaged.expected_machine_data = Some(model::expected_machine::ExpectedMachineData {
+        serial_number: unmanaged.serial.clone(),
+        dpu_policy: model::expected_machine::HostDpuPolicy::Ignore,
+        ..Default::default()
+    });
+    let domain = env.test_harness.test_domain().await;
+    let network_controller = env.test_harness.network_controller();
+    let underlay = network_controller.create_underlay_segment(&domain).await;
+    network_controller.create_admin_segment(&domain).await;
+    let site_explorer = env.test_harness.default_test_site_explorer();
+    for (product, config) in [
+        ("VR NVL72", unmanaged),
+        ("GB200 NVL", ManagedHostConfig::default()),
+    ] {
+        env.redfish_sim
+            .set_service_root_vendor(Some("NVIDIA".into()));
+        env.redfish_sim
+            .set_service_root_product(Some(product.into()));
+        let (host, data) = env
+            .test_harness
+            .managed_host_builder(&site_explorer, underlay)
+            .with_config(config)
+            .build()
+            .boxed_local()
+            .await;
+        let bmc = data.host_bmc_ip().to_string();
+        host.advance_to_converged_ready().await;
+        let request = queue_ac_cycle(&env, &host).await;
+        let actions = env.redfish_sim.timepoint();
+        env.run_single_iteration_without_requeue().await;
+        assert_eq!(
+            host.host.machine().await.state.value,
+            ac_cycle_state(AcPowercycleState::PowerCycle, &request)
+        );
+        env.run_single_iteration_without_requeue().await;
+        let finished = host.host.machine().await;
+        assert_eq!(finished.state.value, ManagedHostState::Ready, "{product}");
+        assert!(
+            finished.machine_maintenance_requested.is_none(),
+            "{product}"
+        );
+        assert_eq!(
+            env.redfish_sim.actions_since(&actions).for_host(&bmc),
+            vec![RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ACPowercycle
+            )],
+            "{product}"
+        );
+    }
 }

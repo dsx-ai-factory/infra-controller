@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -52,6 +53,12 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also create Expected Machines if they have an account with the Site's Infrastructure Provider.
 
 Maximum batch size: 100 Expected Machines per request.
+
+A successful response confirms that Core created every requested machine and REST saved the corresponding records. HTTP 500 can mean the batch was rejected or that REST could not confirm or save its creation. The status alone does not establish whether creation succeeded or may still finish.
+
+When durable batch recovery is enabled on the server, REST reserves the requested machine IDs, MAC addresses, and chassis serial numbers until it can confirm creation or establish failure. Durable batch recovery is disabled by default. Creates, updates, and deletes using those identities return HTTP 409 while confirmation is pending. The reservation also blocks replacement or deletion of all Expected Machines at the Site.
+
+Check Expected Machine inventory before retrying an unconfirmed request. A missing machine is not proof that creation failed. If the server cannot establish the result, a batch with durable recovery keeps its reservation without automatic expiration.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -169,6 +176,17 @@ func (a *ExpectedMachineAPIService) BatchCreateExpectedMachinesExecute(r ApiBatc
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -192,7 +210,7 @@ type ApiBatchUpdateExpectedMachinesRequest struct {
 	expectedMachineUpdateRequest *[]ExpectedMachineUpdateRequest
 }
 
-// Array of Expected Machine update requests.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
+// Array of Expected Machine update requests.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
 func (r ApiBatchUpdateExpectedMachinesRequest) ExpectedMachineUpdateRequest(expectedMachineUpdateRequest []ExpectedMachineUpdateRequest) ApiBatchUpdateExpectedMachinesRequest {
 	r.expectedMachineUpdateRequest = &expectedMachineUpdateRequest
 	return r
@@ -207,7 +225,7 @@ BatchUpdateExpectedMachines Batch Update Expected Machines
 
 Update multiple Expected Machines in a single request. All machines must belong to the same site.
 
-All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address.
+All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address, and `replaceDpuLoopbacks` is independent per machine.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -823,7 +841,7 @@ type ApiGetAllExpectedMachineRequest struct {
 	ApiService      *ExpectedMachineAPIService
 	org             string
 	siteId          *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -835,8 +853,8 @@ func (r ApiGetAllExpectedMachineRequest) SiteId(siteId string) ApiGetAllExpected
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllExpectedMachineRequest) IncludeRelation(includeRelation string) ApiGetAllExpectedMachineRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllExpectedMachineRequest) IncludeRelation(includeRelation []string) ApiGetAllExpectedMachineRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -911,7 +929,15 @@ func (a *ExpectedMachineAPIService) GetAllExpectedMachineExecute(r ApiGetAllExpe
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -1374,11 +1400,11 @@ type ApiGetExpectedMachineRequest struct {
 	ApiService        *ExpectedMachineAPIService
 	org               string
 	expectedMachineId string
-	includeRelation   *string
+	includeRelation   *[]string
 }
 
-// Related entity to expand
-func (r ApiGetExpectedMachineRequest) IncludeRelation(includeRelation string) ApiGetExpectedMachineRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetExpectedMachineRequest) IncludeRelation(includeRelation []string) ApiGetExpectedMachineRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -1435,7 +1461,15 @@ func (a *ExpectedMachineAPIService) GetExpectedMachineExecute(r ApiGetExpectedMa
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
@@ -1543,6 +1577,8 @@ func (r ApiReplaceAllExpectedMachineRequest) Execute() ([]ExpectedMachine, *http
 ReplaceAllExpectedMachine Replace all Expected Machines
 
 Replace the complete Expected Machine set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedMachines` array may be empty to clear the Site's set.
+
+For a BMC MAC retained in the replacement set, stored DPU loopbacks are preserved unless its `interfaces` include a `DpuLoopback` declaration (including one whose omitted role is preserved), or its `replaceDpuLoopbacks` is true. Either case replaces the complete loopback subset. Physical interfaces are always replaced; omitted, null, or empty `interfaces` clears the physical subset.
 
 Every entry must use the top-level `siteId`. BMC MAC addresses and chassis serial numbers must be unique within the replacement set. Referenced SKUs must exist at the Site.
 

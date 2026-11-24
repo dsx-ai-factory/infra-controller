@@ -15,12 +15,13 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use clap::ValueEnum;
 use mac_address::MacAddress;
 use prettytable::{Table, row};
-use rpc::forge::ExpectedMachineRequest;
+use rpc::forge::{ExpectedInterfaceRole, ExpectedMachineRequest};
 
 use crate::async_write;
 use crate::errors::CarbideCliResult;
@@ -96,7 +97,7 @@ pub(super) async fn show_expected_machines(
                     x.bmc_ip,
                     x.machine_id
                         .map(|x| x.to_string())
-                        .unwrap_or("Unlinked".to_string()),
+                        .unwrap_or_else(|| "Unlinked".to_string()),
                 )
             }),
     );
@@ -133,7 +134,9 @@ async fn convert_and_print_into_nice_table(
         "Pause On Ingestion",
         "DPF Enabled",
         "Disable Lockdown",
+        "Control Plane",
         "DPU Policy",
+        "DPU Loopback Reservations",
     ]);
 
     for expected_machine in &expected_machines.expected_machines {
@@ -156,13 +159,31 @@ async fn convert_and_print_into_nice_table(
         let labels = crate::metadata::fmt_labels_as_kv_pairs(expected_machine.metadata.as_ref());
 
         let dpu_policy_display = dpu_policy_display(expected_machine.dpu_mode);
+        let mut loopback_reservations = String::new();
+        for (index, (mac_address, fixed_ip)) in expected_machine
+            .host_nics
+            .iter()
+            .filter(|interface| interface.role() == ExpectedInterfaceRole::DpuLoopback)
+            .filter_map(|interface| {
+                Some((
+                    interface.mac_address.as_deref()?,
+                    interface.fixed_ip.as_deref()?,
+                ))
+            })
+            .enumerate()
+        {
+            if index != 0 {
+                loopback_reservations.push('\n');
+            }
+            write!(loopback_reservations, "{mac_address}: {fixed_ip}")?;
+        }
 
         table.add_row(row![
             expected_machine.chassis_serial_number,
             expected_machine.bmc_mac_address,
             machine_interface
                 .map(|x| x.address.join("\n"))
-                .unwrap_or("Undiscovered".to_string()),
+                .unwrap_or_else(|| "Undiscovered".to_string()),
             expected_machine.fallback_dpu_serial_numbers.join("\n"),
             machine_id.unwrap_or("Unlinked"),
             expected_machine
@@ -186,10 +207,18 @@ async fn convert_and_print_into_nice_table(
                 .to_string(),
             expected_machine
                 .host_lifecycle_profile
+                .as_ref()
                 .and_then(|hlp| hlp.disable_lockdown)
                 .unwrap_or_default()
                 .to_string(),
+            expected_machine
+                .host_lifecycle_profile
+                .as_ref()
+                .and_then(|hlp| hlp.retain_hbn_config_on_boot)
+                .unwrap_or_default()
+                .to_string(),
             dpu_policy_display,
+            loopback_reservations,
         ]);
     }
 
@@ -212,10 +241,13 @@ fn dpu_policy_display(dpu_mode: Option<i32>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use carbide_test_support::value_scenarios;
     use rpc::forge::DpuMode;
 
-    use super::dpu_policy_display;
+    use super::{convert_and_print_into_nice_table, dpu_policy_display};
+    use crate::async_write::CapturedOutput;
 
     #[test]
     fn dpu_policy_display_uses_canonical_policy_vocabulary() {
@@ -245,5 +277,78 @@ mod tests {
                 Some(i32::MAX) => "manage".to_string(),
             }
         );
+    }
+
+    /// The rendered table must carry the lifecycle-profile columns and their
+    /// cell values. A machine with a profile shows each stored flag; a machine
+    /// without one falls back to `false` rather than rendering an empty cell.
+    #[tokio::test]
+    async fn table_renders_host_lifecycle_profile_columns() {
+        let machines = ::rpc::forge::ExpectedMachineList {
+            expected_machines: vec![
+                ::rpc::forge::ExpectedMachine {
+                    chassis_serial_number: "SN-SET".into(),
+                    bmc_mac_address: "00:11:22:33:44:55".into(),
+                    host_lifecycle_profile: Some(::rpc::forge::HostLifecycleProfile {
+                        disable_lockdown: Some(true),
+                        retain_hbn_config_on_boot: Some(true),
+                    }),
+                    ..Default::default()
+                },
+                ::rpc::forge::ExpectedMachine {
+                    chassis_serial_number: "SN-UNSET".into(),
+                    bmc_mac_address: "00:11:22:33:44:66".into(),
+                    host_lifecycle_profile: None,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let mut captured = CapturedOutput::new();
+        convert_and_print_into_nice_table(
+            captured.writer(),
+            &machines,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let rendered = String::from_utf8(captured.into_bytes().await).unwrap();
+
+        // Split a rendered row into trimmed cells. prettytable wraps every row
+        // in `|`, so the first and last split parts are empty padding.
+        let cells = |needle: &str| -> Vec<String> {
+            let line = rendered
+                .lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no rendered row containing {needle}"));
+            let parts: Vec<&str> = line.split('|').collect();
+            parts[1..parts.len() - 1]
+                .iter()
+                .map(|cell| cell.trim().to_string())
+                .collect()
+        };
+
+        // Resolve the columns by header, so an inserted column cannot silently
+        // shift the assertions onto a neighbouring boolean cell.
+        let headers = cells("Serial Number");
+        let lockdown = headers
+            .iter()
+            .position(|header| header == "Disable Lockdown")
+            .expect("Disable Lockdown column");
+        let retain_hbn_config_on_boot = headers
+            .iter()
+            .position(|header| header == "Control Plane")
+            .expect("Control Plane column");
+
+        let set = cells("SN-SET");
+        assert_eq!(set[lockdown], "true");
+        assert_eq!(set[retain_hbn_config_on_boot], "true");
+
+        // No stored profile renders the default rather than an empty cell.
+        let unset = cells("SN-UNSET");
+        assert_eq!(unset[lockdown], "false");
+        assert_eq!(unset[retain_hbn_config_on_boot], "false");
     }
 }

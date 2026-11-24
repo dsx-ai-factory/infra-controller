@@ -37,6 +37,10 @@ use crate::{ActionError, Callbacks, DeviceEffect, http, redfish};
 #[path = "manager_reset_tests.rs"]
 mod reset_defaults_tests;
 
+#[cfg(test)]
+#[path = "manager_log_tests.rs"]
+mod integrated_event_log_tests;
+
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
         odata_id: Cow::Borrowed("/redfish/v1/Managers"),
@@ -105,6 +109,7 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
     const MGR_ID: &str = "{manager_id}";
     const ETH_ID: &str = "{ethernet_id}";
     const HOST_IF_ID: &str = "{hostif_id}";
+    const LOG_ID: &str = "{log_service_id}";
     r.route(&collection().odata_id, get(get_manager_collection::<C>))
         .route(
             &resource(MGR_ID).odata_id,
@@ -145,9 +150,32 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
         )
         .route(
             &redfish::log_service::manager_collection(MGR_ID).odata_id,
-            get(get_log_services),
+            get(get_log_services::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_resource(MGR_ID, LOG_ID, "").odata_id,
+            get(get_log_service::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_clear_log_target(MGR_ID, LOG_ID),
+            post(post_clear_log::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_entries_collection(MGR_ID, LOG_ID).odata_id,
+            get(get_log_entries::<C>),
+        )
+        .route(
+            &format!(
+                "{}/{{entry_id}}",
+                redfish::log_service::manager_entries_collection(MGR_ID, LOG_ID).odata_id
+            ),
+            get(get_log_entry::<C>),
         )
 }
+
+/// HPE iLO's Integrated Event Log: where iLO records host power and reset
+/// events, and where NICo looks for proof that a host restarted.
+const HPE_INTEGRATED_EVENT_LOG: &str = "IEL";
 
 #[derive(Clone, Copy)]
 pub(crate) enum Oem {
@@ -255,6 +283,20 @@ impl ManagerState {
             .map(|manager| resource(manager.id).odata_id.into_owned())
     }
 
+    /// Append an entry to the BMC's own Integrated Event Log, when its
+    /// manager keeps one (HPE iLO). Returns whether an entry was written.
+    pub(crate) fn record_integrated_event(
+        &self,
+        draft: redfish::log_service::LogEntryDraft,
+        created: &str,
+    ) -> bool {
+        self.managers
+            .first()
+            .and_then(|manager| manager.integrated_event_log.as_ref())
+            .map(|log| log.append(draft, created))
+            .is_some()
+    }
+
     pub(crate) fn find(&self, manager_id: &str) -> Option<&SingleManagerState> {
         self.managers.iter().find(|c| c.id == manager_id)
     }
@@ -295,6 +337,8 @@ pub(crate) struct SingleManagerState {
     // PATCHes applied to individual HostInterface resources. Lockdown flows
     // rely on InterfaceEnabled changing persistently across PATCH and GET.
     host_interface_overrides: Mutex<HashMap<String, serde_json::Value>>,
+    // HPE iLO's Integrated Event Log; other managers expose no log service.
+    integrated_event_log: Option<redfish::log_service::EventLog>,
 }
 
 struct NtpState {
@@ -342,7 +386,21 @@ impl SingleManagerState {
             ntp: Mutex::new(NtpState::default()),
             overrides: Arc::new(Mutex::new(json!({}))),
             host_interface_overrides: Mutex::new(HashMap::new()),
+            integrated_event_log: matches!(config.oem, Some(Oem::Hpe)).then(|| {
+                redfish::log_service::EventLog::new(
+                    HPE_INTEGRATED_EVENT_LOG,
+                    redfish::log_service::DEFAULT_MAX_RECORDS,
+                    None,
+                    [],
+                )
+            }),
         }
+    }
+
+    fn log_service(&self, log_service_id: &str) -> Option<&redfish::log_service::EventLog> {
+        self.integrated_event_log
+            .as_ref()
+            .filter(|log| log.id() == log_service_id)
     }
 
     fn network_protocol(&self) -> serde_json::Value {
@@ -768,8 +826,104 @@ async fn post_reset_defaults<C: Callbacks>(
     }
 }
 
-async fn get_log_services() -> Response {
-    not_implemented()
+async fn get_log_services<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+) -> Response {
+    let Some(manager) = state.manager.find(&manager_id) else {
+        return http::not_found();
+    };
+    let Some(log) = manager.integrated_event_log.as_ref() else {
+        return not_implemented();
+    };
+    redfish::log_service::manager_collection(&manager_id)
+        .with_members(&[manager_log_resource(&manager_id, log).entity_ref()])
+        .into_ok_response()
+}
+
+fn manager_log_resource<'a>(
+    manager_id: &str,
+    log: &'a redfish::log_service::EventLog,
+) -> redfish::Resource<'a> {
+    redfish::log_service::manager_resource(manager_id, log.id(), "Integrated Event Log")
+}
+
+async fn get_log_service<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id)): Path<(String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .map(|log| {
+            redfish::log_service::builder(&manager_log_resource(&manager_id, log))
+                .entries(
+                    redfish::log_service::manager_entries_collection(&manager_id, log.id())
+                        .odata_id
+                        .as_ref(),
+                )
+                .capacity(
+                    log.capacity(),
+                    &redfish::log_service::manager_clear_log_target(&manager_id, log.id()),
+                )
+                .into_ok_response()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn post_clear_log<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id)): Path<(String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .map(|log| {
+            log.clear();
+            http::ok_no_content()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn get_log_entries<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id)): Path<(String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .map(|log| {
+            let collection =
+                redfish::log_service::manager_entries_collection(&manager_id, log.id());
+            collection
+                .with_members(&log.entries(&collection))
+                .patch(json!({
+                    "Description": "Integrated Event Log entries", // Required by libredfish
+                }))
+                .into_ok_response()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn get_log_entry<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id, entry_id)): Path<(String, String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .and_then(|log| {
+            log.entry(
+                &redfish::log_service::manager_entries_collection(&manager_id, log.id()),
+                &entry_id,
+            )
+        })
+        .map(|entry| entry.into_ok_response())
+        .unwrap_or_else(http::not_found)
 }
 
 fn not_implemented() -> Response {

@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use carbide_dpu_fmds_shared::machine_identity::MachineIdentityParams;
 use carbide_host_support::agent_config::MachineIdentityConfig;
 use eyre::{WrapErr, eyre};
-use forge_dpu_fmds_shared::machine_identity::MachineIdentityParams;
 use opentelemetry::metrics::Meter;
 use rpc::fmds::fmds_config_service_client::FmdsConfigServiceClient;
 use rpc::fmds::{
@@ -46,6 +46,7 @@ pub(super) enum FmdsUpdater {
     /// which is colocated on the same DPU, possibly in its
     /// own container.
     External {
+        instrumentation: carbide_instrument::Instrumentation,
         address: String,
         machine_identity: MachineIdentityConfig,
         connect_timeout: Duration,
@@ -72,16 +73,17 @@ pub(super) fn register_external_connection_metric(meter: &Meter) -> Arc<AtomicBo
 }
 
 impl FmdsUpdater {
-    /// Pushes the given instance/network config to FMDS and reports whether the
-    /// push succeeded, so callers (the readiness gate) can tell a real apply
-    /// from a dropped one.
+    /// Pushes the given instance/network config to FMDS and returns why the
+    /// push failed, so callers (the readiness gate and the NVUE health check)
+    /// can tell a real apply from a dropped one.
     pub(super) async fn update(
         &mut self,
         instance_data: Option<Arc<InstanceMetadata>>,
         network_config: Option<Arc<ManagedHostNetworkConfigResponse>>,
-    ) -> bool {
+    ) -> eyre::Result<()> {
         match self {
             FmdsUpdater::External {
+                instrumentation,
                 address,
                 machine_identity,
                 connect_timeout,
@@ -99,21 +101,20 @@ impl FmdsUpdater {
 
                 // A failed push is dropped: the next main-loop iteration
                 // reconnects and pushes again.
-                let succeeded = result.is_ok();
-                match result {
-                    Ok(()) => FmdsPush::Succeeded.emit(),
+                match &result {
+                    Ok(()) => FmdsPush::Succeeded.emit(instrumentation),
                     Err(err) => FmdsPush::Failed {
                         error: format!("{err:#}"),
                         fmds_address: address.clone(),
                     }
-                    .emit(),
+                    .emit(instrumentation),
                 }
-                succeeded
+                result
             }
             FmdsUpdater::Embedded(state) => {
                 state.update_instance_data(instance_data);
                 state.update_network_configuration(network_config);
-                true
+                Ok(())
             }
         }
     }
@@ -227,7 +228,6 @@ impl FmdsGrpcClient {
 mod test {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use carbide_instrument::testing::MetricsCapture;
     use config_version::ConfigVersion;
     use rpc::fmds::UpdateConfigResponse;
     use rpc::fmds::fmds_config_service_server::{FmdsConfigService, FmdsConfigServiceServer};
@@ -315,6 +315,7 @@ mod test {
         let last_connect_succeeded = Arc::new(AtomicBool::new(false));
         (
             FmdsUpdater::External {
+                instrumentation: carbide_instrument::Instrumentation::noop(),
                 address,
                 machine_identity: MachineIdentityConfig::default(),
                 connect_timeout: Duration::from_millis(500),
@@ -324,8 +325,7 @@ mod test {
         )
     }
 
-    async fn update_with_metrics_capture(updater: &mut FmdsUpdater) -> bool {
-        let _metrics = MetricsCapture::start();
+    async fn update_with_metrics_capture(updater: &mut FmdsUpdater) -> eyre::Result<()> {
         updater
             .update(Some(Arc::new(test_instance_metadata())), None)
             .await
@@ -342,7 +342,9 @@ mod test {
 
         let (mut updater, _) = test_external_updater(format!("http://{addr}"));
 
-        assert!(update_with_metrics_capture(&mut updater).await);
+        update_with_metrics_capture(&mut updater)
+            .await
+            .expect("FMDS update should succeed");
 
         let update = received.recv().await.expect("server received an update");
         assert_eq!(update.hostname, "test-host");
@@ -350,7 +352,9 @@ mod test {
         assert!(update.machine_identity.is_some());
 
         // A second iteration reconnects and pushes again.
-        assert!(update_with_metrics_capture(&mut updater).await);
+        update_with_metrics_capture(&mut updater)
+            .await
+            .expect("FMDS update should succeed");
 
         let update = received
             .recv()
@@ -369,7 +373,14 @@ mod test {
         let (addr, server, _) = serve_fmds(listener, true);
 
         let (mut updater, last_connect_succeeded) = test_external_updater(format!("http://{addr}"));
-        assert!(!update_with_metrics_capture(&mut updater).await);
+        let error = update_with_metrics_capture(&mut updater)
+            .await
+            .expect_err("FMDS rejected the update");
+        // The NVUE health check reports this error, so it must name the cause.
+        assert!(
+            format!("{error:#}").contains("test update rejection"),
+            "unexpected FMDS error: {error:#}"
+        );
 
         assert!(last_connect_succeeded.load(Ordering::Relaxed));
 
@@ -391,13 +402,15 @@ mod test {
 
         // Nothing is listening yet. The push fails and is dropped, but the
         // updater stays usable rather than latching onto a degraded mode.
-        assert!(!update_with_metrics_capture(&mut updater).await);
+        assert!(update_with_metrics_capture(&mut updater).await.is_err());
         assert!(!last_connect_succeeded.load(Ordering::Relaxed));
 
         // FMDS shows up, and the next iteration reaches it.
         let listener = socket.listen(1024).expect("listen on FMDS test socket");
         let (_, server, mut received) = serve_fmds(listener, false);
-        assert!(update_with_metrics_capture(&mut updater).await);
+        update_with_metrics_capture(&mut updater)
+            .await
+            .expect("FMDS update should succeed");
         assert!(last_connect_succeeded.load(Ordering::Relaxed));
 
         let update = received.recv().await.expect("server received an update");

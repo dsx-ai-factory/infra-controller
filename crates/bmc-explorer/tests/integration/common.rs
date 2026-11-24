@@ -23,6 +23,7 @@ use axum::http::StatusCode;
 use bmc_explorer::ErrorClass;
 use bmc_mock::test_support::TestBmc;
 use bmc_mock::test_support::axum_http_client::Error as TestBmcError;
+use carbide_hw_identification::host_serial::HOST_SERIAL_ASSEMBLY_CHASSIS_IDS;
 
 pub(crate) fn error_classifier(err: &<TestBmc as nv_redfish::Bmc>::Error) -> Option<ErrorClass> {
     match err {
@@ -40,6 +41,7 @@ pub(crate) fn explorer_config() -> bmc_explorer::Config<'static, TestBmc> {
         boot_interface_mac: None,
         error_classifier: &error_classifier,
         retry_timeout: Duration::from_millis(0),
+        assembly_chassis_ids: HOST_SERIAL_ASSEMBLY_CHASSIS_IDS,
         explore_drive_firmware: false,
     }
 }

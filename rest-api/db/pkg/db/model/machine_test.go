@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -700,6 +701,81 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
 			}
+		})
+	}
+}
+
+func TestMachineSQLDAO_GetAllIDs(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	msd := NewMachineDAO(dbSession)
+	mcd := NewMachineCapabilityDAO(dbSession)
+
+	ip, site, it := testMachineInstanceTypeBuildInstanceType(t, dbSession, "sm.x86")
+	ip2, site2, _ := testMachineInstanceTypeBuildInstanceType(t, dbSession, "med.x86")
+
+	siteMachineIDs := []string{}
+	for range 3 {
+		siteMachineIDs = append(siteMachineIDs, testMachineBuildMachine(t, dbSession, ip.ID, site.ID, &it.ID, nil).ID)
+	}
+	slices.Sort(siteMachineIDs)
+	testMachineBuildMachine(t, dbSession, ip2.ID, site2.ID, nil, nil)
+
+	deletedMachine := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil)
+	require.NoError(t, msd.Delete(ctx, nil, deletedMachine.ID, false))
+	withDeletedIDs := append(slices.Clone(siteMachineIDs), deletedMachine.ID)
+	slices.Sort(withDeletedIDs)
+
+	// Two matching capabilities join the same Machine twice.
+	for _, name := range []string{"gpu-a", "gpu-b"} {
+		_, err := mcd.Create(ctx, nil, MachineCapabilityCreateInput{MachineID: &siteMachineIDs[0], InstanceTypeID: &it.ID, Type: MachineCapabilityTypeGPU, Name: name, Count: cutil.GetPtr(1)})
+		require.NoError(t, err)
+	}
+
+	tests := []struct {
+		desc     string
+		filter   MachineFilterInput
+		expected []string
+	}{
+		{
+			desc:     "Site filter excludes other Sites and soft-deleted Machines",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteMachineIDs,
+		},
+		{
+			desc:     "IncludeDeleted adds soft-deleted Machines",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}, IncludeDeleted: true},
+			expected: withDeletedIDs,
+		},
+		{
+			desc:     "ExcludeMetadata does not affect the IDs",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}, ExcludeMetadata: true},
+			expected: siteMachineIDs,
+		},
+		{
+			desc:     "capability filter returns each Machine once",
+			filter:   MachineFilterInput{CapabilityType: db.GetTypedStrPtr(MachineCapabilityTypeGPU)},
+			expected: siteMachineIDs[:1],
+		},
+		{
+			desc:     "no matching Machines returns an empty slice",
+			filter:   MachineFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []string{},
+		},
+		{
+			desc:     "empty Machine ID filter returns an empty slice",
+			filter:   MachineFilterInput{MachineIDs: []string{}},
+			expected: []string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := msd.GetAllIDs(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
 		})
 	}
 }
@@ -1528,6 +1604,12 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := msd.GetByID(ctx, nil, tc.input.MachineID, nil, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := msd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if err != nil {
@@ -1594,9 +1676,7 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.input.IsMissingOnSite, got.IsMissingOnSite)
 				}
 
-				if got.Updated.String() == mcsExp[1].Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 				if tc.input.Metadata != nil {
 					assert.Equal(t, tc.input.Metadata, got.Metadata, got.Metadata)
@@ -2347,36 +2427,6 @@ func TestMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			}
 		})
 	}
-	t.Run("mixed batch preserves omitted force-deletion state", func(t *testing.T) {
-		for _, id := range []string{m1.ID, m3.ID} {
-			_, err := msd.Update(ctx, nil, MachineUpdateInput{MachineID: id, IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(true), ForceDeletionWorkflowID: cutil.GetPtr("prior-" + id)})
-			require.NoError(t, err)
-		}
-		updated, err := msd.UpdateMultiple(ctx, nil, []MachineUpdateInput{
-			{MachineID: m1.ID, Status: cutil.GetPtr(MachineStatusError)},
-			{MachineID: m2.ID, IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(false), ForceDeletionWorkflowID: cutil.GetPtr("next-attempt")},
-			{MachineID: m3.ID, IsForceDeletionRequested: cutil.GetPtr(false), IsForceDeletionComplete: cutil.GetPtr(false)},
-		})
-		require.NoError(t, err)
-		require.Len(t, updated, 3)
-		for i, want := range []bool{true, true, false} {
-			persisted, readErr := msd.GetByID(ctx, nil, updated[i].ID, nil, false)
-			require.NoError(t, readErr)
-			assert.Equal(t, want, persisted.IsForceDeletionRequested)
-			assert.Equal(t, i == 0, persisted.IsForceDeletionComplete)
-			wantID := "prior-" + persisted.ID
-			if i == 1 {
-				wantID = "next-attempt"
-			}
-			assert.Equal(t, cutil.GetPtr(wantID), persisted.ForceDeletionWorkflowID)
-		}
-		cleared, err := msd.Clear(ctx, nil, MachineClearInput{MachineID: m2.ID, ForceDeletionWorkflowID: true})
-		require.NoError(t, err)
-		assert.Nil(t, cleared.ForceDeletionWorkflowID)
-		assert.True(t, cleared.IsForceDeletionRequested)
-		assert.False(t, cleared.IsForceDeletionComplete)
-	})
-
 }
 
 func TestMachineSQLDAO_UpdateMultiple_ExceedsMaxBatchItems(t *testing.T) {

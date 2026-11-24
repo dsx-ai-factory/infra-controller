@@ -70,7 +70,7 @@ async fn reset_commands_require_an_action_and_one_target_selector() {
 
 #[tokio::test]
 async fn public_component_reset_returns_per_device_results_and_forwards_targets() {
-    for (label, args, target, domain_name, results, format, success) in [
+    for (label, args, target, action, domain_name, results, format, success) in [
         (
             "switch ID and certificate domain",
             vec![
@@ -86,6 +86,7 @@ async fn public_component_reset_returns_per_device_results_and_forwards_targets(
             pb::component_reset_request::Target::SwitchIds(pb::SwitchIdList {
                 ids: vec![SWITCH_ID.parse().unwrap()],
             }),
+            pb::ComponentResetAction::SdnFactoryReset,
             Some("nvl-domain".to_string()),
             vec![pb::ComponentResult {
                 component_id: Some(SWITCH_ID.into()),
@@ -95,11 +96,11 @@ async fn public_component_reset_returns_per_device_results_and_forwards_targets(
             true,
         ),
         (
-            "MAC partial submission and backend error",
+            "NVOS MAC partial submission and backend error",
             vec![
                 "component-reset",
                 "--action",
-                "sdn-factory-reset",
+                "nvos-factory-reset",
                 "switch",
                 "--mac-address",
                 "00:11:22:33:44:55,00:11:22:33:44:66",
@@ -107,6 +108,7 @@ async fn public_component_reset_returns_per_device_results_and_forwards_targets(
             pb::component_reset_request::Target::SwitchBmcMacs(pb::MacAddressList {
                 mac_addresses: vec![MAC.into(), "00:11:22:33:44:66".into()],
             }),
+            pb::ComponentResetAction::NvosFactoryReset,
             None,
             vec![
                 pb::ComponentResult {
@@ -135,7 +137,7 @@ async fn public_component_reset_returns_per_device_results_and_forwards_targets(
                 method: "/forge.Forge/ComponentReset",
                 request: pb::ComponentResetRequest {
                     target: Some(target),
-                    action: pb::ComponentResetAction::SdnFactoryReset as i32,
+                    action: action as i32,
                     domain_name,
                 }
                 .encode_to_vec(),
@@ -179,7 +181,7 @@ async fn public_component_reset_returns_per_device_results_and_forwards_targets(
 
 #[tokio::test]
 async fn public_reset_status_renders_device_states_and_errors() {
-    for (label, args, target, statuses, format, success) in [
+    for (label, args, target, action, statuses, format, success) in [
         (
             "text completion and backend failure",
             vec![
@@ -197,6 +199,7 @@ async fn public_reset_status_renders_device_states_and_errors() {
                     SECOND_SWITCH_ID.parse().unwrap(),
                 ],
             }),
+            pb::ComponentResetAction::SdnFactoryReset,
             vec![
                 pb::ComponentResetStatus {
                     result: Some(pb::ComponentResult {
@@ -220,11 +223,11 @@ async fn public_reset_status_renders_device_states_and_errors() {
             false,
         ),
         (
-            "MAC status with queued reset",
+            "MAC status with queued NVOS reset",
             vec![
                 "get-reset-status",
                 "--action",
-                "sdn-factory-reset",
+                "nvos-factory-reset",
                 "switch",
                 "--mac-address",
                 MAC,
@@ -232,12 +235,13 @@ async fn public_reset_status_renders_device_states_and_errors() {
             pb::get_component_reset_status_request::Target::SwitchBmcMacs(pb::MacAddressList {
                 mac_addresses: vec![MAC.into()],
             }),
+            pb::ComponentResetAction::NvosFactoryReset,
             vec![pb::ComponentResetStatus {
                 result: Some(pb::ComponentResult {
                     mac_address: Some(MAC.into()),
                     ..Default::default()
                 }),
-                action: pb::ComponentResetAction::SdnFactoryReset as i32,
+                action: pb::ComponentResetAction::NvosFactoryReset as i32,
                 state: pb::ComponentResetState::Queued as i32,
             }],
             "json",
@@ -256,6 +260,7 @@ async fn public_reset_status_renders_device_states_and_errors() {
             pb::get_component_reset_status_request::Target::SwitchBmcMacs(pb::MacAddressList {
                 mac_addresses: vec![MAC.into()],
             }),
+            pb::ComponentResetAction::SdnFactoryReset,
             vec![pb::ComponentResetStatus {
                 result: Some(pb::ComponentResult {
                     mac_address: Some(MAC.into()),
@@ -282,7 +287,7 @@ async fn public_reset_status_renders_device_states_and_errors() {
                 method: "/forge.Forge/GetComponentResetStatus",
                 request: pb::GetComponentResetStatusRequest {
                     target: Some(target),
-                    action: pb::ComponentResetAction::SdnFactoryReset as i32,
+                    action: action as i32,
                 }
                 .encode_to_vec(),
                 response: Ok(response.encode_to_vec()),
@@ -295,7 +300,14 @@ async fn public_reset_status_renders_device_states_and_errors() {
             let json: serde_json::Value = serde_json::from_str(&output).unwrap();
             assert_eq!(json[0]["result"]["component_id"], serde_json::Value::Null);
             assert_eq!(json[0]["result"]["mac_address"], MAC);
-            assert_eq!(json[0]["action"], "sdn-factory-reset");
+            assert_eq!(
+                json[0]["action"],
+                match action {
+                    pb::ComponentResetAction::NvosFactoryReset => "nvos-factory-reset",
+                    pb::ComponentResetAction::SdnFactoryReset => "sdn-factory-reset",
+                    _ => unreachable!("test only queries SDN and NVOS resets"),
+                },
+            );
             assert_eq!(json[0]["state_code"], response.statuses[0].state);
             assert_eq!(
                 json[0]["result"]["error"],

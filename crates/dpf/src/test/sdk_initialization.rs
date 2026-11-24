@@ -1294,9 +1294,10 @@ async fn test_create_initialization_objects_bluefield_software() {
     assert_eq!(bfsw[0].spec.os_iso, "http://example.com/os.iso");
     assert_eq!(
         bfsw[0].spec.pldm_fw_bundle,
-        Some(serde_json::json!({
-            "pldmid001": "http://example.com/astra.pldm"
-        }))
+        Some(BTreeMap::from([(
+            "pldmid001".to_string(),
+            "http://example.com/astra.pldm".to_string(),
+        )]))
     );
 
     // The DPUDeployment references the BlueFieldSoftware CR, not a BFB.
@@ -1345,6 +1346,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .bfb_url("http://example.com/bf3.bfb")
             .deployment_name("bf3-deployment")
             .flavor_name("bf3-flavor")
+            .enable_pci_switch_emulation(true)
             .services(services.clone())
             .deployment_scoped_service_interfaces(true)
             .intercept_bridging(topology.clone())
@@ -1390,6 +1392,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             })
             .deployment_name("astra-deployment")
             .flavor_name("astra-flavor")
+            .enable_pci_switch_emulation(true)
             .services(services)
             .deployment_scoped_service_interfaces(true)
             .intercept_bridging(topology)
@@ -1612,6 +1615,12 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .parameters
             .as_ref()
             .unwrap();
+        assert_eq!(
+            nvconfig
+                .iter()
+                .any(|parameter| parameter == "PCI_SWITCH_EMULATION_ENABLE=1"),
+            deployment_type == DpuDeploymentType::Bf3,
+        );
         let expected_pf_total_sf = match deployment_type {
             DpuDeploymentType::Bf3Gb200 => "PF_TOTAL_SF=128",
             DpuDeploymentType::Bf3 | DpuDeploymentType::Bf4Generic => "PF_TOTAL_SF=37",
@@ -1779,6 +1788,12 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     .unwrap()
     .expect("Astra deployment-referenced flavor template must exist");
     assert!(astra_template.spec.template.starts_with("spec:\n"));
+    assert!(
+        astra_template
+            .spec
+            .template
+            .contains("PCI_SWITCH_EMULATION_ENABLE=1")
+    );
     let astra_flavor = DPUFlavor {
         metadata: Default::default(),
         spec: {

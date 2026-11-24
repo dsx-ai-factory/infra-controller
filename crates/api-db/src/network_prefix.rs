@@ -46,6 +46,16 @@ pub fn is_overlap_constraint(constraint: Option<&str>) -> bool {
     )
 }
 
+/// Identifies the one-prefix-per-family index for mutation precondition errors.
+pub fn is_family_constraint(constraint: Option<&str>) -> bool {
+    constraint == Some("network_prefix_family")
+}
+
+/// Identifies a reused authoritative DHCPv6 relay link-address.
+pub fn is_dhcpv6_link_address_constraint(constraint: Option<&str>) -> bool {
+    constraint == Some("network_prefix_dhcpv6_link_address")
+}
+
 fn ip_to_u128(ip: IpAddr) -> u128 {
     match ip {
         IpAddr::V4(ip) => u128::from(u32::from(ip)),
@@ -177,7 +187,7 @@ pub async fn find_allocation_occupancy(
 
 // Search for specific prefix
 pub async fn find(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     uuid: NetworkPrefixId,
 ) -> Result<NetworkPrefix, DatabaseError> {
     let query = format!(
@@ -186,7 +196,7 @@ pub async fn find(
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(uuid)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -195,7 +205,7 @@ pub async fn find(
  * Return a list of `NetworkPrefix`es for a segment.
  */
 pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = NetworkPrefix>>(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     filter: super::ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
     let mut query = super::FilterableQueryBuilder::new(format!(
@@ -206,7 +216,7 @@ pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = NetworkPrefix>>(
 
     query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))
 }
@@ -242,7 +252,7 @@ pub async fn find_persisted_for_network_definitions(
 // Return a list of network segment prefixes that are associated with this
 // VPC but are _not_ associated with a VPC prefix.
 pub async fn find_by_vpc(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: VpcId,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
     let query = format!(
@@ -255,7 +265,7 @@ pub async fn find_by_vpc(
 
     let prefixes = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vpc_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))?;
     Ok(prefixes)
@@ -264,7 +274,7 @@ pub async fn find_by_vpc(
 // Return a list of network segment prefixes that are associated with any VPC in the list
 // but are _not_ associated with a VPC prefix.
 pub async fn find_by_vpcs(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_ids: &Vec<VpcId>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
     let query = format!(
@@ -277,7 +287,7 @@ pub async fn find_by_vpcs(
 
     let prefixes = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vpc_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))?;
 
@@ -410,6 +420,7 @@ mod tests {
     use config_version::ConfigVersion;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[test]
     fn overlap_constraint_names_share_one_error_classification() {
@@ -436,7 +447,7 @@ mod tests {
         let sibling_parent_id = VpcPrefixId::new();
         let parent: IpNetwork = "10.70.0.0/24".parse()?;
         let version = ConfigVersion::initial();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         sqlx::query(
             "INSERT INTO tenants (organization_id, organization_name, version)

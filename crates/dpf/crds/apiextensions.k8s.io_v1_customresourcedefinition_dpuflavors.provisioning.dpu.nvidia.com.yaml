@@ -43,8 +43,8 @@ spec:
             description: |-
               DPUFlavorSpec defines the content of DPUFlavor.
               Config-only fields (grub, sysctl, nvconfig, ovs, packages, systemdServices,
-              containerdConfig, agent-applied configFiles, serviceReadiness, ewNicConfigurations,
-              dma, virtualFunctions) may be updated in place.
+              containerdConfig, agent-applied configFiles, serviceReadiness,
+              ewNicConfigurations, dma, virtualFunctions) may be updated in place.
               Immutable fields require a new DPUFlavor.
             properties:
               bfcfgParameters:
@@ -56,8 +56,9 @@ spec:
               configFiles:
                 description: ConfigFiles are the files to be written on the DPU.
                 items:
-                  description: ConfigFile describes a file materialized from inline
-                    raw content or external contentFrom.
+                  description: |-
+                    ConfigFile describes a file materialized from inline raw content or external
+                    contentFrom.
                   properties:
                     contentFrom:
                       description: |-
@@ -106,16 +107,16 @@ spec:
                     raw:
                       description: |-
                         Raw is the inline file content.
-                        Supported only when type is cloud-init. When type is omitted, type defaults
-                        to cloud-init and raw must be set.
+                        Supported only when type is cloud-init. When type is omitted, type
+                        defaults to cloud-init and raw must be set.
                       type: string
                     type:
                       default: cloud-init
                       description: |-
                         Type controls when the file content is materialized.
-                        cloud-init files use raw inline content and are written during cloud-init.
-                        agent-applied files use contentFrom and are written later by dpu-agent.
-                        Defaults to cloud-init when omitted.
+                        cloud-init files use raw inline content and are written during
+                        cloud-init. agent-applied files use contentFrom and are written later
+                        by dpu-agent. Defaults to cloud-init when omitted.
                       enum:
                       - cloud-init
                       - agent-applied
@@ -144,16 +145,17 @@ spec:
                     type: string
                   sandboxImage:
                     description: |-
-                      SandboxImage overrides the containerd sandbox (pause) image on the DPU, e.g.
-                      "registry.example.com/pause:3.9". When unset, the sandbox image shipped with the BFB is kept.
+                      SandboxImage overrides the containerd sandbox (pause) image on the DPU,
+                      e.g. "registry.example.com/pause:3.9". When unset, the sandbox image
+                      shipped with the BFB is kept.
                     maxLength: 512
                     minLength: 1
                     type: string
                 type: object
               dma:
                 description: |-
-                  DMA configures the SNAP DMA SF. The agent picks the ECPF; sfnum is 8000 and MAC is derived.
-                  Ignored except on BlueField-4.
+                  DMA configures the SNAP DMA SF. The agent picks the ECPF; sfnum is 8000
+                  and MAC is derived. Ignored except on BlueField-4.
                 properties:
                   enabled:
                     description: Enabled creates the SNAP DMA SF on BlueField-4 socket-direct
@@ -163,7 +165,8 @@ spec:
               dpuMode:
                 description: |-
                   DpuMode is deprecated and no longer used by provisioning workflows.
-                  Deployment mode is sourced from DPFOperatorConfig and exposed on DPU.status.deploymentMode.
+                  Deployment mode is sourced from DPFOperatorConfig and exposed on
+                  DPU.status.deploymentMode.
                 enum:
                 - dpu
                 - zero-trust
@@ -177,17 +180,20 @@ spec:
                   pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                   x-kubernetes-int-or-string: true
                 description: |-
-                  DPUResources indicates the minimum amount of resources needed for a BFB with that flavor to be installed on a
-                  DPU. Using this field, the controller can understand if that flavor can be installed on a particular DPU. It
-                  should be set to the total amount of resources the system needs + the resources that should be made available for
+                  DPUResources indicates the minimum amount of resources needed for a BFB
+                  with that flavor to be installed on a DPU. Using this field, the
+                  controller can understand if that flavor can be installed on a
+                  particular DPU. It should be set to the total amount of resources the
+                  system needs + the resources that should be made available for
                   DPUServices to consume.
                 type: object
               ewNicConfigurations:
                 description: |-
                   EWNicConfigurations lists per-NIC configuration for the E/W NICs.
-                  Only the first entry is applied in this release; additional entries are ignored until a future
-                  release adds multi-NIC support. The field is modeled as a list now so the API shape does not
-                  need to change when multiple entries are supported.
+                  Only the first entry is applied in this release; additional entries are
+                  ignored until a future release adds multi-NIC support. The field is
+                  modeled as a list now so the API shape does not need to change when
+                  multiple entries are supported.
                 items:
                   description: NicConfiguration is a set of configurations for the
                     NICs
@@ -202,16 +208,17 @@ spec:
                       type: boolean
                     linkType:
                       description: |-
-                        LinkType to be configured, Ethernet|Infiniband. Required unless networkBay is configured;
-                        for Network Bay the link type is governed by the system configuration and must not be set.
+                        LinkType to be configured, Ethernet|Infiniband. Required unless
+                        networkBay is configured; for Network Bay the link type is governed by
+                        the system configuration and must not be set.
                       enum:
                       - Ethernet
                       - Infiniband
                       type: string
                     networkBay:
-                      description: NetworkBay configures a ConnectX-9 Network Bay
-                        card (per-ASIC set_system_conf). Allowed only for ConnectX-9
-                        (nicType 1025).
+                      description: |-
+                        NetworkBay configures a ConnectX-9 Network Bay card (per-ASIC
+                        set_system_conf). Allowed only for ConnectX-9 (nicType 1025).
                       properties:
                         conf:
                           description: |-
@@ -243,10 +250,10 @@ spec:
                         type: object
                       type: array
                     spectrumXOptimized:
-                      description: Spectrum-X optimization settings. Works only with
-                        linkType==Ethernet && numVfs==1. RawNvConfig parameters, if
-                        provided, are merged as overrides on top of Spectrum-X calculated
-                        params.
+                      description: |-
+                        Spectrum-X optimization settings. Works only with linkType==Ethernet &&
+                        numVfs==1. RawNvConfig parameters, if provided, are merged as overrides
+                        on top of Spectrum-X calculated params.
                       properties:
                         enabled:
                           description: Optimize Spectrum X
@@ -322,15 +329,17 @@ spec:
                 description: Grub contains the grub configuration for the DPUFlavor.
                 properties:
                   kernelParameters:
-                    description: KernelParameters are the kernel parameters to be
-                      set in the grub configuration.
+                    description: |-
+                      KernelParameters are the kernel parameters to be set in the grub
+                      configuration.
                     items:
                       type: string
                     type: array
                 type: object
               hostNetworkInterfaceConfigs:
-                description: HostNetworkInterfaceConfigs contains the configuration
-                  for the host-side network interfaces.
+                description: |-
+                  HostNetworkInterfaceConfigs contains the configuration for the host-side
+                  network interfaces.
                 items:
                   description: NetworkInterfaceConfig defines the configuration for
                     a network interface
@@ -348,13 +357,16 @@ spec:
                     nvconfig:
                       description: |-
                         NVConfig contains port-specific configuration for this network interface.
-                        This configuration is applied in addition to the global NVConfig settings in DPUFlavorSpec.
-                        Both global and per-interface NVConfig settings can coexist without collision.
+                        This configuration is applied in addition to the global NVConfig
+                        settings in DPUFlavorSpec. Both global and per-interface NVConfig
+                        settings can coexist without collision.
                       properties:
                         device:
                           description: |-
-                            Device is the device to which the configuration applies. If not specified, the configuration applies to all.
-                            Supported values: "*" (wildcard for all devices), "p0"/"P0" (port 0), "p1"/"P1" (port 1). Case-insensitive.
+                            Device is the device to which the configuration applies. If not
+                            specified, the configuration applies to all. Supported values: "*"
+                            (wildcard for all devices), "p0"/"P0" (port 0), "p1"/"P1" (port 1).
+                            Case-insensitive.
                           enum:
                           - '*'
                           - p0
@@ -364,18 +376,21 @@ spec:
                           type: string
                         force:
                           description: |-
-                            force applies the parameters with `mlxconfig --force` and skips the `mlxconfig q` filter,
-                            so parameters firmware does not yet expose are applied now instead of deferred to a later
-                            reboot. Required when a parameter is gated behind another parameter in the same batch.
-                            Requires DOCA 3.5.0 or later; on an older DOCA version the operation fails.
-                            `--force` skips validation for the whole batch, so an invalid value is applied silently.
-                            Ignored under `spec.hostNetworkInterfaceConfigs[].nvconfig`.
+                            force applies the parameters with `mlxconfig --force` and skips the
+                            `mlxconfig q` filter, so parameters firmware does not yet expose are
+                            applied now instead of deferred to a later reboot. Required when a
+                            parameter is gated behind another parameter in the same batch. Requires
+                            DOCA 3.5.0 or later; on an older DOCA version the operation fails.
+                            `--force` skips validation for the whole batch, so an invalid value is
+                            applied silently. Ignored under
+                            `spec.hostNetworkInterfaceConfigs[].nvconfig`.
                           type: boolean
                         parameters:
                           description: |-
                             Parameters are the parameters to be set for the device.
-                            DELAY_HOST_OS_INIT=ENABLE_USER (0x3) holds the host at UEFI and is rejected by the DPU agent
-                            outside zero-trust, where the agent needs the host to reach the kube-apiserver.
+                            DELAY_HOST_OS_INIT=ENABLE_USER (0x3) holds the host at UEFI and is
+                            rejected by the DPU agent outside zero-trust, where the agent needs the
+                            host to reach the kube-apiserver.
                           items:
                             maxLength: 200
                             pattern: ^[^=\s]+=[^\s]*$
@@ -398,17 +413,22 @@ spec:
                 type: array
               nvconfig:
                 description: |-
-                  NVConfig contains the device-specific configuration (firmware settings, device parameters).
-                  Each entry specifies a device (wildcard '*', or port identifiers 'p0'/'P0'/'p1'/'P1') and its parameters.
-                  If device is '*' or unspecified (defaults to '*'), it applies to all devices and must be the only entry.
-                  Each device (including unspecified as '*') must be unique across all nvconfig entries (case-insensitive).
-                  Validation enforces: device enum values, parameter format (KEY=VALUE), case-insensitive uniqueness, and size limits.
+                  NVConfig contains the device-specific configuration (firmware settings,
+                  device parameters). Each entry specifies a device (wildcard '*', or port
+                  identifiers 'p0'/'P0'/'p1'/'P1') and its parameters. If device is '*' or
+                  unspecified (defaults to '*'), it applies to all devices and must be the
+                  only entry. Each device (including unspecified as '*') must be unique
+                  across all nvconfig entries (case-insensitive). Validation enforces:
+                  device enum values, parameter format (KEY=VALUE), case-insensitive
+                  uniqueness, and size limits.
                 items:
                   properties:
                     device:
                       description: |-
-                        Device is the device to which the configuration applies. If not specified, the configuration applies to all.
-                        Supported values: "*" (wildcard for all devices), "p0"/"P0" (port 0), "p1"/"P1" (port 1). Case-insensitive.
+                        Device is the device to which the configuration applies. If not
+                        specified, the configuration applies to all. Supported values: "*"
+                        (wildcard for all devices), "p0"/"P0" (port 0), "p1"/"P1" (port 1).
+                        Case-insensitive.
                       enum:
                       - '*'
                       - p0
@@ -418,18 +438,21 @@ spec:
                       type: string
                     force:
                       description: |-
-                        force applies the parameters with `mlxconfig --force` and skips the `mlxconfig q` filter,
-                        so parameters firmware does not yet expose are applied now instead of deferred to a later
-                        reboot. Required when a parameter is gated behind another parameter in the same batch.
-                        Requires DOCA 3.5.0 or later; on an older DOCA version the operation fails.
-                        `--force` skips validation for the whole batch, so an invalid value is applied silently.
-                        Ignored under `spec.hostNetworkInterfaceConfigs[].nvconfig`.
+                        force applies the parameters with `mlxconfig --force` and skips the
+                        `mlxconfig q` filter, so parameters firmware does not yet expose are
+                        applied now instead of deferred to a later reboot. Required when a
+                        parameter is gated behind another parameter in the same batch. Requires
+                        DOCA 3.5.0 or later; on an older DOCA version the operation fails.
+                        `--force` skips validation for the whole batch, so an invalid value is
+                        applied silently. Ignored under
+                        `spec.hostNetworkInterfaceConfigs[].nvconfig`.
                       type: boolean
                     parameters:
                       description: |-
                         Parameters are the parameters to be set for the device.
-                        DELAY_HOST_OS_INIT=ENABLE_USER (0x3) holds the host at UEFI and is rejected by the DPU agent
-                        outside zero-trust, where the agent needs the host to reach the kube-apiserver.
+                        DELAY_HOST_OS_INIT=ENABLE_USER (0x3) holds the host at UEFI and is
+                        rejected by the DPU agent outside zero-trust, where the agent needs the
+                        host to reach the kube-apiserver.
                       items:
                         maxLength: 200
                         pattern: ^[^=\s]+=[^\s]*$
@@ -460,8 +483,8 @@ spec:
                   rawConfigScript:
                     description: |-
                       RawConfigScript is the raw configuration script for OVS.
-                      The DPU agent runs this script once per boot. A restart of the agent in the
-                      same boot does not re-run it; a reboot or power cycle does.
+                      The DPU agent runs this script once per boot. A restart of the agent in
+                      the same boot does not re-run it; a reboot or power cycle does.
                     type: string
                 type: object
               packages:
@@ -476,10 +499,13 @@ spec:
                       type: string
                     repoFileRef:
                       description: |-
-                        RepoFileRef constrains package resolution to a specific repository file available on the node.
+                        RepoFileRef constrains package resolution to a specific repository file
+                        available on the node.
                         If empty, any configured repository may satisfy the package.
-                        If specified, only the referenced repository file may provide candidates.
-                        If that repository file does not provide the package or requested version, the dpu-agent flow does not continue.
+                        If specified, only the referenced repository file may provide
+                        candidates.
+                        If that repository file does not provide the package or requested
+                        version, the dpu-agent flow does not continue.
                       type: string
                     version:
                       description: |-
@@ -512,31 +538,33 @@ spec:
                   rule: self.all(x, self.exists_one(y, x.name == y.name))
               scalableFunctions:
                 description: |-
-                  ScalableFunctions is the list of SF groups to create on the DPU, or on the host when
-                  hostDevice is set. Count is per selected device. Over-subscribe can trigger failures at
-                  create time. This field is immutable. Changing it requires a new DPUFlavor. For backward compatibility, when
-                  both this SF list and VF list are empty, SF counts are still derived from PF_TOTAL_SF
-                  (removed in a future release).
+                  ScalableFunctions is the list of SF groups to create on the DPU, or on
+                  the host when hostDevice is set. Count is per selected device.
+                  Over-subscribe can trigger failures at create time. This field is
+                  immutable. Changing it requires a new DPUFlavor. For backward
+                  compatibility, when both this SF list and VF list are empty, SF counts
+                  are still derived from PF_TOTAL_SF (removed in a future release).
                 items:
                   description: ScalableFunction is one group of SFs to create.
                   properties:
                     count:
                       description: |-
-                        Count is SFs to create per selected device. With device "*", count 20 is 20 SFs
-                        on each port. Zero creates nothing.
+                        Count is SFs to create per selected device. With device "*", count 20 is
+                        20 SFs on each port. Zero creates nothing.
                       format: int32
                       minimum: 0
                       type: integer
                     device:
-                      description: 'Device is the target port: "*", a name such as
-                        p0, or a PCI address. Defaults to "*".'
+                      description: |-
+                        Device is the target port: "*", a name such as p0, or a PCI address.
+                        Defaults to "*".
                       pattern: ^(\*|[pP][0-9]+|[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])$
                       type: string
                     hostDevice:
                       description: |-
-                        HostDevice creates the SFs on the host (representors on the DPU). Implies
-                        controller 1; options.controller overrides. Host SFs use the host firmware
-                        budget and must not set poolName.
+                        HostDevice creates the SFs on the host (representors on the DPU).
+                        Implies controller 1; options.controller overrides. Host SFs use the
+                        host firmware budget and must not set poolName.
                       type: boolean
                     options:
                       description: Options are creation settings for this group.
@@ -549,8 +577,9 @@ spec:
                           minimum: 0
                           type: integer
                         cpuList:
-                          description: CPUList pins the SFs to CPUs in mlnx-sf list
-                            form, for example 0-3 or 0,2,4.
+                          description: |-
+                            CPUList pins the SFs to CPUs in mlnx-sf list form, for example 0-3 or
+                            0,2,4.
                           maxLength: 200
                           pattern: ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$
                           type: string
@@ -568,8 +597,9 @@ spec:
                           type: string
                         sfNumStart:
                           description: |-
-                            SFNumStart is the first sfnum of the group; the rest are sequential from it.
-                            Reserved before agent-numbered groups, which fill from 0 around them.
+                            SFNumStart is the first sfnum of the group; the rest are sequential from
+                            it. Reserved before agent-numbered groups, which fill from 0 around
+                            them.
                           format: int32
                           maximum: 65535
                           minimum: 0
@@ -580,8 +610,8 @@ spec:
                       type: object
                     poolName:
                       description: |-
-                        PoolName is the device-plugin resource (for example bf_sf). Unset: created in
-                        hardware only. Forbidden with hostDevice.
+                        PoolName is the device-plugin resource (for example bf_sf). Unset:
+                        created in hardware only. Forbidden with hostDevice.
                       maxLength: 63
                       pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
                       type: string
@@ -602,9 +632,10 @@ spec:
                 properties:
                   gate:
                     description: |-
-                      gate is the DPU.status.operationalConditions entry that must be True before the DPU leaves
-                      the Service Readiness phase. When unset the phase does not wait, and a host hold requested
-                      via DELAY_HOST_OS_INIT is released on DPUServiceCriticalPodsReady.
+                      gate is the DPU.status.operationalConditions entry that must be True
+                      before the DPU leaves the Service Readiness phase. When unset the phase
+                      does not wait, and a host hold requested via DELAY_HOST_OS_INIT is
+                      released on DPUServiceCriticalPodsReady.
                     enum:
                     - DPUServiceCriticalPodsReady
                     - OperationalReady
@@ -627,9 +658,11 @@ spec:
                   pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                   x-kubernetes-int-or-string: true
                 description: |-
-                  SystemReservedResources indicates the resources that are consumed by the system (OS, OVS, DPF system etc) and are
-                  not made available for DPUServices to consume. DPUServices can consume the difference between DPUResources and
-                  SystemReservedResources. This field must not be specified if dpuResources are not specified.
+                  SystemReservedResources indicates the resources that are consumed by
+                  the system (OS, OVS, DPF system etc) and are not made available for
+                  DPUServices to consume. DPUServices can consume the difference between
+                  DPUResources and SystemReservedResources. This field must not be
+                  specified if dpuResources are not specified.
                 type: object
               systemdServices:
                 description: SystemdServices are the systemd services to manage on
@@ -662,23 +695,26 @@ spec:
                   rule: self.all(x, self.exists_one(y, x.name == y.name))
               virtualFunctions:
                 description: |-
-                  VirtualFunctions is the list of VF groups to create. Count is per selected
-                  device. Groups ending up on the same device sum to a single `sriov_numvfs` and then
-                  list order assigns contiguous index ranges. Over-subscribe can trigger failures at
-                  create time. Editing this field reprovisions the DPU.
+                  VirtualFunctions is the list of VF groups to create. Count is per
+                  selected device. Groups ending up on the same device sum to a single
+                  `sriov_numvfs` and then list order assigns contiguous index ranges.
+                  Over-subscribe can trigger failures at create time. Editing this field
+                  reprovisions the DPU.
                 items:
                   description: VirtualFunction is one group of VFs to create.
                   properties:
                     count:
                       description: |-
-                        Count is VFs to create per selected device. Groups ending up on the same device sum to
-                        a single `sriov_numvfs` and then list order assigns contiguous index ranges. Zero creates nothing.
+                        Count is VFs to create per selected device. Groups ending up on the same
+                        device sum to a single `sriov_numvfs` and then list order assigns
+                        contiguous index ranges. Zero creates nothing.
                       format: int32
                       minimum: 0
                       type: integer
                     device:
-                      description: 'Device is the target port: "*", a name such as
-                        p0, or a PCI address. Defaults to "*".'
+                      description: |-
+                        Device is the target port: "*", a name such as p0, or a PCI address.
+                        Defaults to "*".
                       pattern: ^(\*|[pP][0-9]+|[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])$
                       type: string
                     options:
@@ -692,8 +728,8 @@ spec:
                       type: object
                     poolName:
                       description: |-
-                        PoolName is the device-plugin resource (for example bf_vf). Unset: created in
-                        hardware only.
+                        PoolName is the device-plugin resource (for example bf_vf). Unset:
+                        created in hardware only.
                       maxLength: 63
                       pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
                       type: string

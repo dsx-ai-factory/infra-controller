@@ -20,6 +20,7 @@ use std::time::Duration;
 use carbide_test_support::{Case, Outcome};
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use db::TransactionVending as _;
 use model::metadata::Metadata;
 use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
 use model::vpc_prefix::{NewVpcPrefix, VpcPrefixConfig};
@@ -126,7 +127,7 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
         false,
     )
     .await;
-    let mut reader = env.pool.begin().await.unwrap();
+    let mut reader = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_config(&mut reader)
         .await
         .unwrap();
@@ -137,7 +138,7 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
     reader.commit().await.unwrap();
     let other_vpc = create_other_vpc(&env).await;
 
-    let mut writer = env.pool.begin().await.unwrap();
+    let mut writer = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut writer)
         .await
         .unwrap();
@@ -161,7 +162,7 @@ async fn retained_startup_audit_shares_read_lock_and_waits_for_writes(pool: PgPo
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
     let mut expected = vec![tenant_vpc_id, other_vpc.id.unwrap()];
     expected.sort_unstable();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut txn)
         .await
         .unwrap();
@@ -226,7 +227,7 @@ async fn admin_startup_overlap_rejection_rolls_back_attachment(pool: PgPool) {
     )
     .await;
     let other_vpc = create_other_vpc(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut txn)
         .await
         .unwrap();
@@ -247,13 +248,11 @@ async fn admin_startup_overlap_rejection_rolls_back_attachment(pool: PgPool) {
             .unwrap()
             .is_empty()
     );
-    let mut txn = env.pool.begin().await.unwrap();
-    let segments = db::network_segment::admin(&mut txn).await.unwrap();
+    let segments = db::network_segment::admin(&env.pool).await.unwrap();
     assert!(!segments.is_empty());
     assert!(
         segments
             .iter()
             .all(|segment| segment.config.vpc_id.is_none())
     );
-    txn.commit().await.unwrap();
 }

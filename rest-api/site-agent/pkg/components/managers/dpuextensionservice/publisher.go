@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(dpuExtServiceInventoryManager.DiscoverDpuExtensionServiceInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("DpuExtensionService: Successfully registered DiscoverDpuExtensionServiceInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

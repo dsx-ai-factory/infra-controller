@@ -46,9 +46,9 @@ RUN arch="$(dpkg --print-architecture)" && \
 # Install uv (Python manager). Versioned tarball + checksum.
 # Bump UV_VERSION and both sums together (each sha256 is published alongside
 # its release asset as uv-<triple>.tar.gz.sha256).
-ARG UV_VERSION=0.11.32
-ARG UV_SHA256_AMD64=aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967
-ARG UV_SHA256_ARM64=4d4fa08d95b06642e5800df6a22bd71455f23f988269e18da2847971d8c0bf31
+ARG UV_VERSION=0.13.6
+ARG UV_SHA256_AMD64=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+ARG UV_SHA256_ARM64=229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d
 RUN arch="$(dpkg --print-architecture)" && \
     case "${arch}" in \
       amd64) triple="x86_64-unknown-linux-gnu";  sha256="${UV_SHA256_AMD64}" ;; \

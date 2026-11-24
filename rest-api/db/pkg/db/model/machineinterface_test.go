@@ -505,7 +505,7 @@ func TestMachineInterfaceSQLDAO_UpdateFromParams(t *testing.T) {
 				assert.Equal(t, *tc.expectedMacAddress, *got.MacAddress)
 				assert.Equal(t, len(tc.expectedIPAddresses), len(got.IPAddresses))
 
-				if got.Updated.String() == mi1.Updated.String() {
+				if got.Updated.Equal(mi1.Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 

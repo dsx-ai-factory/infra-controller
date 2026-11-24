@@ -8,9 +8,10 @@ use std::time::Duration;
 use carbide_resource_pool_api::testing::LocalProvider;
 use carbide_resource_pool_api::v1;
 use chrono::{DateTime, Utc};
-use db::ConditionalWrite;
+use db::db_read::PgPoolReader;
 use db::resource_pool::{binding, remote};
 use db::work_lock_manager::{self, KeepaliveConfig, WorkLockManagerHandle};
+use db::{ConditionalWrite, TransactionVending as _};
 use model::resource_pool::allocation::{
     AllocationSource, AllocationState, AssignmentMode, ResourcePoolAllocation, ResourcePoolValue,
 };
@@ -67,10 +68,11 @@ impl Harness {
                 interval: Duration::from_secs(3600),
                 timeout: Duration::from_secs(60),
             },
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap();
-        let mut txn = database.begin().await.unwrap();
+        let mut txn = database.txn_begin().await.unwrap();
         let binding = binding::bind_or_verify(
             &mut txn,
             &ResourcePoolSelection {
@@ -135,6 +137,7 @@ impl Harness {
             .unwrap();
         let remote = RemoteResourcePool::new(
             database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             work_locks.clone(),
             binding.authority_id,
             client.clone(),
@@ -161,6 +164,7 @@ impl Harness {
     fn restarted(&self) -> RemoteResourcePool {
         RemoteResourcePool::new(
             self.database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             self.work_locks.clone(),
             self.request.pool.authority_id.clone(),
             self.client.clone(),
@@ -204,7 +208,7 @@ impl Harness {
 
     async fn save_assignment(&self, allocated: v1::Allocation) -> AllocationAssignment {
         let assignment = wire::assignment(&self.saved().await, allocated).unwrap();
-        let mut txn = self.database.begin().await.unwrap();
+        let mut txn = self.database.txn_begin().await.unwrap();
         assert_eq!(
             remote::record_result(
                 &mut txn,
@@ -220,7 +224,7 @@ impl Harness {
     }
 
     async fn attach(&self, assignment: &AllocationAssignment) {
-        let mut txn = self.database.begin().await.unwrap();
+        let mut txn = self.database.txn_begin().await.unwrap();
         assert_eq!(
             remote::attach(
                 &mut txn,
@@ -236,7 +240,7 @@ impl Harness {
     }
 
     async fn request_release(&self, assignment: &AllocationAssignment) {
-        let mut txn = self.database.begin().await.unwrap();
+        let mut txn = self.database.txn_begin().await.unwrap();
         assert_eq!(
             remote::request_release(&mut txn, self.request.request_id, &assignment.allocation_id)
                 .await
@@ -266,7 +270,7 @@ async fn begin_request(
     request: &RemoteAllocationRequest,
     authority: &CompletionAuthority,
 ) -> Result<ResourcePoolAllocation, Box<dyn std::error::Error>> {
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let record = remote::begin(&mut txn, request, authority).await?;
     txn.commit().await?;
     Ok(record)
@@ -475,7 +479,7 @@ async fn lost_cancel_reply_is_confirmed_after_restart(database: PgPool) -> TestR
     // cancellation request. Restart must confirm that same operation.
     let harness = Harness::new(database, provider(), Fault::CancelReplyUnavailableOnce).await;
     let allocated = harness.save_assignment(harness.provision().await).await;
-    let mut txn = harness.database.begin().await?;
+    let mut txn = harness.database.txn_begin().await?;
     assert_eq!(
         remote::request_cancel(&mut txn, harness.request.request_id).await?,
         ConditionalWrite::Applied(())
@@ -800,7 +804,7 @@ async fn worker_takeover_prevents_saving_an_intent_with_the_previous_guard(
         .work_locks
         .try_acquire_lock(work_key.clone())
         .await?;
-    let mut takeover = harness.database.begin().await?;
+    let mut takeover = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *takeover)
         .await?;
@@ -818,10 +822,11 @@ async fn worker_takeover_prevents_saving_an_intent_with_the_previous_guard(
         &harness.request,
         &harness.authority,
     ));
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("intent write did not wait for takeover: {result:?}"),
         _ = bounded(db::test_support::postgres::wait_for_blocked_query(
-            &harness.database, blocker_pid, "FROM work_locks",
+            &mut reader, blocker_pid, "FROM work_locks",
         )) => {}
     }
     takeover.commit().await?;
@@ -1064,7 +1069,7 @@ async fn recovery_advances_past_unchanged_records_and_joins_on_shutdown(
     let mut harness = Harness::new(database, provider(), Fault::ReleaseUnavailableOnce).await;
     let cancelled_id = harness.request.request_id;
     let cancelled_assignment = harness.provision().await;
-    let mut txn = harness.database.begin().await?;
+    let mut txn = harness.database.txn_begin().await?;
     assert_eq!(
         remote::request_cancel(&mut txn, cancelled_id).await?,
         ConditionalWrite::Applied(()),
@@ -1317,6 +1322,7 @@ async fn recovery_continues_after_a_record_uses_its_entire_budget(database: PgPo
         .with_timeouts(Duration::from_secs(60), Duration::from_secs(60));
     let remote = RemoteResourcePool::new(
         harness.database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         harness.request.pool.authority_id.clone(),
         slow_client,
@@ -1909,7 +1915,7 @@ async fn foreground_expiry_cleans_up_after_abandonment_cannot_be_saved(
 
     // Keep the row locked until the caller returns. Its cancellation write
     // must fail to persist even though the provider has already allocated.
-    let mut blocker = harness.database.begin().await?;
+    let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -1920,10 +1926,11 @@ async fn foreground_expiry_cleans_up_after_abandonment_cannot_be_saved(
     .fetch_one(&mut *blocker)
     .await?;
     harness.cancel.cancel();
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("abandonment did not wait for the allocation row: {result:?}"),
         _ = bounded(db::test_support::postgres::wait_for_blocked_query(
-            &harness.database, blocker_pid, "UPDATE resource_pool_allocations",
+            &mut reader, blocker_pid, "UPDATE resource_pool_allocations",
         )) => {}
     }
     tokio::time::pause();
@@ -2077,6 +2084,7 @@ async fn expired_foreground_replay_requests_cleanup_without_dispatch(
     let before = harness.saved().await;
     let foreign = RemoteResourcePool::new(
         harness.database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         "another-authority".into(),
         harness.client.clone(),
@@ -2134,7 +2142,7 @@ async fn saved_failure_resumes_cleanup_without_contacting_the_provider(
             message: "provider capacity exhausted".into(),
         });
         // Simulate a stop after saving the failure but before requesting cleanup.
-        let mut txn = harness.database.begin().await?;
+        let mut txn = harness.database.txn_begin().await?;
         assert_eq!(
             remote::record_result(&mut txn, harness.request.request_id, &result).await?,
             ConditionalWrite::Applied(()),
@@ -2191,6 +2199,7 @@ async fn foreground_budget_stops_waiting_and_records_cleanup(database: PgPool) -
         .with_timeouts(Duration::from_secs(60), Duration::from_secs(60));
     let remote = RemoteResourcePool::new(
         harness.database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         harness.request.pool.authority_id.clone(),
         slow_client,
@@ -2226,7 +2235,7 @@ async fn foreground_budget_stops_waiting_and_records_cleanup(database: PgPool) -
 async fn shutdown_stops_a_database_wait_without_dispatching(database: PgPool) -> TestResult {
     let harness = Harness::new(database, provider(), Fault::None).await;
     begin_request(&harness.database, &harness.request, &harness.authority).await?;
-    let mut blocker = harness.database.begin().await?;
+    let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -2241,9 +2250,10 @@ async fn shutdown_stops_a_database_wait_without_dispatching(database: PgPool) ->
             .remote
             .reconcile(harness.request.request_id, &harness.cancel),
     );
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("recovery did not wait for the allocation row: {result:?}"),
-        _ = bounded(db::test_support::postgres::wait_for_blocked_query(&harness.database, blocker_pid, "SELECT allocation_id FROM resource_pool_allocations")) => {}
+        _ = bounded(db::test_support::postgres::wait_for_blocked_query(&mut reader, blocker_pid, "SELECT allocation_id FROM resource_pool_allocations")) => {}
     }
     harness.cancel.cancel();
     assert!(matches!(
@@ -2289,11 +2299,12 @@ async fn cancelled_read_returns_its_only_connection_while_the_table_stays_locked
         .await?;
     let remote = RemoteResourcePool::new(
         single_connection.clone(),
+        carbide_instrument::Instrumentation::noop(),
         harness.work_locks.clone(),
         harness.request.pool.authority_id.clone(),
         harness.client.clone(),
     );
-    let mut blocker = harness.database.begin().await?;
+    let mut blocker = harness.database.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -2301,10 +2312,11 @@ async fn cancelled_read_returns_its_only_connection_while_the_table_stays_locked
         .execute(&mut *blocker)
         .await?;
     let mut pending = Box::pin(remote.reconcile(harness.request.request_id, &harness.cancel));
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut pending => panic!("initial read did not wait for the table: {result:?}"),
         _ = bounded(db::test_support::postgres::wait_for_blocked_query(
-            &harness.database, blocker_pid, "FROM resource_pool_allocations",
+            &mut reader, blocker_pid, "FROM resource_pool_allocations",
         )) => {}
     }
     harness.cancel.cancel();
@@ -2337,15 +2349,16 @@ async fn database_wait_preserves_a_shorter_operator_timeout(database: PgPool) ->
         .max_connections(1)
         .connect_with(database.connect_options().as_ref().clone())
         .await?;
-    sqlx::query("SET statement_timeout = '100ms'")
+    // Allow setup headroom under load while staying below the five-second default.
+    sqlx::query("SET statement_timeout = '1s'")
         .execute(&single_connection)
         .await?;
     let mut txn = super::database_transaction(&single_connection).await?;
     let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(txn.as_pgconn())
         .await?;
-    assert_eq!(timeout, "100ms");
-    let error = sqlx::query("SELECT pg_sleep(1)")
+    assert_eq!(timeout, "1s");
+    let error = sqlx::query("SELECT pg_sleep(2)")
         .execute(txn.as_pgconn())
         .await
         .expect_err("the operator's shorter timeout must interrupt the query");
@@ -2360,7 +2373,7 @@ async fn database_wait_preserves_a_shorter_operator_timeout(database: PgPool) ->
     let restored: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(&single_connection)
         .await?;
-    assert_eq!(restored, "100ms");
+    assert_eq!(restored, "1s");
     single_connection.close().await;
     Ok(())
 }

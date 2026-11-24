@@ -4,6 +4,30 @@ This page lists the software dependencies that must be deployed before installin
 
 A reference installation and configuration of all these components is described in the [Quick Start Guide](../quick-start.md) (automated via `setup.sh`) and the [Reference Installation](../installation-options/reference-install.md), which is a manual step-by-step guide.
 
+The installation starts with an operator-provisioned Kubernetes cluster.
+NICo does not install the cluster, node operating systems, CNI, or the
+datacenter routing beneath it. Complete
+[Prepare the Kubernetes Cluster](../quick-start.md#step-2--prepare-the-kubernetes-cluster)
+before deploying the prerequisite services. The contracts below describe the
+repository's reference stack; they do not establish support for substitute
+identity, secrets, or inventory products. The installer pins are in
+[`helm-prereqs/helmfile.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/helmfile.yaml)
+and the referenced manifests.
+
+## Dependency Configuration Checklist
+
+| Dependency | Required site configuration | Reference |
+| --- | --- | --- |
+| Storage | A working StorageClass and capacity for PostgreSQL and, when installed, Vault PVCs. Select PostgreSQL storage with `postgresql.storageClass` in `helm-prereqs/values.yaml`; `NICO_STORAGE_CLASS` selects Vault data and audit storage. | [Prerequisite Values](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/values.yaml) |
+| Load balancing | MetalLB pools, advertisements, and service VIPs routable from the devices that consume them. Contour is an optional ingress controller, installed with `--install-contour`. | [Configure MetalLB](../quick-start.md#3g-configure-metallb) |
+| Certificates and secrets | cert-manager issuers, CA trust, and the ESO stores and target Secrets described below. Vault installs by default; the explicit Vault-free path uses Postgres credentials and cert-manager issuance. | [Day 0 Credential Store](../installation-options/day0-credential-store.md) |
+| PostgreSQL | Core and REST databases, service roles, credentials, and the TLS settings used by their clients. The installer also resolves where Keycloak and Temporal store their data. | [Database Placement](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#consolidating-temporalkeycloak-onto-nico-pg-cluster) |
+| REST identity | The reference Keycloak realm `nico` and client `nico-rest`; the API's configured realm, client ID, and URLs must match it. Replace the development credentials before production use. | [Configure NICo REST Authentication](../quick-start.md#3e-configure-nico-rest-authentication) |
+| Temporal | Reachable frontend, trusted client/server certificates, and the `cloud`, `site`, `flow`, and site UUID namespaces used by REST, Flow, and the Site Agent. | [Pipeline Installation Order](../installation-options/reference-install.md#phase-order-and-success-gates) |
+| DNS and time | A recursive resolver advertised through DHCP, the DPU compatibility `.forge` records, matching certificate SANs, and reachable NTP servers. `nico-dns` serves authoritative zones and is not a recursive resolver. | [IP and Network Configuration](../../provisioning/ip-and-network-configuration.md) |
+| Network and hardware inventory | Site-owned IP pools, ASNs, VNIs, route targets, and Expected Machine entries with verified MAC addresses, serials, and credentials; Expected Rack entries when rack ingestion is used. Supply these through NICo configuration and APIs. | [Network Worksheet](https://github.com/dsx-ai-factory/infra-controller/blob/main/scripts/control-plane-dpu/control-plane-network.md) and [Ingesting Hosts](../../provisioning/ingesting-hosts.md) |
+| Images and DPU services | Reachable image registries and boot-artifact hosting, pull credentials where required, DPF inputs unless skipped, and an RMS image tag unless RMS is skipped. | [Pipeline Inputs](../installation-options/reference-install.md#pipeline-inputs) and [Boot Image Hosting](../../bootable_artifacts.md#boot-image-hosting) |
+
 ## Kubernetes and Node Runtime
 
 | Component | Validated Version |
@@ -30,11 +54,11 @@ A reference installation and configuration of all these components is described 
 |---|---|
 | External Secrets Operator | v0.8.6 |
 
-ESO syncs secrets from Vault into Kubernetes Secret objects.
+ESO copies the `site-root` CA bundle and the database credentials into the NICo namespaces as Kubernetes Secrets, through ClusterSecretStores that read Kubernetes Secrets in the `cert-manager` and `postgres` namespaces; it does not read Vault.
 
 **Configuration required:**
 
-- A SecretStore or ClusterSecretStore pointing to Vault.
+- ClusterSecretStores for the `cert-manager` and `postgres` namespaces.
 - ExternalSecret objects for each NICo namespace:
   - `nico-roots-eso`: target secret `nico-roots` with keys `site-root`, `nico-root`
   - DB credentials ExternalSecrets per namespace (e.g. `clouddb-db-eso : nico.nico-pg-cluster.credentials`)
@@ -49,7 +73,7 @@ ESO syncs secrets from Vault into Kubernetes Secret objects.
 
 <Note>The cert-manager component issues and rotates the TLS certificates that NICo services use for mTLS/gRPC communication.</Note>
 
-**ClusterIssuers required**: `self-issuer`, `site-issuer`, `vault-issuer`, `vault-nico-issuer`
+**ClusterIssuers required**: `site-issuer`, a CA issuer backed by the `site-root` Secret, and `vault-nico-issuer`, backed by Vault PKI. The reference installation creates both, plus the `selfsigned-bootstrap` issuer that signs `site-root`; a site installed with `--skip-vault` creates no `vault-nico-issuer` and uses `site-issuer` for the Core, RMS, Flow, and site-agent service certificates.
 
 **If you already have cert-manager:**
 
@@ -110,7 +134,7 @@ psql "postgres://<POSTGRES_USER>:<POSTGRES_PASSWORD>@<POSTGRES_HOST>:<POSTGRES_P
 | Vault server | v1.14.0 (HA Raft) |
 | Vault injector (vault-k8s) | v1.2.1 |
 
-Vault provides a PKI engine for certificate issuance and a KV secrets engine for credential storage. NICo can keep the credentials it manages in Postgres instead; refer to [Day 0 Credential Store](../installation-options/day0-credential-store.md). Certificate issuance stays in Vault.
+Vault provides a PKI engine for certificate issuance and a KV secrets engine for credential storage. It installs by default and stays a supported option. NICo can keep the credentials it manages in Postgres instead; refer to [Day 0 Credential Store](../installation-options/day0-credential-store.md). A site can also be installed without Vault: `setup.sh --skip-vault` keeps credentials in Postgres, issues service certificates from the cert-manager `site-issuer` CA ClusterIssuer, and has `nico-api` request machine and UFM certificates through cert-manager. Refer to [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). The rest of this section applies to sites that install Vault.
 
 **Configuration required:**
 
@@ -129,7 +153,7 @@ Vault provides a PKI engine for certificate issuance and a KV secrets engine for
   - `VAULT_PKI_ROLE_NAME=nico-cluster`
 - Injector (optional) may be enabled for sidecar-based secret injection.
 
-Vault is consumed by nico-api for PKI and secrets (env `VAULT_*`) and by credsmgr (cloud-cert-manager) for CA material exposed to the site bootstrap flow.
+When installed, Vault is consumed by nico-api for PKI and secrets (env `VAULT_*`) and by credsmgr (cloud-cert-manager) for CA material exposed to the site bootstrap flow.
 
 ## Workflow Orchestration
 
@@ -146,7 +170,7 @@ Temporal is the workflow orchestration engine used by NICo REST for multi-step o
 
 **Frontend endpoint (cluster-internal):** `temporal-frontend.temporal.svc:7233`
 
-**Namespaces required:** `cloud`, `site`, and the per-site UUID (registered after site creation)
+**Namespaces required:** `cloud`, `site`, `flow`, and the per-site UUID (registered after site creation). The installer registers `flow` before deploying NICo Flow.
 
 **If you already have Temporal:**
 
@@ -157,6 +181,7 @@ Temporal is the workflow orchestration engine used by NICo REST for multi-step o
 ```bash
 tctl --ns cloud namespace register
 tctl --ns site namespace register
+tctl --ns flow namespace register
 tctl --ns <SITE_UUID> namespace register   # once you know the site UUID
 ```
 
@@ -184,12 +209,8 @@ All logs are collected and shipped using `otel-collector-contrib` (both site con
 
 ## Installation Order
 
-These prerequisites should be installed in the following order:
-
-1. **Cluster and networking**: Kubernetes, containerd, Calico (or conformant CNI), ingress controller (Contour/Envoy), load balancer (MetalLB or cloud LB), DNS recursive resolvers, NTP
-2. **Foundation services** (in order): ESO (optional) → cert-manager → PostgreSQL → Vault → Temporal
-3. **NICo Core** (nico-system): nico-api and supporting services (DHCP/PXE/DNS as required)
-4. **NICo REST components**: Deploy cloud-api, cloud-workflow (cloud-worker & site-worker), and cloud-cert-manager (credsmgr). Seed DB and register Temporal namespaces (`cloud`, `site`, then site UUID). Create OTP and bootstrap secrets for elektra-site-agent; roll restart it.
-5. **Monitoring** (optional): Prometheus operator, Grafana, Loki, OTel, node exporter
-
-To use the automated deployment path, refer to the [Quick Start Guide](../quick-start.md).
+Follow the [Phase Order and Success Gates](../installation-options/reference-install.md#phase-order-and-success-gates)
+when automating the installation. It follows `setup.sh`, including certificate
+bootstrap before Vault, DPF and RMS before Core, and Temporal before the REST
+workers, Flow, and Site Agent. The [Quick Start Guide](../quick-start.md)
+walks through the same sequence with the site inputs explained.

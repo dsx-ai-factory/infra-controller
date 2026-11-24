@@ -42,6 +42,7 @@ use crate::cfg::file::CarbideConfig;
 mod tests;
 
 pub(super) struct HostFirmwareUpdate {
+    instrumentation: carbide_instrument::Instrumentation,
     pub(super) metrics: HostFirmwareUpdateMetrics,
     config: Arc<CarbideConfig>,
     firmware_config: FirmwareConfig,
@@ -105,34 +106,55 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             }
         }
 
-        let machine_updates = self.check_for_updates(&mut txn, available_updates).await?;
+        let machine_updates = db::host_machine_update::find_upgrade_needed(
+            &mut txn,
+            self.config.firmware_global.autoupdate,
+            self.config.firmware_global.instance_updates_manual_tagging,
+        )
+        .await?;
         let mut updates_started = HashSet::default();
         self.metrics
             .pending_firmware_updates
             .store(machine_updates.len() as u64, Ordering::Relaxed);
 
-        for machine_update in machine_updates.iter() {
-            if updating_host_machines.contains(machine_update) {
+        // Discovery can return a host once per BMC address. Only successful,
+        // distinct admissions consume this pass's budget.
+        for machine_update in machine_updates {
+            if updates_started.len() as i32 >= available_updates {
+                break;
+            }
+            if updating_host_machines.contains(&machine_update.id)
+                || updates_started.contains(&machine_update.id)
+                || host_on_disable_list(&self.config.firmware_global, &machine_update.id)
+            {
                 continue;
             }
 
-            db::host_machine_update::trigger_host_reprovisioning_request(
+            // Manual and rack writers do not share the manager's work lock.
+            // Preserve any request they committed after candidate discovery.
+            if !db::host_machine_update::try_trigger_host_reprovisioning_request(
                 &mut txn,
                 "Automated",
-                machine_update,
+                &machine_update.id,
             )
-            .await?;
+            .await?
+            {
+                continue;
+            }
 
-            carbide_instrument::emit(FirmwareUpdateProgress {
-                target: FirmwareUpdateTarget::Host,
-                phase: FirmwareUpdatePhase::Started,
-                machine_id: *machine_update,
-                detail: String::new(),
-            });
-            updates_started.insert(*machine_update);
+            updates_started.insert(machine_update.id);
         }
 
         txn.commit().await?;
+        for machine_id in &updates_started {
+            self.instrumentation.emit(FirmwareUpdateProgress {
+                target: FirmwareUpdateTarget::Host,
+                phase: FirmwareUpdatePhase::Started,
+                machine_id: *machine_id,
+                detail: String::new(),
+            });
+        }
+
         if let (Some(mut last_read), Some(catalog_marker)) =
             (firmware_catalog_last_read, published_catalog_marker)
         {
@@ -141,26 +163,31 @@ impl MachineUpdateModule for HostFirmwareUpdate {
         Ok(updates_started)
     }
 
-    async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()> {
+    async fn clear_completed_updates(
+        &self,
+        txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>> {
         let completed = db::host_machine_update::find_completed_updates(txn).await?;
 
-        for machine in completed {
+        for machine in &completed {
             db::machine::remove_health_report(
                 txn,
-                &machine,
+                machine,
                 health_report::HealthReportApplyMode::Merge,
                 HOST_FW_UPDATE_HEALTH_REPORT_SOURCE,
             )
             .await?;
-            db::machine::update_update_complete(&machine, true, txn).await?;
-            carbide_instrument::emit(FirmwareUpdateProgress {
+            db::machine::update_update_complete(machine, true, txn).await?;
+        }
+        Ok(completed
+            .into_iter()
+            .map(|machine_id| FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::Host,
                 phase: FirmwareUpdatePhase::Completed,
-                machine_id: machine,
+                machine_id,
                 detail: String::new(),
-            });
-        }
-        Ok(())
+            })
+            .collect())
     }
 
     async fn update_metrics(
@@ -176,9 +203,8 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             .exhausted_reprovision_retries
             .store(exhausted_retries as u64, Ordering::Relaxed);
 
-        let mut txn = db::Transaction::begin(pool).await?;
         match db::host_machine_update::find_upgrade_needed(
-            &mut txn,
+            pool,
             self.config.firmware_global.autoupdate,
             self.config.firmware_global.instance_updates_manual_tagging,
         )
@@ -191,7 +217,7 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             }
             Err(e) => tracing::warn!(error=%e, "Error geting host upgrade needed for metrics"),
         };
-        match db::host_machine_update::find_upgrade_in_progress(&mut txn).await {
+        match db::host_machine_update::find_upgrade_in_progress(pool).await {
             Ok(upgrade_in_progress) => {
                 self.metrics
                     .active_firmware_updates
@@ -199,7 +225,6 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             }
             Err(e) => tracing::warn!(error=%e, "Error geting host upgrade in progress for metrics"),
         };
-        txn.commit().await?;
         Ok(())
     }
 }
@@ -209,6 +234,7 @@ impl HostFirmwareUpdate {
         config: Arc<CarbideConfig>,
         meter: opentelemetry::metrics::Meter,
         firmware_config: FirmwareConfig,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Option<Self> {
         tracing::info!(?firmware_config, "Using firmware configuration",);
 
@@ -216,41 +242,12 @@ impl HostFirmwareUpdate {
         metrics.register_callbacks(&meter);
 
         Some(Self {
+            instrumentation,
             firmware_config,
             config,
             metrics,
             firmware_catalog_last_read: Arc::new(Mutex::new(None)),
         })
-    }
-
-    pub(super) async fn check_for_updates(
-        &self,
-        txn: &mut PgConnection,
-        mut available_updates: i32,
-    ) -> CarbideResult<Vec<HostMachineId>> {
-        let mut machines = vec![];
-        if available_updates == 0 {
-            return Ok(machines);
-        };
-        // find_upgrade_needed filters for just things that need upgrades
-        for update_needed in db::host_machine_update::find_upgrade_needed(
-            txn,
-            self.config.firmware_global.autoupdate,
-            self.config.firmware_global.instance_updates_manual_tagging,
-        )
-        .await?
-        {
-            if available_updates == 0 {
-                return Ok(machines);
-            };
-            if host_on_disable_list(&self.config.firmware_global, &update_needed.id) {
-                // This machine is specifically disabled
-                break;
-            }
-            available_updates -= 1;
-            machines.push(update_needed.id);
-        }
-        Ok(machines)
     }
 }
 

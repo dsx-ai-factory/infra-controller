@@ -17,6 +17,7 @@ func TestExpectedInterfaceRole_ToProto(t *testing.T) {
 		{ExpectedInterfaceRoleUnspecified, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_UNSPECIFIED},
 		{ExpectedInterfaceRoleHost, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_HOST},
 		{ExpectedInterfaceRoleDpuOs, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_OS},
+		{ExpectedInterfaceRoleDpuLoopback, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK},
 		{ExpectedInterfaceRoleDpuBmc, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_BMC},
 		{ExpectedInterfaceRoleHostBmc, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_HOST_BMC},
 	} {

@@ -26,15 +26,24 @@ Copy a BFB to a DPU's rshim via its BMC, power-cycling the host afterward:
     $ nico-admin-cli site-explorer copy-bfb-to-dpu-rshim 192.0.2.10 \
     --host-bmc-ip 192.0.2.20
 
+Constrain recovery to the expected DPU BMC identity:
+    $ nico-admin-cli site-explorer copy-bfb-to-dpu-rshim 192.0.2.10 \
+    --host-bmc-ip 192.0.2.20 --mac 00:11:22:33:44:55
+
 Power-cycle the host first to release rshim control to the DPU BMC:
     $ nico-admin-cli site-explorer copy-bfb-to-dpu-rshim 192.0.2.10 \
     --host-bmc-ip 192.0.2.20 --pre-copy-powercycle
 
 ")]
 pub(crate) struct Args {
-    #[clap(help = "BMC IP address or hostname with optional port")]
+    #[clap(help = "DPU BMC IP address")]
     pub(super) address: String,
-    #[clap(long, help = "The MAC address the BMC sent DHCP from")]
+    #[clap(
+        long,
+        help = "Expected DPU BMC MAC address. Must match the interface assigned to the IP. \
+                If omitted, the resolved interface MAC is retained. Recovery fails if the mapping \
+                changes before BFB copy or host power-off."
+    )]
     pub(super) mac: Option<MacAddress>,
     #[clap(
         long,

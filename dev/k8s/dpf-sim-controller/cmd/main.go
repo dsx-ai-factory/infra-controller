@@ -112,6 +112,13 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The reconciler treats a non-positive value as "use the default", which
+	// would silently undo a deploy-time sizing choice.
+	if reconcileConcurrency <= 0 {
+		fmt.Fprintf(os.Stderr, "invalid --reconcile-concurrency %d: must be > 0\n", reconcileConcurrency)
+		os.Exit(2)
+	}
+
 	// Raise with --cache-sync-timeout when simulating very large fleets.
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog := ctrl.Log.WithName("setup")
@@ -168,10 +175,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// NICo fails startup without a DPFOperatorConfig status.version, and no
+	// operator writes one on a simulated site.
+	if err = mgr.Add(&controller.OperatorConfigKeeper{Client: mgr.GetClient(), Namespace: dpfNamespace}); err != nil {
+		setupLog.Error(err, "unable to add the DPFOperatorConfig keeper")
+		os.Exit(1)
+	}
+
 	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
 	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)
 
-	setupLog.Info("starting dpf-sim-controller", "dpfNamespace", dpfNamespace, "phaseDwell", phaseDwell, "osInstallDwell", osInstall, "redfishOSInstall", redfishInstall)
+	setupLog.Info("starting dpf-sim-controller", "dpfNamespace", dpfNamespace, "phaseDwell", phaseDwell, "osInstallDwell", osInstall, "redfishOSInstall", redfishInstall, "reconcileConcurrency", reconcileConcurrency)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager exited")
 		os.Exit(1)

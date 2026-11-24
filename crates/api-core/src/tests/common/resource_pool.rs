@@ -14,13 +14,14 @@ use carbide_resource_pool::remote::RemoteResourcePool;
 use carbide_resource_pool_api::testing::LocalProvider;
 use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
+use db::TransactionVending as _;
 use model::resource_pool::{
     Range, ResourcePoolBackendKind, ResourcePoolDef, ResourcePoolSelection, ResourcePoolType,
     ResourcePoolValueDomain,
 };
 use sqlx::PgPool;
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
@@ -43,9 +44,14 @@ pub(in crate::tests) const SECOND_REMOTE_POOL: &str = "test-remote-manual";
 const AUTHORITY: &str = "test-fabric";
 const PROVIDER_POOL: &str = "test-integers";
 
-/// `RemotePool` binds one logical pool to the provider. Its seed range holds
-/// `start` and `start + 1` (the end is exclusive), all in its automatic or
-/// manual partition. Pick a `start` the fixture's provider serves.
+/// Run deliberate IPv6 SQL stalls one at a time so their observers can acquire
+/// a connection even with the shared test budget set to five.
+pub(in crate::tests) static IPV6_BACKFILL_GATE: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+/// `RemotePool` binds one logical pool to the provider. Integer fixtures seed
+/// `start` and `start + 1`; the IPv4 fixture seeds three consecutive addresses.
+/// All values use the configured automatic or manual partition.
 pub(in crate::tests) struct RemotePool {
     pub(in crate::tests) name: &'static str,
     pub(in crate::tests) start: i64,
@@ -56,6 +62,8 @@ pub(in crate::tests) struct RemotePool {
 /// `start` binds independent integer pools and leaves mandatory Integrated
 /// pools unchanged, so startup tests exercise registration without changing
 /// VPC behavior. Consumer tests use `start_with` to move a pool they exercise.
+/// Build a test controller from the rebuilt API when exercising a remote pool.
+/// Controllers created with the original test environment still use its registry.
 pub(in crate::tests) struct RemotePoolFixture {
     pub(in crate::tests) env: TestEnv,
     pub(in crate::tests) provider: ObservedProvider,
@@ -115,12 +123,164 @@ impl RemotePoolFixture {
         values: &[i64],
         route_target_policy: Option<v1::RouteTargetPolicy>,
     ) -> eyre::Result<Self> {
-        let alias = pools.first().expect("at least one remote pool").name;
-        let mut env = create_test_env_with_overrides(
+        Self::start_with_typed_values(
             database,
-            TestEnvOverrides::no_network_segments().with_fnn_config(None),
+            pools,
+            values.iter().copied().map(Into::into).collect(),
+            v1::ValueDomain::Integer,
+            route_target_policy,
         )
-        .await;
+        .await
+    }
+
+    /// `start_ipv4` moves the DPU loopback pool to a real IPv4 provider.
+    pub(in crate::tests) async fn start_ipv4(database: PgPool) -> eyre::Result<Self> {
+        let first = std::net::Ipv4Addr::new(198, 51, 100, 10);
+        Self::start_with_typed_values(
+            database,
+            &[RemotePool {
+                name: model::resource_pool::common::LOOPBACK_IP,
+                start: u32::from(first).into(),
+                auto_assign: true,
+            }],
+            vec![
+                first.into(),
+                std::net::Ipv4Addr::new(198, 51, 100, 11).into(),
+                std::net::Ipv4Addr::new(198, 51, 100, 12).into(),
+            ],
+            v1::ValueDomain::IpAddress,
+            None,
+        )
+        .await
+    }
+
+    /// `start_ipv6` moves the optional DPU IPv6 loopback pool to the provider.
+    /// The three provisioned values can be exposed incrementally by growth.
+    pub(in crate::tests) async fn start_ipv6(database: PgPool) -> eyre::Result<Self> {
+        let mut fixture = Self::start_with_typed_values(
+            database,
+            &[RemotePool {
+                name: model::resource_pool::common::LOOPBACK_IP_V6,
+                start: 0xa,
+                auto_assign: true,
+            }],
+            [0xa, 0xb, 0xc]
+                .into_iter()
+                .map(|last| std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, last).into())
+                .collect(),
+            v1::ValueDomain::IpAddress,
+            None,
+        )
+        .await?;
+        // Address fixtures are not registered until initialize; replace the
+        // generic fixture's IPv4 declaration with this pool's actual family.
+        fixture.definitions.insert(
+            model::resource_pool::common::LOOPBACK_IP_V6.to_owned(),
+            ResourcePoolDef {
+                pool_type: ResourcePoolType::Ipv6,
+                prefix: None,
+                ranges: vec![Range {
+                    start: "2001:db8::a".to_owned(),
+                    end: "2001:db8::d".to_owned(),
+                    auto_assign: true,
+                }],
+                delegate_prefix_len: None,
+            },
+        );
+        Ok(fixture)
+    }
+
+    /// `start_loopbacks` gives each family its own eligibility over one IP
+    /// provider, so sibling preparation failures can prove exact cleanup.
+    pub(in crate::tests) async fn start_loopbacks(database: PgPool) -> eyre::Result<Self> {
+        let first = std::net::Ipv4Addr::new(198, 51, 100, 10);
+        let mut values = vec![
+            first.into(),
+            std::net::Ipv4Addr::new(198, 51, 100, 11).into(),
+        ];
+        values.extend(
+            [0xa, 0xb, 0xc]
+                .map(|last| std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, last).into()),
+        );
+        let mut fixture = Self::start_with_typed_values(
+            database,
+            &[
+                RemotePool {
+                    name: model::resource_pool::common::LOOPBACK_IP,
+                    start: i64::from(u32::from(first)),
+                    auto_assign: true,
+                },
+                RemotePool {
+                    name: model::resource_pool::common::LOOPBACK_IP_V6,
+                    start: 0xa,
+                    auto_assign: true,
+                },
+            ],
+            values,
+            v1::ValueDomain::IpAddress,
+            None,
+        )
+        .await?;
+        fixture.definitions.insert(
+            model::resource_pool::common::LOOPBACK_IP_V6.to_owned(),
+            ResourcePoolDef {
+                pool_type: ResourcePoolType::Ipv6,
+                prefix: None,
+                ranges: vec![Range {
+                    start: "2001:db8::a".to_owned(),
+                    end: "2001:db8::d".to_owned(),
+                    auto_assign: true,
+                }],
+                delegate_prefix_len: None,
+            },
+        );
+        Ok(fixture)
+    }
+
+    /// `start_asn` moves only the DPU ASN pool, retaining discovery's networks.
+    pub(in crate::tests) async fn start_asn(database: PgPool) -> eyre::Result<Self> {
+        Self::start_asn_with_policy(database, None).await
+    }
+
+    pub(in crate::tests) async fn start_asn_with_policy(
+        database: PgPool,
+        policy: Option<v1::RouteTargetPolicy>,
+    ) -> eyre::Result<Self> {
+        Self::start_with_values(
+            database,
+            &[RemotePool {
+                name: model::resource_pool::common::FNN_ASN,
+                start: 64_512,
+                auto_assign: true,
+            }],
+            &[64_512, 64_513],
+            policy,
+        )
+        .await
+    }
+
+    /// `start_with_typed_values` runs one provider with the requested value
+    /// domain and inventory, then binds the fixture's selected pools to it.
+    async fn start_with_typed_values(
+        database: PgPool,
+        pools: &[RemotePool],
+        values: Vec<v1::Value>,
+        value_domain: v1::ValueDomain,
+        route_target_policy: Option<v1::RouteTargetPolicy>,
+    ) -> eyre::Result<Self> {
+        let alias = pools.first().expect("at least one remote pool").name;
+        let ipv4 = value_domain == v1::ValueDomain::IpAddress;
+        let overrides = if ipv4
+            || pools
+                .iter()
+                .any(|pool| pool.name == model::resource_pool::common::FNN_ASN)
+        {
+            TestEnvOverrides::default()
+        } else {
+            TestEnvOverrides::no_network_segments()
+        };
+        let mut env =
+            create_test_env_with_overrides(database, overrides.with_fnn_config(None)).await;
         let provider = ObservedProvider {
             local: LocalProvider::new(
                 v1::PoolBinding {
@@ -129,13 +289,19 @@ impl RemotePoolFixture {
                     binding_id: Uuid::new_v4().to_string(),
                     logical_pool: alias.into(),
                 },
-                v1::ValueDomain::Integer,
-                values.iter().copied().map(Into::into).collect(),
+                value_domain,
+                values,
                 route_target_policy,
             )?,
             allocations: Arc::default(),
+            recoveries: Arc::default(),
+            allocation_unavailable: Arc::default(),
+            reject_allocate_call: Arc::default(),
+            lose_allocate_reply: Arc::default(),
             allocate_pause: Arc::default(),
+            allocate_barrier: Arc::default(),
             releases: Arc::default(),
+            release_unavailable: Arc::default(),
             describes: Arc::default(),
             defines: Arc::default(),
             define_requests: Arc::default(),
@@ -171,7 +337,7 @@ impl RemotePoolFixture {
         // Keep the API fixture's other Integrated pools. A pool it already seeded,
         // such as `vpc-vni`, loses its Integrated inventory and binding before
         // it moves; a new test pool has none of these rows yet.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let mut definitions = db::resource_pool::all_stored_defs(&mut *txn).await?;
         for pool in pools {
             let allocations: i64 = sqlx::query_scalar(
@@ -198,10 +364,22 @@ impl RemotePoolFixture {
             definitions.insert(
                 pool.name.into(),
                 ResourcePoolDef {
-                    pool_type: ResourcePoolType::Integer,
+                    pool_type: if ipv4 {
+                        ResourcePoolType::Ipv4
+                    } else {
+                        ResourcePoolType::Integer
+                    },
                     ranges: vec![Range {
-                        start: pool.start.to_string(),
-                        end: (pool.start + 2).to_string(),
+                        start: if ipv4 {
+                            std::net::Ipv4Addr::from(u32::try_from(pool.start)?).to_string()
+                        } else {
+                            pool.start.to_string()
+                        },
+                        end: if ipv4 {
+                            std::net::Ipv4Addr::from(u32::try_from(pool.start + 3)?).to_string()
+                        } else {
+                            (pool.start + 2).to_string()
+                        },
                         auto_assign: pool.auto_assign,
                     }],
                     prefix: None,
@@ -217,7 +395,11 @@ impl RemotePoolFixture {
                     pool.name.into(),
                     ResourcePoolSelection {
                         pool_name: pool.name.into(),
-                        value_domain: ResourcePoolValueDomain::Integer,
+                        value_domain: if ipv4 {
+                            ResourcePoolValueDomain::IpAddress
+                        } else {
+                            ResourcePoolValueDomain::Integer
+                        },
                         backend_name: Some("fabric".into()),
                         backend_kind: ResourcePoolBackendKind::Grpc,
                         authority_id: AUTHORITY.into(),
@@ -247,6 +429,7 @@ impl RemotePoolFixture {
     }
 
     /// `initialize` rebuilds the API over the same database and provider.
+    /// Preserve TestEnv's mock endpoint reports when rebuilding its API.
     /// The returned logs let tests check the seed reconciler's drift diagnostics.
     /// Recovery stays stopped so tests can inspect queued release requests
     /// before starting the worker that contacts the provider.
@@ -254,17 +437,29 @@ impl RemotePoolFixture {
         &mut self,
         source: PoolDefinitionSource,
     ) -> eyre::Result<Vec<CapturedLog>> {
+        self.initialize_with_registration_definitions(source, &HashMap::new())
+            .await
+    }
+
+    /// `initialize_with_registration_definitions` also supplies fabric-only
+    /// ranges for first registration, without recording ordinary seed snapshots.
+    pub(in crate::tests) async fn initialize_with_registration_definitions(
+        &mut self,
+        source: PoolDefinitionSource,
+        initial_definitions: &HashMap<String, ResourcePoolDef>,
+    ) -> eyre::Result<Vec<CapturedLog>> {
         let mut monitor = ResourcePoolMonitor::new(
             self.env.pool.clone(),
             &self.env.config.resource_pool_backends,
         )?;
-        let mut txn = self.env.pool.begin().await?;
+        let mut txn = self.env.pool.txn_begin().await?;
         let registry = monitor
             .resolve_registry(
                 source,
                 &mut txn,
                 &self.selections,
                 &self.env.api.work_lock_manager_handle,
+                &self.env.api.instrumentation,
             )
             .await?;
         let logs = if matches!(source, PoolDefinitionSource::SeedConfiguration) {
@@ -273,6 +468,7 @@ impl RemotePoolFixture {
             let (result, logs) = capture_logs_async(db::resource_pool::reconcile_pool_defs(
                 &mut txn,
                 &self.definitions,
+                &carbide_instrument::Instrumentation::noop(),
             ))
             .await;
             result?;
@@ -282,7 +478,7 @@ impl RemotePoolFixture {
         };
         txn.commit().await?;
         monitor
-            .register_pools(&registry, source, &self.cancel)
+            .register_pools(&registry, source, initial_definitions, &self.cancel)
             .await?;
         self.env.api = Arc::new(
             TestApiBuilder::new(
@@ -291,6 +487,7 @@ impl RemotePoolFixture {
                 self.env.api.work_lock_manager_handle.clone(),
             )
             .with_resource_pool_registry(registry)
+            .with_endpoint_explorer(self.env.endpoint_explorer.clone())
             .with_runtime_config(self.env.config.clone())
             .build(),
         );
@@ -322,16 +519,27 @@ impl RemotePoolFixture {
     }
 }
 
-/// `ObservedProvider` injects registration and inspection failures around the
-/// local provider. Describe, Define, Allocate, and Release counters record
-/// incoming calls, including calls that are rejected or paused.
+/// Wraps the local provider so tests can observe calls, pause them, and inject
+/// failures during registration, allocation, recovery, inspection, or release.
 #[derive(Clone)]
 pub(in crate::tests) struct ObservedProvider {
     pub(in crate::tests) local: LocalProvider,
     pub(in crate::tests) allocations: Arc<AtomicUsize>,
-    /// Pauses after the local provider allocates, before Core receives the reply.
+    /// Incoming Recover calls, including unavailable attempts.
+    pub(in crate::tests) recoveries: Arc<AtomicUsize>,
+    /// Makes Allocate, AllocateExact and Recover return Unavailable.
+    pub(in crate::tests) allocation_unavailable: Arc<AtomicBool>,
+    /// Rejects this one-based Allocate call before reserving; zero disables it.
+    pub(in crate::tests) reject_allocate_call: Arc<AtomicUsize>,
+    /// Loses one successful Allocate reply after the provider saves its value.
+    pub(in crate::tests) lose_allocate_reply: Arc<AtomicBool>,
+    /// Pauses Allocate after reserving, before Core receives the reply.
     pub(in crate::tests) allocate_pause: Arc<PausedCall>,
+    /// Holds Allocate calls until every participant reaches the barrier.
+    pub(in crate::tests) allocate_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
     pub(in crate::tests) releases: Arc<AtomicUsize>,
+    /// Makes Release return Unavailable without freeing the provider's value.
+    pub(in crate::tests) release_unavailable: Arc<AtomicBool>,
     pub(in crate::tests) describes: Arc<AtomicUsize>,
     pub(in crate::tests) defines: Arc<AtomicUsize>,
     pub(in crate::tests) define_requests: Arc<Mutex<Vec<v1::DefineRequest>>>,
@@ -421,9 +629,26 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::AllocateRequest>,
     ) -> Result<Response<v1::AllocateResponse>, Status> {
-        self.allocations.fetch_add(1, Ordering::SeqCst);
+        let call = self.allocations.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
+        let barrier = self
+            .allocate_barrier
+            .lock()
+            .expect("Allocate barrier")
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        if self.reject_allocate_call.load(Ordering::SeqCst) == call {
+            return Err(Status::permission_denied("injected allocation rejection"));
+        }
         let response = self.local.allocate(request).await?;
         self.allocate_pause.wait().await;
+        if self.lose_allocate_reply.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable("injected loss of allocation reply"));
+        }
         Ok(response)
     }
 
@@ -431,6 +656,10 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::AllocateExactRequest>,
     ) -> Result<Response<v1::AllocateExactResponse>, Status> {
+        self.allocations.fetch_add(1, Ordering::SeqCst);
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         self.local.allocate_exact(request).await
     }
 
@@ -438,6 +667,10 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::RecoverRequest>,
     ) -> Result<Response<v1::RecoverResponse>, Status> {
+        self.recoveries.fetch_add(1, Ordering::SeqCst);
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         self.local.recover(request).await
     }
 
@@ -453,6 +686,9 @@ impl ResourcePool for ObservedProvider {
         request: Request<v1::ReleaseRequest>,
     ) -> Result<Response<v1::ReleaseResponse>, Status> {
         self.releases.fetch_add(1, Ordering::SeqCst);
+        if self.release_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("release provider disabled"));
+        }
         self.release_pause.wait().await;
         self.local.release(request).await
     }

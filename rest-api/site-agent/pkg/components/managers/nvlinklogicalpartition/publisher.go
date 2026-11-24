@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverNVLinkLogicalPartitionInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("NVLinkLogicalPartition: Successfully registered DiscoverNVLinkLogicalPartitionInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use carbide_hw_identification::host_bluefield::{DpuProduct, HostBlueFieldRules, InventorySource};
 use itertools::Itertools;
 use model::expected_machine::{ExpectedMachine, HostDpuPolicy};
 use model::site_explorer::{BlueFieldOperatingMode, ExploredEndpoint};
@@ -42,11 +43,12 @@ impl<'a> HostDpuMatches<'a> {
     /// They can replace unmatched inventory serials without adding another slot.
     pub(super) fn new(
         ep: &ExploredEndpoint,
-        dpu_sn_to_endpoint: &'a HashMap<String, ExploredEndpoint>,
+        dpu_sn_to_endpoint: &HashMap<&str, &'a ExploredEndpoint>,
         expected_machine: Option<&'a ExpectedMachine>,
         host_dpu_policy: HostDpuPolicy,
+        rules: &HostBlueFieldRules,
     ) -> Self {
-        let inventory_devices = ep.report.devices_with_unique_serials();
+        let inventory_devices = ep.report.devices_with_unique_serials(rules);
 
         // All unique devices serial numbers reported by host.
         let inventory_serials = inventory_devices
@@ -79,7 +81,7 @@ impl<'a> HostDpuMatches<'a> {
 
         // Resolve inventory devices using their host-reported part numbers.
         let inventory_matches = inventory_devices.into_iter().filter_map(|device| {
-            MatchedDpu::from_inventory(device, dpu_sn_to_endpoint, host_dpu_policy)
+            MatchedDpu::from_inventory(device, dpu_sn_to_endpoint, host_dpu_policy, rules)
         });
 
         // Configured serials already reported by the host use the inventory path.
@@ -89,7 +91,7 @@ impl<'a> HostDpuMatches<'a> {
             .copied()
             .filter(|serial| !serial.is_reported_in(&inventory_serials))
             .filter_map(|serial| {
-                MatchedDpu::from_configured(serial, dpu_sn_to_endpoint, host_dpu_policy)
+                MatchedDpu::from_configured(serial, dpu_sn_to_endpoint, host_dpu_policy, rules)
             });
 
         // Both paths now contain MatchedDpu values; their serial sources stay distinct.
@@ -114,6 +116,28 @@ impl<'a> HostDpuMatches<'a> {
     }
 }
 
+fn bmc_product(endpoint: &ExploredEndpoint, rules: &HostBlueFieldRules) -> Option<DpuProduct> {
+    let part_number = endpoint.report.dpu_part_number()?;
+    rules.classify_part_number(InventorySource::DpuProductChassis, part_number)
+}
+
+fn target_mode(
+    policy: HostDpuPolicy,
+    product: Option<DpuProduct>,
+) -> Option<BlueFieldOperatingMode> {
+    match policy {
+        HostDpuPolicy::Nic => Some(BlueFieldOperatingMode::Nic),
+        HostDpuPolicy::Ignore => None,
+        HostDpuPolicy::Manage => match product? {
+            DpuProduct::BlueField3Dpu => Some(BlueFieldOperatingMode::Dpu),
+            DpuProduct::BlueField3SuperNic | DpuProduct::BlueField3SuperNic9D3B4 => {
+                Some(BlueFieldOperatingMode::Nic)
+            }
+            _ => None,
+        },
+    }
+}
+
 /// A trimmed, nonempty serial read from a host inventory device.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct InventorySerial<'a>(&'a str);
@@ -123,11 +147,11 @@ impl<'a> InventorySerial<'a> {
         device.serial_number().map(Self)
     }
 
-    fn find_explored_dpu(
+    fn find_explored_dpu<'e>(
         self,
-        endpoints: &HashMap<String, ExploredEndpoint>,
-    ) -> Option<&ExploredEndpoint> {
-        endpoints.get(self.0)
+        endpoints: &HashMap<&str, &'e ExploredEndpoint>,
+    ) -> Option<&'e ExploredEndpoint> {
+        endpoints.get(self.0).copied()
     }
 }
 
@@ -149,11 +173,11 @@ impl<'a> ConfiguredDpuSerial<'a> {
         inventory.contains(&InventorySerial(self.0))
     }
 
-    fn find_explored_dpu(
+    fn find_explored_dpu<'e>(
         self,
-        endpoints: &HashMap<String, ExploredEndpoint>,
-    ) -> Option<&ExploredEndpoint> {
-        endpoints.get(self.0)
+        endpoints: &HashMap<&str, &'e ExploredEndpoint>,
+    ) -> Option<&'e ExploredEndpoint> {
+        endpoints.get(self.0).copied()
     }
 }
 
@@ -179,32 +203,37 @@ enum DpuMatchSource<'a> {
 impl<'a> MatchedDpu<'a> {
     fn from_inventory(
         device: DeviceIdentifiers<'_>,
-        endpoints: &'a HashMap<String, ExploredEndpoint>,
+        endpoints: &HashMap<&str, &'a ExploredEndpoint>,
         policy: HostDpuPolicy,
+        rules: &HostBlueFieldRules,
     ) -> Option<Self> {
         let serial = InventorySerial::from_device(&device)?;
         let endpoint = serial.find_explored_dpu(endpoints)?;
-        let part_number = device
-            .part_number
-            .or_else(|| endpoint.report.dpu_part_number());
+        // A present but unknown host part number suppresses the BMC mode heuristic.
+        let product = if device.part_number.is_some() {
+            device.bluefield_product
+        } else {
+            bmc_product(endpoint, rules)
+        };
 
         Some(Self {
             endpoint,
-            target_operating_mode: policy.target_operating_mode(part_number),
+            target_operating_mode: target_mode(policy, product),
             source: DpuMatchSource::Inventory,
         })
     }
 
     fn from_configured(
         serial: ConfiguredDpuSerial<'a>,
-        endpoints: &'a HashMap<String, ExploredEndpoint>,
+        endpoints: &HashMap<&str, &'a ExploredEndpoint>,
         policy: HostDpuPolicy,
+        rules: &HostBlueFieldRules,
     ) -> Option<Self> {
         let endpoint = serial.find_explored_dpu(endpoints)?;
 
         Some(Self {
             endpoint,
-            target_operating_mode: policy.target_operating_mode(endpoint.report.dpu_part_number()),
+            target_operating_mode: target_mode(policy, bmc_product(endpoint, rules)),
             source: DpuMatchSource::ExpectedSerial(serial),
         })
     }
@@ -266,14 +295,33 @@ mod tests {
         let host_report: EndpointExplorationReport = ManagedHostConfig::default()
             .with_dpus(vec![dpu.clone(), serial_only_dpu.clone()])
             .into();
-        let endpoints = HashMap::from([
+        let mut serial_only_endpoint = explored_endpoint(serial_only_dpu.into());
+        serial_only_endpoint
+            .report
+            .chassis
+            .iter_mut()
+            .find(|c| c.id == "Card1")
+            .unwrap()
+            .part_number = Some("OEM-NIC".into());
+        let rules: HostBlueFieldRules = serde_json::from_value(serde_json::json!([{
+            "id": "site-peer-nic",
+            "sources": ["dpu_product_chassis"],
+            "part_numbers": [{"exact": "OEM-NIC"}],
+            "product": "bluefield3_supernic"
+        }]))
+        .unwrap();
+        let endpoint_rows = [
             (serial.clone(), explored_endpoint(dpu.into())),
-            (serial_only, explored_endpoint(serial_only_dpu.into())),
+            (serial_only, serial_only_endpoint),
             (
                 expected_serial.clone(),
                 explored_endpoint(expected_dpu.into()),
             ),
-        ]);
+        ];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let expected_machine = ExpectedMachine {
             id: None,
             bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
@@ -296,6 +344,7 @@ mod tests {
                 &endpoints,
                 Some(&expected_machine),
                 HostDpuPolicy::Manage,
+                &rules,
             )
         };
 
@@ -307,7 +356,7 @@ mod tests {
         );
         assert_eq!(
             matches.matched_dpus[1].target_operating_mode,
-            Some(BlueFieldOperatingMode::Dpu),
+            Some(BlueFieldOperatingMode::Nic),
         );
         assert_eq!(
             matches.matched_dpus[2].target_operating_mode,
@@ -316,11 +365,58 @@ mod tests {
     }
 
     #[test]
+    fn first_unrecognized_record_controls_bmc_mode_fallback() {
+        let dpu = DpuConfig {
+            nic_mode: Some(BlueFieldOperatingMode::Nic),
+            ..DpuConfig::default()
+        };
+        let endpoint = explored_endpoint(dpu.clone().into());
+        let endpoints = HashMap::from([(dpu.serial.as_str(), &endpoint)]);
+        let rules = HostBlueFieldRules::default();
+
+        check_values(
+            [
+                Check {
+                    scenario: "missing then unknown uses the BF3 DPU BMC part number",
+                    input: [None, Some("UNKNOWN-OEM")],
+                    expect: Some(BlueFieldOperatingMode::Dpu),
+                },
+                Check {
+                    scenario: "unknown then missing preserves NIC mode",
+                    input: [Some("UNKNOWN-OEM"), None],
+                    expect: None,
+                },
+            ],
+            |parts| {
+                let report = ManagedHostConfig::default()
+                    .with_dpus(vec![dpu.clone(), dpu.clone()])
+                    .into();
+                let mut host = explored_endpoint(report);
+                host.report.chassis.clear();
+                for (device, part) in host.report.systems[0].pcie_devices.iter_mut().zip(parts) {
+                    device.part_number = part.map(str::to_owned);
+                }
+                let matches =
+                    HostDpuMatches::new(&host, &endpoints, None, HostDpuPolicy::Manage, &rules);
+                assert_eq!(matches.expected_total, 1);
+                let [card] = matches.matched_dpus.as_slice() else {
+                    panic!("expected one matched DPU");
+                };
+                card.target_operating_mode
+            },
+        );
+    }
+
+    #[test]
     fn chassis_matches_keep_part_numbers_and_unmatched_pcie_inventory() {
-        let endpoints = HashMap::from([(
+        let endpoint_rows = [(
             "known-dpu".to_string(),
             bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
-        )]);
+        )];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let matches = {
             let host_report: EndpointExplorationReport = ManagedHostConfig::default()
                 .with_dpus(vec![DpuConfig {
@@ -354,7 +450,13 @@ mod tests {
                     ..Default::default()
                 },
             ];
-            HostDpuMatches::new(&host, &endpoints, None, HostDpuPolicy::Manage)
+            HostDpuMatches::new(
+                &host,
+                &endpoints,
+                None,
+                HostDpuPolicy::Manage,
+                &HostBlueFieldRules::default(),
+            )
         };
 
         assert_eq!(matches.expected_total, 2);
@@ -372,7 +474,7 @@ mod tests {
     #[test]
     fn combines_all_matching_sources() {
         const BLUEFIELD: &str = "900-9D3B6-00SV-AA0";
-        let endpoints = HashMap::from([
+        let endpoint_rows = [
             (
                 "pcie-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
@@ -385,7 +487,11 @@ mod tests {
                 "expected-only-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
             ),
-        ]);
+        ];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let expected_machine = ExpectedMachine {
             id: None,
             bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
@@ -433,6 +539,7 @@ mod tests {
                     &endpoints,
                     Some(&expected_machine),
                     HostDpuPolicy::Manage,
+                    &HostBlueFieldRules::default(),
                 );
                 (matches.expected_total, matches.matched_dpus.len())
             },
@@ -441,10 +548,14 @@ mod tests {
 
     #[test]
     fn expected_serials_are_merged_and_normalized() {
-        let endpoints = HashMap::from([(
+        let endpoint_rows = [(
             "known-dpu".to_string(),
             bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
-        )]);
+        )];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         let expected_machine = ExpectedMachine {
             id: None,
             bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
@@ -537,6 +648,7 @@ mod tests {
                     &endpoints,
                     Some(&expected_machine),
                     HostDpuPolicy::Manage,
+                    &HostBlueFieldRules::default(),
                 );
                 (matches.expected_total, matches.matched_dpus.len())
             },
@@ -545,7 +657,7 @@ mod tests {
 
     #[test]
     fn fallback_serials_fill_unmatched_reported_slots() {
-        let endpoints = HashMap::from([
+        let endpoint_rows = [
             (
                 "inventory-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
@@ -554,7 +666,11 @@ mod tests {
                 "fallback-dpu".to_string(),
                 bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
             ),
-        ]);
+        ];
+        let endpoints = endpoint_rows
+            .iter()
+            .map(|(serial, endpoint)| (serial.as_str(), endpoint))
+            .collect();
         check_values(
             [
                 Check {
@@ -632,6 +748,7 @@ mod tests {
                     &endpoints,
                     Some(&expected_machine),
                     HostDpuPolicy::Manage,
+                    &HostBlueFieldRules::default(),
                 );
                 (matches.expected_total, matches.matched_dpus.len())
             },

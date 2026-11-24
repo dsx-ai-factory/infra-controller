@@ -4,8 +4,10 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -498,6 +500,7 @@ func TestInstanceSQLDAO_GetByID(t *testing.T) {
 		id                             uuid.UUID
 		instance                       *Instance
 		paramRelations                 []string
+		forUpdate                      bool
 		expectedError                  bool
 		expectedErrVal                 error
 		expectedTenant                 bool
@@ -555,10 +558,26 @@ func TestInstanceSQLDAO_GetByID(t *testing.T) {
 			expectedMachine:                true,
 			expectedOperatingSystem:        true,
 		},
+		{
+			desc:                           "GetById for update with supported relations",
+			id:                             i1.ID,
+			instance:                       i1,
+			paramRelations:                 []string{TenantRelationName, InfrastructureProviderRelationName, SiteRelationName, InstanceTypeRelationName, VpcRelationName, MachineRelationName, OperatingSystemRelationName, NetworkSecurityGroupRelationName},
+			forUpdate:                      true,
+			expectedError:                  false,
+			expectedTenant:                 true,
+			expectedInfrastructureProvider: true,
+			expectedSite:                   true,
+			expectedInstanceType:           true,
+			expectedNetworkSecurityGroup:   true,
+			expectedVpc:                    true,
+			expectedMachine:                true,
+			expectedOperatingSystem:        true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := isd.GetByID(ctx, nil, tc.id, tc.paramRelations)
+			got, err := isd.GetByID(ctx, nil, tc.id, tc.paramRelations, tc.forUpdate)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if tc.expectedError {
 				assert.Equal(t, tc.expectedErrVal, err)
@@ -1000,6 +1019,84 @@ func TestInstanceSQLDAO_GetAll_AggregatedStatusFilter(t *testing.T) {
 	errorIDs := []uuid.UUID{errorMatches[0].ID, errorMatches[1].ID}
 	assert.Contains(t, errorIDs, powerErrorInstance.ID)
 	assert.Contains(t, errorIDs, lifecycleErrorInstance.ID)
+}
+
+func TestInstanceSQLDAO_GetAllIDs(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceInitDB(t)
+	defer dbSession.Close()
+	testInstanceSetupSchema(t, dbSession)
+
+	ip := testInstanceBuildInfrastructureProvider(t, dbSession, "testIP")
+	site := testInstanceBuildSite(t, dbSession, ip, "testSite")
+	site2 := testInstanceBuildSite(t, dbSession, ip, "testSite2")
+	tenant := testInstanceBuildTenant(t, dbSession, "testTenant1")
+	vpc := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
+	vpc2 := testInstanceBuildVpc(t, dbSession, ip, site2, tenant, "testVpc2")
+	user := testInstanceBuildUser(t, dbSession, "testUser")
+	isd := NewInstanceDAO(dbSession)
+
+	createInstance := func(name string, site *Site, vpc *Vpc) uuid.UUID {
+		t.Helper()
+		instance, err := isd.Create(ctx, nil, InstanceCreateInput{
+			Name:                     name,
+			TenantID:                 tenant.ID,
+			InfrastructureProviderID: ip.ID,
+			SiteID:                   site.ID,
+			VpcID:                    vpc.ID,
+			Status:                   InstanceStatusReady,
+			CreatedBy:                user.ID,
+		})
+		require.NoError(t, err)
+		return instance.ID
+	}
+
+	siteInstanceIDs := []uuid.UUID{createInstance("instance-1", site, vpc), createInstance("instance-2", site, vpc)}
+	slices.SortFunc(siteInstanceIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	createInstance("instance-3", site2, vpc2)
+	require.NoError(t, isd.Delete(ctx, nil, createInstance("instance-4", site, vpc)))
+
+	// Two Interfaces in the VPC join the same Instance twice.
+	ifcd := NewInterfaceDAO(dbSession)
+	for range 2 {
+		_, err := ifcd.Create(ctx, nil, InterfaceCreateInput{
+			InstanceID:      siteInstanceIDs[0],
+			VpcID:           &vpc.ID,
+			VpcIPFamilyMode: cutil.GetPtr(InterfaceVpcIPFamilyModeIPv4Only),
+			Status:          InterfaceStatusPending,
+			CreatedBy:       user.ID,
+		})
+		require.NoError(t, err)
+	}
+
+	tests := []struct {
+		desc     string
+		filter   InstanceFilterInput
+		expected []uuid.UUID
+	}{
+		{
+			desc:     "Site filter excludes other Sites and soft-deleted Instances",
+			filter:   InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteInstanceIDs,
+		},
+		{
+			desc:     "VPC filter returns each Instance once",
+			filter:   InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}},
+			expected: siteInstanceIDs,
+		},
+		{
+			desc:     "no matching Instances returns an empty slice",
+			filter:   InstanceFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []uuid.UUID{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := isd.GetAllIDs(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
 }
 
 func TestInstanceSQLDAO_GetAll(t *testing.T) {
@@ -2747,6 +2844,12 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := isd.GetByID(ctx, nil, tc.id, nil, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := isd.Update(ctx, nil,
 				InstanceUpdateInput{
 					InstanceID: tc.id,
@@ -2855,9 +2958,7 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.expectedTpmEkCertificate, *got.TpmEkCertificate)
 				}
 
-				if got.Updated.String() == tc.instance.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
@@ -3203,7 +3304,7 @@ func TestInstanceSQLDAO_Delete(t *testing.T) {
 			err := isd.Delete(ctx, nil, tc.id)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
-				tmp, err := isd.GetByID(ctx, nil, tc.id, nil)
+				tmp, err := isd.GetByID(ctx, nil, tc.id, nil, false)
 				assert.NotNil(t, err)
 				assert.Nil(t, tmp)
 			}

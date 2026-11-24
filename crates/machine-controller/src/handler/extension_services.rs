@@ -23,7 +23,7 @@ use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use config_version::Versioned;
-use db::extension_service as db_extension_service;
+use db::{TransactionVending as _, extension_service as db_extension_service};
 use eyre::eyre;
 use itertools::Itertools;
 use model::extension_service::{
@@ -183,10 +183,7 @@ pub(super) async fn get_extension_service_types_for_instance(
         .map(|config| config.service_id)
         .unique()
         .collect_vec();
-    let services = {
-        let mut connection = db_pool.acquire().await?;
-        db_extension_service::find_by_ids(&mut connection, &service_ids, false, false).await?
-    };
+    let services = db_extension_service::find_by_ids(db_pool, &service_ids, false).await?;
     let service_types: HashMap<_, _> = services
         .into_iter()
         .map(|service| (service.id, service.service_type))
@@ -370,7 +367,10 @@ async fn persist_dpf_helm_chart_placement_observation(
             .collect(),
     };
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::machine::update_extension_service_status_observation(
         txn.as_mut(),
         &dpu_id,
@@ -379,7 +379,9 @@ async fn persist_dpf_helm_chart_placement_observation(
     )
     .await?
     .check_applied()?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     Ok(observation)
 }
@@ -459,8 +461,9 @@ fn dpf_helm_chart_placement_label_changes(
         .collect()
 }
 
-/// Removes endpoint-free terminated attachments and reports whether the Instance configuration
-/// changed, allowing callers to commit only real cleanup writes.
+/// Removes terminated attachments that no service-interface or VPC-local interface record names
+/// and reports whether the Instance configuration changed, allowing callers to commit only real
+/// cleanup writes.
 pub(super) async fn cleanup_terminated_extension_services(
     instance: &InstanceSnapshot,
     extension_services_status: &mut InstanceExtensionServicesStatus,
@@ -479,12 +482,20 @@ pub(super) async fn cleanup_terminated_extension_services(
     // network child, HBN state, and DHCP state have all been removed.
     // TODO(#6133): Reclaim the attachment and endpoint together after observed
     // service-network cleanup has been persisted.
-    let retained_attachment_ids = instance
-        .config
-        .network
+    // A VPC-local record names its attachment the same way, and snapshot loading
+    // rejects a record whose attachment is gone, so whatever removes the record
+    // releases the attachment rather than this cleanup.
+    let network = &instance.config.network;
+    let retained_attachment_ids = network
         .service_interfaces
         .iter()
         .map(|service_interface| service_interface.attachment_id)
+        .chain(
+            network
+                .vpc_local_interfaces
+                .iter()
+                .map(|vpc_local_interface| vpc_local_interface.attachment_id),
+        )
         .collect::<HashSet<_>>();
     let reclaimable_service_keys = terminated_service_keys
         .into_iter()

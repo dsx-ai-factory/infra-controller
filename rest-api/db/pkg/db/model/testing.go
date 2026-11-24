@@ -37,6 +37,9 @@ func TestSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create Network Security Group table
 	err = dbSession.DB.ResetModel(context.Background(), (*NetworkSecurityGroup)(nil))
 	assert.Nil(t, err)
+	// create DHCP Option Set table
+	err = dbSession.DB.ResetModel(context.Background(), (*DhcpOptionSet)(nil))
+	assert.Nil(t, err)
 	// create NVLink Logical Partition table
 	err = dbSession.DB.ResetModel(context.Background(), (*NVLinkLogicalPartition)(nil))
 	assert.Nil(t, err)

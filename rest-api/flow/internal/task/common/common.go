@@ -14,6 +14,7 @@ import (
 type TaskType string
 
 const (
+	TaskTypeComponentReset    TaskType = "component_reset"
 	TaskTypeUnknown           TaskType = "unknown"
 	TaskTypeInjectExpectation TaskType = "inject_expectation"
 	TaskTypePowerControl      TaskType = "power_control"
@@ -23,20 +24,11 @@ const (
 )
 
 func TaskTypeFromString(s string) TaskType {
-	switch s {
-	case TaskTypeInjectExpectation.String():
-		return TaskTypeInjectExpectation
-	case TaskTypePowerControl.String():
-		return TaskTypePowerControl
-	case TaskTypeFirmwareControl.String():
-		return TaskTypeFirmwareControl
-	case TaskTypeBringUp.String():
-		return TaskTypeBringUp
-	case TaskTypeDecommission.String():
-		return TaskTypeDecommission
-	default:
-		return TaskTypeUnknown
+	tt := TaskType(s)
+	if tt.IsValid() {
+		return tt
 	}
+	return TaskTypeUnknown
 }
 
 func (tt TaskType) IsZero() bool {
@@ -44,7 +36,13 @@ func (tt TaskType) IsZero() bool {
 }
 
 func (tt TaskType) IsValid() bool {
-	return TaskTypeFromString(tt.String()) != TaskTypeUnknown
+	switch tt {
+	case TaskTypeComponentReset, TaskTypeInjectExpectation, TaskTypePowerControl,
+		TaskTypeFirmwareControl, TaskTypeBringUp, TaskTypeDecommission:
+		return true
+	default:
+		return false
+	}
 }
 
 func (tt TaskType) String() string {
@@ -110,6 +108,8 @@ type OperationRuleListOptions struct {
 // TaskAttributes holds flexible task metadata stored as a single jsonb
 // column. New fields can be added here without requiring a DB migration.
 type TaskAttributes struct {
+	// TraceID correlates execution attempts, including after queueing or restart.
+	TraceID string `json:"trace_id,omitempty"`
 	// ComponentsByType maps each targeted component type to its UUIDs.
 	// Nil means the task targets no specific components.
 	ComponentsByType map[devicetypes.ComponentType][]uuid.UUID `json:"components_by_type,omitempty"` //nolint:lll

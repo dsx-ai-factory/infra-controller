@@ -78,13 +78,47 @@ If Instances are in different Racks, they will not be able to share memory with 
 
 If a NICo user wants to update an Instance to change NVLink Logical Partition assignment for its GPUs, they can do so by calling the `PATCH /v2/org/{org}/nico/instance/{instance-id}` [REST API endpoint](api:PATCH/v2/org/:org/nico/instance/:instanceId).
 
-The user can specify the NVLink Logical Partition ID for each GPU in the Instance by passing the `nvLinkInterfaces` list.
+Omit `nvLinkInterfaces` or send `null` to keep the current assignments. A supplied
+list defines the complete set of desired assignments. Include the
+`deviceInstance` and `nvLinkLogicalPartitionId` for each assignment you want to
+keep. Omit a GPU from the list to remove its assignment. Send `[]` to clear all
+assignments where the VPC rules permit it.
 
-If Instance's VPC has a default NVLink Logical Partition, no changes to the NVLink Logical Partition assignment are allowed.
+If the VPC has a default NVLink Logical Partition and the Instance has NVLink
+Interfaces with a status other than `Deleting`, a supplied list must match all
+of those GPU-to-partition assignments in any order. A change to the set returns
+HTTP 400. Exact matches still undergo NVLink validation. An accepted repeat
+preserves the assignments and sets the Instance status to `Configuring`. If the
+Instance has no NVLink Interfaces outside `Deleting`, it can accept new
+assignments.
 
-### Removing Instances from a Logical Partition
+### Remove GPU Partition Assignments
 
-If a user de-provisions an Instance, NICo will remove the Instance GPUs from the NVLink Partition.
+Change assignments while the Instance is `Ready`, before requesting
+deprovisioning. Where the VPC permits replacement, this request assigns GPU 0
+to the specified partition and requests removal of all other assignments.
+
+```json
+{
+  "nvLinkInterfaces": [
+    {
+      "deviceInstance": 0,
+      "nvLinkLogicalPartitionId": "505e07bc-86bf-489a-807d-92dc8b80e6ff"
+    }
+  ]
+}
+```
+
+Where the VPC permits replacement, clear all assignments with `{"nvLinkInterfaces": []}`.
+
+A GPU can remain in its previous physical partition after the REST API stops
+returning its `Deleting` interface. Use the
+[per-machine placement check](#verifying-a-tenants-nvlink-placement) to inspect the
+last observed placement. To confirm removal, ask your site operator to verify
+that the previous physical partition's current NMX-C membership excludes the
+affected GPU.
+
+Deprovisioning an Instance also removes its GPU assignments.
 
 ### Deleting an NVLink Logical Partition
 
@@ -92,21 +126,22 @@ A NICo user can call [`DELETE /v2/org/{org}/nico/nvlink-logical-partition/{nvLin
 
 ### Retrieving NVLink Partition Information for an Instance
 
-A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve information about an Instance. As part of the `200` response body, NICo will return a `nvLinkInterfaces` list that includes both the `nvLinkLogicalPartitionId` and `nvLinkDomainId` for each GPU in the Instance.
+A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve the Instance's stored `nvLinkInterfaces`. Each record identifies the GPU by `deviceInstance` and its assigned partition by `nvLinkLogicalPartitionId`. The `nvLinkDomainId` field is null until the physical domain is known. A GPU can appear more than once while earlier bindings are `Deleting`. That status means REST has marked the binding for removal. To confirm physical removal, check the previous partition's current NMX-C membership.
 
 ### Default NVLink Logical Partition for a VPC
 
-**It's an optional default, not a constraint.**
+**A VPC default is optional.**
 VPCs can be created with or without a default NVLink Logical Partition.
 
-It is optional on both `POST .../vpc` (Create VPC) and `PATCH .../vpc/{vpcId}` (Update VPC).
+**How the VPC default works**
 
-**What setting it on a VPC actually does**
-It's a convenience default for instance creation. When `nvLinkLogicalPartitionId` is set on the VPC, you don't have to specify `nvLinkInterfaces` on `POST .../instance` (Create Instance) or `POST .../instance/batch` (Batch Create Instances) — the API will auto-populate the per-GPU NVLink Interfaces to reference that VPC's NVLink Logical Partition.
-That's the entire effect. It does not reserve or lock the NVLink Logical Partition to the VPC.
+When `nvLinkLogicalPartitionId` is set on the VPC, you can omit `nvLinkInterfaces`
+from Create Instance and Batch Create Instances requests. NICo assigns every
+NVLink-capable GPU to the VPC's NVLink Logical Partition.
 
-**No exclusivity between VPCs**
-We intentionally don't restrict an NVLink Logical Partition to a single VPC. The same `nvLinkLogicalPartitionId` may be set on multiple VPCs. This is deliberate, to preserve flexibility in how you plan networking and NVLink partitioning.
+The default also restricts changes to existing GPU assignments on Instance
+updates. Multiple VPCs can use the same NVLink Logical Partition. The Instance
+rows in the table below apply to creation.
 
 **You can also manage NVLink at the Instance level**
 If you want finer control, leave `nvLinkLogicalPartitionId` unset on the VPC and specify `nvLinkInterfaces` directly on Create Instance — each entry binds a specific `deviceInstance` (GPU) to an explicit `nvLinkLogicalPartitionId`, so different GPUs in the same instance (or across Instances in the same VPC) can operate in different NVLink Logical Partitions.
@@ -115,9 +150,9 @@ If you want finer control, leave `nvLinkLogicalPartitionId` unset on the VPC and
 
 | Configuration | Behavior |
 | ------------- | -------- |
-| VPC has `nvLinkLogicalPartitionId`, Instance creation omits `nvLinkInterfaces` | API auto-populates all GPUs to the VPC's NVLink Logical Partition |
-| VPC has `nvLinkLogicalPartitionId`, Instance specifies `nvLinkInterfaces` | Instance-level values must align with VPC's Partition, rendering the specification redundant |
-| VPC doesn't have `nvLinkLogicalPartitionId` set, Instance specifies `nvLinkInterfaces` | Per-GPU NVLink Logical Partition assignments are used |
+| VPC has `nvLinkLogicalPartitionId`, Instance creation omits `nvLinkInterfaces` or sends an empty list | API auto-populates all GPUs to the VPC's NVLink Logical Partition |
+| VPC has `nvLinkLogicalPartitionId`, Instance creation specifies `nvLinkInterfaces` as a non-empty list | NICo assigns only the GPUs in that list. Each entry must reference the VPC’s default partition. |
+| VPC doesn't have `nvLinkLogicalPartitionId` set, Instance creation specifies `nvLinkInterfaces` | Per-GPU NVLink Logical Partition assignments are used |
 | Same `nvLinkLogicalPartitionId` on multiple VPCs | Allowed — no implicit exclusivity |
 
 ### How NICo Reconciles NVLink State
@@ -139,9 +174,23 @@ Each reconciliation pass does the following:
    alerts block normal allocation while they remain in aggregate host health.
    See the linked probe contract for recovery, hardware replacement, manual
    removal, and allocation exceptions.
+1. Raises or clears the per-rack
+   [`NmxcUnreachable`](../architecture/health/health_probe_ids.md#nmxcunreachable)
+   health report. A rack whose NMX-C could not be used for
+   `nvlink_config.partition_monitor_unreachable_alert_after` consecutive passes
+   (default `3`) gets a `Hardware` alert naming the endpoint and the failing
+   step; the first pass that reaches NMX-C again clears it. The alert does not
+   block allocations.
 1. Compares observed state against desired state.
 1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
+1. Removes NICo's record of any stale physical partition in the chassis's domain
+   that NMX-C has not listed on two consecutive checked passes unless NMX-C lists
+   it again before the pass ends.
+1. After every chassis has been checked, removes NICo's record of any physical
+   partition whose NVLink domain no managed host belongs to, such as after NMX-C
+   restarts with a new domain UUID. Nothing is removed this way while any host's
+   domain is unknown for the pass.
 1. Updates per-machine GPU status observations in the NICo database. The
    per-instance `configs_synced.nvlink` field is derived from these
    observations and is what gates the instance's `Ready` state.
@@ -303,6 +352,9 @@ described below do not fit the site, under `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+# Consecutive passes a rack's NMX-C must be unusable before its
+# NmxcUnreachable alert is raised; the first reachable pass clears it.
+partition_monitor_unreachable_alert_after = 3
 
 # TLS material for NMX-C. The CA path defaults when nico-api finds a
 # ca.crt (see below); otherwise set it, because the certificate monitor
@@ -315,13 +367,21 @@ nmx_c_tls_authority        = "nmxc.example.internal"
 nmx_c_endpoint_port        = 9370
 
 allow_insecure = false
+
+# TCP reachability checks of ready switches, raising the SwitchUnreachable
+# (NVOS, every switch) and NmxtUnreachable (NMX-T, primary switches) switch
+# health alerts after consecutive failures. They run whenever `enabled` is
+# true above; set `enabled` here to run or stop them independently.
+[nvlink_config.switch_reachability]
+run_interval = "60s"
+unreachable_alert_after = 3
 ```
 
 | Field | Purpose |
 | ----- | ------- |
 | `nmx_c_tls_ca_cert_path` | PEM containing the CAs that verify NMX-C over HTTPS. It is the only trust source: neither the partition monitor nor the certificate monitor uses the system trust store |
-| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
-| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
+| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C. Set it together with `nmx_c_tls_client_key_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
+| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above. Set it together with `nmx_c_tls_client_cert_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
@@ -342,13 +402,13 @@ schedule the change accordingly.
 When either setting is `true`, `nico-api` fills in unset TLS settings at
 startup:
 
-- **Client certificate, key, and authority.** When none of the four
+* **Client certificate, key, and authority.** When none of the four
   `nmx_c_tls_*` keys is set, `nico-api` uses `tls.crt` and `tls.key` from the
   nico-api Helm chart's `nvSwitchTls.nicoClient` mount,
   `/var/run/secrets/nvswitch-client`, and sets `nmx_c_tls_authority` to
   `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
   defaults.
-- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+* **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
   over HTTPS, `nico-api` uses `ca.crt` from that mount, or else
   `/var/run/secrets/nico-roots/ca.crt`. This applies regardless of the other
   keys.
@@ -419,7 +479,7 @@ below should be repeatable as a checklist.
 1. **Per-instance configuration has converged.** The instance's
    `InstanceStatus` reports `configs_synced.nvlink = true` and the
    `nvLinkInterfaces` list on the instance shows the expected
-   `nvLinkLogicalPartitionId` and `nvLinkDomainId` for each GPU.
+   `nvLinkLogicalPartitionId` and `nvLinkDomainId` for each desired assignment.
 1. **Per-machine GPU placement.**
 
    ```bash

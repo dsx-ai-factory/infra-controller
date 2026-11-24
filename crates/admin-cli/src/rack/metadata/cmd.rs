@@ -163,7 +163,7 @@ async fn metadata_from_expected_rack(
         metadata.labels = expected_rack_metadata.labels;
     } else {
         if !expected_rack_metadata.name.is_empty()
-            && (metadata.name.is_empty() || metadata.name == cmd.rack.to_string())
+            && (metadata.name.is_empty() || metadata.name == cmd.rack.as_str())
         {
             metadata.name = expected_rack_metadata.name;
         };

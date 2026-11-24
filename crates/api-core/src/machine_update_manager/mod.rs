@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use db::TransactionVending as _;
 pub(crate) mod dpu_nic_firmware;
 pub(crate) mod dpu_nic_firmware_metrics;
 mod host_firmware;
@@ -29,7 +30,7 @@ use std::time::Duration;
 
 use carbide_machine_controller::config::FirmwareGlobal;
 use carbide_machine_controller::dpf::DpfOperations;
-use carbide_utils::managed_loop::{self, LoopManager};
+use carbide_utils::managed_loop::{LoopManager, ManagedLoopIteration};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::HostMachineId;
 use db::Transaction;
@@ -59,6 +60,7 @@ use crate::{CarbideError, CarbideResult};
 /// * `max_concurrent_machine_updates` the maximum number of updates allowed across all modules
 /// * `machine_update_run_interval` how often the manager calls the modules to start updates
 pub(crate) struct MachineUpdateManager {
+    instrumentation: carbide_instrument::Instrumentation,
     database_connection: PgPool,
     max_concurrent_machine_updates: MaxConcurrentUpdates,
     run_interval: Duration,
@@ -79,8 +81,10 @@ impl MachineUpdateManager {
         config: Arc<CarbideConfig>,
         modules: Vec<Box<dyn MachineUpdateModule>>,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         MachineUpdateManager {
+            instrumentation,
             database_connection,
             max_concurrent_machine_updates: config.max_concurrent_machine_updates(),
             run_interval: Duration::from_secs(config.machine_update_run_interval_secs()),
@@ -98,11 +102,12 @@ impl MachineUpdateManager {
         meter: opentelemetry::metrics::Meter,
         work_lock_manager_handle: WorkLockManagerHandle,
         dpf: Option<Arc<dyn DpfOperations>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         let mut update_modules = vec![];
 
         if let Some(dpu_nic_firmware) =
-            DpuNicFirmwareUpdate::new(config.clone(), meter.clone(), dpf)
+            DpuNicFirmwareUpdate::new(config.clone(), meter.clone(), dpf, instrumentation.clone())
         {
             update_modules.push(Box::new(dpu_nic_firmware) as Box<dyn MachineUpdateModule>);
         }
@@ -110,14 +115,18 @@ impl MachineUpdateManager {
         let mut machine_update_metrics = MachineUpdateManagerMetrics::new();
         machine_update_metrics.register_callbacks(&meter);
 
-        if let Some(host_firmware) =
-            HostFirmwareUpdate::new(config.clone(), meter.clone(), config.get_firmware_config())
-        {
+        if let Some(host_firmware) = HostFirmwareUpdate::new(
+            config.clone(),
+            meter.clone(),
+            config.get_firmware_config(),
+            instrumentation.clone(),
+        ) {
             update_modules.push(Box::new(host_firmware));
         }
         update_modules.push(Box::new(nic_firmware::NicFirmwareUpdate));
 
         MachineUpdateManager {
+            instrumentation,
             database_connection,
             max_concurrent_machine_updates: config.max_concurrent_machine_updates(),
             run_interval: Duration::from_secs(config.machine_update_run_interval_secs()),
@@ -155,7 +164,10 @@ impl MachineUpdateManager {
         loop {
             let tick = timer.tick();
             let result = self.run_single_iteration().await;
-            managed_loop::record_iteration(LoopManager::MachineUpdateManager, &result);
+            self.instrumentation.emit(ManagedLoopIteration::from_result(
+                LoopManager::MachineUpdateManager,
+                &result,
+            ));
 
             tokio::select! {
                 _ = tick.sleep() => {},
@@ -223,12 +235,16 @@ impl MachineUpdateManager {
 
         let mut txn = update_transaction(&self.database_connection, &work_lock).await?;
 
+        let mut completion_events = Vec::new();
         for update_module in self.update_modules.iter() {
-            update_module.clear_completed_updates(&mut txn).await?;
+            completion_events.extend(update_module.clear_completed_updates(&mut txn).await?);
         }
         txn.commit().await?;
+        for event in completion_events {
+            self.instrumentation.emit(event);
+        }
 
-        let mut txn = Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
 
         // current host machines in maintenance
         let mut current_updating_machines = HashSet::<HostMachineId>::new();
@@ -282,7 +298,7 @@ impl MachineUpdateManager {
         let current_updating_count = current_updating_machines.len();
 
         //refresh snapshots for metrics
-        let mut txn = Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let snapshots = self.get_all_snapshots(&mut txn).await?;
         txn.commit().await?;
 
@@ -304,6 +320,7 @@ impl MachineUpdateManager {
                 .store(max_concurrent_updates as u64, Ordering::Relaxed);
         }
 
+        self.instrumentation.emit(metrics::CompletedPass);
         Ok(())
     }
 
@@ -332,11 +349,11 @@ impl MachineUpdateManager {
 /// duration are not bounded here. A worker replaced by a takeover is rejected;
 /// nominal lease expiry without takeover still permits the transaction.
 /// Keep filesystem and network work outside this transaction.
-async fn update_transaction<'a>(
-    pool: &'a PgPool,
+async fn update_transaction(
+    pool: &PgPool,
     work_lock: &WorkLock,
-) -> CarbideResult<Transaction<'a>> {
-    let mut txn = Transaction::begin(pool).await?;
+) -> CarbideResult<Transaction<'static>> {
+    let mut txn = pool.txn_begin().await?;
     sqlx::query(
         "SELECT set_config('statement_timeout', \
             LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
@@ -346,7 +363,7 @@ async fn update_transaction<'a>(
     .execute(txn.as_pgconn())
     .await
     .map_err(|error| db::DatabaseError::query("set machine update statement timeout", error))?;
-    work_lock.fence_transaction(txn.as_mut()).await?;
+    work_lock.fence_transaction(&mut txn).await?;
     Ok(txn)
 }
 
@@ -355,8 +372,6 @@ pub(crate) fn host_on_disable_list(
     firmware_global: &FirmwareGlobal,
     host_id: &HostMachineId,
 ) -> bool {
-    firmware_global
-        .host_disable_autoupdate
-        .iter()
-        .any(|listed| *listed == host_id.to_string())
+    let disabled_hosts = &firmware_global.host_disable_autoupdate;
+    !disabled_hosts.is_empty() && disabled_hosts.contains(&host_id.to_string())
 }
