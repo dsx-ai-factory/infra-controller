@@ -231,8 +231,12 @@ For optional REST fields and batch JSON examples, use [Ingesting Hosts (REST API
 
 ### Select the host inventory serial number
 
-Site Explorer checks the serial declared by ExpectedMachine against the stored
-Redfish exploration report. On supported GB200 and Vera Rubin compute trays,
+When you register an Expected Machine, set `chassisSerialNumber` to the
+expected host inventory serial. Use the selection and fallback rules below to
+identify the correct Redfish value. Site Explorer compares it with the stored
+exploration report.
+
+On supported GB200 and Vera Rubin compute trays,
 built-in rules identify the chassis FRU in `Chassis_0/Assembly` by its name
 and model. These rules distinguish the tray from board and product FRUs even
 when their models are identical.
