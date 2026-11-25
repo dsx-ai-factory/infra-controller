@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+suite: NTP container security context migration
+templates:
+  - statefulset.yaml
+tests:
+  - it: keeps the hardcoded baseline with chart defaults
+    set:
+      replicas: 1
+      global: {}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.capabilities
+
+  - it: honors the deprecated securityContext key when containerSecurityContext is unset
+    # The chart default is null; an upgrading operator who only sets the old
+    # securityContext key must still get its values — kindIs "invalid" on the
+    # null default routes the fallback.
+    set:
+      replicas: 1
+      global: {}
+      securityContext:
+        capabilities:
+          add: [SYS_TIME]
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add[0]
+          value: SYS_TIME
+
+  - it: prefers containerSecurityContext over the deprecated key
+    set:
+      replicas: 1
+      global: {}
+      securityContext:
+        capabilities:
+          add: [SYS_TIME]
+      containerSecurityContext:
+        capabilities:
+          add: [CHOWN]
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add[0]
+          value: CHOWN
+
+  - it: an explicit empty map drops extra settings without falling back
+    # An empty map is a valid kind, so the deprecated key must NOT be
+    # consulted — an operator nulling the capability keeps it nulled.
+    set:
+      replicas: 1
+      global: {}
+      securityContext:
+        capabilities:
+          add: [SYS_TIME]
+      containerSecurityContext: {}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.capabilities

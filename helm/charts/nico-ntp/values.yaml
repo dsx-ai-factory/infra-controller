@@ -62,11 +62,13 @@ podSecurityContext: {}
 
 ## Extra container security context, rendered after the always-applied
 ## `allowPrivilegeEscalation: false` baseline (chart-managed; an
-## allowPrivilegeEscalation key set here is ignored). Empty by default; no override is
+## allowPrivilegeEscalation key set here is ignored). Null by default; no override is
 ## needed on OpenShift restricted Security Context Constraints (SCC).
 ## Renamed from `securityContext` in this release; the old key is still honored
-## as a fallback for one release to allow a graceful migration.
-containerSecurityContext: {}
+## as a fallback for one release to allow a graceful migration. The default
+## must stay null (not an empty map): the fallback checks kindIs "invalid",
+## which an empty map never satisfies.
+containerSecurityContext: null
 
 nodeSelector: {}
 

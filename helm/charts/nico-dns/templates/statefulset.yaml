@@ -64,15 +64,16 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           ports:
-            # Keep the named container ports in sync with the listener: the
-            # Services route to service.targetPort (default the service port),
-            # so when targetPort moves (e.g. 5353 on OpenShift) the container
-            # port must follow or the names no longer describe the pod.
+            # Keep the named container ports in sync with the listener. The
+            # Services route to the resolved targetPort (per-entry override,
+            # then service.targetPort, then the entry's port), so the
+            # container port uses the same precedence and always describes
+            # where nico-dns binds.
             - name: udp
-              containerPort: {{ .Values.service.targetPort | default 53 }}
+              containerPort: {{ include "nico-dns.listenerPort" (dict "name" "udp" "context" $) }}
               protocol: UDP
             - name: tcp
-              containerPort: {{ .Values.service.targetPort | default 53 }}
+              containerPort: {{ include "nico-dns.listenerPort" (dict "name" "tcp" "context" $) }}
               protocol: TCP
             # Prometheus metrics endpoint; scraped via a PodMonitor (no Service).
             - name: metrics
