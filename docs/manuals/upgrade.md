@@ -253,8 +253,8 @@ If the rotation target is already version 1 or later, the local
 version 0 entry does not become current. If devices still use version 0, keep
 the copied local value unchanged after this ownership migration; later password
 changes must use coordinated BMC rotation so hardware and convergence records
-advance together. On DPF sites, follow the
-[shared credential rotation procedure](dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
+advance together. On DPF sites, meet the
+[shared credential rotation prerequisites](dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
 before staging a new target. See
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 

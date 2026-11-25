@@ -1398,8 +1398,11 @@ DPF provisions DPUs out-of-band over Redfish and needs the BMC password
 applied to the hardware. NICo uses the configured **site-wide BMC root**
 credential to create the `bmc-shared-password` Secret in the DPF operator
 namespace (`dpf-operator-system` by default). It retries every 60 seconds if
-bootstrap starts before the credential is available. Once the Secret exists,
-NICo keeps the original value across restarts and later site-wide rotations.
+bootstrap starts before the credential is available. NICo builds with shared
+Secret retention keep the original value across restarts and later site-wide
+rotations. Earlier builds copy a newly staged target password into the shared
+Secret even while DPUs still use the previous password. See the
+[shared Secret retention change](https://github.com/dsx-ai-factory/infra-controller/pull/9649).
 
 Configure it through a watched Kubernetes Secret, through the API, or by seeding
 the persistent credential store directly.
@@ -1493,11 +1496,14 @@ The BMC site-wide root seeds SuperNIC lockdown IKM version 0 only when that lock
 
 #### Rotate a DPU that uses the shared Secret
 
-For a NICo 2.5 upgrade with DPF 30.0.0 or later, keep the site-wide target
-fixed while rolling out the updated NICo API replicas. Older replicas can
-still replace the shared password when the target changes. If you upgrade
-DPF separately, restart the NICo API replicas after the DPF upgrade so they
-read the installed DPF version.
+<Warning>
+Before staging a new target on a DPF-managed NICo 2.5 site, upgrade DPF to
+30.0.0 or later and roll out a NICo build with shared Secret retention to every
+API replica. Keep the site-wide target fixed until the rollout finishes.
+</Warning>
+
+If you upgrade DPF separately, restart the NICo API replicas after the DPF
+upgrade so they read the installed DPF version.
 
 Existing DPUDevices keep using `bmc-shared-password` until their next BMC
 credential rotation. After the updated NICo API replicas are running, stage
