@@ -81,7 +81,7 @@ Instead, use
 [`credential rotate --type=bmc`](../manuals/nico-admin-cli/commands/credential/credential-rotate.md)
 to stage version 1 or later in the persistent backend and converge devices. On
 DPF sites, follow the
-[shared credential cutover](../manuals/dpf.md#verify-the-shared-to-per-dpu-cutover)
+[shared credential rotation procedure](../manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
 before staging a new target.
 
 ## Environment Source
@@ -168,7 +168,7 @@ start while their credential is absent. Registration that uses the shared
 password waits until NICo publishes the shared Secret. Once created, the
 shared Secret retains its original value. If the local v0 entry is lost,
 restore the original value. Follow the
-[shared credential cutover](../manuals/dpf.md#verify-the-shared-to-per-dpu-cutover)
+[shared credential rotation procedure](../manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
 before staging a new target. Use a Kubernetes Secret for credential material.
 Once rotation advances the target to version 1 or later, NICo reads that
 versioned credential from a persistent backend because the local-file schema

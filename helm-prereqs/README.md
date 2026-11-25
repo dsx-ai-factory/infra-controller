@@ -1637,7 +1637,7 @@ unversioned entry in Vault or Postgres. API add/delete operations for version 0
 are rejected in this mode, and a Vault import excludes that path. Use
 coordinated BMC rotation to advance to version 1 or later in the persistent
 backend. On DPF sites, follow the
-[shared credential cutover](../docs/manuals/dpf.md#verify-the-shared-to-per-dpu-cutover)
+[shared credential rotation procedure](../docs/manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
 before staging a new target.
 The file schema has no versioned BMC root key. Use a Secret, not a ConfigMap,
 for this credential. See
@@ -1652,7 +1652,7 @@ Registration that uses the shared password waits for
 failure, a present local v0 permits startup and retry. NICo creates the shared
 Secret once and keeps its value. If the local v0 entry is lost, restore the
 original value. For rotation, follow the
-[DPF shared credential cutover](../docs/manuals/dpf.md#verify-the-shared-to-per-dpu-cutover).
+[DPF shared credential rotation](../docs/manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret).
 
 Each `setup.sh` run removes the obsolete `dpf-set-bmc-root` Job and its
 `dpf-bmc-root-pw` and `dpf-admincli-cert` Secrets before installing DPF. This

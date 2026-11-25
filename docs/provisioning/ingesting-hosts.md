@@ -153,7 +153,7 @@ source or, when it is absent there, the watched Kubernetes Secret; the API
 rejects the backend write with HTTP `412 Precondition Failed`. After ingestion
 starts, keep local version 0 unchanged and use coordinated BMC rotation for
 password changes. On DPF sites, follow the
-[shared credential cutover](../manuals/dpf.md#verify-the-shared-to-per-dpu-cutover)
+[shared credential rotation procedure](../manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
 before staging a new target.
 
 ```bash

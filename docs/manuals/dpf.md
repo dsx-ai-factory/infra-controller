@@ -459,15 +459,14 @@ and immutability match and it is not being deleted. A conflicting Secret blocks
 registration until you reset or force-delete the host and let credential Secret
 cleanup finish.
 
-With the same DPF version requirement, NICo uses DPF to adopt and rotate BMC
-root credentials for DPUs on DPF-ingested hosts. The host BMC continues to use
-Redfish. DPU BMC root rotation and automatic adoption require DPF to be enabled.
+With the same DPF version requirement, NICo uses DPF to rotate BMC root
+credentials for DPUs on DPF-ingested hosts when DPF is enabled. On BF4, DPF also
+applies the password to its `service` account when the BMC exposes that account
+through Redfish. The host BMC continues to use Redfish.
 
 Force deletion can interrupt a versioned rotation. When DPF might have changed
 the root password, NICo preserves the recovery credentials and verifies the
-active password before re-ingestion. During automatic adoption, both Secret
-references use the same root password. On BF4, DPF also applies this password
-to its `service` account when the BMC exposes that account through Redfish.
+active password before re-ingestion.
 </Note>
 
 <Note>
@@ -1439,8 +1438,7 @@ and rejects API add/delete operations for v0 with instructions to update the
 local source. After any managed device begins using version 0, keep that local
 value unchanged: replacing it does not update BMC hardware or convergence
 records. Use coordinated BMC credential rotation to advance to version 1 or
-later. On DPF sites, [verify the cutover](#verify-the-shared-to-per-dpu-cutover)
-before advancing the target.
+later. For DPF sites, see [Rotate a DPU that uses the shared Secret](#rotate-a-dpu-that-uses-the-shared-secret).
 The versioned credential then comes from the persistent backend; the file
 schema has no versioned BMC root key. See
 [Credential Sources](../configuration/credential-sources.md#precedence).
@@ -1493,25 +1491,29 @@ present.
 The BMC site-wide root seeds SuperNIC lockdown IKM version 0 only when that lockdown credential is absent. Lockdown IKM and BMC credentials then remain independent. Before locking a card, follow the [IKM security requirements](../architecture/supernic_lockdown_key_management.md#key-derivation-function-kdf). Preserve the [credential and Core database backups required for recovery](../architecture/supernic_lockdown_key_management.md#backup-and-recovery).
 </Note>
 
-#### Verify the shared-to-per-DPU cutover
+#### Rotate a DPU that uses the shared Secret
 
 For a NICo 2.5 upgrade with DPF 30.0.0 or later, keep the site-wide target
 fixed while rolling out the updated NICo API replicas. Older replicas can
-still replace the shared password when the target changes.
+still replace the shared password when the target changes. If you upgrade
+DPF separately, restart the NICo API replicas after the DPF upgrade so they
+read the installed DPF version.
 
-When a DPF-ingested host is in `Ready`, NICo checks each DPU whose per-device
-Secret has yet to be confirmed. If the DPUDevice uses the shared Secret, NICo
-copies that password into an immutable per-DPU Secret and updates the
-DPUDevice reference. DPF confirms adoption. The host stays in `Ready` while
-NICo retries pending adoption, and NICo stops checking each DPU after recording
-its confirmation. This happens automatically when DPF is enabled, even when
-site-wide automatic BMC rotation is disabled.
+Existing DPUDevices keep using `bmc-shared-password` until their next BMC
+credential rotation. After the updated NICo API replicas are running, stage
+the next site-wide target with
+[`credential rotate --type=bmc`](nico-admin-cli/commands/credential/credential-rotate.md).
 
-Confirm that `spec.bmcCredentialSecretName` and `status.bmcCredentialSecretName`
-name the same per-DPU Secret and that `BMCCredentialsReady` is `True` for the
-current generation. The DPUDevice fields track this cutover independently of the
-device's BMC rotation version.
-Stage a new site-wide target after the affected DPUDevices have adopted.
+- With `bmc_rotation_enabled = true`, eligible DPUs converge automatically when
+  their hosts are idle in `Ready`.
+- With `bmc_rotation_enabled = false` (the default), request convergence with
+  [`credential force-bmc set`](nico-admin-cli/commands/credential/credential-force-bmc-set.md)
+  using the DPU's BMC MAC address.
+
+On rotation, DPF moves the DPUDevice directly to a per-DPU Secret for the
+target version. Confirm that `spec.bmcCredentialSecretName` and
+`status.bmcCredentialSecretName` name that same Secret and that
+`BMCCredentialsReady` is `True` for the current generation.
 
 ### 3.7. Mark hosts as DPF-managed in expected machines
 
