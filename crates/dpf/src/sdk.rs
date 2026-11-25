@@ -227,7 +227,7 @@ pub struct DpfSdk<R, L = NoLabels> {
     labeler: L,
     operator_version: semver::Version,
     shared_bmc_password_ready: Arc<AtomicBool>,
-    _bmc_refresh_guard: Option<tokio_util::sync::DropGuard>,
+    _bmc_bootstrap_guard: Option<tokio_util::sync::DropGuard>,
 }
 
 impl<R, L> DpfSdk<R, L> {
@@ -248,7 +248,7 @@ pub struct DpfSdkBuilder<'a, R, P, L = NoLabels> {
     namespace: String,
     labeler: L,
     bmc_password_provider: P,
-    bmc_password_refresh_interval: Option<Duration>,
+    bmc_secret_retry_interval: Option<Duration>,
     join_set: Option<&'a mut tokio::task::JoinSet<()>>,
 }
 
@@ -259,7 +259,7 @@ impl<R, P> DpfSdkBuilder<'_, R, P> {
             namespace: namespace.into(),
             labeler: NoLabels,
             bmc_password_provider,
-            bmc_password_refresh_interval: None,
+            bmc_secret_retry_interval: None,
             join_set: None,
         }
     }
@@ -273,14 +273,14 @@ impl<'a, R, P, L> DpfSdkBuilder<'a, R, P, L> {
             namespace: self.namespace,
             labeler,
             bmc_password_provider: self.bmc_password_provider,
-            bmc_password_refresh_interval: self.bmc_password_refresh_interval,
+            bmc_secret_retry_interval: self.bmc_secret_retry_interval,
             join_set: self.join_set,
         }
     }
 
-    // enables background refresh of the BMC password.
-    pub fn with_bmc_password_refresh_interval(mut self, interval: Duration) -> Self {
-        self.bmc_password_refresh_interval = Some(interval);
+    /// Enables background retries while the shared BMC Secret is missing.
+    pub fn with_bmc_secret_retry_interval(mut self, interval: Duration) -> Self {
+        self.bmc_secret_retry_interval = Some(interval);
         self
     }
 
@@ -298,24 +298,11 @@ where
     R: K8sConfigRepository + DpfOperatorConfigRepository + 'static,
     P: BmcPasswordProvider + 'static,
 {
-    /// Fetch password, write the K8s BMC secret, spawn refresh task,
-    /// and return the constructed SDK.
+    /// Publish the shared BMC Secret once. A fresh site can start before an
+    /// operator sets the site-wide BMC credential through the API. In that case
+    /// the bootstrap task retries until the Secret exists.
     ///
-    /// The BMC password is not necessarily available the first time this runs.
-    /// It comes from the site-wide BMC root credential, which operators set
-    /// *through the API this SDK is initializing*, so on a fresh site the
-    /// credential does not exist yet. When a refresh interval is configured the
-    /// initial read is therefore best-effort: initialization continues without
-    /// the Secret, and the refresh task writes it as soon as the credential
-    /// appears — no restart needed. Registration without a per-device credential reference
-    /// remains blocked until the shared credential has been accepted and published.
-    ///
-    /// Authoritative local ownership is the exception: local version 0 must be
-    /// present before startup. This value-based activation criterion is safe
-    /// across rolling deployments, where an older replica may still register a
-    /// DPUDevice while the replacement replica starts.
-    /// Without a refresh interval nothing would ever retry, so there a failed
-    /// read stays fatal.
+    /// Authoritative local ownership still requires local version 0 at startup.
     ///
     /// Reads the installed operator version once. A missing operator config or version,
     /// invalid version, read failure, or expired read deadline fails SDK construction.
@@ -327,47 +314,36 @@ where
         let operator_version = version::read_operator_version(repo.as_ref(), &namespace).await?;
         version::version_requirement()?.check_operator_version(&operator_version)?;
 
-        let password = match provider.get_bmc_password().await {
+        let ready = match provider.get_bmc_password().await {
             Ok(password) => {
-                write_bmc_secret::<R>(&repo, &namespace, &password).await?;
-                shared_bmc_password_ready.store(true, Ordering::Release);
-                Some(password)
+                write_bmc_secret(&*repo, &namespace, &password).await?;
+                true
             }
-            Err(error) if self.bmc_password_refresh_interval.is_some() => {
+            Err(error) if self.bmc_secret_retry_interval.is_some() => {
                 if error.is_local_bmc_password_source_unavailable() {
                     return Err(error);
                 }
-                if error.is_bmc_password_source_unavailable() {
-                    tracing::warn!(
-                        %error,
-                        secret = SECRET_NAME,
-                        tracking_issue = "https://github.com/NVIDIA/infra-controller/issues/6147",
-                        "BMC password source is unavailable; retaining any existing DPF BMC Secret because NICo's DPF integration uses one shared credential"
-                    );
-                } else {
-                    tracing::warn!(
-                        %error,
-                        secret = SECRET_NAME,
-                        "BMC password unavailable; DPF secret will be written once the credential is set"
-                    );
-                }
-                None
+                tracing::warn!(
+                    %error,
+                    secret = SECRET_NAME,
+                    "BMC password unavailable; waiting to create the shared DPF Secret"
+                );
+                false
             }
             Err(error) => return Err(error),
         };
+        shared_bmc_password_ready.store(ready, Ordering::Release);
 
-        let guard = if let Some(interval) = self.bmc_password_refresh_interval {
-            Some(spawn_bmc_refresh(
+        let guard = match self.bmc_secret_retry_interval.filter(|_| !ready) {
+            Some(interval) => Some(spawn_bmc_secret_bootstrap(
                 repo.clone(),
                 namespace.clone(),
                 provider,
-                password,
                 interval,
                 shared_bmc_password_ready.clone(),
                 self.join_set,
-            )?)
-        } else {
-            None
+            )?),
+            None => None,
         };
 
         Ok(DpfSdk {
@@ -376,12 +352,12 @@ where
             labeler: self.labeler,
             operator_version,
             shared_bmc_password_ready,
-            _bmc_refresh_guard: guard,
+            _bmc_bootstrap_guard: guard,
         })
     }
 
     /// Consume the builder, create the K8s BMC secret, cache the installed operator version,
-    /// and optionally spawn a background credential refresh task. Does not create DPF CRDs.
+    /// and optionally retry publication in the background. Does not create DPF CRDs.
     pub async fn build_without_resources(self) -> Result<DpfSdk<R, L>, DpfError> {
         self.init_secret_and_task().await
     }
@@ -404,7 +380,7 @@ where
     P: BmcPasswordProvider + 'static,
     L: ResourceLabeler,
 {
-    /// Consume the builder, validate initialization, create the Kubernetes BMC Secret and optional refresh task, then run the resource and migration workflow documented by [`DpfSdk::create_initialization_objects`].
+    /// Consume the builder, validate initialization, create the Kubernetes BMC Secret and optional bootstrap task, then run the resource and migration workflow documented by [`DpfSdk::create_initialization_objects`].
     pub async fn initialize(
         self,
         config: &InitDpfResourcesConfig,
@@ -425,56 +401,14 @@ async fn write_bmc_secret<R: K8sConfigRepository>(
 ) -> Result<(), DpfError> {
     let mut data = BTreeMap::new();
     data.insert("password".to_string(), password.as_bytes().to_vec());
-    K8sConfigRepository::apply_secret(repo, SECRET_NAME, namespace, data).await
-}
-
-/// Fetch the current BMC password from the provider and update the K8s
-/// secret when it differs from `last_password`. Returns the password
-/// value that should be remembered for the next comparison.
-///
-/// `last_password` is `None` when no password has been written yet — either
-/// because the credential was unset at startup or because every write since has
-/// failed. That case writes on the next successful read, which is how a site
-/// that boots without the site-wide BMC root recovers on its own.
-async fn refresh_bmc_secret_if_changed<R: K8sConfigRepository>(
-    repo: &R,
-    namespace: &str,
-    provider: &impl BmcPasswordProvider,
-    last_password: Option<String>,
-) -> Option<String> {
-    match provider.get_bmc_password().await {
-        Ok(new_pw) if Some(&new_pw) != last_password.as_ref() => {
-            if let Err(e) = write_bmc_secret::<R>(repo, namespace, &new_pw).await {
-                tracing::error!(error = %e, "Failed to refresh BMC secret");
-                last_password
-            } else {
-                Some(new_pw)
-            }
-        }
-        Err(e) if e.is_bmc_password_source_unavailable() => {
-            if last_password.is_some() {
-                tracing::error!(
-                    error = %e,
-                    tracking_issue = "https://github.com/NVIDIA/infra-controller/issues/6147",
-                    "Retaining the last accepted DPF BMC Secret because NICo's DPF integration uses one shared credential"
-                );
-            }
-            last_password
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to read BMC password");
-            last_password
-        }
-        _ => last_password,
-    }
+    K8sConfigRepository::create_secret_if_absent(repo, SECRET_NAME, namespace, data).await
 }
 
 // separate function to drop the 'a lifetime from the builder
-fn spawn_bmc_refresh<R, P>(
+fn spawn_bmc_secret_bootstrap<R, P>(
     repo: Arc<R>,
     namespace: String,
     provider: P,
-    password: Option<String>,
     interval: Duration,
     shared_bmc_password_ready: Arc<AtomicBool>,
     join_set: Option<&mut tokio::task::JoinSet<()>>,
@@ -486,7 +420,6 @@ where
     let cancel_token = tokio_util::sync::CancellationToken::new();
     let guard = cancel_token.clone().drop_guard();
     let task = async move {
-        let mut last_password = password;
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
         while cancel_token
@@ -494,28 +427,40 @@ where
             .await
             .is_some()
         {
-            last_password =
-                refresh_bmc_secret_if_changed(repo.as_ref(), &namespace, &provider, last_password)
-                    .await;
-            if last_password.is_some() {
-                shared_bmc_password_ready.store(true, Ordering::Release);
+            let result = match provider.get_bmc_password().await {
+                Ok(password) => write_bmc_secret(&*repo, &namespace, &password).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => {
+                    shared_bmc_password_ready.store(true, Ordering::Release);
+                    break;
+                }
+                Err(error) => tracing::warn!(%error, "Waiting to create the shared DPF BMC Secret"),
             }
         }
+        // The API supervises background tasks until shutdown. Once the Secret
+        // exists, wait for cancellation without polling the credential source.
+        cancel_token.cancelled().await;
     };
 
     if let Some(js) = join_set {
         js.build_task()
-            .name("dpf_bmc_password_refresh")
+            .name("dpf_bmc_secret_bootstrap")
             .spawn(task)
             .map_err(|e| {
-                DpfError::InvalidState(format!("Failed to spawn BMC refresh task: {e}"))
+                DpfError::InvalidState(format!(
+                    "Failed to spawn DPF BMC Secret bootstrap task: {e}"
+                ))
             })?;
     } else {
         tokio::task::Builder::new()
-            .name("dpf_bmc_password_refresh")
+            .name("dpf_bmc_secret_bootstrap")
             .spawn(task)
             .map_err(|e| {
-                DpfError::InvalidState(format!("Failed to spawn BMC refresh task: {e}"))
+                DpfError::InvalidState(format!(
+                    "Failed to spawn DPF BMC Secret bootstrap task: {e}"
+                ))
             })?;
     }
 
@@ -7023,7 +6968,7 @@ mod tests {
         ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError> {
             Ok(None)
         }
-        async fn apply_secret(
+        async fn create_secret_if_absent(
             &self,
             _name: &str,
             _ns: &str,
@@ -8922,7 +8867,6 @@ mod tests {
     struct SecretTrackingMock {
         secrets_written: Arc<std::sync::Mutex<Vec<String>>>,
         dpu_devices: Arc<RwLock<Vec<DPUDevice>>>,
-        fail_writes: bool,
     }
 
     #[async_trait]
@@ -8997,18 +8941,17 @@ mod tests {
         ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError> {
             Ok(None)
         }
-        async fn apply_secret(
+        async fn create_secret_if_absent(
             &self,
             _name: &str,
             _ns: &str,
             data: BTreeMap<String, Vec<u8>>,
         ) -> Result<(), DpfError> {
-            if self.fail_writes {
-                return Err(DpfError::ConfigError("simulated write failure".into()));
-            }
-            if let Some(pw_bytes) = data.get("password") {
-                let pw = String::from_utf8(pw_bytes.clone()).unwrap();
-                self.secrets_written.lock().unwrap().push(pw);
+            let mut secrets = self.secrets_written.lock().unwrap();
+            if secrets.is_empty()
+                && let Some(pw_bytes) = data.get("password")
+            {
+                secrets.push(String::from_utf8(pw_bytes.clone()).unwrap());
             }
             Ok(())
         }
@@ -9089,110 +9032,9 @@ mod tests {
         }
     }
 
+    /// The bootstrap task retries transient source failures after initialization.
     #[tokio::test]
-    async fn test_refresh_writes_secret_when_password_changes() {
-        let mock = SecretTrackingMock::default();
-        let provider = "new-password".to_string();
-
-        let result = refresh_bmc_secret_if_changed(
-            &mock,
-            TEST_NAMESPACE,
-            &provider,
-            Some("old-password".into()),
-        )
-        .await;
-
-        assert_eq!(result.as_deref(), Some("new-password"));
-        assert_eq!(
-            mock.secrets_written.lock().unwrap().as_slice(),
-            &["new-password"]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_refresh_skips_write_when_password_unchanged() {
-        let mock = SecretTrackingMock::default();
-        let provider = "same".to_string();
-
-        let result =
-            refresh_bmc_secret_if_changed(&mock, TEST_NAMESPACE, &provider, Some("same".into()))
-                .await;
-
-        assert_eq!(result.as_deref(), Some("same"));
-        assert!(mock.secrets_written.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_refresh_retains_last_password_on_write_failure() {
-        let mock = SecretTrackingMock {
-            fail_writes: true,
-            ..Default::default()
-        };
-        let provider = "new-password".to_string();
-
-        let result = refresh_bmc_secret_if_changed(
-            &mock,
-            TEST_NAMESPACE,
-            &provider,
-            Some("old-password".into()),
-        )
-        .await;
-
-        assert_eq!(result.as_deref(), Some("old-password"));
-    }
-
-    /// The recovery path for a site that booted before the site-wide BMC root
-    /// credential was set: nothing has been written yet, so the first
-    /// successful read must write the Secret.
-    #[tokio::test]
-    async fn test_refresh_writes_secret_when_no_password_written_yet() {
-        let mock = SecretTrackingMock::default();
-        let provider = "first-password".to_string();
-
-        let result = refresh_bmc_secret_if_changed(&mock, TEST_NAMESPACE, &provider, None).await;
-
-        assert_eq!(result.as_deref(), Some("first-password"));
-        assert_eq!(
-            mock.secrets_written.lock().unwrap().as_slice(),
-            &["first-password"]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_refresh_retains_state_during_transient_read_failure() {
-        let mock = SecretTrackingMock::default();
-
-        let result = refresh_bmc_secret_if_changed(
-            &mock,
-            TEST_NAMESPACE,
-            &TransientBmcPasswordFailureProvider,
-            None,
-        )
-        .await;
-
-        assert_eq!(result, None);
-        assert!(mock.secrets_written.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_refresh_retains_secret_when_source_is_unavailable() {
-        let mock = SecretTrackingMock::default();
-
-        let result = refresh_bmc_secret_if_changed(
-            &mock,
-            TEST_NAMESPACE,
-            &InvalidatedBmcPasswordProvider,
-            Some("stale-password".into()),
-        )
-        .await;
-
-        assert_eq!(result.as_deref(), Some("stale-password"));
-        assert!(mock.secrets_written.lock().unwrap().is_empty());
-    }
-
-    /// A refresh task retries transient source failures after initialization.
-    #[tokio::test]
-    async fn test_build_succeeds_on_transient_read_failure_with_refresh_configured() {
+    async fn test_build_succeeds_on_transient_read_failure_with_bootstrap_configured() {
         let mock = SecretTrackingMock::default();
 
         let sdk = DpfSdkBuilder::new(
@@ -9200,7 +9042,7 @@ mod tests {
             TEST_NAMESPACE,
             TransientBmcPasswordFailureProvider,
         )
-        .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+        .with_bmc_secret_retry_interval(Duration::from_secs(3600))
         .build_without_resources()
         .await
         .expect("initialization tolerates a transient credential read failure");
@@ -9210,11 +9052,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_tolerates_unavailable_source_with_refresh_configured() {
+    async fn test_build_tolerates_unavailable_source_with_bootstrap_configured() {
         let mock = SecretTrackingMock::default();
 
         let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, InvalidatedBmcPasswordProvider)
-            .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+            .with_bmc_secret_retry_interval(Duration::from_secs(3600))
             .build_without_resources()
             .await
             .expect("initialization defers an unavailable credential source");
@@ -9228,7 +9070,7 @@ mod tests {
         let mock = SecretTrackingMock::default();
         let Err(error) =
             DpfSdkBuilder::new(mock, TEST_NAMESPACE, MissingLocalV0BmcPasswordProvider)
-                .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+                .with_bmc_secret_retry_interval(Duration::from_secs(3600))
                 .build_without_resources()
                 .await
         else {
@@ -9246,7 +9088,7 @@ mod tests {
         let mock = SecretTrackingMock::default();
 
         let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, InvalidatedBmcPasswordProvider)
-            .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+            .with_bmc_secret_retry_interval(Duration::from_secs(3600))
             .build_without_resources()
             .await
             .expect("a fresh DPF site may wait for a non-authoritative credential source");
@@ -9265,9 +9107,11 @@ mod tests {
     async fn dpu_registration_unblocks_after_credential_is_published() {
         let mock = SecretTrackingMock::default();
         let provider = MutableBmcPasswordProvider::default();
+        let mut tasks = tokio::task::JoinSet::new();
 
         let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, provider.clone())
-            .with_bmc_password_refresh_interval(Duration::from_secs(60))
+            .with_bmc_secret_retry_interval(Duration::from_secs(60))
+            .with_join_set(&mut tasks)
             .build_without_resources()
             .await
             .expect("a fresh DPF site may wait for a non-authoritative credential source");
@@ -9289,12 +9133,13 @@ mod tests {
             mock.secrets_written.lock().unwrap().as_slice(),
             &["local-password"]
         );
+        assert!(tasks.try_join_next().is_none());
     }
 
-    /// Without a refresh task nothing would ever retry the read, so a transient
+    /// Without a bootstrap task nothing would retry the read, so a transient
     /// source failure stays fatal rather than leaving the Secret absent.
     #[tokio::test]
-    async fn test_build_fails_on_transient_read_failure_without_refresh_configured() {
+    async fn test_build_fails_on_transient_read_failure_without_bootstrap_configured() {
         let mock = SecretTrackingMock::default();
 
         let Err(error) =
@@ -9302,7 +9147,7 @@ mod tests {
                 .build_without_resources()
                 .await
         else {
-            panic!("a transient BMC password failure with no refresh task is fatal");
+            panic!("a transient BMC password failure with no bootstrap task is fatal");
         };
 
         assert!(
@@ -10552,7 +10397,7 @@ mod configmap_seed_tests {
         ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError> {
             Ok(None)
         }
-        async fn apply_secret(
+        async fn create_secret_if_absent(
             &self,
             _name: &str,
             _ns: &str,

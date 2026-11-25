@@ -1310,6 +1310,7 @@ dependencies = [
  "carbide-libmlx",
  "carbide-libmlx-model",
  "carbide-machine-controller",
+ "carbide-machine-validation-adapters",
  "carbide-macros",
  "carbide-measured-boot",
  "carbide-metrics-utils",
@@ -2860,6 +2861,7 @@ dependencies = [
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-libmlx-model",
+ "carbide-machine-validation-adapters",
  "carbide-measured-boot",
  "carbide-proto-compiler",
  "carbide-redfish",
@@ -2911,6 +2913,7 @@ name = "carbide-machine-validation"
 version = "0.0.0"
 dependencies = [
  "carbide-instrument",
+ "carbide-machine-validation-adapters",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -2926,6 +2929,19 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "carbide-machine-validation-adapters"
+version = "0.0.0"
+dependencies = [
+ "carbide-test-support",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -7503,7 +7519,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.31#246db2d7962b7a271094fd4c31ebb9b1edfd6238"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.32#b043a2f8960b9e8085b878e2a723450613261f7d"
 dependencies = [
  "chrono",
  "clap",
@@ -8152,6 +8168,7 @@ dependencies = [
  "carbide-instrument",
  "carbide-libmlx",
  "carbide-libmlx-model",
+ "carbide-machine-validation-adapters",
  "carbide-macros",
  "carbide-measured-boot",
  "carbide-network",
