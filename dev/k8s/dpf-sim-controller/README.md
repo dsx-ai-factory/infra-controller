@@ -167,6 +167,32 @@ then fails. `helm-prereqs/clean.sh` deletes `dpf-operator-system` and the
 DPF CRDs, and the simulator and the object with them, so deploy the simulator
 again before the next `setup.sh`. `make undeploy` leaves the object in place.
 
+## Per-DPU BMC credentials
+
+NICo treats versions from 26.8.0 as supporting one BMC credential Secret per
+DPU (`crates/dpf/src/sdk/version.rs`). With the simulator at `v30.0.0`,
+nico-api does the following for every DPUDevice it creates:
+
+- It creates an immutable Secret in the DPF namespace, named
+  `<device-id>-initial` or `<device-id>-v<version>`, with the DPU BMC password
+  under the key `password`.
+- It sets `spec.bmcCredentialSecretName` on the DPUDevice to that name.
+- It deletes these Secrets when the host is deleted, decommissioned, or reset.
+
+The simulator does not reproduce the operator's part:
+
+- It does not read the per-DPU Secrets. The optional Redfish install logs in
+  with the shared `bmc-shared-password` Secret, which NICo still writes. A DPU
+  BMC whose password differs from the shared one rejects that login, and the
+  DPU moves to `Error`.
+- It does not write `status.bmcCredentialSecretName` or the
+  `BMCCredentialsReady` condition on the DPUDevice. NICo's BMC credential
+  rotation for a host ingested through DPF waits for both. Leave
+  `bmc_rotation_enabled` off and do not request a forced BMC rotation on a
+  simulated site.
+- It does not set the BlueField-4 `service` account password. The operator
+  sets it from the same Secret, so NICo skips it from 26.8.0.
+
 ## Quick start (against a machine-a-tron cluster)
 
 Deploy the simulator with `make deploy` below whenever the nico-core site
@@ -380,7 +406,9 @@ Secret directly, not through the cache, and the Role grants `get` on that name
 only, so a custom `--bmc-secret-name` needs the name in
 `config/rbac/role.yaml` as well. TLS verification is skipped, as in the
 operator's basic-auth client: DPU BMCs and machine-a-tron's mock BMCs serve
-self-signed certificates. The operator's mTLS client is not reproduced.
+self-signed certificates. The operator's mTLS client is not reproduced. The
+Redfish install does not use a per-DPU Secret. Refer to
+[Per-DPU BMC credentials](#per-dpu-bmc-credentials).
 
 **Network path on a machine-a-tron cluster.** machine-a-tron's controller
 publishes every mock BMC as a Service whose `externalIPs` is the BMC address
