@@ -82,19 +82,17 @@ The following table maps the sections on this page to what the run does:
 | §2 [Operator install](#2-dpf-installation) | Installs `deploy/charts/dpf-operator` from a `NVIDIA/doca-platform` checkout at the reviewed commit this repository pins (currently `v26.4.0`). Two source paths enforce that commit: the `helm-prereqs/doca-platform` git submodule in a git checkout (initialized automatically), or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged `nico-prereqs` chart. `NICO_DPF_SRC` overrides both with an operator-managed local checkout (air-gapped sites); keep it at the pinned commit, because setup.sh installs whatever it contains and only warns when its HEAD differs from the pin.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_IMAGE_TAG` (defaults to the pinned release; override the repository with `NICO_DPF_IMAGE_REPO`).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default - a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
 | §3.1 [RBAC](#31-rbac-for-the-nico-orchestrator) | Created by the NICo Core chart (`nico-api.dpf.rbacCreate=true`, set automatically) — the Role/RoleBinding subject is the chart's actual ServiceAccount. |
 | §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
-| §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-start-carbide-api-to-create-the-dpf-initialization-objects) | `setup.sh` renders `[dpf].enabled = true` and deploys Core once after the DPF prerequisites are ready. carbide-api initializes the DPF SDK and creates the BFB, DPUFlavor, and DPUDeployment on that first startup.<br/><br/>When `NICO_DPF_BMC_ROOT_PASSWORD` is set, setup creates or reuses a persistent watched version-0 credential Secret after deployment is accepted and configures local ownership before that rollout. Declining deployment leaves the Secret untouched. Otherwise the credential may come from an operator-managed credential-file Secret or be configured through the API later. In `local_first` or `backend` mode, a fresh site starts without it and the 60-second refresh writes the derived current-version `bmc-shared-password` Secret after the credential becomes available. Authoritative `local` mode requires version 0 before startup when v0 is current or the current target cannot be resolved. |
+| §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-start-carbide-api-to-create-the-dpf-initialization-objects) | `setup.sh` renders `[dpf].enabled = true` and deploys Core once after the DPF prerequisites are ready. carbide-api initializes the DPF SDK and creates the BFB, DPUFlavor, and DPUDeployment on that first startup.<br/><br/>When `NICO_DPF_BMC_ROOT_PASSWORD` is set, setup creates or reuses a persistent watched version-0 credential Secret after deployment is accepted and configures local ownership before that rollout. Declining deployment leaves the Secret untouched. Otherwise the credential may come from an operator-managed credential-file Secret or be configured through the API later. In `local_first` or `backend` mode, a fresh site starts without it and Core retries every 60 seconds until it creates the `bmc-shared-password` Secret. Authoritative `local` mode requires version 0 before startup when v0 is current or the current target cannot be resolved. |
 
 [Per-host enablement](#37-mark-hosts-as-dpf-managed-in-expected-machines) (§3.7) and the [CLI appendix](#appendix-nico-admin-cli-dpf-command-reference) still apply unchanged. The sections below remain the reference for what is being installed, for manual installs, and for environments not using `setup.sh`.
 
 ### BMC root availability
 
-DPF provisioning uses the site-wide BMC root credential (the shared BMC
-password DPF uses to reach the DPUs' host BMCs over Redfish).
-The production SDK uses a fixed 60-second refresh. In `local_first` or `backend`
-mode, a fresh site starts with DPF enabled even when the credential is absent.
-The API logs a warning, leaves `bmc-shared-password` unwritten, and blocks new
-DPU registration until a refresh accepts the credential and publishes the
-shared Secret. The API and DPF initialization resources remain available.
+NICo uses the site-wide BMC root credential to create the shared Secret for
+DPF. In `local_first` or `backend` mode, a fresh site can start before the
+credential is configured. NICo logs a warning and retries publication every
+60 seconds. Registration that uses the shared password waits for the Secret.
+The API and DPF initialization resources remain available.
 Authoritative `local` mode instead requires local version 0 before Core starts
 on both fresh and existing DPF sites whenever v0 is current or the current
 target cannot be resolved. If the rotation target cannot be read, a present
@@ -462,14 +460,14 @@ registration until you reset or force-delete the host and let credential Secret
 cleanup finish.
 
 With the same DPF version requirement, NICo uses DPF to adopt and rotate BMC
-root credentials for DPUs on DPF-ingested hosts. The DPU `service` account is
-excluded from this flow. The host BMC continues to use Redfish. If DPF is
-disabled, those hosts wait for DPF before starting or resuming BMC rotation.
+root credentials for DPUs on DPF-ingested hosts. The host BMC continues to use
+Redfish. DPU BMC root rotation and automatic adoption require DPF to be enabled.
 
-Keep the published shared password valid until existing shared DPUDevices
-finish adopting per-device credentials. Force deletion can interrupt a
-rotation. When DPF might have changed the password, NICo preserves the
-recovery credentials and verifies the active password before re-ingestion.
+Force deletion can interrupt a versioned rotation. When DPF might have changed
+the root password, NICo preserves the recovery credentials and verifies the
+active password before re-ingestion. During automatic adoption, both Secret
+references use the same root password. On BF4, DPF also applies this password
+to its `service` account when the BMC exposes that account through Redfish.
 </Note>
 
 <Note>
@@ -1397,37 +1395,12 @@ integrity protection and a trusted boot mechanism such as Secure Boot.
 
 ### 3.6. Set the site-wide BMC root credential
 
-DPF provisions DPUs out-of-band over Redfish, so it needs the BMC password NICo
-applies to managed hardware. carbide-api reads the **site-wide BMC root**
-credential and mirrors its current version into the derived
-`bmc-shared-password` Secret in `dpf-operator-system` (section 4), refreshing it
-every 60 seconds so an initially missing bootstrap credential propagates
-without a restart. This refresh is not a safe rotation mechanism.
-
-If the current rotation target is absent from its authoritative credential
-source, a fresh site leaves the derived Secret unwritten. Once NICo has
-published a value, it retains that last value and logs an error until the
-credential returns. Restore the expected credential. A transient source-read
-failure during background refresh also retains the last published Secret and
-retries the read.
-
-<Warning>
-Keep the site-wide target unchanged while any DPF-managed DPU still uses the
-shared `bmc-shared-password` Secret. The shared Secret follows the site-wide
-target before devices finish rotating, so it would no longer authenticate those
-DPUs. This includes sites on the default DPF 26.4.0 pin.
-
-Upgrade to DPF 26.8.0 or later (excluding prereleases of 26.8.0), then restart
-all NICo API replicas so they detect the new operator version. Keep the current
-site-wide target and request convergence for each existing shared DPU with
-`nico-admin-cli credential force-bmc set --bmc-mac <dpu-bmc-mac>`.
-
-For each DPUDevice, confirm that
-`spec.bmcCredentialSecretName` and `status.bmcCredentialSecretName` name the same
-per-device Secret and that `BMCCredentialsReady` is `True` for the current
-generation. Stage a new site-wide target after every DPF-managed DPU meets those
-checks.
-</Warning>
+DPF provisions DPUs out-of-band over Redfish and needs the BMC password
+applied to the hardware. NICo uses the configured **site-wide BMC root**
+credential to create the `bmc-shared-password` Secret in the DPF operator
+namespace (`dpf-operator-system` by default). It retries every 60 seconds if
+bootstrap starts before the credential is available. Once the Secret exists,
+NICo keeps the original value across restarts and later site-wide rotations.
 
 Configure it through a watched Kubernetes Secret, through the API, or by seeding
 the persistent credential store directly.
@@ -1451,14 +1424,14 @@ and chart values are in [helm-prereqs → DPF](https://github.com/dsx-ai-factory
 Set `nico-api.credentials.bmcSiteWideRootSource: local` with the
 `existingSecret` values before Core is deployed. Creating the Secret after
 installation does not mount it; adding the mount later requires a Core values
-update and rollout. Once mounted, a Secret update can supply or correct version
-0 before any managed device begins using it, and reloads without restarting
-NICo. With DPF enabled, local v0 is required before Core starts on fresh and
+update and rollout. The mounted Secret can supply version 0 before NICo
+creates the shared Secret. NICo reloads the mounted credential file without
+a restart. With DPF enabled, local v0 is required before Core starts on fresh and
 existing sites whenever v0 is current or the current target cannot be resolved.
 This prevents a rolling update from activating local ownership while an older
 replica can still register a DPU that uses the shared credential.
-After a local v0 has been accepted, losing it retains that last value and logs
-an error; restore the same value. Do not use a ConfigMap for this credential.
+If the local v0 entry is lost, restore the same value. Use a Kubernetes Secret
+for this credential.
 
 The local entry supplies only version 0 of the BMC root. In `local` mode it uses
 environment-then-file precedence, never falls back to Vault or Postgres for v0,
@@ -1466,7 +1439,7 @@ and rejects API add/delete operations for v0 with instructions to update the
 local source. After any managed device begins using version 0, keep that local
 value unchanged: replacing it does not update BMC hardware or convergence
 records. Use coordinated BMC credential rotation to advance to version 1 or
-later. On DPF sites, finish the shared-to-per-device cutover described above
+later. On DPF sites, [verify the cutover](#verify-the-shared-to-per-dpu-cutover)
 before advancing the target.
 The versioned credential then comes from the persistent backend; the file
 schema has no versioned BMC root key. See
@@ -1485,11 +1458,9 @@ history and in the process argument list. Run it from a shell with history
 disabled, or use the seeding path below, which avoids both.
 </Warning>
 
-This works on a site that is already running: when a BMC password refresh
-interval is configured, carbide-api starts whether or not the credential is
-present. While it is missing it logs a warning and leaves
-`bmc-shared-password` unwritten, then writes the Secret on the next refresh
-tick after the credential is set, with no restart required.
+In `local_first` or `backend` mode, you can set the bootstrap credential while
+NICo is running. NICo creates `bmc-shared-password` on its next retry if the
+Secret is still absent.
 
 **By seeding the persistent credential store**, to have the credential in place
 before carbide-api first starts. This likewise requires `backend` mode or
@@ -1521,6 +1492,26 @@ present.
 <Note>
 The BMC site-wide root seeds SuperNIC lockdown IKM version 0 only when that lockdown credential is absent. Lockdown IKM and BMC credentials then remain independent. Before locking a card, follow the [IKM security requirements](../architecture/supernic_lockdown_key_management.md#key-derivation-function-kdf). Preserve the [credential and Core database backups required for recovery](../architecture/supernic_lockdown_key_management.md#backup-and-recovery).
 </Note>
+
+#### Verify the shared-to-per-DPU cutover
+
+For a NICo 2.5 upgrade with DPF 30.0.0 or later, keep the site-wide target
+fixed while rolling out the updated NICo API replicas. Older replicas can
+still replace the shared password when the target changes.
+
+When a DPF-ingested host is in `Ready`, NICo checks each DPU whose per-device
+Secret has yet to be confirmed. If the DPUDevice uses the shared Secret, NICo
+copies that password into an immutable per-DPU Secret and updates the
+DPUDevice reference. DPF confirms adoption. The host stays in `Ready` while
+NICo retries pending adoption, and NICo stops checking each DPU after recording
+its confirmation. This happens automatically when DPF is enabled, even when
+site-wide automatic BMC rotation is disabled.
+
+Confirm that `spec.bmcCredentialSecretName` and `status.bmcCredentialSecretName`
+name the same per-DPU Secret and that `BMCCredentialsReady` is `True` for the
+current generation. The DPUDevice fields track this cutover independently of the
+device's BMC rotation version.
+Stage a new site-wide target after the affected DPUDevices have adopted.
 
 ### 3.7. Mark hosts as DPF-managed in expected machines
 
@@ -1683,9 +1674,9 @@ deployment** in `[dpf.deployments.*]` (BF3 always, plus enabled BF4 generic or
 Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
 `deployment_name`:
 
-- A `Secret` (`bmc-shared-password`) holding the shared BMC password (shared
-  across deployments), if the credential is available. Otherwise the refresh
-  task writes it after the credential is configured.
+- A `Secret` (`bmc-shared-password`) holding the BMC password shared across
+  deployments. NICo creates it after the credential is configured and keeps
+  the first published value.
 - A `BFB` CR named `bf-bundle-<sha256(bfb_url)>`, from the deployment's `bfb_url`
 - A `DPUFlavor` CR (BF3/generic BF4) or `DPUFlavorTemplate` CR (Astra) named
   `<flavor_name>-<spec-hash>`. The 16-character hex suffix is a SHA-256 digest

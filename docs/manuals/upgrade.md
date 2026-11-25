@@ -207,14 +207,12 @@ cd helm-prereqs/
 source ./preflight.sh
 ```
 
-Fix all errors before proceeding. On DPF sites, registration of a new DPUDevice
-remains blocked until the site-wide BMC root is available from the configured
-credential sources and the 60-second refresh publishes the derived
-current-version `bmc-shared-password` Secret. NICo retains an existing Secret,
-but does not infer startup readiness from that retained value. This does not
-prevent a `local_first` or `backend` Core rollout; Core starts and retries the
-source. Authoritative `local` mode requires version 0 before Core starts when
-v0 is current or the current target cannot be resolved.
+Fix all errors before proceeding. On DPF sites, DPUDevice registration that
+uses the shared password requires `bmc-shared-password`. In `local_first` or
+`backend` mode, Core can start before the site-wide BMC root is available.
+Core retries publication every 60 seconds until the shared Secret exists.
+Authoritative `local` mode requires version 0 before Core starts when v0 is
+current or the current target cannot be resolved.
 
 ### DPF BMC root ownership on upgrade
 
@@ -250,14 +248,13 @@ resolved. A target at version 1 or later does not require local v0 before
 startup. This prevents a rolling update from activating local ownership while
 an older replica can still register a DPU that uses the shared credential. A
 transient rotation-target read failure does not block startup when local v0 is
-present. After NICo accepts local v0, removing it retains the last accepted
-shared Secret and logs an error until the original value is restored.
+present. If the local v0 entry is lost, restore the original value.
 If the rotation target is already version 1 or later, the local
 version 0 entry does not become current. If devices still use version 0, keep
 the copied local value unchanged after this ownership migration; later password
 changes must use coordinated BMC rotation so hardware and convergence records
 advance together. On DPF sites, follow the
-[shared credential cutover](dpf.md#36-set-the-site-wide-bmc-root-credential)
+[shared credential cutover](dpf.md#verify-the-shared-to-per-dpu-cutover)
 before staging a new target. See
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 

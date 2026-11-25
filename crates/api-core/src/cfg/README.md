@@ -2209,7 +2209,7 @@ ingestion starts, keep it unchanged: changing only the read source does not
 update BMC hardware or credential-convergence records. Use coordinated BMC
 credential rotation to advance to a backend-managed version. On DPF sites,
 follow the
-[shared credential cutover](../../../../docs/manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
+[shared credential cutover](../../../../docs/manuals/dpf.md#verify-the-shared-to-per-dpu-cutover)
 before staging a new target.
 
 #### Environment credential source
@@ -2272,10 +2272,9 @@ bmc_site_wide_root:
 With `bmc_site_wide_root_source = "local"`, the watched Kubernetes Secret may
 supply or correct this value before ingestion without restarting NICo. Do not
 change it after a managed device begins using version 0; use coordinated BMC
-rotation to advance to a backend-managed version instead. DPF sites must not
-rotate while DPUs rely on the shared BMC Secret; see
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Use a Secret
-rather than a ConfigMap for credential data.
+rotation to advance to a backend-managed version instead. DPF sites should
+verify the [shared credential cutover](../../../../docs/manuals/dpf.md#verify-the-shared-to-per-dpu-cutover)
+before staging a new target. Use a Kubernetes Secret for credential data.
 
 ### `SecretsConfig`
 
