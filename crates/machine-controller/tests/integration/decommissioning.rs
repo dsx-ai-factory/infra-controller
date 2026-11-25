@@ -314,22 +314,24 @@ async fn vanilla_bfb_recovers_after_task_history_is_lost(pool: PgPool) {
 async fn vanilla_bfb_retains_diagnostics_for_a_reused_id_or_failed_install(pool: PgPool) {
     let mut fixture = Fixture::new(pool).await;
     let unrelated = task(SAVED_ID, "Completed", "http://bmc/forge.bfb");
-    let mut failed = task(SAVED_ID, "Exception", IMAGE_URI);
-    failed["Messages"] = json!([
+    let messages = json!([
         {"MessageId": "Update.1.0.TransferFailed", "Message": "BFB transfer failed"},
         {"MessageId": "Update.1.0.InstallFailed", "Message": "DPU restart rejected"}
     ]);
 
-    let cases = [
-        (
-            unrelated,
-            &["does not identify the expected SimpleUpdate"][..],
-        ),
+    let failed_cases = ["Exception", "Cancelled", "Killed"].map(|state| {
+        let mut failed = task(SAVED_ID, state, IMAGE_URI);
+        failed["Messages"] = messages.clone();
         (
             failed,
-            &["Exception", "BFB transfer failed", "DPU restart rejected"][..],
-        ),
-    ];
+            vec![state, "BFB transfer failed", "DPU restart rejected"],
+        )
+    });
+    let cases = std::iter::once((
+        unrelated,
+        vec!["does not identify the expected SimpleUpdate"],
+    ))
+    .chain(failed_cases);
     for (tracked, diagnostics) in cases {
         fixture
             .tick([
@@ -337,7 +339,7 @@ async fn vanilla_bfb_retains_diagnostics_for_a_reused_id_or_failed_install(pool:
                 (EXPANDED_TASKS, StatusCode::OK, collection(vec![tracked])),
             ])
             .await;
-        fixture.assert_error(diagnostics, true).await;
+        fixture.assert_error(&diagnostics, true).await;
     }
 }
 

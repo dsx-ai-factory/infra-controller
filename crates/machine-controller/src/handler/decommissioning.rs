@@ -594,10 +594,14 @@ pub(super) async fn handle_deconfiguring_dpus(
                                     task.percent_complete.unwrap_or_default()
                                 )));
                             }
-                            Some(TaskState::Exception) => {
+                            Some(
+                                task_state @ (TaskState::Exception
+                                | TaskState::Cancelled
+                                | TaskState::Killed),
+                            ) => {
                                 let messages =
                                     task.messages.iter().map(|msg| &msg.message).join("\n");
-                                format!("{install} failed with state Exception\n{messages}")
+                                format!("{install} failed with state {task_state}\n{messages}")
                             }
                             task_state => {
                                 return Err(StateHandlerError::GenericError(eyre::eyre!(
