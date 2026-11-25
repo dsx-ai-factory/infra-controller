@@ -472,6 +472,10 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
             .fetch_all(&mut *observer)
             .await?;
         assert_eq!(after, before, "{name}");
+        let unfinished: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests")
+            .fetch_one(&mut *observer)
+            .await?;
+        assert_eq!(unfinished, 0, "{name}");
     }
     Ok(())
 }
@@ -878,6 +882,29 @@ async fn find_vpcs_by_ids_omits_retained_incompatible_effective_profile(
             .as_ref()
             .and_then(|status| status.effective_routing_profile.as_ref())
             .is_some()
+    );
+
+    // Cancellation must return a committed VPC even if its derived routing
+    // profile became incompatible. REST can then follow ordinary deletion.
+    let cancelled = api
+        .cancel_vpc_creation(tonic::Request::new(rpc::forge::CancelVpcCreationRequest {
+            id: Some(incompatible_id),
+            tenant_organization_id: incompatible
+                .config
+                .as_ref()
+                .unwrap()
+                .tenant_organization_id
+                .clone(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(
+        cancelled.result,
+        Some(
+            rpc::forge::cancel_vpc_creation_response::Result::CreatedVpc(
+                found_by_id[&incompatible_id].clone()
+            )
+        )
     );
 
     // Emit one actionable warning identifying the incompatible retained VPC.
@@ -2466,12 +2493,14 @@ async fn change_vpc_routing_profile_same_version_commits_once(
     );
     assert_eq!(find_test_vpc(&env, vpc_id).await?.version, changed.version);
     let allocations = vpc_vni_pool_state(&env).await?;
+    let owner_id = vpc_id.to_string();
+    let owner_type = OwnerType::Vpc.to_string();
     assert_eq!(
         allocations
             .iter()
             .filter(|(_, _, state)| matches!(&state.0,
-                ResourcePoolEntryState::Allocated { owner, owner_type }
-                if owner == &vpc_id.to_string() && owner_type == &OwnerType::Vpc.to_string()
+                ResourcePoolEntryState::Allocated { owner, owner_type: allocation_owner_type }
+                if owner == &owner_id && allocation_owner_type == &owner_type
             ))
             .count(),
         2
@@ -2528,9 +2557,10 @@ async fn change_vpc_routing_profile_exact_vni_has_one_owner_under_concurrent_req
         find_test_vpc(&env, loser_before.id.expect("losing VPC ID")).await?,
         *loser_before
     );
+    let requested_vni_text = requested_vni.to_string();
     let (_, _, state) = expected_allocations
         .iter_mut()
-        .find(|(name, value, _)| name == external_pool && value == &requested_vni.to_string())
+        .find(|(name, value, _)| name == external_pool && value == &requested_vni_text)
         .expect("requested external VNI");
     assert_eq!(state.0, ResourcePoolEntryState::Free);
     *state = sqlx::types::Json(ResourcePoolEntryState::Allocated {
@@ -4630,19 +4660,19 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     let vpc_id: VpcId = forge_vpc.id.expect("should have id");
 
     assert_eq!(
-        &forge_vpc.metadata.clone().unwrap().name,
+        &forge_vpc.metadata.as_ref().unwrap().name,
         "test_VPC_with_labels"
     );
     assert_eq!(
-        forge_vpc.metadata.clone().unwrap().description,
+        forge_vpc.metadata.as_ref().unwrap().description,
         "this VPC must have labels."
     );
-    assert!(forge_vpc.metadata.clone().unwrap().labels.len() == 2);
+    assert!(forge_vpc.metadata.as_ref().unwrap().labels.len() == 2);
 
     assert_eq!(
         forge_vpc
             .metadata
-            .clone()
+            .as_ref()
             .unwrap()
             .labels
             .iter()
@@ -4654,7 +4684,7 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     assert_eq!(
         forge_vpc
             .metadata
-            .clone()
+            .as_ref()
             .unwrap()
             .labels
             .iter()
@@ -4675,10 +4705,10 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         .unwrap();
 
     assert_eq!(vpc_list.vpcs.len(), 1);
-    let fetched_vpc = vpc_list.vpcs[0].clone();
+    let fetched_vpc = &vpc_list.vpcs[0];
 
     assert_eq!(
-        &fetched_vpc.metadata.clone().unwrap().name,
+        &fetched_vpc.metadata.as_ref().unwrap().name,
         "test_VPC_with_labels"
     );
     assert_eq!(
@@ -4690,15 +4720,15 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         "Forge_unit_tests"
     );
     assert_eq!(
-        fetched_vpc.metadata.clone().unwrap().description,
+        fetched_vpc.metadata.as_ref().unwrap().description,
         "this VPC must have labels."
     );
-    assert!(fetched_vpc.metadata.clone().unwrap().labels.len() == 2);
+    assert!(fetched_vpc.metadata.as_ref().unwrap().labels.len() == 2);
 
     assert_eq!(
         fetched_vpc
             .metadata
-            .clone()
+            .as_ref()
             .unwrap()
             .labels
             .iter()
@@ -4710,6 +4740,7 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     assert_eq!(
         fetched_vpc
             .metadata
+            .as_ref()
             .unwrap()
             .labels
             .iter()

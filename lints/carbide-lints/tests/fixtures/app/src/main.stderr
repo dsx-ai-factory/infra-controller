@@ -213,10 +213,34 @@ note: Transaction declared here
 377 | async fn bad_takes_db_reader_inner<DB>(_db: &mut DB)
     |                                        ^^^
 
+error: A sqlx::Transaction is being held across this 'await' point
+   --> src/main.rs:492:37
+    |
+492 |         unrelated_async_work("bad").await;
+    |                                     ^^^^^
+    |
+note: Transaction declared here
+   --> src/main.rs:489:13
+    |
+489 |     let mut txn = make_transaction();
+    |             ^^^
+
+error: A sqlx::Transaction is being held across this 'await' point
+   --> src/main.rs:504:6
+    |
+504 |     .await;
+    |      ^^^^^
+    |
+note: Transaction declared here
+   --> src/main.rs:500:9
+    |
+500 |     let uncaptured = make_transaction();
+    |         ^^^^^^^^^^
+
 error: sqlx::Transaction is dropped by this function without commit()/rollback(), or being moved out
    --> src/main.rs:362:29
     |
 362 | fn bad_missing_commit_param(_txn: PgTransaction<'_>) {
     |                             ^^^^
 
-error: could not compile `sqlx_app` (bin "sqlx_app") due to 19 previous errors
+error: could not compile `sqlx_app` (bin "sqlx_app") due to 21 previous errors

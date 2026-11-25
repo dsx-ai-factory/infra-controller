@@ -8,6 +8,17 @@ identifies the root, boot, and EFI filesystems after imaging.
 Image installation overwrites the complete selected disk.
 </Warning>
 
+## QCOW Download TLS Verification
+
+The QCOW imager verifies server certificates by default for HTTPS downloads of
+disk images, distribution checksum files, and cloud-init data. Downloads that
+start on HTTPS must stay on HTTPS through redirects.
+
+If certificate verification fails, check that the server presents a complete
+certificate chain that the imager trusts, and confirm the host clock is correct.
+The explicit `insecure_tls=yes` kernel argument disables certificate verification
+for all of the imager's HTTPS downloads and logs a warning.
+
 ## Configuring the Target Disk
 
 The Core API and `nico-admin-cli` call this field `boot_disk`; the REST API

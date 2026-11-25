@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(instanceInventoryManager.DiscoverInstanceInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("Instance: Successfully registered DiscoverInstanceInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

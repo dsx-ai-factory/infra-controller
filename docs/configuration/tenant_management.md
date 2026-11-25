@@ -1238,6 +1238,6 @@ Flag-first ordering -- always put flags before positional args.
 - [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md), full networking architecture
 - [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs and waiting for peering deletion
 - [NVLink Partitioning](../manuals/nvlink_partitioning.md), NVLink logical partition management
-- [Machine Reboot Playbook](../playbooks/machine_reboot.md), emergency BMC reboot procedures
+- [Machine Reboot Playbook](../playbooks/machine_reboot.md), administrator restarts of managed hosts and attached DPUs
 - [Force Delete Playbook](../playbooks/force_delete.md), removing stuck machines
 - [Day 0/1/2 Lifecycle](../overview/lifecycle.md), NICo lifecycle model overview

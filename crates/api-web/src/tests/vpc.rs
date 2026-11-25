@@ -137,11 +137,11 @@ async fn vpc_pages_show_status_vni(pool: sqlx::PgPool) {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response_body(response)
-            .await
-            .contains(&format!("<td>{vni}</td>"))
-    );
+    let body = response_body(response).await;
+    assert!(body.contains(&format!("<td>{vni}</td>")));
+    assert!(body.contains(&format!(
+        "<a href=\"/admin/ipam/overlay/prefix/{vpc_prefix_id}\">192.0.2.0/25</a>"
+    )));
 
     // Verify the IPAM overlay prefix detail page renders status.vni.
     let response = app

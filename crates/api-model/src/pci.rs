@@ -23,6 +23,7 @@
 
 use std::num::ParseIntError;
 
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -173,13 +174,7 @@ impl PciBdfOrderingKey {
 pub(crate) fn normalize_uefi_device_path(
     path: &str,
 ) -> Result<String, UefiPciOrderingKeyParseError> {
-    parse_uefi_components(path).map(|components| {
-        components
-            .into_iter()
-            .map(|component| component.to_string())
-            .collect::<Vec<_>>()
-            .join(".")
-    })
+    parse_uefi_components(path).map(|components| components.into_iter().join("."))
 }
 
 /// Parses UEFI root and hop components while preserving their existing order.

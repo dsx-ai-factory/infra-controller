@@ -325,7 +325,7 @@ func newResource(ctx context.Context, serviceNameFallback string) (*resource.Res
 
 func serviceName(res *resource.Resource) string {
 	for _, attr := range res.Attributes() {
-		if string(attr.Key) == "service.name" {
+		if attr.Key == "service.name" {
 			return attr.Value.AsString()
 		}
 	}

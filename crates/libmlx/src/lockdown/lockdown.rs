@@ -49,32 +49,26 @@ impl std::fmt::Display for LockStatus {
 }
 
 // LockdownManager is the main interface for managing device
-// lockdown operations.
+// lockdown operations. It submits these flint commands:
+// - `flint -d <device> hw_access disable <key>` disables hardware access.
+// - `flint -d <device> set_key <key>` sets the hardware access key.
+// - `flint -d <device> hw_access enable <key>` enables hardware access.
 //
-// Just to have this documented somewhere, it's important to call out
-// a few notes around the behavior(s) with locking and unlocking cards.
+// Lock and unlock use `hw_access`. The runner maps Already responses to
+// `AlreadyLocked` or `AlreadyUnlocked`. `set_device_key` uses `set_key`; the
+// runner classifies its completion by exit status, and the method returns no
+// lock status.
 //
-// Behind the scenes, there's:
-// - hw_access disable <device> <key>, which locks a card with a given key.
-// - set_key disable <device> <key>, which does the exact same thing.
-// - hw_access enable <device> <key>, which unlocks the card with the key.
+// In testing on a BF3 SuperNIC, both `set_key` and `hw_access disable`
+// appeared to disable access. Calling `hw_access disable` after `set_key`
+// reported access already disabled. After `hw_access enable`, a different
+// key could be applied without a reboot or power cycle, which suggested
+// that enabling access cleared the active key on that card.
 //
-// Originally I thought you had to set_key, and then you could lock at
-// will, and had to unlock with the key. But it turns out that set_key
-// and hw_access disable both appear to do the same thing now. If you try
-// to call hw_access disable after set_key, it just tells you access
-// is already disabled.
-//
-// I also thought you had to reboot/power cycle the card after changing
-// the key, but based on testing, that also seems to not be the case
-// either. Once you hw_access enable, it clears the key, and you need
-// to either hw_access disable or set_key again (and can do it with a
-// different key). This is actually nice, because I don't need to power
-// cycle in between tenants (granted we will anyway, but it's one less
-// power cycle to worry about).
-//
-// But fwiw, that behavior may also be card specific. I'm testing on
-// a BF3 SuperNIC, and it's letting me do things as I described above.
+// Those observations do not establish key retention or activation and reset
+// requirements for other NICs, firmware, or flint versions. The test's firmware
+// and flint versions were not recorded here; do not treat this as a general
+// guarantee that setting a key locks a card or that unlocking clears its key.
 pub struct LockdownManager {
     // runner is the flint command runner.
     runner: FlintRunner,

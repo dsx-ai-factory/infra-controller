@@ -16,6 +16,7 @@
  */
 
 use std::ffi::OsString;
+use std::fmt::Write;
 use std::time::Duration;
 
 use carbide_instrument::Instrumentation;
@@ -364,7 +365,13 @@ async fn run_firmware_upgrade(
                 ),
                 reason => reason.to_string(),
             };
-            let cleanup = cleanup_errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
+            let mut cleanup = String::new();
+            for (index, error) in cleanup_errors.iter().enumerate() {
+                if index > 0 {
+                    cleanup.push_str("; ");
+                }
+                write!(cleanup, "{error}").expect("writing to a String cannot fail");
+            }
             let error = format!(
                 "{reason}; cleanup: {cleanup}; inputs retained at {}; hardware access remains blocked pending operator reconciliation; process termination does not establish that device-internal work stopped",
                 attempt.staging.work_dir().display(),

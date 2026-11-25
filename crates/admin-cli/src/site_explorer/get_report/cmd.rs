@@ -25,6 +25,7 @@ use prettytable::{Cell, Row, Table, format, row};
 use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
+use crate::table_utils::wrap_line as wrap_text;
 use crate::{async_write, async_writeln};
 
 /// Build an index into the ExploredEndpoints slice for ones matching this ExploredManaged, using
@@ -158,7 +159,7 @@ async fn get_exploration_report_for_bmc_address(
     // get managed host with host bmc
     let mut managed_host = api_client
         .0
-        .find_explored_managed_hosts_by_ids(std::slice::from_ref(&ip.to_string()))
+        .find_explored_managed_hosts_by_ids(std::slice::from_ref(ip))
         .await?
         .managed_hosts;
 
@@ -489,29 +490,12 @@ fn endpoint_to_row(endpoint: &ExploredEndpoint) -> Row {
         .map(|report| report.last_exploration_error_display())
         .unwrap_or_default();
 
-    let error_segmented = last_error
-        .chars()
-        .collect::<Vec<char>>()
-        .chunks(70)
-        .map(|c| c.iter().collect::<String>())
-        .collect::<Vec<String>>()
-        .join("\n");
+    let error_segmented = wrap_text(&last_error, 70);
 
     let state = endpoint
         .preingestion_state
         .split_once(" ")
-        .map(|(x, y)| {
-            Cow::Owned(format!(
-                "{}\n{}",
-                x,
-                y.chars()
-                    .collect::<Vec<char>>()
-                    .chunks(17)
-                    .map(|x| x.iter().collect::<String>())
-                    .collect::<Vec<String>>()
-                    .join("\n")
-            ))
-        })
+        .map(|(x, y)| Cow::Owned(format!("{}\n{}", x, wrap_text(y, 17))))
         .unwrap_or(Cow::Borrowed(endpoint.preingestion_state.as_str()));
 
     Row::new(vec![
@@ -574,13 +558,7 @@ async fn display_endpoint(
         .map(|report| report.last_exploration_error_display())
         .unwrap_or_default();
 
-    let error_segmented = last_error
-        .chars()
-        .collect::<Vec<char>>()
-        .chunks(175)
-        .map(|c| c.iter().collect::<String>())
-        .collect::<Vec<String>>()
-        .join("\n");
+    let error_segmented = wrap_text(&last_error, 175);
 
     table.add_row(row!["Last Exploration Error", error_segmented]);
     table.add_row(row!["Report Version", endpoint.report_version]);
@@ -689,9 +667,9 @@ async fn display_endpoint(
 #[cfg(test)]
 mod tests {
     use ::rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint, OperatorErrorSchema};
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
 
-    use super::{convert_endpoints_to_nice_table, filter_endpoints};
+    use super::{convert_endpoints_to_nice_table, filter_endpoints, wrap_text};
 
     fn operator_error_schema() -> OperatorErrorSchema {
         OperatorErrorSchema {
@@ -710,16 +688,31 @@ mod tests {
     }
 
     #[test]
+    fn wrapping_counts_unicode_scalars_without_a_trailing_newline() {
+        value_scenarios!(run = |text| wrap_text(text, 3);
+            "empty and exact boundaries have no trailing newline" {
+                "" => "".to_string(),
+                "abc" => "abc".to_string(),
+            }
+
+            "multibyte and combining scalars each count once" {
+                "aé\u{301}🦀" => "aé\u{301}\n🦀".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn endpoint_error_filter_and_table_rendering_use_structured_errors() {
-        let error = endpoint(
+        let mut error = endpoint(
             "192.0.2.10",
             EndpointExplorationReport {
                 last_exploration_error_schema: Some(operator_error_schema()),
                 ..Default::default()
             },
         );
+        error.preingestion_state = "Ready abcdefghijklmnopé界".to_string();
         let clear = endpoint("192.0.2.11", EndpointExplorationReport::default());
-        let endpoints = vec![error.clone(), clear];
+        let endpoints = vec![error, clear];
 
         check_values(
             [
@@ -753,8 +746,19 @@ mod tests {
             },
         );
 
-        let rendered = convert_endpoints_to_nice_table(&[error]).to_string();
+        let table = convert_endpoints_to_nice_table(&endpoints);
+        let rendered = table.to_string();
+        assert!(rendered.contains("Pre-ingestion State"));
+        assert!(rendered.contains("Last Exploration Error"));
         assert!(rendered.contains("NICO-SITEEXPLORER-122"));
         assert!(rendered.contains("BMC vendor missing"));
+        assert_eq!(
+            table.get_row(0).unwrap().get_cell(5).unwrap().get_content(),
+            "Ready\nabcdefghijklmnopé\n界"
+        );
+        assert_eq!(
+            table.get_row(1).unwrap().get_cell(7).unwrap().get_content(),
+            ""
+        );
     }
 }

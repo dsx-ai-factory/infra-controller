@@ -13,8 +13,8 @@ nico-admin-cli instance allocate [-n|--number]
 [-s|--subnet] [-t|--tenant-org]
 <-p|--prefix-name> [--label-key] [--label-value]
 [--network-security-group-id] [--instance-type-id]
-[--os] [--spxconfig] [--vf-subnet]
-[-v|--vpc-prefix-id] [--flat-vpc-id] [--extended]
+[--os] [--extended] [--spxconfig] [--vf-subnet]
+[-v|--vpc-prefix-id] [--flat-vpc-id]
 [--vf-vpc-prefix-id] [--ip-address] [--vf-ip-address]
 [--ipv6-vpc-prefix-id] [--ipv6-vf-prefix-id]
 [--ipv6-ip-address] [--ipv6-vf-ip-address]
@@ -60,6 +60,14 @@ to type ID set for the machine of the request
 
 OS definition in JSON format
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--spxconfig <SPX_JSON>`
 
 SPX configuration in JSON format
@@ -75,14 +83,6 @@ The VPC prefix to assign to a PF
 `--flat-vpc-id <FLAT_VPC_ID>`
 
 Create an instance in the given "flat" VPC, for machines without DPUs
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--vf-vpc-prefix-id <VF_VPC_PREFIX_ID>`
 

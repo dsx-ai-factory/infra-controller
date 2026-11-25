@@ -61,8 +61,7 @@ pub(super) async fn attach(args: Args, api_client: &ApiClient) -> CarbideCliResu
 
         println!(
             "Network security group {} successfully attached to instance {}",
-            args.id.clone(),
-            instance_id
+            args.id, instance_id
         );
     }
 
@@ -90,8 +89,7 @@ pub(super) async fn attach(args: Args, api_client: &ApiClient) -> CarbideCliResu
 
         println!(
             "Network security group {} successfully attached to VPC {}",
-            args.id.clone(),
-            v
+            args.id, v
         );
     }
 

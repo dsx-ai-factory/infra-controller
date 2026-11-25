@@ -102,7 +102,7 @@ func sameCoreComponentIdentity(expected, observed string) bool {
 		return false
 	}
 	hash, valid := normalizeCoreComponentHash(expected[coreComponentIDPrefixLength:])
-	return valid && hash == strings.ToLower(observed[coreComponentIDPrefixLength:])
+	return valid && strings.EqualFold(hash, observed[coreComponentIDPrefixLength:])
 }
 
 // normalizeCoreComponentHash checks Core's Base32Hex representation before folding

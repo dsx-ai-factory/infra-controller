@@ -8,7 +8,9 @@ Service (RMS)** asynchronously and polls job status until completion.
 ## Goals
 
 - Install or rotate the switch NVOS certificate as part of initial switch
-  bring-up, before NVOS admin credentials are stored (`RotateOsPassword`).
+  bring-up, before managed password reconciliation (`RotateOsPassword`).
+  [Initial NVOS rotation](../../operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
+  stores the working credentials during pre-ingestion, before switch creation.
 - Reset existing mTLS bindings before installing certificates during initial
   bring-up, so stale client-CA trust cannot block installation.
 - Keep RMS-specific protobuf and job semantics behind the CM `NvSwitchManager`

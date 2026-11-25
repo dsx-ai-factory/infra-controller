@@ -28,7 +28,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use carbide_authn::middleware::{AuthContext, Principal};
@@ -1055,17 +1055,17 @@ async fn upload(
 ) -> (u16, usize, Vec<String>, Vec<String>) {
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password(), instrumentation).await;
-    let answer = exchange(
-        &state,
-        proxied(
-            Method::POST,
-            UPLOAD_PATH,
-            to_the_bmc(),
-            &[(header::CONTENT_LENGTH, len.to_string().as_str())],
-            Body::from(vec![b'x'; len]),
-        ),
-    )
-    .await;
+    let mut request = proxied(
+        Method::POST,
+        UPLOAD_PATH,
+        to_the_bmc(),
+        &[],
+        Body::from(vec![b'x'; len]),
+    );
+    request
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    let answer = exchange(&state, request).await;
     let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one request");
     (
         answer.status,
@@ -1151,13 +1151,17 @@ async fn after_rejection(
     let request = if input.body_len == 0 {
         proxied(input.method, input.path, to_the_bmc(), &[], Body::empty())
     } else {
-        proxied(
+        let mut request = proxied(
             input.method,
             input.path,
             to_the_bmc(),
-            &[(header::CONTENT_LENGTH, input.body_len.to_string().as_str())],
+            &[],
             Body::from(vec![b'x'; input.body_len]),
-        )
+        );
+        request
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(input.body_len));
+        request
     };
     let answer = exchange(&state, request).await;
 

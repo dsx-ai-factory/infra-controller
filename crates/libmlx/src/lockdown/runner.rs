@@ -350,8 +350,8 @@ impl FlintRunner {
             .output()
             .map_err(|e| MlxError::CommandFailed(format!("Failed to execute burn: {e}")))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
         if !output.status.success() {
             if stderr.contains("Permission denied") || stdout.contains("Permission denied") {
@@ -364,7 +364,7 @@ impl FlintRunner {
             return Err(MlxError::CommandFailed(error_msg));
         }
 
-        Ok(stdout)
+        Ok(stdout.into_owned())
     }
 
     // verify_image verifies the firmware on the device against a given
@@ -392,8 +392,8 @@ impl FlintRunner {
             MlxError::CommandFailed(format!("Failed to execute verify with image: {e}"))
         })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
         if !output.status.success() {
             if stderr.contains("Permission denied") || stdout.contains("Permission denied") {
@@ -406,7 +406,7 @@ impl FlintRunner {
             return Err(MlxError::CommandFailed(error_msg));
         }
 
-        Ok(stdout)
+        Ok(stdout.into_owned())
     }
 
     pub(crate) fn burn_command(&self, device: &str, image: &Path) -> CommandSpec {
@@ -879,7 +879,7 @@ mod coverage_tests {
             existing.display()
         );
 
-        let img = existing.to_string_lossy().to_string();
+        let img = existing.to_string_lossy().into_owned();
 
         let b = runner.burn("dev0", &existing).unwrap_err();
         assert_eq!(err_kind(&b), "DryRun");

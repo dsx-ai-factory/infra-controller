@@ -15,7 +15,7 @@ use db::resource_pool::{
     ResourcePoolAllocationNotOwned, binding, registration as definitions, remote as storage,
 };
 use db::work_lock_manager::{self, KeepaliveConfig, WorkLockManagerHandle};
-use db::{ConditionalWrite, TransactionVending as _};
+use db::{ConditionalWrite, DatabaseError, TransactionVending as _};
 use model::resource_pool::allocation::{
     AllocationSource, AllocationState, AssignmentMode, ResourcePoolAllocation, ResourcePoolValue,
 };
@@ -41,8 +41,9 @@ use crate::grpc::test_server::{Fault, FaultProvider, Gate, TestServer, bounded, 
 use crate::remote::{RemoteResourcePool, RemoteResourcePoolError};
 use crate::value::{ResourcePoolEligibility, ValueConversionError};
 use crate::{
-    AllocationCleanupStatus, AllocationStatus, PoolDefinitionSource, ResourcePoolBackendError,
-    ResourcePoolRegistry, ResourcePoolWithBackend, registration,
+    AllocationCleanupStatus, AllocationOwnerIds, AllocationStatus, IntegratedAllocationOwner,
+    PoolDefinitionSource, ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolWithBackend,
+    registration,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -287,13 +288,60 @@ fn assignment(record: &ResourcePoolAllocation) -> &AllocationAssignment {
     assignment
 }
 
+/// Shared cleanup treats free or missing Integrated values as successful cleanup.
+#[carbide_macros::sqlx_test]
+async fn shared_integrated_release_accepts_free_and_missing_values(database: PgPool) -> TestResult {
+    let descriptor = ResourcePool::<i32>::new("cleanup-test".to_owned(), ValueType::Integer);
+    let mut txn = database.txn_begin().await?;
+    db::resource_pool::populate(&descriptor, &mut txn, vec![1], false).await?;
+    let registry = ResourcePoolRegistry::default();
+    for (scenario, value) in [("already free", 1), ("missing", 2)] {
+        registry
+            .release_value(
+                &descriptor,
+                &mut txn,
+                value,
+                OwnerType::IBPartition,
+                AllocationOwnerIds {
+                    entity_id: "removed-partition",
+                    integrated_owner: IntegratedAllocationOwner::Recorded,
+                },
+                "pkey",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{scenario} value needs no cleanup: {error}"));
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
 /// Shared allocation and release obey the entity transaction. Rolling it back
 /// must leave the provider's reservation available for retry, not free it early.
 #[carbide_macros::sqlx_test]
 async fn shared_remote_allocation_attaches_and_releases_in_the_entity_transaction(
     database: PgPool,
 ) -> TestResult {
-    let fixture = RemotePoolFixture::automatic(database, 1).await?;
+    // Both values are eligible for automatic allocation. The provider selects
+    // the first one. Releasing 2 must fail the comparison with the receipt for 1.
+    let local = LocalProvider::new(
+        pool(),
+        v1::ValueDomain::Integer,
+        vec![1.into(), 2.into()],
+        None,
+    )?;
+    let fixture = RemotePoolFixture::new(
+        database,
+        local,
+        &ResourcePoolEligibility {
+            domain: ResourcePoolValueDomain::Integer,
+            entries: vec![
+                entry(1, v1::AssignmentMode::Automatic),
+                entry(2, v1::AssignmentMode::Automatic),
+            ],
+        },
+        Fault::None,
+    )
+    .await?;
     let cancel = CancellationToken::new();
     let selected = fixture
         .registry
@@ -373,12 +421,41 @@ async fn shared_remote_allocation_attaches_and_releases_in_the_entity_transactio
                 &cancel,
             )
             .await,
-        Err(ResourcePoolBackendError::Database(
-            db::DatabaseError::FailedPrecondition(_)
-        ))
+        Err(ResourcePoolBackendError::Remote(RemoteResourcePoolError::Storage(ref error)))
+            if matches!(error.as_ref(), storage::RemoteAllocationError::SlotInUse(_))
     ));
     assert_eq!(fixture.saved().await?, attached);
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 1);
+
+    // Neither an old value nor a different entity can release the live assignment.
+    let mut txn = fixture.database.txn_begin().await?;
+    for (entity_id, value) in [
+        ("machine-1", 2), // Right entity, stale value.
+        ("machine-2", 1), // Right value, no receipt for this entity.
+    ] {
+        let error = fixture
+            .registry
+            .release_value(
+                &fixture.descriptor,
+                &mut txn,
+                value,
+                OwnerType::Machine,
+                AllocationOwnerIds {
+                    entity_id,
+                    integrated_owner: IntegratedAllocationOwner::Recorded,
+                },
+                "test-allocation",
+            )
+            .await
+            .expect_err("a missing or conflicting receipt must block deletion");
+        assert!(matches!(
+            error,
+            ResourcePoolBackendError::Database(DatabaseError::FailedPrecondition(_))
+        ));
+    }
+    txn.commit().await?;
+    assert_eq!(fixture.saved().await?, attached);
+    assert_eq!(fixture.provider.release_calls.load(Ordering::SeqCst), 0);
 
     // Release records intent in the caller's transaction. Only reconciliation
     // after commit may contact the provider and free the reservation.
@@ -1731,8 +1808,10 @@ async fn preparation_rejects_changed_or_invalid_replay_evidence(database: PgPool
         match case {
             Case::OtherDesire => assert!(matches!(
                 error,
-                ResourcePoolBackendError::Database(db::DatabaseError::FailedPrecondition(message))
-                    if message == "machine `machine-1` already has an allocation or unfinished request for slot `test-allocation`"
+                ResourcePoolBackendError::Remote(RemoteResourcePoolError::Storage(ref error))
+                    if matches!(error.as_ref(), storage::RemoteAllocationError::SlotInUse(
+                        db::DatabaseError::FailedPrecondition(message)
+                    ) if message == "machine `machine-1` already has an allocation or unfinished request for slot `test-allocation`")
             )),
             Case::OtherPool => assert!(matches!(error, ResourcePoolBackendError::RequestChanged)),
             Case::ProviderIdentity => assert!(matches!(
@@ -2281,9 +2360,8 @@ async fn retained_other_pool_cannot_hide_older_cleanup(database: PgPool) -> Test
                 &cancel,
             )
             .await,
-        Err(ResourcePoolBackendError::Database(
-            db::DatabaseError::FailedPrecondition(_)
-        ))
+        Err(ResourcePoolBackendError::Remote(RemoteResourcePoolError::Storage(ref error)))
+            if matches!(error.as_ref(), storage::RemoteAllocationError::SlotInUse(_))
     ));
     assert_eq!(fixture.saved().await?, newer);
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 2);
@@ -2741,7 +2819,8 @@ async fn shared_membership_preserves_growth_and_mixed_backend_values(
         );
     }
 
-    // Missing acknowledgement is an error rather than a falsely empty pool.
+    // A binding alone is not an acknowledged definition. Neither presence nor
+    // capacity may silently treat this missing acknowledgement as an empty pool.
     sqlx::query("DELETE FROM resource_pool_registration WHERE binding_id = $1")
         .bind(binding.binding_id)
         .execute(&mut *txn)
@@ -2752,7 +2831,301 @@ async fn shared_membership_preserves_growth_and_mixed_backend_values(
             db::DatabaseError::FailedPrecondition(_)
         ))
     ));
+    assert!(matches!(
+        fixture.registry.is_configured(&mut txn, &other).await,
+        Err(ResourcePoolBackendError::Database(
+            db::DatabaseError::FailedPrecondition(_)
+        ))
+    ));
     txn.rollback().await?;
+    fixture.stop().await;
+    Ok(())
+}
+
+/// Public deltas must replay a pending Define rather than append another
+/// successor; repeated deltas keep the acknowledged revision unchanged.
+#[carbide_macros::sqlx_test]
+async fn growth_delta_replays_the_saved_definition_without_duplicate_revisions(
+    database: PgPool,
+) -> TestResult {
+    let fixture = RemotePoolFixture::automatic(database, 1).await?;
+    let binding = &fixture
+        .registry
+        .get(fixture.descriptor.name())
+        .expect("remote binding")
+        .binding;
+    let original = registration::latest_accepted(&fixture.database, binding)
+        .await?
+        .expect("accepted seed");
+    let delta = model::resource_pool::ResourcePoolDef {
+        pool_type: model::resource_pool::ResourcePoolType::Integer,
+        prefix: None,
+        ranges: vec![model::resource_pool::Range {
+            start: "2".to_owned(),
+            end: "4".to_owned(),
+            auto_assign: true,
+        }],
+        delegate_prefix_len: None,
+    };
+    let mut pending = original.clone();
+    pending.previous_revision = Some("1".to_owned());
+    pending.eligibility_revision = "2".to_owned();
+    pending
+        .eligibility
+        .extend(ResourcePoolEligibility::try_from(delta.clone())?.entries);
+    let saved = ResourcePoolRegistration {
+        binding_id: binding.binding_id,
+        revision: 2,
+        request: pending.encode_to_vec(),
+        accepted: false,
+    };
+    let mut txn = fixture.database.txn_begin().await?;
+    definitions::insert(&mut txn, &saved).await?;
+    txn.commit().await?;
+    // This is the durable state after provider acceptance but before Core has
+    // committed acknowledgement. Existing registration tests inject lost RPCs.
+    fixture.remote.provider().define(pending.clone()).await?;
+    let pools = HashMap::from([(fixture.descriptor.name().to_owned(), delta)]);
+    fixture.registry.grow(&fixture.database, &pools).await?;
+    let acknowledged = definitions::latest(&fixture.database, binding.binding_id)
+        .await?
+        .expect("grown revision");
+    assert!(acknowledged.accepted);
+    assert_eq!(acknowledged.request, saved.request);
+    assert_eq!(acknowledged.revision, saved.revision);
+    let calls = fixture
+        .provider
+        .define_requests
+        .lock()
+        .expect("Define requests")
+        .clone();
+    assert_eq!(calls, vec![original.clone(), pending.clone(), pending]);
+    fixture.registry.grow(&fixture.database, &pools).await?;
+    assert_eq!(
+        definitions::latest(&fixture.database, binding.binding_id).await?,
+        Some(acknowledged)
+    );
+    assert_eq!(
+        fixture
+            .provider
+            .define_requests
+            .lock()
+            .expect("Define requests")
+            .len(),
+        calls.len()
+    );
+    assert_eq!(
+        registration::accepted(&fixture.database, binding, 1).await?,
+        Some(original)
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// Neither a native/remote batch nor multiple remote pools has an atomic
+/// commit protocol. Reject both without committing bindings or inventory and
+/// without calling Define.
+#[carbide_macros::sqlx_test]
+async fn growth_rejects_unsupported_batches_before_effects(database: PgPool) -> TestResult {
+    let mut fixture = RemotePoolFixture::automatic(database, 1).await?;
+    let peer = fixture
+        .add_pool(
+            "growth-peer",
+            &ResourcePoolEligibility {
+                domain: ResourcePoolValueDomain::Integer,
+                entries: vec![entry(1, v1::AssignmentMode::Automatic)],
+            },
+        )
+        .await?;
+    let registrations_before: Vec<(Uuid, i64, Vec<u8>, bool)> = sqlx::query_as(
+        "SELECT binding_id, revision, request, accepted FROM resource_pool_registration ORDER BY binding_id, revision"
+    )
+    .fetch_all(&fixture.database)
+    .await?;
+    let bindings_before = binding::all(&fixture.database).await?;
+    let definitions_before = db::resource_pool::all_stored_defs(&fixture.database).await?;
+    let calls_before = fixture
+        .provider
+        .define_requests
+        .lock()
+        .expect("Define requests")
+        .clone();
+    let definition = model::resource_pool::ResourcePoolDef {
+        pool_type: model::resource_pool::ResourcePoolType::Integer,
+        prefix: None,
+        ranges: vec![model::resource_pool::Range {
+            start: "2".to_owned(),
+            end: "4".to_owned(),
+            auto_assign: true,
+        }],
+        delegate_prefix_len: None,
+    };
+    for (scenario, other) in [
+        ("mixed", "new-native-growth"),
+        ("multiple remote", peer.name()),
+    ] {
+        let error = fixture
+            .registry
+            .grow(
+                &fixture.database,
+                &HashMap::from([
+                    (fixture.descriptor.name().to_owned(), definition.clone()),
+                    (other.to_owned(), definition.clone()),
+                ]),
+            )
+            .await
+            .expect_err(scenario);
+        assert!(
+            matches!(
+                error,
+                crate::ResourcePoolGrowthError::Database(DatabaseError::FailedPrecondition(_))
+            ),
+            "{scenario}: {error}"
+        );
+        assert_eq!(
+            binding::all(&fixture.database).await?,
+            bindings_before,
+            "{scenario}"
+        );
+        assert_eq!(
+            db::resource_pool::all_stored_defs(&fixture.database).await?,
+            definitions_before,
+            "{scenario}"
+        );
+        assert_eq!(
+            *fixture
+                .provider
+                .define_requests
+                .lock()
+                .expect("Define requests"),
+            calls_before,
+            "{scenario}"
+        );
+        let registrations: Vec<(Uuid, i64, Vec<u8>, bool)> = sqlx::query_as(
+            "SELECT binding_id, revision, request, accepted FROM resource_pool_registration ORDER BY binding_id, revision"
+        )
+        .fetch_all(&fixture.database)
+        .await?;
+        assert_eq!(registrations, registrations_before, "{scenario}");
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE name IN ($1, $2)")
+                .bind(fixture.descriptor.name())
+                .bind(other)
+                .fetch_one(&fixture.database)
+                .await?;
+        assert_eq!(rows, 0, "{scenario}");
+    }
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A first binding committed during growth must never route provider inventory
+/// through SQL. The resource-table lock pauses resolution after its binding
+/// snapshot, before it checks the pool's stored inventory.
+#[carbide_macros::sqlx_test]
+async fn growth_rechecks_a_concurrently_created_remote_binding(database: PgPool) -> TestResult {
+    let fixture = RemotePoolFixture::automatic(database, 1).await?;
+    let name = "concurrent-growth";
+    let mut gate = fixture.database.txn_begin().await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let pools = HashMap::from([(
+        name.to_owned(),
+        model::resource_pool::ResourcePoolDef {
+            pool_type: model::resource_pool::ResourcePoolType::Integer,
+            ranges: vec![model::resource_pool::Range {
+                start: "2".to_owned(),
+                end: "4".to_owned(),
+                auto_assign: true,
+            }],
+            prefix: None,
+            delegate_prefix_len: None,
+        },
+    )]);
+    let mut growth = Box::pin(fixture.registry.grow(&fixture.database, &pools));
+    let mut reader = PgPoolReader::from(fixture.database.clone());
+    tokio::select! {
+        result = &mut growth => panic!("growth passed the inventory gate: {result:?}"),
+        _ = db::test_support::postgres::wait_for_blocked_query(&mut reader, gate_pid, "resource_pool") => {}
+    }
+    let original = &fixture
+        .registry
+        .get(fixture.descriptor.name())
+        .expect("provider pool")
+        .binding;
+    let selection = ResourcePoolSelection {
+        pool_name: name.to_owned(),
+        value_domain: ResourcePoolValueDomain::Integer,
+        backend_name: original.backend_name.clone(),
+        backend_kind: ResourcePoolBackendKind::Grpc,
+        authority_id: original.authority_id.clone(),
+        remote_pool: name.to_owned(),
+    };
+    let mut binding_txn = fixture.database.txn_begin().await?;
+    binding::bind_or_verify(&mut binding_txn, &selection).await?;
+    binding_txn.commit().await?;
+    gate.commit().await?;
+    let error = tokio::time::timeout(Duration::from_secs(10), &mut growth)
+        .await?
+        .expect_err("a concurrently changed binding requires a fresh growth request");
+    assert!(
+        matches!(&error, crate::ResourcePoolGrowthError::Registry(
+            crate::ResourcePoolRegistryError::Binding(binding::BindingError::Conflict {
+                name: conflicting_pool, ..
+            })
+        ) if conflicting_pool == name),
+        "{error}"
+    );
+    drop(growth);
+    let mut connection = fixture.database.acquire().await?;
+    assert!(!db::resource_pool::pool_has_rows(&mut *connection, name).await?);
+    drop(connection);
+    let saved = binding::load(&fixture.database, name)
+        .await?
+        .expect("remote binding");
+    assert_eq!(saved.backend_kind, ResourcePoolBackendKind::Grpc);
+    assert!(
+        definitions::latest(&fixture.database, saved.binding_id)
+            .await?
+            .is_none()
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// An acknowledged zero-value definition still configures a remote allocator.
+/// Its lack of capacity must not silently disable an optional caller's pool.
+#[carbide_macros::sqlx_test]
+async fn acknowledged_empty_pool_is_configured_without_available_values(
+    database: PgPool,
+) -> TestResult {
+    let mut fixture = RemotePoolFixture::automatic(database, 1).await?;
+    let empty = fixture
+        .add_pool(
+            "empty-membership",
+            &ResourcePoolEligibility {
+                domain: ResourcePoolValueDomain::Integer,
+                entries: vec![v1::Eligibility {
+                    assignment_mode: v1::AssignmentMode::Automatic as i32,
+                    entries: Some(v1::eligibility::Entries::Range(v1::ValueRange {
+                        start: Some(1_i64.into()),
+                        end: Some(1_i64.into()),
+                    })),
+                }],
+            },
+        )
+        .await?;
+    let mut txn = fixture.database.txn_begin().await?;
+    assert!(fixture.registry.is_configured(&mut txn, &empty).await?);
+    assert!(!fixture.registry.has_values(&mut txn, &empty).await?);
+    let absent = ResourcePool::<i32>::new("absent-native".to_owned(), ValueType::Integer);
+    assert!(!fixture.registry.is_configured(&mut txn, &absent).await?);
+    txn.rollback().await?;
+    assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 0);
     fixture.stop().await;
     Ok(())
 }

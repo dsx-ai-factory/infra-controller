@@ -247,6 +247,10 @@ func (mvp ManageVpcPeering) createOrUpdateVpcPeeringFromSite(
 			logger.Warn().Msgf("unable to create VPC Peering found on Site: no peer VPC was found for ID: %s", reportedVpcPeering.Vpc2ID)
 			return nil, nil
 		}
+		if vpc1.IsCreationPendingOrRejected() || vpc2.IsCreationPendingOrRejected() {
+			logger.Warn().Msg("parent VPC creation does not establish ownership of the Site VPC Peering")
+			return nil, nil
+		}
 
 		isMultiTenant := vpc1.TenantID != vpc2.TenantID
 		var infrastructureProviderID *uuid.UUID

@@ -193,6 +193,7 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(mst.dbSession)
 	skgiaDAO := cdbm.NewSSHKeyGroupInstanceAssociationDAO(mst.dbSession)
 	nsgDAO := cdbm.NewNetworkSecurityGroupDAO(mst.dbSession)
+	dosDAO := cdbm.NewDhcpOptionSetDAO(mst.dbSession)
 	ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(mst.dbSession)
 	desdDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(mst.dbSession)
 	skuDAO := cdbm.NewSkuDAO(mst.dbSession)
@@ -572,6 +573,21 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		}
 	}
 
+	// Delete DHCP Option Sets
+	doss, _, err := dosDAO.GetAll(ctx, nil, cdbm.DhcpOptionSetFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve DHCP Option Sets from DB by Site ID")
+		return err
+	}
+
+	for _, dos := range doss {
+		serr := dosDAO.Delete(ctx, nil, dos.ID)
+		if serr != nil && serr != cdb.ErrDoesNotExist {
+			logger.Error().Err(serr).Str("DHCP Option Set ID", dos.ID.String()).Msg("error deleting DHCP Option Set record in DB")
+			return serr
+		}
+	}
+
 	// Delete operating system site associations.
 	ossas, _, err := ossaDAO.GetAll(ctx, nil, cdbm.OperatingSystemSiteAssociationFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -793,7 +809,7 @@ func (mst ManageSite) GetAllSiteIDs(ctx context.Context) ([]uuid.UUID, error) {
 // updateSiteStatusInDB is helper function to write Site status updates to DB
 func (mst ManageSite) updateSiteStatusInDB(ctx context.Context, tx *cdb.Tx, siteID uuid.UUID, status *string, statusMessage *string) error {
 	logger := log.With().Str("activity", "updateSiteStatusInDB").Logger()
-	logger.Info().Msg(fmt.Sprintf("status value: %v, siteID: %v", status, siteID))
+	logger.Info().Msgf("status value: %v, siteID: %v", status, siteID)
 	if status != nil {
 		siteDAO := cdbm.NewSiteDAO(mst.dbSession)
 

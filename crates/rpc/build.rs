@@ -114,6 +114,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".forge.BmcIpAllocationType",
             "#[cfg_attr(feature = \"cli\", derive(clap::ValueEnum))]",
         )
+        .type_attribute(
+            ".forge.ServiceVpcAddressFamily",
+            "#[cfg_attr(feature = \"cli\", derive(clap::ValueEnum))]",
+        )
+        .field_attribute(
+            ".forge.ServiceVpcAddressFamily.SERVICE_VPC_ADDRESS_FAMILY_UNSPECIFIED",
+            "#[cfg_attr(feature = \"cli\", value(skip))]",
+        )
+        .type_attribute(
+            ".forge.InstanceDpuExtensionServiceConfig",
+            "#[cfg_attr(feature = \"cli\", derive(serde::Deserialize), serde(deny_unknown_fields))]",
+        )
+        .field_attribute(
+            ".forge.InstanceDpuExtensionServiceConfig.service_vpc_ids",
+            "#[cfg_attr(feature = \"cli\", serde(default))]",
+        )
         .include_file("prost_common.rs")
         .type_attribute(".health", "#[derive(serde::Deserialize, serde::Serialize)]")
         .type_attribute(

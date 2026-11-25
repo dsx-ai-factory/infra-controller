@@ -265,12 +265,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				return err
 			})
 			if cerr != nil {
-				// Retry errors include earlier failures; classify the last attempt.
-				lastErr := errors.Unwrap(cerr)
-				if lastErr == nil {
-					lastErr = cerr
-				}
-				if errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed) {
+				if errors.Is(cerr, cdb.ErrXactAdvisoryLockFailed) {
 					logger.Warn().Err(cerr).Str("ID", emID.String()).Msg("skipping ExpectedMachine after bounded Expected Inventory lock contention retries")
 					continue
 				}
@@ -395,12 +390,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				return uerr
 			})
 			if uerr != nil {
-				// Retry errors include earlier failures; classify the last attempt.
-				lastErr := errors.Unwrap(uerr)
-				if lastErr == nil {
-					lastErr = uerr
-				}
-				if errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed) {
+				if errors.Is(uerr, cdb.ErrXactAdvisoryLockFailed) {
 					logger.Warn().Err(uerr).Str("ExpectedMachineID", cur.ID.String()).Msg("skipping ExpectedMachine after bounded Expected Inventory lock contention retries")
 					continue
 				}

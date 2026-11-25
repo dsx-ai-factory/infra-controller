@@ -22,7 +22,7 @@ the effect of each throughput knob in isolation. Companion to
 | K2 | `site_explorer.concurrent_explorations` | 30 | 400 | `lib.rs:2294` - semaphore width for parallel Redfish probes per cycle |
 | K3 | `site_explorer.explorations_per_run` | 90 | 360 | `lib.rs:2218` - cap on routine endpoints selected per cycle |
 | K4 | `site_explorer.machines_created_per_run` | 4 | 100 | `machine_creator.rs:106` - hard cap on managed hosts created per cycle |
-| K5 | `firmware_global.concurrency_limit` | 16 | *(not overridden)* | preingestion-manager - concurrent endpoint transactions (NOT a batch cap; all eligible endpoints are processed each 30s run, ≤N at a time). Also caps firmware flashing concurrency. |
+| K5 | `firmware_global.concurrency_limit` | 16 | *(not overridden)* | `preingestion-manager/src/lib.rs:316` - concurrent endpoint tasks within one pass. A pass attempts all endpoints selected at its start and can exceed the configured interval; submitted firmware work can continue after a task returns. Refer to [Firmware execution](../operations/firmware-updates/configuration.md#firmware-execution). |
 | K6 | `firmware_global.run_interval` | 30s | *(not overridden)* | preingestion loop period |
 | K7 | `machine_state_controller.controller.max_concurrency` (nico-api chart value `machineStateController.maxConcurrency`) | 10 (chart default) | 100 (`nico-core-simulation.yaml`) | `state-controller/src/controller/processor.rs`: parallel object state-machine tasks (hostinit/dpuinit advancement). Measured on a 250-rack site with 4,500 hosts and 13,500 machines. At 10 each host gets one step per 20 min or so and takes about 17 h from creation to ready. At 40 a machine takes 4.1 h and 250 racks are ready in 7.4 h. At 80 the figures are 1.8 h and 4.5 to 5.0 h. At 120 they are 1.3 to 1.4 h and 3.9 to 4.9 h. At 160 the run is slower (11.7 h) because the handlers contend for the admin segment advisory lock. 80 to 120 is the recommended range. |
 
@@ -35,8 +35,8 @@ blocks of `helm-prereqs/values/nico-core-simulation.yaml`.
 
 ## Method
 
-- **Fleet**: 1000 hosts × 2 DPUs (3000 endpoints) for iteration speed; confirm
-  the winning combination at 4500×2 = 13,500.
+- **Fleet**: 1,000 hosts plus two DPUs per host gives 3,000 endpoints for iteration speed.
+  Confirm the winning combination at 4,500 × (1 + 2) = 13,500 endpoints.
 - **One knob per run.** Reset the site between runs so every run starts from
   an identical state: `helm uninstall`, then the inventory reset in
   [Teardown and Reset](machine-a-tron-deployment.md#teardown-and-reset) of the
@@ -75,5 +75,3 @@ at 13.5k scale.
 - `COMMAND_BUFFER_SIZE = 100` (`work_lock_manager.rs`) does not bound K7: the
   state controller takes one work lock per controller iteration, not per
   handler.
-- `site_explorer.run_interval`'s doc comment says "5 Minutes" but the default
-  is 120 s - fix the comment while we're in there.

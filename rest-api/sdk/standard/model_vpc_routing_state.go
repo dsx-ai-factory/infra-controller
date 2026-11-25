@@ -32,7 +32,7 @@ type VpcRoutingState struct {
 	RoutingProfile NullableString `json:"routingProfile"`
 	// Persisted active VNI verified against pool ownership. Inspection accepts nonnegative values, including zero and values outside the profile-change range; successful inspection does not imply a profile change is supported.
 	ActiveVni uint32 `json:"activeVni"`
-	// Allocation owned by this VPC in the other pool, or null when the valid active allocation is its only allocation. Inconsistent ownership is an error, not a null result.
+	// Original assignment in the other pool, including an assignment whose release awaits provider confirmation. The response does not distinguish pending release from an allocation whose release has not started. Null means no retained assignment remains. Routing mutations reject unfinished cleanup. Inconsistent ownership returns an error.
 	RetainedAllocation NullableVpcRetainedVniAllocation `json:"retainedAllocation"`
 }
 

@@ -60,6 +60,7 @@ carbide-test-support = { path = "../test-support" }
 
 clap = { workspace = true }
 ipnetwork = { workspace = true }
+serde_yaml = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

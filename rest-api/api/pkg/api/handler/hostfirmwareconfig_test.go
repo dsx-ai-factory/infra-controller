@@ -4,11 +4,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -235,7 +235,7 @@ func (f hostFirmwareConfigHandlerFixture) doRequest(t *testing.T, method string,
 	require.NoError(t, err)
 
 	e := echo.New()
-	req := httptest.NewRequest(method, "/", strings.NewReader(string(body)))
+	req := httptest.NewRequest(method, "/", bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)

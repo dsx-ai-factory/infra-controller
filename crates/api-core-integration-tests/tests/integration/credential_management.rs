@@ -290,14 +290,18 @@ async fn test_ufm_credential_mutations_reject_local_ownership(pool: PgPool) {
     );
 }
 
+/// Verifies backend-owned UFM deletion removes the key rather than storing an empty-password
+/// certificate-selection tombstone.
 #[sqlx_test]
 async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
+    // Build the public API over a backend-owned writer and its underlying test store.
     let (env, credential_manager) =
         init_with_runtime_config(pool, config_with_ufm_source(UfmCredentialSource::Backend)).await;
     let key = CredentialKey::UfmAuth {
         fabric: "default".to_string(),
     };
 
+    // Add the initial token and prove the configured writer received it.
     env.api()
         .create_credential(tonic::Request::new(ufm_create_request()))
         .await
@@ -313,6 +317,7 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
         })
     );
 
+    // Delete through the public handler and prove no tombstone remains in the writer.
     env.api()
         .delete_credential(tonic::Request::new(ufm_delete_request()))
         .await
@@ -322,10 +327,7 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
             .get_credentials_from_writer(&key)
             .await
             .expect("read backend after delete"),
-        Some(Credentials::UsernamePassword {
-            username: "https://ufm.example.com".to_string(),
-            password: String::new(),
-        })
+        None
     );
 }
 

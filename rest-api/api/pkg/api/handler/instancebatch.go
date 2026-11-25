@@ -605,7 +605,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
 			}
 			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				logger.Warn().Msgf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
 			}
 		}
@@ -649,22 +649,22 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			if subnet.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request is not owned by Tenant", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request is not owned by Tenant", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request is not owned by Tenant", subnetID), nil)
 			}
 
 			if subnet.ControllerNetworkSegmentID == nil || subnet.Status != cdbm.SubnetStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request data is not in Ready state", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request data is not in Ready state", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request data is not in Ready state", subnetID), nil)
 			}
 
 			if subnet.VpcID != vpc.ID {
-				logger.Warn().Msg(fmt.Sprintf("Subnet: %v specified in request does not match with VPC", subnetID))
+				logger.Warn().Msgf("Subnet: %v specified in request does not match with VPC", subnetID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Subnet: %v specified in request does not match with VPC", subnetID), nil)
 			}
 
 			if vpc.NetworkVirtualizationType != nil && *vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", vpc.ID))
+				logger.Warn().Msgf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", vpc.ID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnet based interfaces", vpc.ID), nil)
 			}
 
@@ -684,17 +684,17 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixUUID))
+				logger.Warn().Msgf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixUUID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request data is not in Ready state", vpcPrefixUUID), nil)
 			}
 
 			if vpcPrefix.SiteID != site.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixUUID))
+				logger.Warn().Msgf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixUUID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request does not belong to Site", vpcPrefixUUID), nil)
 			}
 
 			if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", vpc.ID))
+				logger.Warn().Msgf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", vpc.ID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC Prefix based interfaces", vpc.ID), nil)
 			}
 
@@ -750,7 +750,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			interfaceVpcID := uuid.MustParse(*ifc.VpcID)
 			interfaceVpc := interfaceVpcIDMap[interfaceVpcID]
 			if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-				logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", vpc.ID))
+				logger.Warn().Msgf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", vpc.ID)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have FNN network virtualization type in order to create VPC based interfaces", vpc.ID), nil)
 			}
 
@@ -887,7 +887,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				logger.Warn().Str("tenantID", tenant.ID.String()).Str("serviceID", desID.String()).
 					Msg("DPU Extension Service does not belong to current Tenant")
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-					fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID.String()), nil)
+					fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID), nil)
 			}
 
 			// Validate service belongs to same site
@@ -895,7 +895,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				logger.Warn().Str("siteID", site.ID.String()).Str("serviceID", desID.String()).
 					Msg("DPU Extension Service does not belong to Site")
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-					fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instances are being created", desID.String()), nil)
+					fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instances are being created", desID), nil)
 			}
 
 			if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
@@ -913,7 +913,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			}
 			if !versionFound {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest,
-					fmt.Sprintf("Version: %s was not found for DPU Extension Service: %s", requestedVersion, desID.String()), nil)
+					fmt.Sprintf("Version: %s was not found for DPU Extension Service: %s", requestedVersion, desID), nil)
 			}
 
 			desIDMap[desID.String()] = des
@@ -2058,11 +2058,10 @@ func allocateMachinesForBatch(
 
 	// Get all available Machines for the Instance Type
 	filterInput := cdbm.MachineFilterInput{
-		InstanceTypeIDs:               []uuid.UUID{instancetype.ID},
-		IsAssigned:                    cutil.GetPtr(false),
-		Statuses:                      []string{cdbm.MachineStatusReady},
-		Labels:                        machineLabelSelector,
-		ExcludeForceDeletionRequested: true,
+		InstanceTypeIDs: []uuid.UUID{instancetype.ID},
+		IsAssigned:      cutil.GetPtr(false),
+		Statuses:        []string{cdbm.MachineStatusReady},
+		Labels:          machineLabelSelector,
 	}
 	machines, _, err := mcDAO.GetAll(ctx, tx, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -2181,7 +2180,7 @@ func allocateMachinesForBatch(
 				return common.ErrMachineUnavailable
 			}
 
-			if umc.IsAssigned || umc.IsForceDeletionQuarantined() {
+			if umc.IsAssigned {
 				return common.ErrMachineUnavailable
 			}
 

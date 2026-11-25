@@ -20,6 +20,7 @@ func TestDpuMachineSummary_UnmarshalJSON(t *testing.T) {
 		"bmcInfo":null,
 		"dmiData":null,
 		"interfaces":null,
+		"lldpNeighbors":[],
 		"softwareComponents":null,
 		"health":null,
 		"labels":null,

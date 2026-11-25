@@ -31,6 +31,7 @@ use carbide_firmware::defaults::{
     BF3_CEC_VERSION, BF3_NIC_VERSION, BF3_UEFI_VERSION,
 };
 use carbide_host_support::bootstrap_ca::BootstrapCaSource;
+pub use carbide_ib_fabric::config::UfmAuthMode;
 use carbide_ib_fabric::config::{IBFabricConfig, IbFabricDefinition};
 use carbide_machine_controller::config::power_manager::default_power_options;
 use carbide_machine_controller::config::{
@@ -426,8 +427,9 @@ pub struct CarbideConfig {
     /// (e.g., "prod" or "fake").
     pub dpu_ipmi_tool_impl: Option<String>,
 
-    /// Number of retries when IPMI returns an error during
-    /// DPU reboot.
+    /// Total process attempts per command for the production IPMI tool; defaults to three.
+    /// Zero starts no process and returns an invalid-retry error. Queued instance
+    /// reboots use one bounded attempt independently of this legacy setting.
     pub dpu_ipmi_reboot_attempts: Option<u32>,
 
     /// Number of consecutive HTTP 401/403 responses from a BMC before the
@@ -655,6 +657,10 @@ pub struct CarbideConfig {
     /// RackStateController related configuration parameter
     #[serde(default)]
     pub rack_state_controller: RackStateControllerConfig,
+
+    /// NVLink Domain controller scheduling, independent of the Rack controller.
+    #[serde(default)]
+    pub nvlink_domain_state_controller: NvLinkDomainStateControllerConfig,
 
     /// PowerShelfStateController related configuration parameter
     #[serde(default)]
@@ -1324,8 +1330,9 @@ pub enum UfmCredentialSource {
     /// Local environment/file UFM entries are ignored.
     Backend,
     /// Read UFM credentials only from the local environment/file sources.
-    /// Every configured fabric must be present when IB management starts, and
-    /// persistent backend mutation is disabled.
+    /// Every configured fabric without explicit client-certificate authentication
+    /// must be present when IB management starts, and persistent backend mutation
+    /// is disabled.
     Local,
 }
 
@@ -1658,10 +1665,11 @@ pub enum PerObjectStateMetricObjectType {
     VpcPrefix,
     SpdmAttestation,
     IbPartition,
+    NvlinkDomain,
 }
 
 impl PerObjectStateMetricObjectType {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Machine,
         Self::Switch,
         Self::Rack,
@@ -1670,6 +1678,7 @@ impl PerObjectStateMetricObjectType {
         Self::VpcPrefix,
         Self::SpdmAttestation,
         Self::IbPartition,
+        Self::NvlinkDomain,
     ];
 
     /// The `object_type` label token; must match what the controllers record.
@@ -1683,6 +1692,7 @@ impl PerObjectStateMetricObjectType {
             Self::VpcPrefix => "vpc_prefix",
             Self::SpdmAttestation => "spdm_attestation",
             Self::IbPartition => "ib_partition",
+            Self::NvlinkDomain => "nvlink_domain",
         }
     }
 }
@@ -2114,6 +2124,10 @@ pub struct DpfConfig {
     /// This site-wide value overrides per-service Helm values and is read at startup.
     #[serde(default, rename = "multiClusterSupport")]
     pub multi_cluster_support: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage on all DPF deployments.
+    /// Changing this setting generates new flavors and can reprovision existing DPUs.
+    #[serde(default)]
+    pub enable_pci_switch_emulation: bool,
     /// Opts the DPF namespace into deployment-scoped DPUServiceInterfaces.
     /// BF3 sites (including BF3 GB200) and generic BF4 use the default
     /// unscoped mode; BF4 Astra requires this to be enabled. When enabled, initialization
@@ -2211,6 +2225,7 @@ impl Default for DpfConfig {
         Self {
             enabled: false,
             multi_cluster_support: false,
+            enable_pci_switch_emulation: false,
             deployment_scoped_service_interfaces: false,
             pf_total_sf_reserved: default_dpf_pf_total_sf_reserved(),
             dpu_service_sync_enabled: default_to_true(),
@@ -2328,7 +2343,7 @@ impl DpfConfig {
 }
 
 fn default_dpf_bfb_url() -> String {
-    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.5.0-89_26.07_ubuntu-24.04_64k_prod.bfb".to_string()
+    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.6.0-86_26.10_ubuntu-24.04_64k_prod.bfb".to_string()
 }
 
 fn default_dpf_deployment_name() -> String {
@@ -4297,6 +4312,15 @@ pub struct PowerShelfStateControllerConfig {
     pub rack_firmware_reprovisioning_enabled: bool,
 }
 
+/// NVLink Domain controller scheduling configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NvLinkDomainStateControllerConfig {
+    /// Common scheduling and concurrency settings; defaults match Rack.
+    #[serde(default)]
+    pub controller: StateControllerConfig,
+}
+
 /// RackStateController related config
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -5179,7 +5203,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
             metrics_endpoint: value
                 .metrics_endpoint
                 .map(|x| x.to_string())
-                .unwrap_or("NA".to_string()),
+                .unwrap_or_else(|| "NA".to_string()),
             database_url: value.database_url,
             max_database_connections: value.max_database_connections,
             enable_ip_fabric: value.ib_config.unwrap_or_default().enabled,
@@ -5214,7 +5238,9 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .keys()
                 .cloned()
                 .collect_vec(),
-            dpu_ipmi_tool_impl: value.dpu_ipmi_tool_impl.unwrap_or("Not Set".to_string()),
+            dpu_ipmi_tool_impl: value
+                .dpu_ipmi_tool_impl
+                .unwrap_or_else(|| "Not Set".to_string()),
             dpu_ipmi_reboot_attempt: value.dpu_ipmi_reboot_attempts.unwrap_or_default(),
             initial_domain_name: value.initial_domain_name,
             sitename: value.sitename,
@@ -5653,6 +5679,25 @@ mod tests {
     use model::vpc::VpcRoutingProfileOverrides;
 
     use super::*;
+
+    #[test]
+    fn per_object_state_metrics_accepts_nvlink_domains() {
+        let config: PerObjectStateMetricsConfig = toml::from_str(
+            r#"enabled = true
+object_types = ["nvlink_domain"]"#,
+        )
+        .unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.object_types.len(), 1);
+        let domain = config.object_types[0];
+        assert_eq!(domain.as_str(), "nvlink_domain");
+        assert_eq!(serde_json::to_value(domain).unwrap(), "nvlink_domain");
+        assert!(
+            PerObjectStateMetricsConfig::default()
+                .object_types
+                .contains(&domain)
+        );
+    }
 
     /// Disabling both bearer tokens and machine mTLS would lock every node out
     /// of the API; validation must refuse the combination, and each mechanism
@@ -6771,6 +6816,7 @@ path = "credentials.yaml"
             polling_bios_setup_stuck_threshold: Duration::minutes(15),
             boot_interface_observation_interval: Duration::hours(2),
             full_lockdown_recovery_enabled: true,
+            instance_reboot_queue_enabled: true,
         };
 
         let config_str = serde_json::to_string(&input).unwrap();
@@ -6822,6 +6868,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::hours(2),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -6848,6 +6895,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::minutes(10),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -8806,7 +8854,7 @@ mqtt_endpoint = "mqtt.forge"
                 dpa_config.astra.underlay_ip_rail_id_bit_len,
                 dpa_config.astra.underlay_ip_software_plane_id_bit_len,
             ),
-            (16, 13, 4, 8)
+            (16, 13, 3, 2)
         );
     }
 
@@ -10258,6 +10306,19 @@ helm_repo_url = "oci://registry.example.test/doca"
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
         }
+    }
+
+    #[test]
+    fn dpf_pci_switch_emulation_is_opt_in() {
+        assert!(!DpfConfig::default().enable_pci_switch_emulation);
+        value_scenarios!(
+            run = |input: &str| toml::from_str::<DpfConfig>(input).unwrap().enable_pci_switch_emulation;
+            "PCI switch emulation" {
+                "" => false,
+                "enable_pci_switch_emulation = false" => false,
+                "enable_pci_switch_emulation = true" => true,
+            }
+        );
     }
 
     #[test]

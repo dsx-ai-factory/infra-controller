@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -246,7 +247,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name              string
 		reqOrgName        string
-		reqBody           string
+		reqBody           []byte
 		user              *cdbm.User
 		expectedErr       bool
 		expectedStatus    int
@@ -255,7 +256,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -263,7 +264,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user does not belong to org",
 			reqOrgName:     "SomeOtherOrg",
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -271,7 +272,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user role is forbidden",
 			reqOrgName:     tnOrg,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1Forbidden,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -279,7 +280,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when request body is invalid",
 			reqOrgName:     tnOrg,
-			reqBody:        string(invalidBodyBytes),
+			reqBody:        invalidBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -288,7 +289,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when DPF Helm chart service ID is omitted",
 			reqOrgName:     tnOrg,
-			reqBody:        string(missingDpfServiceIDBodyBytes),
+			reqBody:        missingDpfServiceIDBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -296,7 +297,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when DPF Helm chart service ID is empty",
 			reqOrgName:     tnOrg,
-			reqBody:        string(emptyDpfServiceIDBodyBytes),
+			reqBody:        emptyDpfServiceIDBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -304,7 +305,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when DPF Helm chart omits deployInCluster",
 			reqOrgName:     tnOrg,
-			reqBody:        string(missingDeployInClusterBodyBytes),
+			reqBody:        missingDeployInClusterBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -312,7 +313,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when deployInCluster is set to true",
 			reqOrgName:     tnOrg,
-			reqBody:        string(unsupportedDeployInClusterBodyBytes),
+			reqBody:        unsupportedDeployInClusterBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -321,7 +322,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when DPF Helm chart omits DPU target",
 			reqOrgName:     tnOrg,
-			reqBody:        string(missingDpuTargetBodyBytes),
+			reqBody:        missingDpuTargetBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -333,7 +334,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when DPF Helm chart DPU target is empty",
 			reqOrgName:     tnOrg,
-			reqBody:        string(emptyDpuTargetBodyBytes),
+			reqBody:        emptyDpuTargetBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -344,7 +345,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when site does not exist",
 			reqOrgName:     tnOrg,
-			reqBody:        string(invalidSiteBodyBytes),
+			reqBody:        invalidSiteBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -352,7 +353,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "error when name already exists",
 			reqOrgName:     tnOrg,
-			reqBody:        string(nameClashBodyBytes),
+			reqBody:        nameClashBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -360,14 +361,14 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "success creating baseline DPF Helm chart DPU Extension Service",
 			reqOrgName:     tnOrg,
-			reqBody:        string(baselineBodyBytes),
+			reqBody:        baselineBodyBytes,
 			user:           tnu1,
 			expectedStatus: http.StatusCreated,
 		},
 		{
 			name:        "error when Core returns a different deployment type",
 			reqOrgName:  tnOrg,
-			reqBody:     string(mismatchedBaselineBodyBytes),
+			reqBody:     mismatchedBaselineBodyBytes,
 			user:        tnu1,
 			expectedErr: true, expectedStatus: http.StatusInternalServerError,
 		},
@@ -375,7 +376,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "success creating DPU Extension Service",
 			reqOrgName:     tnOrg,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -383,7 +384,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "success creating DPF Helm chart DPU Extension Service",
 			reqOrgName:     tnOrg,
-			reqBody:        string(dpfBodyBytes),
+			reqBody:        dpfBodyBytes,
 			user:           tnu1,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -391,7 +392,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		{
 			name:           "success creating DPF Helm chart DPU Extension Service with unknown Core lifecycle state",
 			reqOrgName:     tnOrg,
-			reqBody:        string(dpfUnknownLifecycleBodyBytes),
+			reqBody:        dpfUnknownLifecycleBodyBytes,
 			user:           tnu1,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -409,7 +410,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tt.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -995,7 +996,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		name                  string
 		reqOrgName            string
 		dpuExtensionServiceID string
-		reqBody               string
+		reqBody               []byte
 		user                  *cdbm.User
 		expectedErr           bool
 		expectedStatus        int
@@ -1004,7 +1005,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when user not found in request context",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               string(okBodyBytes),
+			reqBody:               okBodyBytes,
 			user:                  nil,
 			expectedErr:           true,
 			expectedStatus:        http.StatusInternalServerError,
@@ -1013,7 +1014,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when user does not belong to org",
 			reqOrgName:            "SomeOtherOrg",
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               string(okBodyBytes),
+			reqBody:               okBodyBytes,
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1022,7 +1023,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when user role is forbidden",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               string(okBodyBytes),
+			reqBody:               okBodyBytes,
 			user:                  tnu1Forbidden,
 			expectedErr:           true,
 			expectedStatus:        http.StatusForbidden,
@@ -1031,7 +1032,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when request body is invalid",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               string(invalidBodyBytes),
+			reqBody:               invalidBodyBytes,
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1040,7 +1041,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when Kubernetes Pod data is not a Pod specification",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               `{"data": "kind: Deployment"}`,
+			reqBody:               []byte(`{"data": "kind: Deployment"}`),
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1049,7 +1050,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPF Helm chart data is not a chart definition",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: desDpf.ID.String(),
-			reqBody:               `{"data": "kind: Pod"}`,
+			reqBody:               []byte(`{"data": "kind: Pod"}`),
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1059,7 +1060,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPF Helm chart update omits service ID",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: desDpf.ID.String(),
-			reqBody:               string(missingDpfServiceIDBodyBytes),
+			reqBody:               missingDpfServiceIDBodyBytes,
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1069,7 +1070,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPF Helm chart update omits deployInCluster",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: desDpf.ID.String(),
-			reqBody:               string(missingDpfDeployBodyBytes),
+			reqBody:               missingDpfDeployBodyBytes,
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1079,7 +1080,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPF Helm chart update deploys in the host cluster",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: desDpf.ID.String(),
-			reqBody:               string(unsupportedDpfDeployBodyBytes),
+			reqBody:               unsupportedDpfDeployBodyBytes,
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1088,7 +1089,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPF Helm chart update carries only credentials",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: desDpf.ID.String(),
-			reqBody:               `{"credentials": {"registryUrl": "https://registry.hub.docker.com", "username": "testuser", "password": "testpass"}}`,
+			reqBody:               []byte(`{"credentials": {"registryUrl": "https://registry.hub.docker.com", "username": "testuser", "password": "testpass"}}`),
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1097,7 +1098,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPF Helm chart update carries only observability",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: desDpf.ID.String(),
-			reqBody:               `{"observability": {"configs": []}}`,
+			reqBody:               []byte(`{"observability": {"configs": []}}`),
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1106,7 +1107,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPU Extension Service does not exist",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: uuid.New().String(),
-			reqBody:               string(okBodyBytes),
+			reqBody:               okBodyBytes,
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusNotFound,
@@ -1115,7 +1116,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when name already exists",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               string(nameClashBodyBytes),
+			reqBody:               nameClashBodyBytes,
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -1124,7 +1125,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "success updating DPU Extension Service name/description",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               string(okBodyBytes),
+			reqBody:               okBodyBytes,
 			user:                  tnu1,
 			expectedErr:           false,
 			expectedStatus:        http.StatusOK,
@@ -1133,7 +1134,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "success updating DPU Extension Service data/credentials",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: des1.ID.String(),
-			reqBody:               string(okBody2Bytes),
+			reqBody:               okBody2Bytes,
 			user:                  tnu1,
 			expectedErr:           false,
 			expectedStatus:        http.StatusOK,
@@ -1142,7 +1143,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "success updating DPF Helm chart DPU Extension Service without Core lifecycle status",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: desDpfPending.ID.String(),
-			reqBody:               string(dpfBodyBytes),
+			reqBody:               dpfBodyBytes,
 			user:                  tnu1,
 			expectedErr:           false,
 			expectedStatus:        http.StatusOK,
@@ -1179,7 +1180,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tt.reqBody))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(tt.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

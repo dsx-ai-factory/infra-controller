@@ -182,16 +182,9 @@ impl Bluefield4<'_> {
             redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
-        let host_mac = self
-            .host_mac_address
-            .to_string()
-            .replace(':', "")
-            .to_ascii_uppercase();
-        let oob_mac = self
-            .oob_mac_address
-            .to_string()
-            .replace(':', "")
-            .to_ascii_uppercase();
+        let [a, b, c, d, e, f] = self.host_mac_address.bytes();
+        let host_mac = format!("{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}");
+        let [a, b, c, d, e, f] = self.oob_mac_address.bytes();
         let nic_base = |function: &str| {
             format!(
                 "VenHw(1E5A432C-0466-4D31-B009-D4D9239271D3)/\
@@ -203,7 +196,7 @@ impl Bluefield4<'_> {
             "VenHw(1E5A432C-0466-4D31-B009-D4D9239271D3)/\
              MemoryMapped(0xB,0x14180000,0x14181FFF)/PciRoot(0x8)/\
              Pci(0x0,0x0)/Pci(0x0,0x0)/Pci(0x6,0x0)/Pci(0x0,0x0)/\
-             MAC({oob_mac},0x1)"
+             MAC({a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X},0x1)"
         );
         let pxe_v4_display_name = format!("UEFI PXEv4 (MAC:{host_mac})");
         let pxe_v6_display_name = format!("UEFI PXEv6 (MAC:{host_mac})");

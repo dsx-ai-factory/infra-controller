@@ -352,6 +352,8 @@ pub async fn clear_manual_firmware_upgrade_completed(
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
+
     use super::*;
 
     /// find_upgrade_needed as written before its predicates were shared.
@@ -377,7 +379,7 @@ mod tests {
 
     #[test]
     fn find_upgrade_needed_sql_text_unchanged() {
-        let normalized = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized = |sql: &str| sql.split_whitespace().join(" ");
         assert_eq!(
             normalized(FIND_UPGRADE_NEEDED),
             normalized(ORIGINAL_FIND_UPGRADE_NEEDED)

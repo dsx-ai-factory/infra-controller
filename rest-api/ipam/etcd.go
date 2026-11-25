@@ -247,7 +247,7 @@ func (e *etcd) ReadAllPrefixCidrs(ctx context.Context, namespace string) ([]stri
 		if err != nil {
 			return nil, err
 		}
-		allPrefix = append(allPrefix, string(pfx.Cidr))
+		allPrefix = append(allPrefix, pfx.Cidr)
 	}
 
 	return allPrefix, nil
@@ -287,7 +287,7 @@ func (e *etcd) UpdatePrefix(ctx context.Context, prefix Prefix, namespace string
 		return Prefix{}, fmt.Errorf("unable to get all prefix cidrs:%w", err)
 	}
 
-	oldPrefix, err := fromJSON([]byte(p.Kvs[0].Value))
+	oldPrefix, err := fromJSON(p.Kvs[0].Value)
 	if err != nil {
 		return Prefix{}, err
 	}

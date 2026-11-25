@@ -253,7 +253,7 @@ async fn seed_bmc_interface(
     .bind(segment_id)
     .bind(mac)
     .bind(hostname)
-    .bind(machine_id.to_string())
+    .bind(machine_id)
     .fetch_one(&mut *txn)
     .await
     .expect("failed to create BMC machine interface");

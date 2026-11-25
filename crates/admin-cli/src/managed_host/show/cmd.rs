@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -104,15 +103,24 @@ fn build_row(src: ManagedHostOutputWrapper, headers: &[&str], widths: &ColumnWid
         states.extend(dpu_states);
     }
 
-    let state = states
-        .iter()
-        .map(|x| {
-            x.split_once(' ')
-                .map(|(x, y)| Cow::Owned(format!("{x}\n{}", y.replace(", ", "\n"))))
-                .unwrap_or(Cow::Borrowed(x.as_str()))
-        })
-        .collect::<Vec<Cow<str>>>()
-        .join("\n");
+    let mut state = String::new();
+    for (index, observed_state) in states.iter().enumerate() {
+        if index != 0 {
+            state.push('\n');
+        }
+        if let Some((name, details)) = observed_state.split_once(' ') {
+            state.push_str(name);
+            state.push('\n');
+            for (detail_index, detail) in details.split(", ").enumerate() {
+                if detail_index != 0 {
+                    state.push('\n');
+                }
+                state.push_str(detail);
+            }
+        } else {
+            state.push_str(observed_state);
+        }
+    }
 
     let is_unhealthy =
         !value.health.alerts.is_empty() | value.dpus.iter().any(|x| !x.health.alerts.is_empty());
@@ -139,7 +147,7 @@ fn build_row(src: ManagedHostOutputWrapper, headers: &[&str], widths: &ColumnWid
         row_data.extend_from_slice(&[
             value.host_gpu_count.to_string(),
             value.host_ib_ifs_count.to_string(),
-            value.host_memory.unwrap_or(UNKNOWN.to_owned()),
+            value.host_memory.unwrap_or_else(|| UNKNOWN.to_owned()),
             value.instance_type_id.unwrap_or_default(),
         ]);
     }
@@ -314,7 +322,7 @@ fn show_managed_host_details_view(m: carbide_rpc_utils::ManagedHostOutput) -> Ca
     writeln!(
         &mut lines,
         "Hostname    : {}",
-        m.hostname.unwrap_or(UNKNOWN.to_string())
+        m.hostname.as_deref().unwrap_or(UNKNOWN)
     )?;
 
     writeln!(&mut lines, "State       : {}", m.state)?;
@@ -371,14 +379,17 @@ fn show_managed_host_details_view(m: carbide_rpc_utils::ManagedHostOutput) -> Ca
         ),
         (
             "  Associated Instance Type",
-            Some(m.instance_type_id.unwrap_or("Unassociated".to_string())),
+            Some(
+                m.instance_type_id
+                    .unwrap_or_else(|| "Unassociated".to_string()),
+            ),
         ),
         (
             "  Quarantined",
             Some(
                 m.quarantine_state
                     .map(|q| format!("yes (reason: {})", q.reason.as_deref().unwrap_or("<none>")))
-                    .unwrap_or("no".to_string()),
+                    .unwrap_or_else(|| "no".to_string()),
             ),
         ),
     ];
@@ -432,7 +443,7 @@ deprecated and will be removed in a future release, see https://docs.nvidia.com/
                 &mut lines,
                 "{:<width$}: {}",
                 key,
-                value.unwrap_or(UNKNOWN.to_string())
+                value.as_deref().unwrap_or(UNKNOWN)
             )?;
         }
     }
@@ -477,7 +488,7 @@ deprecated and will be removed in a future release, see https://docs.nvidia.com/
                     &mut lines,
                     "{:<width$}: {}",
                     key,
-                    value.unwrap_or(UNKNOWN.to_string())
+                    value.as_deref().unwrap_or(UNKNOWN)
                 )?;
             }
         }
@@ -489,34 +500,32 @@ deprecated and will be removed in a future release, see https://docs.nvidia.com/
 }
 
 fn format_health_alerts(alerts: &[HealthProbeAlert], width: usize) -> String {
-    alerts
-        .iter()
-        .flat_map(|alert| {
-            let mut dup_map: HashMap<&str, i32> = HashMap::default();
-            let alert_messages = alert.message.split('\n');
-            for a in alert_messages {
-                dup_map
-                    .entry(a)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
+    let mut output = String::new();
+    for alert in alerts {
+        let mut dup_map: HashMap<&str, i32> = HashMap::default();
+        for message in alert.message.split('\n') {
+            dup_map
+                .entry(message)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+        for (message, count) in dup_map {
+            if !output.is_empty() {
+                write!(output, "\n{:<width$}: ", " ").expect("writing to a String cannot fail");
             }
-            let mut out_vec = Vec::default();
-            for (msg, count) in dup_map {
-                let alert_message = if count > 1 {
-                    format!("{msg} (x{count})")
-                } else {
-                    msg.to_string()
-                };
-                out_vec.push(if let Some(target) = &alert.target {
-                    format!("{} [Target: {}]: {}", alert.id, target, alert_message)
-                } else {
-                    format!("{}: {}", alert.id, alert_message)
-                });
+            if let Some(target) = &alert.target {
+                write!(output, "{} [Target: {}]: {}", alert.id, target, message)
+                    .expect("writing to a String cannot fail");
+            } else {
+                write!(output, "{}: {}", alert.id, message)
+                    .expect("writing to a String cannot fail");
             }
-            out_vec
-        })
-        .collect::<Vec<String>>()
-        .join(&format!("\n{:<width$}: ", " "))
+            if count > 1 {
+                write!(output, " (x{count})").expect("writing to a String cannot fail");
+            }
+        }
+    }
+    output
 }
 
 pub(super) async fn show(
@@ -656,6 +665,72 @@ pub(super) async fn show(
 mod tests {
     use super::*;
     use crate::table_utils::MaxWidthSpec;
+
+    #[test]
+    fn state_cells_preserve_empty_lines_and_detail_separators() {
+        carbide_test_support::value_scenarios!(run = |(host_state, dpu_states): (&str, &[&str])| {
+            let options = ManagedHostOutputOptions::default();
+            let host = carbide_rpc_utils::ManagedHostOutput {
+                state: host_state.to_string(),
+                dpus: dpu_states.iter().map(|state| {
+                    carbide_rpc_utils::managed_host_display::ManagedHostAttachedDpu {
+                        state: Some((*state).to_string()),
+                        ..Default::default()
+                    }
+                }).collect(),
+                ..Default::default()
+            };
+            let row = build_row(
+                ManagedHostOutputWrapper { options, managed_host_output: host },
+                &headers_for(&options),
+                &ColumnWidths::default(),
+            );
+            row.get_cell(2).expect("state cell").get_content()
+        };
+            "an empty host state still separates the DPU state" {
+                ("", &["Ready"][..]) => "\nDPU0:Ready".to_string(),
+            }
+            "Unicode and existing empty detail lines are preserved" {
+                ("é alpha, , beta\nnext", &[][..]) => "é\nalpha\n\nbeta\nnext".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn health_alerts_keep_per_alert_counts_targets_and_indentation() {
+        let targeted = HealthProbeAlert {
+            id: health_report::HealthProbeId::heartbeat_timeout(),
+            target: Some("fan 1".to_string()),
+            in_alert_since: None,
+            message: "fan stopped\nfan stopped".to_string(),
+            tenant_message: None,
+            classifications: Vec::new(),
+        };
+        let untargeted = HealthProbeAlert {
+            target: None,
+            message: "fan stopped".to_string(),
+            ..targeted.clone()
+        };
+        carbide_test_support::check_values(
+            [
+                carbide_test_support::Check {
+                    scenario: "empty alerts",
+                    input: Vec::new(),
+                    expect: "".to_string(),
+                },
+                carbide_test_support::Check {
+                    scenario: "duplicate lines stay within their alert",
+                    input: vec![targeted, untargeted],
+                    expect: concat!(
+                        "HeartbeatTimeout [Target: fan 1]: fan stopped (x2)",
+                        "\n    : HeartbeatTimeout: fan stopped"
+                    )
+                    .to_string(),
+                },
+            ],
+            |alerts| format_health_alerts(&alerts, 4),
+        );
+    }
 
     #[test]
     fn max_width_narrower_than_header_floors_at_header_length() {

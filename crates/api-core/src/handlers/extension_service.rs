@@ -17,6 +17,7 @@
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
+use ::rpc::model::instance::config::extension_services::service_vpc_ids_for_attachment;
 use carbide_extension_service_controller::interface_mac::ensure_interface_mac;
 use carbide_instrument::{Event, LabelValue};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
@@ -1202,6 +1203,12 @@ pub(crate) async fn find_instances_by_extension_service(
                 instance_id: instance.id.to_string(),
                 service_id: service_id.to_string(),
                 version: service_version.to_string(),
+                attachment_id: ext_service_config.id.map(Into::into),
+                service_vpc_ids: service_vpc_ids_for_attachment(
+                    ext_service_config,
+                    &instance.config.network.service_interfaces,
+                )
+                .map_err(|error| CarbideError::internal(error.to_string()))?,
                 removed: ext_service_config
                     .removed
                     .or(instance.deleted)
@@ -1263,7 +1270,7 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
     match root {
         serde_yaml::Value::Mapping(ref mapping) => {
             // Check for apiVersion field
-            if !mapping.contains_key(serde_yaml::Value::String("apiVersion".to_string())) {
+            if !mapping.contains_key("apiVersion") {
                 return Err(CarbideError::InvalidArgument(
                     "pod manifest missing required field: apiVersion".to_string(),
                 ));
@@ -1271,7 +1278,7 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
 
             // Check for kind field and verify it's "Pod"
             let kind = mapping
-                .get(serde_yaml::Value::String("kind".to_string()))
+                .get("kind")
                 .and_then(|v| v.as_str());
             if kind != Some("Pod") {
                 return Err(CarbideError::InvalidArgument(
@@ -1282,11 +1289,11 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
 
             // Check for metadata.name field
             let metadata = mapping
-                .get(serde_yaml::Value::String("metadata".to_string()))
+                .get("metadata")
                 .and_then(|v| v.as_mapping());
             match metadata {
                 Some(meta_map) => {
-                    if !meta_map.contains_key(serde_yaml::Value::String("name".to_string())) {
+                    if !meta_map.contains_key("name") {
                         return Err(CarbideError::InvalidArgument(
                             "pod manifest missing required field: metadata.name".to_string(),
                         ));
@@ -1301,12 +1308,12 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
 
             // Check for spec.containers as a non-empty array
             let spec = mapping
-                .get(serde_yaml::Value::String("spec".to_string()))
+                .get("spec")
                 .and_then(|v| v.as_mapping());
             match spec {
                 Some(spec_map) => {
                     let containers = spec_map
-                        .get(serde_yaml::Value::String("containers".to_string()))
+                        .get("containers")
                         .and_then(|v| v.as_sequence());
 
                     match containers {

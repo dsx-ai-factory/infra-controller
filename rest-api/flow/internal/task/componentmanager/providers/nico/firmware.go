@@ -4,6 +4,10 @@
 package nico
 
 import (
+	"fmt"
+
+	"google.golang.org/grpc/status"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -25,4 +29,14 @@ func MapFirmwareState(state corev1.FirmwareUpdateState) operations.FirmwareUpdat
 	default:
 		return operations.FirmwareUpdateStateUnknown
 	}
+}
+
+// FirmwareRPCError retains the RPC code without exposing upstream error text.
+func FirmwareRPCError(action string, err error) error {
+	return status.Error(status.Code(err), "credential-bearing firmware "+action+" failed")
+}
+
+// FirmwareResultDiagnostic identifies a rejected component without upstream text.
+func FirmwareResultDiagnostic(result *corev1.ComponentResult, useMAC bool) string {
+	return fmt.Sprintf("firmware operation for %s returned %s", ResultIdentifier(result, useMAC), result.GetStatus())
 }

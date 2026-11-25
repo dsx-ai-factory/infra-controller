@@ -259,7 +259,7 @@ pub async fn find_ids(
 
     if let Some(state) = &filter.controller_state {
         qb.push(" AND s.controller_state->>'state' = ");
-        qb.push_bind(state.clone());
+        qb.push_bind(state);
     }
 
     if let Some(mac) = filter.bmc_mac {
@@ -275,7 +275,7 @@ pub async fn find_ids(
 
     if let Some(ovrrd_str) = &filter.only_with_health_alert {
         qb.push(" AND health_reports->'merges' ? ");
-        qb.push_bind(ovrrd_str.clone());
+        qb.push_bind(ovrrd_str);
         qb.push(" AND jsonb_array_length(health_reports->'merges'->");
         qb.push_bind(ovrrd_str);
         qb.push("->'alerts') > 0");

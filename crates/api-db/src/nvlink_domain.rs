@@ -6,12 +6,19 @@
 //! Persistence and membership admission for NVLink domains.
 
 use carbide_uuid::rack::RackGroupId;
+use config_version::ConfigVersion;
 use model::nvlink_domain::NvLinkDomain;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
+
+/// Controller snapshot loading, versioned writes, and deletion intent.
+pub mod lifecycle;
+
+/// Resolve declared member positions against actual compute and switch inventory.
+pub mod members;
 
 /// Require an existing rack group and atomically claim positions in the caller's transaction.
 /// The caller must roll back on failure, including a concurrent membership conflict.
@@ -92,8 +99,35 @@ pub async fn find_by_ids(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// Delete a declaration and its membership claims, without touching hardware or observed domains.
+/// Mark controller-owned Domains for deletion while retaining their member claims.
+/// Declarations predating lifecycle adoption are deleted immediately.
 pub async fn delete(txn: &mut PgConnection, id: Uuid) -> DatabaseResult<()> {
+    let query = "SELECT version FROM nvlink_domains WHERE id=$1 FOR UPDATE";
+    let version: Option<Option<ConfigVersion>> = sqlx::query_scalar(query)
+        .bind(id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    match version {
+        Some(Some(version)) => {
+            let query = "UPDATE nvlink_domains SET deleted=now(), version=$2
+                WHERE id=$1 AND deleted IS NULL";
+            sqlx::query(query)
+                .bind(id)
+                .bind(version.increment())
+                .execute(txn)
+                .await
+                .map_err(|e| DatabaseError::query(query, e))?;
+            return Ok(());
+        }
+        None => {
+            return Err(DatabaseError::NotFoundError {
+                kind: "nvlink_domain",
+                id: id.to_string(),
+            });
+        }
+        Some(None) => {}
+    }
     let query = "DELETE FROM nvlink_domains WHERE id=$1";
     let result = sqlx::query(query)
         .bind(id)

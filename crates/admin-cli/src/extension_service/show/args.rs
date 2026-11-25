@@ -15,11 +15,15 @@
  * limitations under the License.
  */
 
+use carbide_uuid::extension_service::ExtensionServiceId;
 use clap::Parser;
 
 use super::super::common::ExtensionServiceType;
 
 #[derive(Parser, Debug)]
+#[command(
+    long_about = "Display extension service information, including the address families required by its service VPC interfaces and the registration lifecycle reason. An unavailable family can keep the registration in Creating. Use extension-service show-instances to inspect instance attachments."
+)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -45,7 +49,7 @@ pub(crate) struct Args {
         long,
         help = "The extension service ID to show (leave empty to show all)"
     )]
-    pub(super) id: Option<String>,
+    pub(super) id: Option<ExtensionServiceId>,
 
     #[clap(short = 't', long = "type", help = "Filter by service type (optional)")]
     pub(super) service_type: Option<ExtensionServiceType>,

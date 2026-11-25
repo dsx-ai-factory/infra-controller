@@ -24,6 +24,7 @@ use axum::extract::{OriginalUri, Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Response};
 use carbide_api_core::Api;
 use hyper::http::StatusCode;
+use itertools::Itertools;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
 use serde::Deserialize;
@@ -145,13 +146,7 @@ impl From<forgerpc::InstanceTypeMachineCapabilityFilterAttributes>
                 .unwrap_or_else(|| UNUSED_CAPABILITY_PROPERTY.to_string()),
             inactive_devices: c
                 .inactive_devices
-                .map(|v| {
-                    v.items
-                        .iter()
-                        .map(|i| i.to_string())
-                        .collect::<Vec<String>>()
-                        .join(", ")
-                })
+                .map(|v| v.items.iter().join(", "))
                 .unwrap_or_else(|| UNUSED_CAPABILITY_PROPERTY.to_string()),
         }
     }

@@ -575,7 +575,7 @@ site:
 	require.NoError(t, err)
 	assert.Contains(t, stderr.String(), "reused site command-site (site-1)")
 
-	resolved, err := readSitePrerequisiteManifest("-", strings.NewReader(stdout.String()))
+	resolved, err := readSitePrerequisiteManifest("-", bytes.NewReader(stdout.Bytes()))
 	require.NoError(t, err)
 	assert.Equal(t, "provider-org", resolved.Provider.Org)
 	assert.Equal(t, "provider-id", resolved.Provider.ID)

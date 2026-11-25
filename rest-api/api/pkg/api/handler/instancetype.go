@@ -457,7 +457,7 @@ func (gaith GetAllInstanceTypeHandler) Handle(c echo.Context) error {
 	if statusQuery != "" {
 		_, ok := cdbm.InstanceTypeStatusMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		status = &statusQuery

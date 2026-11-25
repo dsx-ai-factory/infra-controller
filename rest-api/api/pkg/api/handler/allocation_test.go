@@ -4,13 +4,14 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
@@ -319,7 +320,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 	tests := []struct {
 		name                 string
 		reqOrgName           string
-		reqBody              string
+		reqBody              []byte
 		user                 *cdbm.User
 		expectedErr          bool
 		expectNameErrMsg     string
@@ -336,7 +337,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:               "reject IPv6 length before narrowing",
 			reqOrgName:         ipOrg1,
-			reqBody:            string(invalidV6Body),
+			reqBody:            invalidV6Body,
 			user:               ipu,
 			expectedErr:        true,
 			expectedStatus:     http.StatusBadRequest,
@@ -356,7 +357,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when User not found in request context",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBodyIT),
+			reqBody:        okBodyIT,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -364,7 +365,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when User not found in Org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBodyIT),
+			reqBody:        okBodyIT,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -372,7 +373,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when request body doesn't bind",
 			reqOrgName:     ipOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -380,7 +381,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when request doesn't validate",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -388,7 +389,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Infrastructure Provider doesnt exist for Org",
 			reqOrgName:     ipOrg3,
-			reqBody:        string(okBodyIT),
+			reqBody:        okBodyIT,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -396,7 +397,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Site in request doesnt exist",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyBadSiteID),
+			reqBody:        errBodyBadSiteID,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -404,7 +405,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Site specified in request belongs to a different Provider than current Org's",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyBadSiteIP),
+			reqBody:        errBodyBadSiteIP,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -412,7 +413,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Tenant in request doesnt exist",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyBadTenantID),
+			reqBody:        errBodyBadTenantID,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -420,7 +421,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Instance Type in Allocation Constraint doesn't exist",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyBadITInAC),
+			reqBody:        errBodyBadITInAC,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -428,7 +429,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Instance Type's Provider does not match with current Org's Provider",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyBadIPInIT),
+			reqBody:        errBodyBadIPInIT,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -436,7 +437,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Instance Type's Site is different from Allocation's Site",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(errBodyBadSiteInIT),
+			reqBody:        errBodyBadSiteInIT,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -444,7 +445,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when User does not have correct role",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyIT),
+			reqBody:        okBodyIT,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -452,7 +453,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:                 "success case with Allocation Constraint resource type is Instance Type",
 			reqOrgName:           ipOrg1,
-			reqBody:              string(okBodyIT),
+			reqBody:              okBodyIT,
 			user:                 ipu,
 			expectedErr:          false,
 			expectedStatus:       http.StatusCreated,
@@ -462,7 +463,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "success when Allocation Constraint already exists for Instance Type for the Tenant",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBodyRepeatedITInAC),
+			reqBody:        okBodyRepeatedITInAC,
 			user:           ipu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -470,7 +471,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when Allocation Contraint with Instance Type is not satisfiable by available Machines",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyITMachinesUnavailable),
+			reqBody:        errBodyITMachinesUnavailable,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -478,7 +479,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "success when Allocation Contraint with Instance Type exists for another tenant",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBodyITForDifferentTenant),
+			reqBody:        okBodyITForDifferentTenant,
 			user:           ipu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -486,7 +487,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when IP Block in Allocation Constraint doesn't exist",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyBadIPBInAC),
+			reqBody:        errBodyBadIPBInAC,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -494,7 +495,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "Tenant SitePrefix cannot be used as an Allocation parent",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyTenantSitePrefixInAC),
+			reqBody:        errBodyTenantSitePrefixInAC,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -502,7 +503,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when IP Block in Allocation Constraint belongs to a different Provider than current Org's",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyBadIPInIPB),
+			reqBody:        errBodyBadIPInIPB,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -510,7 +511,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "error when IP Block in Allocation Constraint belongs to a different Site than specified in request",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(errBodyBadSiteInIPB),
+			reqBody:        errBodyBadSiteInIPB,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -518,7 +519,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:               "error when IPAM allocation for child IP Block fails",
 			reqOrgName:         ipOrg2,
-			reqBody:            string(errBodyIpamFail),
+			reqBody:            errBodyIpamFail,
 			user:               ipu,
 			expectedErr:        true,
 			expectedIpamErrMsg: "Could not create child IPAM entry for Allocation Constraint. Details: unable to find prefix for cidr:192.168.0.0/16",
@@ -527,7 +528,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:               "error when Allocation Constraint value is larger than parent IP Block size",
 			reqOrgName:         ipOrg1,
-			reqBody:            string(errAllocationConstraintHasBlockSizeLargerThanParent),
+			reqBody:            errAllocationConstraintHasBlockSizeLargerThanParent,
 			user:               ipu,
 			expectedErr:        true,
 			expectedIpamErrMsg: "Could not create child IPAM entry for Allocation Constraint. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
@@ -536,7 +537,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:             "error when Allocation with same name already exists",
 			reqOrgName:       ipOrg1,
-			reqBody:          string(errBodyIPBNameClash),
+			reqBody:          errBodyIPBNameClash,
 			user:             ipu,
 			expectedErr:      true,
 			expectNameErrMsg: "id",
@@ -545,7 +546,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:            "success when Allocation Constraint with IP Block is specified",
 			reqOrgName:      ipOrg1,
-			reqBody:         string(okBodyIPB),
+			reqBody:         okBodyIPB,
 			user:            ipu,
 			expectedErr:     false,
 			expectedStatus:  http.StatusCreated,
@@ -555,7 +556,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		{
 			name:           "success when Allocation Constraint with Full Grant",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBodyIPBFG),
+			reqBody:        okBodyIPBFG,
 			user:           ipu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -568,7 +569,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -771,7 +772,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		require.NoError(t, err)
 
 		e := echo.New()
-		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		rec := httptest.NewRecorder()
 		ec := e.NewContext(req, rec)
@@ -861,10 +862,10 @@ func TestAllocationHandler_Create(t *testing.T) {
 	})
 }
 
-func testCreateAllocation(t *testing.T, dbSession *cdb.Session, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName, reqBody string) *model.APIAllocation {
+func testCreateAllocation(t *testing.T, dbSession *cdb.Session, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName string, reqBody []byte) *model.APIAllocation {
 	ctx := context.Background()
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(reqBody))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 
@@ -889,7 +890,7 @@ func testCreateAllocation(t *testing.T, dbSession *cdb.Session, ipamStorage cipa
 	scp := sc.NewClientPool(tcfg)
 
 	acr := model.APIAllocationCreateRequest{}
-	err := json.Unmarshal([]byte(reqBody), &acr)
+	err := json.Unmarshal(reqBody, &acr)
 	assert.NoError(t, err)
 
 	scp.IDClientMap[acr.SiteID] = tsc
@@ -990,13 +991,13 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			okBodyIT, err := json.Marshal(model.APIAllocationCreateRequest{Name: fmt.Sprintf("allocation-%02d", i), Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site1.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT}})
 			assert.Nil(t, err)
 
-			al = testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIT))
+			al = testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIT)
 			assert.NotNil(t, al)
 		} else {
 			okBodyIPB, err := json.Marshal(model.APIAllocationCreateRequest{Name: fmt.Sprintf("allocation-%02d", i), Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site1.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIPB}})
 			assert.Nil(t, err)
 
-			al = testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIPB))
+			al = testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIPB)
 			assert.NotNil(t, al)
 		}
 
@@ -1024,7 +1025,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 		acOrg := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: itTmp.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 1}
 		orgBody, err := json.Marshal(model.APIAllocationCreateRequest{Name: fmt.Sprintf("org-allocation-%02d", i), Description: cutil.GetPtr(""), TenantID: orgTenant.ID.String(), SiteID: orgSite.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acOrg}})
 		assert.Nil(t, err)
-		orgAl := testCreateAllocation(t, dbSession, ipamStorage, orgUser, orgName, string(orgBody))
+		orgAl := testCreateAllocation(t, dbSession, ipamStorage, orgUser, orgName, orgBody)
 		assert.NotNil(t, orgAl)
 		common.TestBuildStatusDetail(t, dbSession, orgAl.ID, cdbm.AllocationStatusRegistered, cutil.GetPtr("Allocation is now registered"))
 	}
@@ -1624,10 +1625,10 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1658,14 +1659,13 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			err := gaah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
-			if tc.expectedErr {
-				return
-			}
-
 			if rec.Code != tc.expectedStatus {
 				t.Errorf("response %v", rec.Body.String())
 			}
 			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedErr {
+				return
+			}
 
 			resp := []model.APIAllocation{}
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -1791,8 +1791,8 @@ func TestAllocationHandler_GetByID(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref)
 
-	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIT))
-	aIPB := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIPB))
+	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIT)
+	aIPB := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIPB)
 	assert.NotNil(t, aIPB)
 
 	// OTEL Spanner configuration
@@ -2111,10 +2111,10 @@ func TestAllocationHandler_Update(t *testing.T) {
 	okBodyIPB, err := json.Marshal(model.APIAllocationCreateRequest{Name: "test-allocation-3", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIPB1}})
 	assert.Nil(t, err)
 
-	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIT))
-	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIT2))
+	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIT)
+	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIT2)
 	assert.NotNil(t, aIT2)
-	aIPB := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIPB))
+	aIPB := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIPB)
 	assert.NotNil(t, aIPB)
 
 	errBody1, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("a")})
@@ -2127,7 +2127,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 	okBody2, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("UpdatedName2"), Description: cutil.GetPtr("UpdatedDesc2")})
 	assert.Nil(t, err)
-	okBody3, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("test-allocation")})
+	okBody3, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr(aIT2.Name)})
 	assert.Nil(t, err)
 	okBody4, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("test-updated-allocation-3")})
 	assert.Nil(t, err)
@@ -2160,7 +2160,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	tests := []struct {
 		name                      string
 		reqOrgName                string
-		reqBody                   string
+		reqBody                   []byte
 		user                      *cdbm.User
 		aID                       string
 		expectedErr               bool
@@ -2174,7 +2174,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           nil,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2183,7 +2183,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           ipu,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2192,7 +2192,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody doesnt bind",
 			reqOrgName:     ipOrg1,
-			reqBody:        "BadBody",
+			reqBody:        []byte("BadBody"),
 			user:           ipu,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2201,7 +2201,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody json doesnt validate",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBody1),
+			reqBody:        errBody1,
 			user:           ipu,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2210,7 +2210,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified org does not have infrastructure provider",
 			reqOrgName:     ipOrg3,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           ipu,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2219,7 +2219,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified org does not have infrastructure provider matching the one in allocation",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           ipu,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2228,7 +2228,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified allocation id is invalid uuid",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           ipu,
 			aID:            "bad$uuid",
 			expectedErr:    true,
@@ -2237,7 +2237,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified allocation doesnt exist",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           ipu,
 			aID:            uuid.New().String(),
 			expectedErr:    true,
@@ -2246,7 +2246,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when user doesn't have the right role",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnu,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2255,7 +2255,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "error when updated name already exists for another allocation",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyNameUniqueness),
+			reqBody:        errBodyNameUniqueness,
 			user:           ipu,
 			aID:            aIT.ID,
 			expectedErr:    true,
@@ -2264,7 +2264,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:               "success case 1",
 			reqOrgName:         ipOrg1,
-			reqBody:            string(okBody1),
+			reqBody:            okBody1,
 			user:               ipu,
 			aID:                aIT.ID,
 			expectedErr:        false,
@@ -2277,7 +2277,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "success case 2",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBody2),
+			reqBody:        okBody2,
 			user:           ipu,
 			aID:            aIT.ID,
 			expectedErr:    false,
@@ -2289,17 +2289,17 @@ func TestAllocationHandler_Update(t *testing.T) {
 		{
 			name:           "success when same name is sent for update",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBody3),
+			reqBody:        okBody3,
 			user:           ipu,
-			aID:            aIT.ID,
+			aID:            aIT2.ID,
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedName:   "test-allocation",
+			expectedName:   aIT2.Name,
 		},
 		{
 			name:                      "success when updating allocation with IP Block constraint",
 			reqOrgName:                ipOrg1,
-			reqBody:                   string(okBody4),
+			reqBody:                   okBody4,
 			user:                      ipu,
 			aID:                       aIPB.ID,
 			expectedErr:               false,
@@ -2313,7 +2313,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2333,6 +2333,12 @@ func TestAllocationHandler_Update(t *testing.T) {
 				tc:        tc.tmc,
 				cfg:       cfg,
 			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewAllocationDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.aID), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
@@ -2348,7 +2354,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 				if tc.expectedDesc != nil {
 					assert.Equal(t, *tc.expectedDesc, *rsp.Description)
 				}
-				assert.NotEqual(t, aIT.Updated.String(), rsp.Updated.String())
+				assert.False(t, rsp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rsp.Updated)
 
 				if len(rsp.AllocationConstraints) > 0 {
 					if rsp.AllocationConstraints[0].ResourceType == cdbm.AllocationResourceTypeInstanceType {
@@ -2461,17 +2467,17 @@ func TestAllocationHandler_Delete(t *testing.T) {
 	assert.NotNil(t, parentPrefVpcPrefix)
 
 	// Create 1 Instance Type Allocation
-	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIT))
+	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIT)
 	_ = uuid.MustParse(aIT.ID)
 	_ = uuid.MustParse(aIT.AllocationConstraints[0].ID)
 	// Create another instance type allocation with same instane type
-	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyRepeatedITInAC))
-	aIT3 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodySmallIT))
+	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyRepeatedITInAC)
+	aIT3 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodySmallIT)
 
 	// Create 3 IP Block Allocation
-	aIPB := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIPB))
-	aIPBFG := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIPBFG))
-	aIPBVpcPrefix := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIPBVpcPrefix))
+	aIPB := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIPB)
+	aIPBFG := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIPBFG)
+	aIPBVpcPrefix := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIPBVpcPrefix)
 	assert.NotNil(t, aIPBVpcPrefix)
 
 	instanceDAO := cdbm.NewInstanceDAO(dbSession)
@@ -2996,7 +3002,7 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 	tests := []struct {
 		name                 string
 		reqOrgName           string
-		reqBody              string
+		reqBody              []byte
 		user                 *cdbm.User
 		expectedErr          bool
 		expectedStatus       int
@@ -3007,7 +3013,7 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 		{
 			name:                 "success allocating 6 machines for first tenant",
 			reqOrgName:           ipOrg1,
-			reqBody:              string(okBodyIT),
+			reqBody:              okBodyIT,
 			user:                 ipu,
 			expectedErr:          false,
 			expectedStatus:       http.StatusCreated,
@@ -3017,7 +3023,7 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 		{
 			name:                 "success allocating 4 machines for second tenant",
 			reqOrgName:           ipOrg1,
-			reqBody:              string(okBodyITForDifferentTenant),
+			reqBody:              okBodyITForDifferentTenant,
 			user:                 ipu,
 			expectedErr:          false,
 			expectedStatus:       http.StatusCreated,
@@ -3029,7 +3035,7 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

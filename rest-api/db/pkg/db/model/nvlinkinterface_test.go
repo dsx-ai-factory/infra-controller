@@ -5,7 +5,6 @@ package model
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -632,127 +631,59 @@ func TestNVLinkInterfaceSQLDAO_Create(t *testing.T) {
 	}
 }
 
+func testSetupNVLinkBindings(t *testing.T) (*db.Session, func(*testing.T, string) *NVLinkInterface) {
+	t.Helper()
+	session := testInitDB(t)
+	t.Cleanup(session.Close)
+	TestSetupSchema(t, session)
+
+	user := testBuildUser(t, session, nil, testGenerateStarfleetID(), nil, nil, nil)
+	provider := testBuildInfrastructureProvider(t, session, nil, "provider", "Provider", user.ID)
+	tenant := testBuildTenant(t, session, nil, "tenant", "tenant-org", user.ID)
+	site := testBuildSite(t, session, nil, provider.ID, "site", "Site", provider.Org, user.ID)
+	vpc := testInstanceBuildVpc(t, session, provider, site, tenant, "vpc")
+	instance, err := NewInstanceDAO(session).Create(t.Context(), nil, InstanceCreateInput{
+		Name: "instance", TenantID: tenant.ID, InfrastructureProviderID: provider.ID,
+		SiteID: site.ID, VpcID: vpc.ID, Status: InstanceStatusPending, CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	partition := testBuildNVLinkLogicalPartition(t, session, nil, "partition", nil, tenant.Org, tenant.ID, site.ID, cutil.GetPtr(NVLinkLogicalPartitionStatusReady), user.ID)
+	dao := NewNVLinkInterfaceDAO(session)
+	return session, func(t *testing.T, status string) *NVLinkInterface {
+		t.Helper()
+		row, err := dao.Create(t.Context(), nil, NVLinkInterfaceCreateInput{
+			InstanceID: instance.ID, SiteID: site.ID, NVLinkLogicalPartitionID: partition.ID,
+			Status: status, CreatedBy: user.ID,
+		})
+		require.NoError(t, err)
+		return row
+	}
+}
+
 func TestNVLinkInterfaceSQLDAO_Update(t *testing.T) {
-	ctx := context.Background()
-	// Create test DB
-	dbSession := testInitDB(t)
-	defer dbSession.Close()
-
-	// Create tables
-	TestSetupSchema(t, dbSession)
-
-	// Create necessary objects
-	ipu := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("johnd@test.com"), cutil.GetPtr("John"), cutil.GetPtr("Doe"))
-	ip := testBuildInfrastructureProvider(t, dbSession, nil, "test-ip", "Test Provider", ipu.ID)
-
-	tnu := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("jdoetenant@test.com"), cutil.GetPtr("Tenant"), cutil.GetPtr("Doe"))
-	tn := testBuildTenant(t, dbSession, nil, "test-tenant", "test-tenant-org", tnu.ID)
-
-	st := testBuildSite(t, dbSession, nil, ip.ID, "test-site", "Test Site", ip.Org, ipu.ID)
-
-	// Create necessary objects for instance
-	vpc := testInstanceBuildVpc(t, dbSession, ip, st, tn, "testVpc")
-	instanceType := testInstanceBuildInstanceType(t, dbSession, ip, "testInstanceType")
-	machine := testMachineBuildMachine(t, dbSession, ip.ID, st.ID, &instanceType.ID, cutil.GetPtr("mcTypeTest"))
-	allocation := testInstanceBuildAllocation(t, dbSession, ip, tn, st, "testAllocation")
-	_ = testBuildAllocationConstraint(t, dbSession, allocation, AllocationResourceTypeInstanceType, instanceType.ID, AllocationConstraintTypeReserved, 10, uuid.New())
-	operatingSystem := testInstanceBuildOperatingSystem(t, dbSession, "testOS")
-	isd := NewInstanceDAO(dbSession)
-	i1, err := isd.Create(
-		ctx, nil,
-		InstanceCreateInput{
-			Name:                     "test1",
-			TenantID:                 tn.ID,
-			InfrastructureProviderID: ip.ID,
-			SiteID:                   st.ID,
-			InstanceTypeID:           &instanceType.ID,
-			VpcID:                    vpc.ID,
-			MachineID:                &machine.ID,
-			Hostname:                 cutil.GetPtr("test.com"),
-			OperatingSystemID:        cutil.GetPtr(operatingSystem.ID),
-			IpxeScript:               cutil.GetPtr("ipxe"),
-			AlwaysBootWithCustomIpxe: true,
-			UserData:                 cutil.GetPtr("userdata"),
-			InfinityRCRStatus:        cutil.GetPtr("RESOURCE_GRANTED"),
-			Status:                   InstanceStatusPending,
-			CreatedBy:                tnu.ID,
-		},
-	)
-	assert.Nil(t, err)
-	assert.NotNil(t, i1)
-
-	nvllp := testBuildNVLinkLogicalPartition(t, dbSession, nil, "test-nvlinklogicalpartition", nil, tn.Org, tn.ID, st.ID, cutil.GetPtr(NVLinkLogicalPartitionStatusReady), tnu.ID)
-	nvli := testBuildNVLinkInterface(t, dbSession, nil, st.ID, i1.ID, nvllp.ID, nil, cutil.GetPtr("Nvidia GB200"), 0, cutil.GetPtr("guid"), cutil.GetPtr(NVLinkInterfaceStatusReady), tnu.ID)
-
-	uNVLinkInterface := nvli
-	uNVLinkInterface.DeviceInstance = 1
-	uNVLinkInterface.Status = NVLinkInterfaceStatusPending
-
-	// OTEL Spanner configuration
-	_, _, ctx = testCommonTraceProviderSetup(t, context.Background())
-
-	type fields struct {
-		dbSession *db.Session
-	}
-	type args struct {
-		ctx             context.Context
-		id              uuid.UUID
-		DeviceInstance  int
-		Status          string
-		IsMissingOnSite bool
-	}
+	session, newBinding := testSetupNVLinkBindings(t)
+	dao := NewNVLinkInterfaceDAO(session)
+	_, _, ctx := testCommonTraceProviderSetup(t, t.Context())
 	tests := []struct {
-		name               string
-		fields             fields
-		args               args
-		want               *NVLinkInterface
-		wantErr            bool
-		verifyChildSpanner bool
+		name       string
+		input      NVLinkInterfaceUpdateInput
+		wantDevice int
+		wantStatus string
 	}{
-		{
-			name: "update NVLinkInterface from params returns success",
-			fields: fields{
-				dbSession: dbSession,
-			},
-			args: args{
-				ctx:            ctx,
-				id:             nvli.ID,
-				DeviceInstance: uNVLinkInterface.DeviceInstance,
-				Status:         uNVLinkInterface.Status,
-			},
-			want:               uNVLinkInterface,
-			wantErr:            false,
-			verifyChildSpanner: true,
-		},
+		{name: "update device and status", input: NVLinkInterfaceUpdateInput{DeviceInstance: cutil.GetPtr(1), Status: cutil.GetPtr(NVLinkInterfaceStatusPending)}, wantDevice: 1, wantStatus: NVLinkInterfaceStatusPending},
+		{name: "touch updates the timestamp", wantStatus: NVLinkInterfaceStatusReady},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession: tt.fields.dbSession,
-			}
-			got, err := nvlisd.Update(
-				tt.args.ctx,
-				nil,
-				NVLinkInterfaceUpdateInput{
-					NVLinkInterfaceID: tt.args.id,
-					DeviceInstance:    &tt.args.DeviceInstance,
-					Status:            &tt.args.Status,
-				},
-			)
-
-			fmt.Printf("\ngot ID: %v, Created: %v, Updated: %v", got.ID.String(), got.Created, got.Updated)
-
-			require.Equal(t, tt.wantErr, err != nil)
-
-			assert.Equal(t, tt.want.DeviceInstance, got.DeviceInstance)
-			assert.Equal(t, tt.want.Status, got.Status)
-
-			assert.NotEqualValues(t, got.Updated, nvli.Updated)
-
-			if tt.verifyChildSpanner {
-				span := otrace.SpanFromContext(ctx)
-				assert.True(t, span.SpanContext().IsValid())
-			}
+			row := newBinding(t, NVLinkInterfaceStatusReady)
+			input := tt.input
+			input.NVLinkInterfaceID = row.ID
+			got, err := dao.Update(ctx, nil, input)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantDevice, got.DeviceInstance)
+			assert.Equal(t, tt.wantStatus, got.Status)
+			assert.True(t, got.Updated.After(row.Updated))
+			assert.True(t, otrace.SpanFromContext(ctx).SpanContext().IsValid())
 		})
 	}
 }

@@ -32,7 +32,8 @@ pub(crate) struct Nic<'a> {
 
 impl Nic<'_> {
     pub(crate) fn rooftop(mac: MacAddress) -> Nic<'static> {
-        let serial_number = Some(format!("RT{}", mac.to_string().replace(':', "")).into());
+        let [a, b, c, d, e, f] = mac.bytes();
+        let serial_number = Some(format!("RT{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}").into());
         Nic {
             manufacturer: Some("Rooftop Technologies".into()),
             model: Some("Rooftop 10 Kilobit Ethernet Adapter".into()),

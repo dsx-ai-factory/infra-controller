@@ -1782,8 +1782,8 @@ mod tests {
         timestamps.add_timestamp(id, "2026-06-13T00:00:00Z".to_string());
 
         assert_eq!(
-            timestamps.get_timestamp(&id),
-            Some(&"2026-06-13T00:00:00Z".to_string())
+            timestamps.get_timestamp(&id).map(String::as_str),
+            Some("2026-06-13T00:00:00Z")
         );
         assert_eq!(timestamps.into_iter().count(), 1);
     }

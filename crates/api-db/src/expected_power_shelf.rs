@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
@@ -347,13 +347,13 @@ pub async fn create_missing_from(
     expected_power_shelves: &[ExpectedPowerShelf],
 ) -> DatabaseResult<()> {
     let existing_power_shelves = find_all(&mut *txn).await?;
-    let existing_map: BTreeMap<String, ExpectedPowerShelf> = existing_power_shelves
+    let existing_macs: HashSet<MacAddress> = existing_power_shelves
         .into_iter()
-        .map(|power_shelf| (power_shelf.bmc_mac_address.to_string(), power_shelf))
+        .map(|power_shelf| power_shelf.bmc_mac_address)
         .collect();
 
     for expected_power_shelf in expected_power_shelves {
-        if existing_map.contains_key(&expected_power_shelf.bmc_mac_address.to_string()) {
+        if existing_macs.contains(&expected_power_shelf.bmc_mac_address) {
             tracing::debug!(
                 bmc_mac_address = %expected_power_shelf.bmc_mac_address,
                 "Expected power shelf already exists; not overwriting",

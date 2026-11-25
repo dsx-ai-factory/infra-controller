@@ -156,11 +156,176 @@ pub(crate) struct CommonUuidPlaceholder {
     pub value: ::prost::alloc::string::String,
 }
 
+// Length of a tag-1 protobuf string field, including proto3's omission of empty strings.
+fn string_field_len(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    prost::encoding::key_len(1) + prost::encoding::encoded_len_varint(len as u64) + len
+}
+
+fn deserialize_from_str<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+    D: serde::Deserializer<'de>,
+{
+    struct StringVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T> serde::de::Visitor<'de> for StringVisitor<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        type Value = Result<T, T::Err>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(value.parse())
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            match std::str::from_utf8(value) {
+                Ok(value) => self.visit_str(value),
+                Err(_) => Err(E::invalid_value(serde::de::Unexpected::Bytes(value), &self)),
+            }
+        }
+    }
+
+    // Convert domain errors after the string read to preserve diagnostic positions.
+    deserializer
+        .deserialize_string(StringVisitor(std::marker::PhantomData))?
+        .map_err(serde::de::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
 
-    use super::{DbColumns, DbTable};
+    use super::*;
+
+    #[test]
+    fn protobuf_string_identifiers_match_their_reference_message() {
+        fn check<T>(id: T, text: &str)
+        where
+            T: prost::Message + Default + PartialEq + std::fmt::Debug,
+        {
+            let reference = CommonUuidPlaceholder {
+                value: text.to_owned(),
+            };
+            let encoded = id.encode_to_vec();
+            assert_eq!(id.encoded_len(), encoded.len());
+            assert_eq!(encoded, prost::Message::encode_to_vec(&reference));
+            assert_eq!(T::decode(encoded.as_slice()).unwrap(), id);
+        }
+
+        let machine = "fm100dt0000000000000000000000000000000000000000000000000000";
+        check(machine.parse::<machine::MachineId>().unwrap(), machine);
+        check(machine.parse::<machine::DpuMachineId>().unwrap(), machine);
+        let switch = "sw100nt0000000000000000000000000000000000000000000000000000";
+        check(switch.parse::<switch::SwitchId>().unwrap(), switch);
+        let shelf = "ps100rt0000000000000000000000000000000000000000000000000000";
+        check(shelf.parse::<power_shelf::PowerShelfId>().unwrap(), shelf);
+        let uuid = "00000000-0000-0000-0000-000000000000";
+        check(uuid.parse::<instance::InstanceId>().unwrap(), uuid);
+        for text in ["", "rack-α", &"r".repeat(128)] {
+            check(rack::RackId::new(text), text);
+            check(rack::RackGroupId::new(text), text);
+            check(rack::RackProfileId::new(text), text);
+        }
+    }
+
+    #[cfg(feature = "sqlx")]
+    #[test]
+    fn sql_identifiers_append_canonical_text() {
+        fn encode<T>(text: &str) -> Vec<u8>
+        where
+            T: std::str::FromStr + for<'q> sqlx::Encode<'q, sqlx::Postgres>,
+            T::Err: std::fmt::Debug,
+        {
+            let mut buffer = sqlx::postgres::PgArgumentBuffer::default();
+            buffer.extend_from_slice(b"prefix:");
+            assert!(matches!(
+                sqlx::Encode::encode_by_ref(&text.parse::<T>().unwrap(), &mut buffer).unwrap(),
+                sqlx::encode::IsNull::No
+            ));
+            buffer.to_vec()
+        }
+
+        type EncodeFn = fn(&str) -> Vec<u8>;
+        let machine = "fm100dt0000000000000000000000000000000000000000000000000000";
+        let switch = "sw100nt0000000000000000000000000000000000000000000000000000";
+        let shelf = "ps100rt0000000000000000000000000000000000000000000000000000";
+        for (scenario, text, encode) in [
+            ("machine", machine, encode::<machine::MachineId> as EncodeFn),
+            (
+                "machine subtype",
+                machine,
+                encode::<machine::DpuMachineId> as EncodeFn,
+            ),
+            ("switch", switch, encode::<switch::SwitchId> as EncodeFn),
+            (
+                "power shelf",
+                shelf,
+                encode::<power_shelf::PowerShelfId> as EncodeFn,
+            ),
+            ("device", switch, encode::<device::DeviceId> as EncodeFn),
+            (
+                "trusted machine",
+                machine,
+                encode::<measured_boot::TrustedMachineId> as EncodeFn,
+            ),
+            (
+                "all trusted machines",
+                "*",
+                encode::<measured_boot::TrustedMachineId> as EncodeFn,
+            ),
+            (
+                "instance type",
+                "type-α",
+                encode::<instance_type::InstanceTypeId> as EncodeFn,
+            ),
+            (
+                "security group",
+                "group-α",
+                encode::<network_security_group::NetworkSecurityGroupId> as EncodeFn,
+            ),
+        ] {
+            assert_eq!(
+                encode(text),
+                format!("prefix:{text}").into_bytes(),
+                "{scenario}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_id_deserialization_accepts_reader_and_byte_inputs() {
+        use serde::Deserialize;
+        use serde::de::value::{BytesDeserializer, Error};
+
+        let text = "fm100dt0000000000000000000000000000000000000000000000000000";
+        let expected = text.parse::<machine::MachineId>().unwrap();
+        let json = format!("\"{text}\"");
+        assert_eq!(
+            serde_json::from_reader::<_, machine::MachineId>(json.as_bytes()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            machine::MachineId::deserialize(BytesDeserializer::<Error>::new(text.as_bytes()))
+                .unwrap(),
+            expected
+        );
+        let bytes = &[0xff];
+        let expected_error =
+            String::deserialize(BytesDeserializer::<Error>::new(bytes)).unwrap_err();
+        let actual_error =
+            machine::MachineId::deserialize(BytesDeserializer::<Error>::new(bytes)).unwrap_err();
+        assert_eq!(actual_error.to_string(), expected_error.to_string());
+    }
 
     #[test]
     fn manual_db_table_without_alias_uses_existing_metadata() {

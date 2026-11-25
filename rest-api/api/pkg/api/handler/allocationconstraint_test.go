@@ -4,12 +4,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -137,39 +137,39 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Allocation 1
-	aIT1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIT1))
+	aIT1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIT1)
 	aID1, _ := uuid.Parse(aIT1.ID)
 	assert.NotNil(t, aID1)
 	acID1 := uuid.MustParse(aIT1.AllocationConstraints[0].ID)
 	assert.NotNil(t, acID1)
 
-	aIPB1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIPB1))
+	aIPB1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIPB1)
 	aipID1, _ := uuid.Parse(aIPB1.ID)
 	assert.NotNil(t, aipID1)
 	acipID1 := uuid.MustParse(aIPB1.AllocationConstraints[0].ID)
 	assert.NotNil(t, acipID1)
 
 	// Allocation 2
-	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIT2))
+	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIT2)
 	aID2, _ := uuid.Parse(aIT2.ID)
 	assert.NotNil(t, aID2)
 	acID2 := uuid.MustParse(aIT2.AllocationConstraints[0].ID)
 	assert.NotNil(t, acID2)
 
-	aIPB2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIPB2))
+	aIPB2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIPB2)
 	aipID2, _ := uuid.Parse(aIPB2.ID)
 	assert.NotNil(t, aipID2)
 	acipID2 := uuid.MustParse(aIPB2.AllocationConstraints[0].ID)
 	assert.NotNil(t, acipID2)
 
-	aIPB3 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIPB3))
+	aIPB3 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIPB3)
 	aipID3, _ := uuid.Parse(aIPB3.ID)
 	assert.NotNil(t, aipID3)
 
-	operatorRootAllocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(operatorRootAllocationBody))
+	operatorRootAllocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, operatorRootAllocationBody)
 	operatorRootAllocationID := uuid.MustParse(operatorRootAllocation.ID)
 
-	aITTenant2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyITTenant2))
+	aITTenant2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyITTenant2)
 	assert.NotNil(t, aITTenant2)
 
 	// Get Allocation Constraints for above Allocations
@@ -206,7 +206,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		AllocationConstraints: []model.APIAllocationConstraintCreateRequest{{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipbV6.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 80}},
 	})
 	require.NoError(t, err)
-	v6Allocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(v6AllocationBody))
+	v6Allocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, v6AllocationBody)
 	v6Constraint, err := acDAO.GetByID(ctx, nil, uuid.MustParse(v6Allocation.AllocationConstraints[0].ID), nil)
 	require.NoError(t, err)
 	require.NotNil(t, v6Constraint.DerivedResourceID)
@@ -335,7 +335,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	tests := []struct {
 		name                    string
 		reqOrgName              string
-		reqBody                 string
+		reqBody                 []byte
 		user                    *cdbm.User
 		acID                    string
 		requestedAID            uuid.UUID
@@ -353,7 +353,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:               "preserve shorter-than-source error",
 			reqOrgName:         ipOrg1,
-			reqBody:            `{"constraintValue":63}`,
+			reqBody:            []byte(`{"constraintValue":63}`),
 			user:               ipu,
 			requestedAID:       v6Constraint.AllocationID,
 			requestedACS:       *v6Constraint,
@@ -365,7 +365,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:               "reject IPv6 length without changing the allocation",
 			reqOrgName:         ipOrg1,
-			reqBody:            `{"constraintValue":336}`,
+			reqBody:            []byte(`{"constraintValue":336}`),
 			user:               ipu,
 			requestedAID:       v6Constraint.AllocationID,
 			requestedACS:       *v6Constraint,
@@ -391,7 +391,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when User is not found in Request Context",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBodyIT1),
+			reqBody:        okBodyIT1,
 			user:           nil,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -402,7 +402,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when User does not belong to Organization",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBodyIT1),
+			reqBody:        okBodyIT1,
 			user:           ipu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -413,7 +413,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when Request Body does not bind",
 			reqOrgName:     ipOrg1,
-			reqBody:        "BadBody",
+			reqBody:        []byte("BadBody"),
 			user:           ipu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -424,7 +424,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified Organization has no Infrastructure Provider",
 			reqOrgName:     ipOrg3,
-			reqBody:        string(okBodyIT1),
+			reqBody:        okBodyIT1,
 			user:           ipu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -435,7 +435,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when Organization's Infrastructure Provider does not match Allocation's",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(okBodyIT1),
+			reqBody:        okBodyIT1,
 			user:           ipu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -446,7 +446,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when Allocation Constraint ID is not a valid UUID",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBodyIT1),
+			reqBody:        okBodyIT1,
 			user:           ipu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -457,7 +457,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when Allocation Constraint does not exist",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBodyIT1),
+			reqBody:        okBodyIT1,
 			user:           ipu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -468,7 +468,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when User does not have the required role",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyIT1),
+			reqBody:        okBodyIT1,
 			user:           tnu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -479,7 +479,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:               "error when Allocation ID does not match Allocation Constraint",
 			reqOrgName:         ipOrg1,
-			reqBody:            string(okBodyIT1),
+			reqBody:            okBodyIT1,
 			user:               ipu,
 			requestedAID:       uuid.New(),
 			requestedACS:       acsit1[0],
@@ -491,7 +491,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "success updating Allocation Constraint value for Instance Type resource",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIT1),
+			reqBody:                 okBodyIT1,
 			user:                    ipu,
 			requestedAID:            acsit1[0].AllocationID,
 			requestedACS:            acsit1[0],
@@ -504,7 +504,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:           "error when Machines are not available for Allocation Constraint update",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBodyIT1),
+			reqBody:        errBodyIT1,
 			user:           ipu,
 			requestedAID:   acsit1[0].AllocationID,
 			requestedACS:   acsit1[0],
@@ -515,7 +515,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "successfully updating Allocation Constraint value for IP Block resource",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIP1),
+			reqBody:                 okBodyIP1,
 			user:                    ipu,
 			requestedAID:            acsip1[0].AllocationID,
 			requestedACS:            acsip1[0],
@@ -528,7 +528,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "successfully updating Allocation Constraint value for IP Block resource with full grant",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIP1ToFG),
+			reqBody:                 okBodyIP1ToFG,
 			user:                    ipu,
 			requestedAID:            acsip1[0].AllocationID,
 			requestedACS:            acsip1[0],
@@ -541,7 +541,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "successfully updating Allocation Constraint value for IP Block resource away from full grant",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIP1),
+			reqBody:                 okBodyIP1,
 			user:                    ipu,
 			requestedAID:            acsip1[0].AllocationID,
 			requestedACS:            acsip1[0],
@@ -554,7 +554,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "success updating Allocation Constraint when Instance count is below new value",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIT2),
+			reqBody:                 okBodyIT2,
 			user:                    ipu,
 			requestedAID:            acsit2[0].AllocationID,
 			requestedACS:            acsit2[0],
@@ -566,7 +566,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "success updating Allocation Constraint when Instance count equals new value",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIT4),
+			reqBody:                 okBodyIT4,
 			user:                    ipu,
 			requestedAID:            acsit2[0].AllocationID,
 			requestedACS:            acsit2[0],
@@ -578,7 +578,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "error when Instance count exceeds new Allocation Constraint value",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIT3),
+			reqBody:                 okBodyIT3,
 			user:                    ipu,
 			requestedAID:            acsit1[0].AllocationID,
 			requestedACS:            acsit1[0],
@@ -591,7 +591,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "error when Subnets exist for Allocation Constraint IP Block",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIP2),
+			reqBody:                 okBodyIP2,
 			user:                    ipu,
 			requestedAID:            acsip2[0].AllocationID,
 			requestedACS:            acsip2[0],
@@ -604,7 +604,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:                    "error when VPC Prefix exists for Allocation Constraint child IP Block",
 			reqOrgName:              ipOrg1,
-			reqBody:                 string(okBodyIP2),
+			reqBody:                 okBodyIP2,
 			user:                    ipu,
 			requestedAID:            acsip3[0].AllocationID,
 			requestedACS:            acsip3[0],
@@ -617,7 +617,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:               "error when OperatorManaged SitePrefix parent IP Block is deleting",
 			reqOrgName:         ipOrg1,
-			reqBody:            string(okBodyIP1),
+			reqBody:            okBodyIP1,
 			user:               ipu,
 			requestedAID:       operatorRootConstraint.AllocationID,
 			requestedACS:       operatorRootConstraint,
@@ -655,7 +655,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		{
 			name:               "error updating IP Block Allocation Constraint beyond the IPv4 maximum",
 			reqOrgName:         ipOrg1,
-			reqBody:            string(errBodyIP1),
+			reqBody:            errBodyIP1,
 			user:               ipu,
 			requestedAID:       acsip1[0].AllocationID,
 			requestedACS:       acsip1[0],
@@ -670,7 +670,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

@@ -10,6 +10,7 @@ use super::Args;
 use crate::async_writeln;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
+use crate::network_segment::show::cmd::format_segment_after_mutation;
 
 /// Prints the committed server result, not a reconstruction of the request.
 pub(super) async fn add_prefix(args: Args, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
@@ -20,15 +21,9 @@ pub(super) async fn add_prefix(args: Args, ctx: &mut RuntimeContext) -> CarbideC
         .await
         .context("append a network segment prefix")?;
     let output = match ctx.config.format {
-        OutputFormat::AsciiTable => {
-            crate::network_segment::show::cmd::convert_network_to_nice_format(
-                segment,
-                None,
-                &ctx.api_client,
-            )
+        OutputFormat::AsciiTable => format_segment_after_mutation(segment, &ctx.api_client)
             .await
-            .context("format the updated network segment returned by core")?
-        }
+            .context("format the updated network segment returned by core")?,
         OutputFormat::Json => serde_json::to_string_pretty(&segment)
             .context("serialize the updated network segment as JSON")?,
         OutputFormat::Yaml => serde_yaml::to_string(&segment)

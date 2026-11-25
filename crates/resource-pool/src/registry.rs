@@ -29,7 +29,10 @@ use model::resource_pool::binding::{
 use sqlx::PgConnection;
 
 use crate::remote::RemoteResourcePool;
-use crate::{IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolWithBackend};
+use crate::{
+    IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolBackendError,
+    ResourcePoolWithBackend,
+};
 
 // Integrated has no per-pool state. Sharing its adapter does not cache a binding.
 static INTEGRATED_BACKEND: ResourcePoolBackend =
@@ -153,6 +156,29 @@ impl ResourcePoolRegistry {
             .get_or_load_backend(db, pool.name())
             .await?
             .map(|backend| ResourcePoolWithBackend { pool, backend }))
+    }
+
+    /// `select_for_allocation` selects a backend for a required allocation.
+    /// Missing inventory defers to Integrated, whose allocator diagnoses the
+    /// automatic/manual range in the entity transaction. This preserves callers'
+    /// admission and allocation-error ordering. Invalid bindings still fail closed.
+    pub async fn select_for_allocation<'a, T, DB>(
+        &'a self,
+        db: &mut DB,
+        pool: &'a ResourcePool<T>,
+    ) -> Result<ResourcePoolWithBackend<'a, T>, ResourcePoolBackendError>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+        T: ToString + FromStr + Send + Sync + 'static,
+        T::Err: std::error::Error,
+    {
+        Ok(self
+            .select(db, pool)
+            .await?
+            .unwrap_or(ResourcePoolWithBackend {
+                pool,
+                backend: &INTEGRATED_BACKEND,
+            }))
     }
 
     /// `get_or_load_backend` borrows a resolved backend or checks the database for

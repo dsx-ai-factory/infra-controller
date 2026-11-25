@@ -9,6 +9,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1578,6 +1579,20 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	if ruleID != nil {
 		info.RuleID = ruleID.String()
 	}
+	if req.GetDeviceCredentialOverrides() != nil {
+		if !req.GetOverrideReadinessCheck() {
+			return nil, status.Error(codes.InvalidArgument, "device credential overrides require override_readiness_check")
+		}
+		for _, subTarget := range req.GetSubTargets() {
+			if subTarget == "dpu" {
+				return nil, status.Error(codes.InvalidArgument, "device credential overrides do not support DPU updates")
+			}
+		}
+		info.DeviceCredentials, err = firmwareauth.EncryptDeviceCredentials(rs.dataCipher, req.GetDeviceCredentialOverrides())
+		if err != nil {
+			return nil, firmwareAuthenticationStatusError(err)
+		}
+	}
 	err = rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {
 		return nil, firmwareAuthenticationStatusError(err)
@@ -1919,7 +1934,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 		if leftKey != rightKey {
 			return leftKey < rightKey
 		}
-		return left.ID.String() < right.ID.String()
+		return bytes.Compare(left.ID[:], right.ID[:]) < 0
 	})
 
 	// Convert store drifts to proto response
@@ -2181,7 +2196,7 @@ func (rs *FlowServerImpl) sortComponents(components []*component.Component, orde
 	}
 	less := func(i, j int, left, right string) bool {
 		if left == right {
-			return components[i].Info.ID.String() < components[j].Info.ID.String()
+			return bytes.Compare(components[i].Info.ID[:], components[j].Info.ID[:]) < 0
 		}
 		if effectiveOrderBy.Direction == dbquery.OrderAscending {
 			return left < right

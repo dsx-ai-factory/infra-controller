@@ -4,6 +4,7 @@
 package bmc
 
 import (
+	"bytes"
 	"net"
 	"regexp"
 	"strings"
@@ -62,7 +63,7 @@ func (b *BMC) SetIP(ip string) {
 func (b *BMC) Patch(nb BMC) bool {
 	patched := false
 
-	if strings.Compare(b.MAC.String(), nb.MAC.String()) == 0 {
+	if bytes.Equal(b.MAC.HardwareAddr, nb.MAC.HardwareAddr) {
 		if nb.IP != nil && !b.IP.Equal(nb.IP) {
 			b.IP = nb.IP
 			patched = true

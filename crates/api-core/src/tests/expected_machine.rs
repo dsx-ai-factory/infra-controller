@@ -3090,13 +3090,13 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
         match change {
             Change::Dynamic | Change::RemoveInterface => {
                 let mut update: rpc::forge::ExpectedMachine = captured.clone().into();
+                let mac_address = declaration.mac_address.unwrap().to_string();
                 if matches!(change, Change::Dynamic) {
                     let interface = update
                         .host_nics
                         .iter_mut()
                         .find(|interface| {
-                            interface.mac_address
-                                == Some(declaration.mac_address.unwrap().to_string())
+                            interface.mac_address.as_deref() == Some(mac_address.as_str())
                         })
                         .expect("the update should contain the expected interface");
                     interface.ip_allocation =
@@ -3104,7 +3104,7 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
                     interface.fixed_ip = None;
                 } else {
                     update.host_nics.retain(|interface| {
-                        interface.mac_address != Some(declaration.mac_address.unwrap().to_string())
+                        interface.mac_address.as_deref() != Some(mac_address.as_str())
                     });
                     update.replace_host_nics = true;
                 }
@@ -3248,10 +3248,13 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         .await;
 
         let mut update: rpc::forge::ExpectedMachine = captured.into();
+        let expected_mac_address = mac_address.to_string();
         let interface = update
             .host_nics
             .iter_mut()
-            .find(|interface| interface.mac_address == Some(mac_address.to_string()))
+            .find(|interface| {
+                interface.mac_address.as_deref() == Some(expected_mac_address.as_str())
+            })
             .expect("the update should contain the host interface");
         interface.ip_allocation = Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32);
         interface.fixed_ip = None;
@@ -5104,6 +5107,7 @@ async fn dpu_loopback_reservation_pool_membership(pool: sqlx::PgPool) {
     use std::net::IpAddr;
 
     use model::resource_pool::OwnerType;
+    use model::test_support::machine_snapshot::dpu_machine_id;
 
     let env = create_test_env(pool.clone()).await;
     let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
@@ -5120,15 +5124,10 @@ async fn dpu_loopback_reservation_pool_membership(pool: sqlx::PgPool) {
     db::resource_pool::populate(loopback_pool, &mut txn, vec![auto_assign], true)
         .await
         .unwrap();
-    db::resource_pool::allocate_exact(
-        loopback_pool,
-        &mut txn,
-        OwnerType::Machine,
-        "other-dpu",
-        taken,
-    )
-    .await
-    .unwrap();
+    let owner = dpu_machine_id(1).to_string();
+    db::resource_pool::allocate_exact(loopback_pool, &mut txn, OwnerType::Machine, &owner, taken)
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
 
     // A value outside the pool is rejected as invalid.
@@ -5193,9 +5192,13 @@ async fn dpu_loopback_reservation_pool_membership(pool: sqlx::PgPool) {
         .await
         .expect("a free requestable value must be accepted");
 
-    // Re-submitting the identical reservation is a no-op: an unchanged value
-    // skips pool re-validation, so it succeeds even though the pool entry is
-    // still free (it is only claimed when the DPU machine is created).
+    // A fresh reservation would now fail ownership validation, but replaying
+    // unchanged intent does not revalidate or reassign the live address.
+    let mut txn = pool.txn_begin().await.unwrap();
+    db::resource_pool::allocate_exact(loopback_pool, &mut txn, OwnerType::Machine, &owner, free)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
     env.api
         .update_expected_machine(tonic::Request::new(expected_machine_with_reservations(
             "1A:1B:1C:1D:1E:04",

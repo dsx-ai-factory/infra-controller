@@ -856,12 +856,15 @@ mod tests {
                     continue;
                 }
                 for metric in family.get_metric() {
-                    let labels = metric
-                        .get_label()
-                        .iter()
-                        .map(|label| format!("{}={}", label.name(), label.value()))
-                        .collect::<Vec<_>>()
-                        .join(",");
+                    let mut labels = String::new();
+                    for (index, label) in metric.get_label().iter().enumerate() {
+                        if index > 0 {
+                            labels.push(',');
+                        }
+                        labels.push_str(label.name());
+                        labels.push('=');
+                        labels.push_str(label.value());
+                    }
                     let value = if iterations {
                         metric.get_histogram().get_sample_count()
                     } else {

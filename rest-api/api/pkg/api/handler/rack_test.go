@@ -1498,6 +1498,15 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
+			name:           "success - device overrides ignored on rack endpoint",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			body:           fmt.Sprintf(`{"siteId":"%s","deviceCredentialOverrides":{"unknown":"ignored"}}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
 			name:           "success - firmware update with authentication data",
 			reqOrg:         org,
 			user:           providerUser,
@@ -1572,6 +1581,10 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 						testFlowProxyRequest(t, args, flowReq)
 					}
 					assert.Equal(t, tt.expectedTargets, flowReq.GetSubTargets())
+					assert.Nil(t, flowReq.GetDeviceCredentialOverrides())
+					if tt.expectedAuth == "" {
+						assert.Empty(t, args.Get(3).(grpcproxy.Request).EncryptedSecrets)
+					}
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -1956,6 +1969,14 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
+			name:           "success - device overrides ignored on rack endpoint",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","deviceCredentialOverrides":{"unknown":"ignored"}}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
 			name:           "success - firmware update all racks with authentication data",
 			reqOrg:         org,
 			user:           providerUser,
@@ -2016,6 +2037,10 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 						testFlowProxyRequest(t, args, flowReq)
 					}
 					assert.Equal(t, tt.expectedTargets, flowReq.GetSubTargets())
+					assert.Nil(t, flowReq.GetDeviceCredentialOverrides())
+					if tt.expectedAuth == "" {
+						assert.Empty(t, args.Get(3).(grpcproxy.Request).EncryptedSecrets)
+					}
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient

@@ -265,6 +265,9 @@ spec:
               path "{{ .Values.vault.kvMount }}/data/ufm/*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }
+              path "{{ .Values.vault.kvMount }}/metadata/ufm/*" {
+                capabilities = ["list", "delete"]
+              }
               path "{{ .Values.vault.kvMount }}/data/nmxm/*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }

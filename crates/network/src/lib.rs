@@ -122,14 +122,30 @@ pub fn deserialize_mlx_mac<'a, D>(deserializer: D) -> Result<MacAddress, D::Erro
 where
     D: Deserializer<'a>,
 {
-    let input_value = String::deserialize(deserializer)?;
-    let mac_address = deserialize_input_mac_to_address(&input_value).map_err(|e| {
-        serde::de::Error::custom(format!(
-            "failed to parse input mac_address({input_value}): {e}"
-        ))
-    })?;
+    struct MlxMacVisitor;
 
-    Ok(mac_address)
+    impl<'de> serde::de::Visitor<'de> for MlxMacVisitor {
+        type Value = Result<MacAddress, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(deserialize_input_mac_to_address(value)
+                .map_err(|e| format!("failed to parse input mac_address({value}): {e}")))
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            let value = std::str::from_utf8(value)
+                .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+            self.visit_str(value)
+        }
+    }
+
+    deserializer
+        .deserialize_string(MlxMacVisitor)?
+        .map_err(serde::de::Error::custom)
 }
 
 pub fn deserialize_optional_mlx_mac<'a, D>(deserializer: D) -> Result<Option<MacAddress>, D::Error>
@@ -181,6 +197,48 @@ mod tests {
     use carbide_test_support::{Case, check_cases};
 
     use super::*;
+
+    #[test]
+    fn mlx_mac_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "ch:64";
+        let cases = [
+            (
+                "borrowed string",
+                deserialize_mlx_mac(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                deserialize_mlx_mac(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                deserialize_mlx_mac(StringDeserializer::<Error>::new(input.to_string())),
+            ),
+            (
+                "bytes",
+                deserialize_mlx_mac(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert_eq!(
+                value,
+                deserialize_input_mac_to_address(input).expect("fixture MAC"),
+                "{scenario}",
+            );
+        }
+
+        let error = deserialize_mlx_mac(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
 
     // `sanitized_mac` returns `eyre::Result`, whose error does not implement
     // `PartialEq`, so error rows use `Fails` and the run closure maps the

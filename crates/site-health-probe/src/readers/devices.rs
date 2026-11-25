@@ -2523,11 +2523,7 @@ mod tests {
                 self.inner.publish(family, snap);
                 let mut published = self.published.lock().unwrap();
                 published.push((family, meta, units));
-                let secs = |at: SystemTime| {
-                    at.duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs_f64()
-                };
+                let secs = crate::state_metrics::unix_seconds;
                 for (family, meta, units) in published.iter().rev().fold(
                     Vec::<(Family, SweepMeta, usize)>::new(),
                     |mut newest, row| {
@@ -2796,7 +2792,7 @@ mod tests {
         // Rack 2 is soft-deleted between the census and its by-ID read; the
         // by-ID read still returns it, with `deleted` set.
         h.nico.after("find_rack_ids", |site| {
-            let rack = site.racks.get_mut(&fake::rack_id(2).to_string()).unwrap();
+            let rack = site.racks.get_mut(fake::rack_id(2).as_str()).unwrap();
             rack.deleted = Some(SystemTime::now().into());
         });
         h.sweep().await.expect("complete sweep");

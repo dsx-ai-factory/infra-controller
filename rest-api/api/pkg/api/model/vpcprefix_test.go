@@ -52,6 +52,27 @@ func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			desc: "ok with labels",
+			obj: APIVpcPrefixCreateRequest{
+				Name:         "ab",
+				Labels:       map[string]string{"owner": "networking"},
+				VpcID:        vpcID,
+				IPBlockID:    &ipBlockID,
+				PrefixLength: &validPrefixLength,
+			},
+		},
+		{
+			desc: "error when labels are invalid",
+			obj: APIVpcPrefixCreateRequest{
+				Name:         "ab",
+				Labels:       map[string]string{"": "networking"},
+				VpcID:        vpcID,
+				IPBlockID:    &ipBlockID,
+				PrefixLength: &validPrefixLength,
+			},
+			expectErr: true,
+		},
+		{
 			desc:      "error when VpcID is not valid uuid",
 			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: "baduuid", IPBlockID: &ipBlockID, PrefixLength: &validPrefixLength},
 			expectErr: true,
@@ -256,6 +277,15 @@ func TestAPIVpcPrefixUpdateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			desc: "ok when labels are provided",
+			obj:  APIVpcPrefixUpdateRequest{Labels: map[string]string{"owner": "networking"}},
+		},
+		{
+			desc:      "error when labels are invalid",
+			obj:       APIVpcPrefixUpdateRequest{Labels: map[string]string{"": "networking"}},
+			expectErr: true,
+		},
+		{
 			desc:      "error when Name is provided but is empty",
 			obj:       APIVpcPrefixUpdateRequest{Name: cutil.GetPtr("")},
 			expectErr: true,
@@ -313,6 +343,7 @@ func TestAPIVpcPrefixNew(t *testing.T) {
 		SiteID:       uuid.New(),
 		VpcID:        uuid.New(),
 		IPBlockID:    &ipBlock.ID,
+		Labels:       cdbm.Labels{"owner": "networking"},
 		Prefix:       ipBlock.Prefix,
 		PrefixLength: 24,
 		Created:      cdb.GetCurTime(),
@@ -349,6 +380,7 @@ func TestAPIVpcPrefixNew(t *testing.T) {
 			assert.NotNil(t, tc.dbObj.VpcID)
 			assert.Equal(t, tc.dbObj.Prefix, *got.Prefix)
 			assert.Equal(t, tc.dbObj.PrefixLength, got.PrefixLength)
+			assert.Equal(t, APILabels(tc.dbObj.Labels), got.Labels)
 			assert.Nil(t, got.UsageStats)
 		})
 	}
@@ -424,7 +456,12 @@ func TestNewAPIVpcPrefix_UsageStats(t *testing.T) {
 func TestAPIVpcPrefixCreateRequest_ToProto(t *testing.T) {
 	prefixID := uuid.New()
 	vpcID := uuid.New()
-	vp := &cdbm.VpcPrefix{ID: prefixID, Name: "prefix-a", Prefix: "10.0.0.0/16"}
+	vp := &cdbm.VpcPrefix{
+		ID:     prefixID,
+		Name:   "prefix-a",
+		Labels: cdbm.Labels{"owner": "networking"},
+		Prefix: "10.0.0.0/16",
+	}
 	vpc := &cdbm.Vpc{ID: vpcID}
 
 	t.Run("sources canonical fields from the entity's ToProto", func(t *testing.T) {
@@ -445,12 +482,19 @@ func TestAPIVpcPrefixCreateRequest_ToProto(t *testing.T) {
 		assert.Equal(t, "10.0.0.0/16", req.Config.Prefix)
 		require.NotNil(t, req.Metadata)
 		assert.Equal(t, "prefix-a", req.Metadata.Name)
+		require.Len(t, req.Metadata.Labels, 1)
+		assert.Equal(t, "owner", req.Metadata.Labels[0].GetKey())
+		assert.Equal(t, "networking", req.Metadata.Labels[0].GetValue())
 	})
 }
 
 func TestAPIVpcPrefixUpdateRequest_ToProto(t *testing.T) {
 	prefixID := uuid.New()
-	vp := &cdbm.VpcPrefix{ID: prefixID, Name: "prefix-a"}
+	vp := &cdbm.VpcPrefix{
+		ID:     prefixID,
+		Name:   "prefix-a",
+		Labels: cdbm.Labels{"owner": "networking"},
+	}
 
 	t.Run("sources Id and Metadata.Name from the post-merge entity", func(t *testing.T) {
 		apiReq := APIVpcPrefixUpdateRequest{Name: cutil.GetPtr("prefix-a")}
@@ -460,5 +504,8 @@ func TestAPIVpcPrefixUpdateRequest_ToProto(t *testing.T) {
 		assert.Equal(t, prefixID.String(), req.Id.Value)
 		require.NotNil(t, req.Metadata)
 		assert.Equal(t, "prefix-a", req.Metadata.Name)
+		require.Len(t, req.Metadata.Labels, 1)
+		assert.Equal(t, "owner", req.Metadata.Labels[0].GetKey())
+		assert.Equal(t, "networking", req.Metadata.Labels[0].GetValue())
 	})
 }

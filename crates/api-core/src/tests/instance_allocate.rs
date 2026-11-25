@@ -1501,6 +1501,89 @@ async fn test_zero_dpu_instance_allocation_rejects_non_flat_vpc_id(
 }
 
 #[crate::sqlx_test]
+async fn test_infrastructure_workload_allocation_is_rejected(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let tenant_segment = env.create_vpc_and_tenant_segment().await;
+    let vpc_id = db::vpc::find_by_segment(&env.pool, tenant_segment)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let host = api_fixtures::create_managed_host(&env).await;
+
+    for (segment_type, gateway) in [
+        (
+            forge::NetworkSegmentType::Admin,
+            FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1],
+        ),
+        (
+            forge::NetworkSegmentType::Underlay,
+            FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[2],
+        ),
+    ] {
+        // Ready, VPC-bound targets isolate workload admission from the existing
+        // parent checks. Dedicated prefixes have no physical address owners.
+        let segment_id = create_network_segment(
+            &env.api,
+            &format!("unsupported workload {segment_type:?}"),
+            &format!("{}/{}", gateway.network(), gateway.prefix()),
+            &gateway.ip().to_string(),
+            segment_type,
+            Some(vpc_id),
+            false,
+        )
+        .await;
+        env.run_network_segment_controller_iteration().await;
+        env.run_network_segment_controller_iteration().await;
+        let error = env
+            .api
+            .allocate_instance(tonic::Request::new(forge::InstanceAllocationRequest {
+                machine_id: Some(host.host().id),
+                config: Some(forge::InstanceConfig {
+                    tenant: Some(default_tenant_config()),
+                    os: Some(default_os_config()),
+                    network: Some(single_interface_network_config(segment_id)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("infrastructure workload allocation must fail");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error.message().contains(&format!(
+                "network segment {segment_id} has type {segment_type:?}"
+            )),
+            "{error}"
+        );
+        assert!(
+            db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let address_counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM instance_addresses WHERE segment_id = $1),
+                    (SELECT count(*) FROM machine_interface_addresses a
+                     JOIN machine_interfaces i ON i.id = a.interface_id WHERE i.segment_id = $1)",
+        )
+        .bind(segment_id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(address_counts, (0, 0));
+        assert_eq!(
+            db::vpc::find_by_segment(&env.pool, segment_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            vpc_id
+        );
+    }
+}
+
+#[crate::sqlx_test]
 async fn test_reject_single_dpu_instance_allocation_no_network_config(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

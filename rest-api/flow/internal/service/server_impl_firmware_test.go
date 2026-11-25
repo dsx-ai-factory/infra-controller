@@ -179,3 +179,38 @@ func perComponentServiceAuthenticationData(
 		},
 	}
 }
+
+func TestFlowServerImpl_UpgradeFirmwareDeviceCredentials(t *testing.T) {
+	credentials := &pb.DeviceCredentialOverrides{Bmc: &pb.DeviceLogin{Username: "operator", Password: "device-secret"}}
+	for _, tc := range []struct {
+		name       string
+		direct     bool
+		subTargets []string
+		code       codes.Code
+	}{
+		{"encrypted submission", true, nil, codes.OK},
+		{"routing required", false, nil, codes.InvalidArgument},
+		{"mixed DPU rejected", true, []string{"bmc", "dpu"}, codes.InvalidArgument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cipher := newServiceTestCipher(t)
+			manager := &firmwareTaskManager{}
+			server := &FlowServerImpl{taskManager: manager, dataCipher: cipher}
+			_, err := server.UpgradeFirmware(context.Background(), &pb.UpgradeFirmwareRequest{
+				TargetSpec:             &pb.OperationTargetSpec{Targets: &pb.OperationTargetSpec_Components{Components: &pb.ComponentTargets{Targets: []*pb.ComponentTarget{{Identifier: &pb.ComponentTarget_Id{Id: &pb.UUID{Id: uuid.NewString()}}}}}}},
+				OverrideReadinessCheck: tc.direct, SubTargets: tc.subTargets, DeviceCredentialOverrides: credentials,
+			})
+			require.Equal(t, tc.code, status.Code(err))
+			if tc.code != codes.OK {
+				require.Nil(t, manager.request)
+				return
+			}
+			require.NotContains(t, string(manager.request.Operation.Info), "device-secret")
+			var info operations.FirmwareControlTaskInfo
+			require.NoError(t, info.Unmarshal(manager.request.Operation.Info))
+			got, err := firmwareauth.DecryptDeviceCredentials(cipher, info.DeviceCredentials)
+			require.NoError(t, err)
+			require.Equal(t, "device-secret", got.GetBmc().GetPassword())
+		})
+	}
+}

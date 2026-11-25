@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
@@ -571,13 +571,13 @@ pub async fn create_missing_from(
     expected_switches: &[ExpectedSwitch],
 ) -> DatabaseResult<()> {
     let existing_switches = find_all(&mut *txn).await?;
-    let existing_map: BTreeMap<String, ExpectedSwitch> = existing_switches
+    let existing_macs: HashSet<MacAddress> = existing_switches
         .into_iter()
-        .map(|switch| (switch.bmc_mac_address.to_string(), switch))
+        .map(|switch| switch.bmc_mac_address)
         .collect();
 
     for expected_switch in expected_switches {
-        if existing_map.contains_key(&expected_switch.bmc_mac_address.to_string()) {
+        if existing_macs.contains(&expected_switch.bmc_mac_address) {
             tracing::debug!(
                 bmc_mac_address = %expected_switch.bmc_mac_address,
                 "Expected switch already exists; not overwriting",

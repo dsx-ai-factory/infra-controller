@@ -118,7 +118,7 @@ impl IBFabricConfig {
     {
         let mtu = i32::deserialize(deserializer)?;
 
-        IBMtu::try_from(mtu).map_err(|e| serde::de::Error::custom(e.to_string()))
+        IBMtu::try_from(mtu).map_err(serde::de::Error::custom)
     }
 
     pub fn deserialize_rate_limit<'de, D>(deserializer: D) -> Result<IBRateLimit, D::Error>
@@ -127,7 +127,7 @@ impl IBFabricConfig {
     {
         let rate_limit = i32::deserialize(deserializer)?;
 
-        IBRateLimit::try_from(rate_limit).map_err(|e| serde::de::Error::custom(e.to_string()))
+        IBRateLimit::try_from(rate_limit).map_err(serde::de::Error::custom)
     }
 
     pub fn deserialize_service_level<'de, D>(deserializer: D) -> Result<IBServiceLevel, D::Error>
@@ -136,8 +136,18 @@ impl IBFabricConfig {
     {
         let service_level = i32::deserialize(deserializer)?;
 
-        IBServiceLevel::try_from(service_level).map_err(|e| serde::de::Error::custom(e.to_string()))
+        IBServiceLevel::try_from(service_level).map_err(serde::de::Error::custom)
     }
+}
+
+/// Selects how NICo authenticates to a fabric's UFM endpoint when the setting is explicit.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum UfmAuthMode {
+    /// Authenticate with the default SPIFFE client certificate files.
+    ClientCertificate,
+    /// Authenticate with the stored credential password as a UFM token.
+    Token,
 }
 
 /// Settings related to an IB fabric
@@ -150,6 +160,9 @@ pub struct IbFabricDefinition {
     /// Note: Currently only a single endpoint is accepted.
     /// This limitation might be lifted in the future
     pub endpoints: Vec<String>,
+    /// Explicit UFM authentication method. Omission preserves credential-based selection.
+    #[serde(default)]
+    pub auth: Option<UfmAuthMode>,
     /// pkey ranges used for the fabric
     /// Note that editing the pkey ranges will never shrink the currently defined
     /// ranges. It can only be used to expand the range
@@ -173,12 +186,13 @@ mod test {
 
     use super::*;
 
+    /// Verifies optional fabric settings preserve legacy defaults and reject unsupported values.
     #[test]
     fn fabric_definition_preserves_pool_selectors_and_legacy_pkeys() {
         scenarios!(
-            run = |selectors| {
+            run = |settings| {
                 let input = format!(
-                    "endpoints = [\"https://ufm.example\"]\npkeys = [{{ start = \"1\", end = \"100\" }}]\n{selectors}"
+                    "endpoints = [\"https://ufm.example\"]\npkeys = [{{ start = \"1\", end = \"100\" }}]\n{settings}"
                 );
                 let config: IbFabricDefinition = Figment::new()
                     .merge(Toml::string(&input))
@@ -190,16 +204,31 @@ mod test {
                     end: "100".to_string(),
                     auto_assign: true,
                 }]);
-                Ok::<_, ()>((config.backend, config.remote_pool))
+                Ok::<_, ()>((config.auth, config.backend, config.remote_pool))
             };
+            // Omission must remain distinguishable from either explicit authentication mode.
             "legacy defaults" {
-                "" => Yields((None, None)),
+                "" => Yields((None, None, None)),
             }
+            // Certificate mode must parse without creating an implicit default for older sites.
+            "client certificate authentication" {
+                "auth = \"client_certificate\"" => Yields((Some(UfmAuthMode::ClientCertificate), None, None)),
+            }
+            // Token mode must parse separately so runtime validation can require a token.
+            "token authentication" {
+                "auth = \"token\"" => Yields((Some(UfmAuthMode::Token), None, None)),
+            }
+            // Pool selectors remain independent of the new authentication setting.
             "configured selection" {
-                "backend = \"shared\"\nremote_pool = \"provider-pkeys\"" => Yields((Some("shared".to_string()), Some("provider-pkeys".to_string()))),
+                "backend = \"shared\"\nremote_pool = \"provider-pkeys\"" => Yields((None, Some("shared".to_string()), Some("provider-pkeys".to_string()))),
             }
+            // Misspelled pool settings must continue to fail under deny_unknown_fields.
             "unknown selector" {
                 "bakend = \"shared\"" => Fails,
+            }
+            // Serde must reject authentication values outside the two supported modes.
+            "unsupported authentication" {
+                "auth = \"password\"" => Fails,
             }
         );
     }

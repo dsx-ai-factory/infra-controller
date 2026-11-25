@@ -494,6 +494,7 @@ The `nico-mcp` command takes the following flags:
 | `--listen` | `NICO_MCP_LISTEN` | Listen address. Defaults to `:8080`. |
 | `--path` | `NICO_MCP_PATH` | MCP handler path. Defaults to `/mcp`. |
 | `--shutdown-timeout` | `NICO_MCP_SHUTDOWN_TIMEOUT` | Graceful shutdown timeout. Defaults to `10s`. |
+| `--metrics-listen` | `NICO_MCP_METRICS_LISTEN` | Listen address for Prometheus metrics at `/metrics`. Metrics are not served when empty. See [Metrics](../operations/nico-mcp.md#metrics). |
 | `--base-url` | `NICO_BASE_URL` | Default NICo REST base URL. |
 | `--org` | `NICO_ORG` | Default organization for REST requests. |
 | `--api-name` | `NICO_API_NAME` | API path segment. Defaults to `nico`. |

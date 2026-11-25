@@ -46,7 +46,7 @@ async fn test_topology_update_on_machineid_update(pool: sqlx::PgPool) {
     let query = r#"UPDATE machines SET id = $2 WHERE id=$1;"#;
 
     sqlx::query(query)
-        .bind(host.id.to_string())
+        .bind(host.id)
         .bind("fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg")
         .execute(&mut *txn)
         .await

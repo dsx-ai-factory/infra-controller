@@ -190,9 +190,7 @@ impl<'de> Deserialize<'de> for RackProductFamily {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(D::Error::custom)
+        crate::deserialize_from_str(deserializer)
     }
 }
 

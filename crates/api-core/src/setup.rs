@@ -51,6 +51,9 @@ use carbide_machine_controller::per_object::MachinePerObjectInfo;
 use carbide_network_segment_controller::context::NetworkSegmentStateHandlerServices;
 use carbide_network_segment_controller::handler::NetworkSegmentStateHandler;
 use carbide_network_segment_controller::io::NetworkSegmentStateControllerIO;
+use carbide_nvlink_domain_controller::{
+    NvLinkDomainStateControllerIO, NvLinkDomainStateHandler, NvLinkDomainStateHandlerServices,
+};
 use carbide_nvlink_manager::{NvLinkManager, NvLinkManagerArgs};
 use carbide_power_shelf_controller::context::PowerShelfStateHandlerServices;
 use carbide_power_shelf_controller::handler::PowerShelfStateHandler;
@@ -62,10 +65,11 @@ use carbide_rack_controller::context::RackStateHandlerServices;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::libredfish::{DirectRedfishPool, RedfishClientPool};
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
+use carbide_site_explorer::dpu_loopback::update_dpu_loopback_ips_v6;
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
 use carbide_spdm_controller::handler::SpdmAttestationStateHandler;
@@ -79,7 +83,6 @@ use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::TransactionVending as _;
 use db::db_read::PgPoolReader;
-use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
@@ -88,7 +91,6 @@ use librms::RackManagerClientPool;
 use model::attestation::spdm::VerifierImpl;
 use model::expected_machine::ExpectedMachine;
 use model::ib::DEFAULT_IB_FABRIC_NAME;
-use model::machine::HostHealthConfig;
 use model::network_segment::NetworkDefinition;
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
@@ -116,6 +118,7 @@ use crate::cfg::file::{
 use crate::cfg::load::all_configuration_files;
 use crate::cfg::resource_pool::ResourcePoolBackendConfig;
 use crate::dpa::handler::start_svpc_handler;
+use crate::dpu_service_sync_metrics::DpuServiceSyncHoldMonitor;
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::listener::ApiListenMode;
 use crate::logging::log_limiter::LogLimiter;
@@ -162,9 +165,9 @@ fn create_ipmi_tool(
 /// pool by a call-site mistake.
 struct BmcProxyPools {
     /// The pool for ordinary BMC traffic: nico-bmc-proxy when `[bmc_proxy]`
-    /// is enabled, otherwise the direct pool itself. Credential-lifecycle
-    /// work never uses this handle -- that is what the [`BmcCredentialOps`]
-    /// handle is for.
+    /// is enabled, otherwise the direct pool itself. Work with explicit
+    /// credentials never uses this handle -- that is what the
+    /// [`DirectRedfishPool`] is for.
     general: Arc<dyn RedfishClientPool>,
     /// The pools the driver connector uses: ordinary traffic routed like
     /// `general`, and the direct pool for explicit credentials.
@@ -254,7 +257,7 @@ fn create_redfish_pool(
     carbide_config: &CarbideConfig,
     credential_manager: Arc<dyn CredentialManager>,
     instrumentation: carbide_instrument::Instrumentation,
-) -> eyre::Result<(Arc<dyn RedfishClientPool>, Arc<dyn BmcCredentialOps>)> {
+) -> eyre::Result<(Arc<dyn RedfishClientPool>, DirectRedfishPool)> {
     let pool = libredfish::RedfishClientPool::builder()
         .danger_accept_invalid_certs()
         .build()
@@ -298,7 +301,7 @@ fn create_redfish_pool(
         (None, None, _) => {} // leave bmc_proxy untouched
     }
 
-    Ok(carbide_redfish::libredfish::new_pool_with_credential_ops(
+    Ok(carbide_redfish::libredfish::new_pool_with_direct(
         credential_manager,
         pool,
         carbide_config.site_explorer.bmc_proxy.clone(),
@@ -353,7 +356,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         )?)
     };
 
-    let (shared_redfish_pool, bmc_credential_ops) = create_redfish_pool(
+    let (shared_redfish_pool, direct_redfish_pool) = create_redfish_pool(
         &carbide_config,
         credential_manager.clone(),
         instrumentation.clone(),
@@ -556,8 +559,18 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     }
     txn.commit().await?;
 
+    let fabric_definitions = if ib_config.enabled {
+        crate::resource_pool::ib_fabric_pool_definitions(&carbide_config.ib_fabrics)
+    } else {
+        HashMap::new()
+    };
     resource_pool_monitor
-        .register_pools(&registry, pool_definition_source, &cancel_token)
+        .register_pools(
+            &registry,
+            pool_definition_source,
+            &fabric_definitions,
+            &cancel_token,
+        )
         .await?;
 
     if !carbide_config.listen_only {
@@ -610,6 +623,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     )
     .await?;
 
+    // Pass only enabled fabrics and explicitly selected auth modes into the runtime manager.
     let ib_fabric_manager_impl = ib::create_ib_fabric_manager(
         credential_manager.clone(),
         ib::IBFabricManagerConfig {
@@ -619,6 +633,17 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
                     .iter()
                     .map(|(fabric_id, fabric_definition)| {
                         (fabric_id.clone(), fabric_definition.endpoints.clone())
+                    })
+                    .collect()
+            } else {
+                Default::default()
+            },
+            auth_modes: if ib_config.enabled {
+                carbide_config
+                    .ib_fabrics
+                    .iter()
+                    .filter_map(|(fabric_id, fabric_definition)| {
+                        fabric_definition.auth.map(|auth| (fabric_id.clone(), auth))
                     })
                     .collect()
             } else {
@@ -678,7 +703,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
 
     let bmc_client = Arc::new(
         AuthenticatedBmcClient::new(
-            bmc_credential_ops.clone(),
+            direct_redfish_pool.clone(),
             shared_nv_redfish_pool,
             // Established-endpoint traffic goes through nico-bmc-proxy when
             // enabled; credential setup stays on the direct handle above.
@@ -690,11 +715,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     );
     let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
         bmc_client.clone(),
-        carbide_config
-            .site_explorer
-            .rotate_switch_nvos_credentials
-            .clone(),
-        carbide_config.site_explorer.explore_drive_firmware,
+        &carbide_config.site_explorer,
         db_pool.clone(),
         instrumentation.clone(),
     );
@@ -776,6 +797,20 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .as_ref()
             .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
     );
+    if let Some(sdk) = &dpf_sdk {
+        let sdk = sdk.clone();
+        bmc_explorer.set_dpf_recovery(
+            work_lock_manager_handle.clone(),
+            Box::new(move |node_id, device_id| {
+                let sdk = sdk.clone();
+                Box::pin(async move {
+                    sdk.bmc_credential_resources_gone(&node_id, &device_id)
+                        .await
+                        .map_err(|_| "could not verify DPF resource drain".to_string())
+                })
+            }),
+        );
+    }
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
@@ -876,7 +911,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         eth_data,
         ib_fabric_manager,
         redfish_pool: general_redfish_pool,
-        bmc_credential_ops: bmc_credential_ops.clone(),
+        direct_redfish_pool: direct_redfish_pool.clone(),
         driver_connector: driver_connector.clone(),
         bmc_proxy_passthrough,
         bmc_session_manager,
@@ -1159,6 +1194,7 @@ fn build_dpf_init_config(
         .registry_mirrors(carbide_config.dpf.registry_mirrors.clone())
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
+        .enable_pci_switch_emulation(carbide_config.dpf.enable_pci_switch_emulation)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
         .deployment_type(deployment_type);
     if let Some(bluefield_software) = bluefield_software {
@@ -1378,7 +1414,7 @@ async fn initialize_dpf_resources(
             CarbideDPFLabeler::new(carbide_config.dpf.deployments.bf3.node_label_key.clone())
                 .with_deployment_type_labels(deployment_type_labels),
         )
-        .with_bmc_password_refresh_interval(std::time::Duration::from_secs(60))
+        .with_bmc_secret_retry_interval(std::time::Duration::from_secs(60))
         .with_join_set(join_set)
         .build_without_resources()
         .await
@@ -1494,6 +1530,8 @@ pub fn validate_resource_pool_config(
     resolve_resource_pool_config(carbide_config, initial_objects).map(|_| ())
 }
 
+/// `ResourcePoolStartupConfig` keeps ordinary seed definitions separate from
+/// backend selections, which also include enabled fabrics' PKey pools.
 #[derive(Debug)]
 struct ResourcePoolStartupConfig {
     definitions: HashMap<String, ResourcePoolDef>,
@@ -1853,7 +1891,7 @@ async fn initialize_and_start_controllers<'a>(
         database_connection: db_pool,
         ib_fabric_manager,
         redfish_pool: shared_redfish_pool,
-        bmc_credential_ops,
+        direct_redfish_pool,
         driver_connector,
         work_lock_manager_handle,
         rms_client,
@@ -1945,24 +1983,14 @@ async fn initialize_and_start_controllers<'a>(
     let ib_config = carbide_config.ib_config.clone().unwrap_or_default();
 
     if ib_config.enabled {
-        // Populate IB specific resource pools
-        let mut txn = db_pool.txn_begin().await?;
-
-        for (fabric_id, x) in carbide_config.ib_fabrics.iter() {
-            db::resource_pool::define(
-                &mut txn,
-                &model::resource_pool::common::ib_pkey_pool_name(fabric_id),
-                &resource_pool::ResourcePoolDef {
-                    pool_type: model::resource_pool::define::ResourcePoolType::Integer,
-                    ranges: x.pkeys.clone(),
-                    prefix: None,
-                    delegate_prefix_len: None,
-                },
+        api_service
+            .resource_pool_monitor
+            .initialize_ib_pkey_pools(
+                &api_service.resource_pool_registry,
+                &carbide_config.ib_fabrics,
+                &cancel_token,
             )
             .await?;
-        }
-
-        txn.commit().await?;
     }
 
     let resource_pool_stats = crate::resource_pool::metrics::start_pool_stats(
@@ -2014,7 +2042,15 @@ async fn initialize_and_start_controllers<'a>(
     )
     .await?;
 
-    if let Err(error) = update_dpu_loopback_ips_v6(db_pool, common_pools).await {
+    if let Err(error) = update_dpu_loopback_ips_v6(
+        db_pool,
+        &api_service.resource_pool_registry,
+        common_pools,
+        &cancel_token,
+        &api_service.instrumentation,
+    )
+    .await
+    {
         tracing::error!(
             error = %error,
             "Failed to update IPv6 loopback IPs for DPUs",
@@ -2145,7 +2181,7 @@ async fn initialize_and_start_controllers<'a>(
     let state_controller_id = hostname::get()
         .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string().into())
         .to_string_lossy()
-        .to_string();
+        .into_owned();
 
     // Every controller that records per-object series, in one place so the
     // two hold-period computations below cannot drift apart. The first four
@@ -2160,6 +2196,7 @@ async fn initialize_and_start_controllers<'a>(
         &carbide_config.extension_service_state_controller.controller,
         &carbide_config.spdm_state_controller.controller,
         &carbide_config.ib_partition_state_controller.controller,
+        &carbide_config.nvlink_domain_state_controller.controller,
     ];
 
     // Cross-controller registry feeding the per-object health and state
@@ -2182,7 +2219,7 @@ async fn initialize_and_start_controllers<'a>(
     per_object_metrics_registry.register(&meter);
 
     // Hold period for the per-object state/info gauges, which are fed by all
-    // eight controllers. An object's series is only refreshed after its
+    // state controllers. An object's series is only refreshed after its
     // handler finishes, so the worst-case refresh gap is roughly an iteration
     // interval (with slack) PLUS the longest allowed handler runtime. Note:
     // under fleet backlog the wall-clock iteration can exceed iteration_time;
@@ -2240,6 +2277,13 @@ async fn initialize_and_start_controllers<'a>(
         })
         .transpose()?;
 
+    // The machine state controller and the DPU service sync hold monitor must
+    // judge whether a host is past its SLA the same way, so both get these.
+    let machine_host_health = carbide_config.host_health;
+    let machine_sla_config = model::machine::slas::MachineSlaConfig::new(
+        carbide_config.machine_state_controller.failure_retry_time,
+    );
+
     // handles need to be stored in a variable
     // If they are assigned to _ then the destructor will be immediately called
     StateController::<MachineStateControllerIO>::builder()
@@ -2257,11 +2301,11 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: shared_redfish_pool.clone(),
-                bmc_connector: BmcConnector::new(
+                bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
+                    direct_redfish_pool.clone(),
                     driver_connector.clone(),
                 ),
-                bmc_credential_ops: bmc_credential_ops.clone(),
                 ipmi_tool: ipmi_tool.clone(),
                 site_config: carbide_config.machine_state_handler_site_config().into(),
                 component_manager: component_manager.clone().map(Arc::new),
@@ -2278,6 +2322,7 @@ async fn initialize_and_start_controllers<'a>(
                 dpf_per_dpu_bmc_credentials: dpf_sdk
                     .as_ref()
                     .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
+                dpf_rotation_locks: Some(work_lock_manager_handle.clone()),
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -2336,24 +2381,8 @@ async fn initialize_and_start_controllers<'a>(
                 .build(),
         ))
         .io(Arc::new(MachineStateControllerIO {
-            host_health: HostHealthConfig {
-                hardware_health_reports: carbide_config.host_health.hardware_health_reports,
-                dpu_agent_version_staleness_threshold: carbide_config
-                    .host_health
-                    .dpu_agent_version_staleness_threshold,
-                prevent_allocations_on_stale_dpu_agent_version: carbide_config
-                    .host_health
-                    .prevent_allocations_on_stale_dpu_agent_version,
-                prevent_allocations_on_scout_heartbeat_timeout: carbide_config
-                    .host_health
-                    .prevent_allocations_on_scout_heartbeat_timeout,
-                suppress_external_alerting_on_scout_heartbeat_timeout: carbide_config
-                    .host_health
-                    .suppress_external_alerting_on_scout_heartbeat_timeout,
-            },
-            sla_config: model::machine::slas::MachineSlaConfig::new(
-                carbide_config.machine_state_controller.failure_retry_time,
-            ),
+            host_health: machine_host_health,
+            sla_config: machine_sla_config.clone(),
         }))
         .state_change_emitter(state_change_emitter)
         .build_and_spawn(join_set, cancel_token.clone())
@@ -2518,6 +2547,7 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
+                resource_pool_registry: Arc::new(api_service.resource_pool_registry.clone()),
             }
             .into(),
         )
@@ -2545,12 +2575,11 @@ async fn initialize_and_start_controllers<'a>(
                 rack_firmware_reprovisioning_enabled: carbide_config
                     .power_shelf_state_controller
                     .rack_firmware_reprovisioning_enabled,
-                redfish_client_pool: shared_redfish_pool.clone(),
-                bmc_connector: BmcConnector::new(
+                bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
+                    direct_redfish_pool.clone(),
                     driver_connector.clone(),
                 ),
-                bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
                 ),
@@ -2601,6 +2630,23 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build RackStateController");
 
+    StateController::<NvLinkDomainStateControllerIO>::builder()
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
+        .meter("carbide_nvlink_domains", meter.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(NvLinkDomainStateHandlerServices {
+            db_pool: db_pool.clone(),
+        }))
+        .per_object_state_metrics(per_object_state_recorder("nvlink_domain"))
+        .iteration_config((&carbide_config.nvlink_domain_state_controller.controller).into())
+        .state_handler(Arc::new(NvLinkDomainStateHandler))
+        .build_and_spawn(join_set, cancel_token.clone())
+        .expect("Unable to build NvLinkDomainStateController");
+
     StateController::<SwitchStateControllerIO>::builder()
         .database(
             db_pool.clone(),
@@ -2619,12 +2665,11 @@ async fn initialize_and_start_controllers<'a>(
                     .switch_state_controller
                     .effective_switch_mtls_services_as_i32(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
-                redfish_client_pool: shared_redfish_pool.clone(),
-                bmc_connector: BmcConnector::new(
+                bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
+                    direct_redfish_pool.clone(),
                     driver_connector.clone(),
                 ),
-                bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
                 ),
@@ -2779,6 +2824,12 @@ async fn initialize_and_start_controllers<'a>(
     .with_driver_connector(driver_connector.clone());
 
     let preingestion_manager = match component_manager.as_ref() {
+        Some(manager) => preingestion_manager
+            .with_component_manager(Arc::new(manager.clone()), credential_manager.clone()),
+        None => preingestion_manager,
+    };
+
+    let preingestion_manager = match component_manager.as_ref() {
         Some(manager)
             if manager.compute_tray.backend()
                 == component_manager::compute_tray_manager::Backend::Rms =>
@@ -2802,6 +2853,16 @@ async fn initialize_and_start_controllers<'a>(
     )
     .start(join_set, cancel_token.clone())?;
 
+    // Started with or without DPF: a site that has none never records a hold,
+    // and reports zero rather than no series.
+    DpuServiceSyncHoldMonitor::new(
+        db_pool.clone(),
+        &meter,
+        machine_host_health,
+        machine_sla_config,
+    )
+    .start(join_set, cancel_token.clone())?;
+
     // we need to create ek_cert_status entries for all existing machines
     attestation::backfill_ek_cert_status_for_existing_machines(db_pool).await?;
 
@@ -2813,11 +2874,7 @@ async fn initialize_and_start_controllers<'a>(
     )
     .start(join_set, cancel_token.clone())?;
 
-    apply_config_on_startup(
-        &api_service,
-        &carbide_config.machine_validation_config.clone(),
-    )
-    .await?;
+    apply_config_on_startup(&api_service, &carbide_config.machine_validation_config).await?;
 
     tracing::info!("initialize_and_start_controllers: all controllers initialized and started");
 
@@ -4331,6 +4388,29 @@ mod tests {
                     .map_err(|error| error.to_string())
             },
         );
+
+        // A separately configured pool supplies both the seed and the backend.
+        let mut ordinary = config.clone();
+        ordinary.ib_config = Some(carbide_ib_fabric::config::IBFabricConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let pool = resource_pool::common::ib_pkey_pool_name(DEFAULT_IB_FABRIC_NAME);
+        let seed: ResourcePoolDef = toml::from_str(
+            r#"type = "integer"
+ranges = [{ start = "1000", end = "1002", auto_assign = false }]"#,
+        )
+        .unwrap();
+        ordinary.pools = Some(HashMap::from([(pool.clone(), seed.clone().into())]));
+        let resolved = resolve_resource_pool_config(&ordinary, None).unwrap();
+        assert_eq!(resolved.definitions.get(&pool), Some(&seed));
+        assert_eq!(resolved.selections[&pool].backend_name, None);
+
+        ordinary.pools = Some(HashMap::from([(pool, ipv4_pool("192.0.2.0/30").into())]));
+        let error = resolve_resource_pool_config(&ordinary, None)
+            .expect_err("a configured address pool cannot supply fabric PKeys")
+            .to_string();
+        assert!(error.contains("conflicts with the PKey pool"), "{error}");
 
         // A disabled fabric still validates its explicitly configured selectors.
         config

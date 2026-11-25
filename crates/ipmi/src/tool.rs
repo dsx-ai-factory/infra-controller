@@ -17,14 +17,15 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_utils::cmd::{CmdError, CmdResult, TokioCmd};
 use eyre::eyre;
 
-use crate::IPMITool;
 use crate::metrics::{IpmiCommand, count_ipmi_command};
+use crate::{IPMITool, RestartError};
 
 pub(super) struct IPMIToolImpl {
     instrumentation: carbide_instrument::Instrumentation,
@@ -69,6 +70,41 @@ impl IPMIToolImpl {
 
 #[async_trait]
 impl IPMITool for IPMIToolImpl {
+    async fn restart_once(
+        &self,
+        bmc_address: SocketAddr,
+        credential_key: &CredentialKey,
+    ) -> Result<(), RestartError> {
+        let credentials = self
+            .credentials(credential_key)
+            .await
+            .map_err(RestartError::NotSent)?;
+        self.execute_ipmitool_command(
+            IpmiCommand::ChassisPowerReset,
+            bmc_address,
+            &credentials,
+            true,
+        )
+        .await
+        .map_err(classify_restart_error)?;
+        Ok(())
+    }
+
+    async fn restart_with_credentials(
+        &self,
+        bmc_address: SocketAddr,
+        credentials: &Credentials,
+    ) -> Result<(), eyre::Report> {
+        self.execute_ipmitool_command(
+            IpmiCommand::ChassisPowerReset,
+            bmc_address,
+            credentials,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn bmc_cold_reset(
         &self,
         bmc_address: SocketAddr,
@@ -77,7 +113,7 @@ impl IPMITool for IPMIToolImpl {
         let credentials = self.credentials(credential_key).await?;
 
         match self
-            .execute_ipmitool_command(IpmiCommand::BmcColdReset, bmc_address, &credentials)
+            .execute_ipmitool_command(IpmiCommand::BmcColdReset, bmc_address, &credentials, false)
             .await
         {
             Ok(_) => Ok(()),
@@ -93,40 +129,22 @@ impl IPMITool for IPMIToolImpl {
     ) -> Result<(), eyre::Report> {
         let credentials = self.credentials(credential_key).await?;
 
-        let mut errors: Vec<CmdError> = Vec::default();
-
-        if legacy_boot {
-            match self
+        // A failed legacy command is counted by the runner. Fall back to standard chassis reset.
+        if legacy_boot
+            && self
                 .execute_ipmitool_command(
                     IpmiCommand::DpuLegacyPowerReset,
                     bmc_address,
                     &credentials,
+                    false,
                 )
                 .await
-            {
-                Ok(_) => return Ok(()),   // return early if we get a successful response
-                Err(e) => errors.push(e), // add error and move on if not
-            }
-        }
-        match self
-            .execute_ipmitool_command(IpmiCommand::ChassisPowerReset, bmc_address, &credentials)
-            .await
+                .is_ok()
         {
-            Ok(_) => return Ok(()),   // return early if we get a successful response
-            Err(e) => errors.push(e), // add error and move on if not
+            return Ok(());
         }
-
-        // Only the last error survives as the returned failure; the earlier
-        // attempts' failures have already been counted where they happened.
-        let result = errors.pop();
-
-        Err(match result {
-            None => {
-                // This should be impossible, right? We always call execute_ipmitool_command.
-                eyre::eyre!("no commands were successful and no error reported")
-            }
-            Some(err) => err.into(),
-        })
+        self.restart_with_credentials(bmc_address, &credentials)
+            .await
     }
 }
 
@@ -149,6 +167,7 @@ impl IPMIToolImpl {
         command: IpmiCommand,
         bmc_address: SocketAddr,
         credentials: &Credentials,
+        single_attempt: bool,
     ) -> CmdResult<String> {
         let (username, password) = match credentials {
             Credentials::UsernamePassword { username, password } => (username, password),
@@ -162,10 +181,34 @@ impl IPMIToolImpl {
             .attempts(self.attempts);
 
         tracing::info!(command = ?cmd, "Running IPMI command");
-        let result = cmd.env("IPMITOOL_PASSWORD", password).output().await;
+        let cmd = cmd.env("IPMITOOL_PASSWORD", password);
+        let result = if single_attempt {
+            // Bound this one command, not the controller's durable recovery lifetime.
+            // The default controller budget is 180 seconds and can cancel it earlier.
+            execute_single_attempt(cmd, Duration::from_secs(60)).await
+        } else {
+            cmd.output().await
+        };
         count_ipmi_command(command, &result, &self.instrumentation);
         result
     }
+}
+
+/// Only a failed spawn proves that this attempt could not have sent a reset.
+fn classify_restart_error(error: CmdError) -> RestartError {
+    match error {
+        CmdError::RunError(..) => RestartError::NotSent(error.into()),
+        _ => RestartError::Uncertain(error.into()),
+    }
+}
+
+/// Bound and cancel one local reset process while retaining whether it started.
+async fn execute_single_attempt(command: TokioCmd, deadline: Duration) -> CmdResult<String> {
+    tokio::time::timeout(deadline, command.attempts(1).kill_on_drop(true).output())
+        .await
+        .map_err(|error| {
+            CmdError::TokioRunError("ipmitool chassis power reset".into(), error.to_string())
+        })?
 }
 
 #[cfg(test)]
@@ -175,6 +218,94 @@ mod test {
 
     use carbide_secrets::credentials::Credentials;
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+
+    /// A failed result must not repeat a mutation, even when the command requests retries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn durable_reset_runs_one_process() {
+        // Zero would otherwise run no process; three would replay a failed mutation.
+        for configured_attempts in [0, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let calls = dir.path().join("calls");
+            let command = carbide_utils::cmd::TokioCmd::new("/bin/sh")
+                .args([
+                    "-c",
+                    "printf x >> \"$1\"; exit 1",
+                    "ipmi-fixture",
+                    calls.to_str().unwrap(),
+                ])
+                .attempts(configured_attempts);
+            let error = super::execute_single_attempt(command, std::time::Duration::from_secs(5))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                super::classify_restart_error(error),
+                crate::RestartError::Uncertain(_)
+            ));
+            assert_eq!(std::fs::read(calls).unwrap(), b"x");
+        }
+    }
+
+    /// A missing executable proves non-delivery; unlike a failed child, it can clear
+    /// the new attempt marker without losing an earlier attempt's restart evidence.
+    #[tokio::test]
+    async fn durable_reset_spawn_failure_is_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = carbide_utils::cmd::TokioCmd::new(dir.path().join("missing-ipmitool"));
+        let error = super::execute_single_attempt(command, std::time::Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            super::classify_restart_error(error),
+            crate::RestartError::NotSent(_)
+        ));
+    }
+
+    /// Cancellation and the attempt deadline must stop/reap the actual local process.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn durable_reset_stops_the_process_when_its_attempt_ends() {
+        use std::time::Duration;
+
+        for cancel in [true, false] {
+            // Eight seconds independently bounds this proof; the fixture exits naturally at 30.
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let dir = tempfile::tempdir().unwrap();
+                let pid_file = dir.path().join("pid");
+                let command = carbide_utils::cmd::TokioCmd::new("/bin/sh").args([
+                    "-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 30",
+                    "ipmi-fixture", pid_file.to_str().unwrap(),
+                ]);
+                let deadline = if cancel { Duration::from_secs(60) } else { Duration::from_secs(3) };
+                let mut attempt = Box::pin(super::execute_single_attempt(command, deadline));
+                let pid = tokio::select! {
+                    // A delayed test poll can observe both the marker and deadline at once.
+                    // Prefer the recorded start before judging how the command ended.
+                    biased;
+                    pid = async {
+                        loop {
+                            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                                && let Ok(pid) = text.parse::<u32>() {
+                                break pid;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    } => pid,
+                    result = &mut attempt => panic!("command ended before its start marker: {result:?}"),
+                };
+                // Cancel only after the real command has started. The other row exercises
+                // the helper's own deadline rather than an outer test cancellation.
+                if cancel {
+                    drop(attempt);
+                } else {
+                    assert!(attempt.await.is_err());
+                }
+                while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("the process must disappear before the fixture's natural exit");
+        }
+    }
 
     #[test]
     fn test_ipmitool_new() {

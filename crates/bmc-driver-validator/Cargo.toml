@@ -35,6 +35,7 @@ bmc-drivers = { path = "../bmc-drivers" }
 bmc-explorer = { path = "../bmc-explorer" }
 bmc-platform = { path = "../bmc-platform" }
 bmc-runtime = { path = "../bmc-runtime" }
+carbide-hw-identification = { path = "../hw-identification" }
 carbide-ipmi = { path = "../ipmi" }
 carbide-redfish = { path = "../redfish" }
 carbide-secrets = { path = "../secrets", default-features = false }

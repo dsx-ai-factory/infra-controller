@@ -33,6 +33,8 @@ use crate::db_read::DbReader;
 use crate::dns::zone::DbDnsZone;
 use crate::{DatabaseError, DatabaseResult};
 
+pub mod creation;
+
 #[cfg(test)]
 mod test_explicit_columns;
 

@@ -26,7 +26,7 @@ repository = "https://github.com/dsx-ai-factory/infra-controller"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.30" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.32" }
 librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.11.0", features = ["server"] }
 ansi-to-html = "0.2.2"
 
@@ -48,7 +48,6 @@ rustls = { version = "0.23.46", features = ["aws_lc_rs"] }
 rustls-pki-types = "1.10.0"
 sqlx = { version = "0.9" }
 sqlx-core = { version = "0.9" }
-sqlx-macros-core = { version = "0.9" }
 
 opentelemetry = { version = "0.32.0", features = ["logs"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["logs", "rt-tokio"] }

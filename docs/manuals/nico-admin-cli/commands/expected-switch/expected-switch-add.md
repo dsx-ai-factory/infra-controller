@@ -13,9 +13,9 @@ nico-admin-cli expected-switch add <-a|--bmc-mac-address>
 <-u|--bmc-username> <-p|--bmc-password>
 <-s|--switch-serial-number> <--nvos-interface>
 [--nvos-username] [--nvos-password] [--meta-name]
-[--meta-description] [--label] [--rack_id]
-[--bmc-ip-address] [--nvos-ip-address]
-[--bmc-retain-credentials] [--extended] [--sort-by]
+[--meta-description] [--extended] [--label]
+[--rack_id] [--bmc-ip-address] [--nvos-ip-address]
+[--bmc-retain-credentials] [--sort-by]
 [-h|--help]
 ```
 
@@ -65,6 +65,14 @@ Switches. If empty, the SwitchId will be used
 The description that should be used as part of the Metadata for newly
 created Machines
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--label <LABEL>`
 
 A label that will be added as metadata for the newly created Machine.
@@ -97,14 +105,6 @@ factory-default credentials in Vault as-is
 > - true
 >
 > - false
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

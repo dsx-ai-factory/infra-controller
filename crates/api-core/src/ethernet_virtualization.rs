@@ -838,7 +838,7 @@ pub(crate) async fn resolve_vpc_network_security_group(
     )
     .await?
     .pop()
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "NetworkSecurityGroup",
         id: network_security_group_id.to_string(),
     })?;

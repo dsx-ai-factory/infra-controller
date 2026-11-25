@@ -70,7 +70,12 @@ pub struct PowerShelfId {
 
 impl Ord for PowerShelfId {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.to_string().cmp(&other.to_string())
+        // After the common prefix, Display writes type, source, then fixed-length ASCII hardware ID.
+        self.ty
+            .id_char()
+            .cmp(&other.ty.id_char())
+            .then_with(|| self.source.id_char().cmp(&other.source.id_char()))
+            .then_with(|| self.hardware_id.cmp(&other.hardware_id))
     }
 }
 
@@ -102,7 +107,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for PowerShelfId {
         &self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        std::io::Write::write_fmt(&mut **buf, format_args!("{self}"))?;
         Ok(sqlx::encode::IsNull::No)
     }
 }
@@ -163,12 +168,12 @@ impl PowerShelfId {
     ) -> PowerShelfId {
         // BASE32_DNSSEC is chosen to just generate lowercase characters and
         // numbers - which will result in valid DNS names for PowerShelfIds.
-        let encoded = BASE32_DNSSEC.encode(&hardware_hash);
-        assert_eq!(encoded.len(), POWER_SHELF_ID_HARDWARE_ID_BASE32_LENGTH);
+        let mut hardware_id = [0; POWER_SHELF_ID_HARDWARE_ID_BASE32_LENGTH];
+        BASE32_DNSSEC.encode_mut(&hardware_hash, &mut hardware_id);
 
         Self {
             source,
-            hardware_id: encoded.as_bytes().try_into().unwrap(),
+            hardware_id,
             ty,
         }
     }
@@ -330,7 +335,7 @@ impl std::fmt::Display for PowerShelfId {
         // The next character determines how the PowerShelfId is derived (`PowerShelfIdSource`)
         f.write_char(self.source.id_char())?;
         // Then follows the source data.
-        // SAFETY: `hardware_id` is private and populated only from `BASE32_DNSSEC::encode`, whose
+        // SAFETY: `hardware_id` is private and populated only from `BASE32_DNSSEC::encode_mut`, whose
         // output is ASCII and therefore valid UTF-8.
         unsafe { f.write_str(std::str::from_utf8_unchecked(self.hardware_id.as_slice())) }
     }
@@ -346,7 +351,7 @@ pub const POWER_SHELF_ID_HARDWARE_ID_BASE32_LENGTH: usize = 52;
 
 /// The length of a valid PowerShelfID
 ///
-/// It is made up of the prefix length (5 bytes) plus the encoded hardware ID length
+/// It is made up of the prefix length (7 bytes) plus the encoded hardware ID length
 pub const POWER_SHELF_ID_LENGTH: usize =
     POWER_SHELF_ID_PREFIX_LENGTH + POWER_SHELF_ID_HARDWARE_ID_BASE32_LENGTH;
 
@@ -396,7 +401,7 @@ impl Serialize for PowerShelfId {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.collect_str(self)
     }
 }
 
@@ -405,18 +410,12 @@ impl<'de> Deserialize<'de> for PowerShelfId {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-
-        let str_value = String::deserialize(deserializer)?;
-        let id =
-            PowerShelfId::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(id)
+        crate::deserialize_from_str(deserializer)
     }
 }
 
-// Implement [`prost::Message`] manually so that we can be wire-compatible with the
-// `.common.PowerShelfId` protobuf message, which is what we actually serialize. Do this by
-// constructing a `legacy_rpc::PowerShelfId` and delegate all  [`prost::Message`] methods to it.
+// The legacy shim owns encoding and decoding for wire compatibility with `.common.PowerShelfId`.
+// Its string field contains fixed-length canonical ID text, so encoded_len computes that size directly.
 impl prost::Message for PowerShelfId {
     fn encode_raw(&self, buf: &mut impl BufMut)
     where
@@ -447,7 +446,7 @@ impl prost::Message for PowerShelfId {
     }
 
     fn encoded_len(&self) -> usize {
-        legacy_rpc::PowerShelfId::from(*self).encoded_len()
+        crate::string_field_len(POWER_SHELF_ID_LENGTH)
     }
 
     #[allow(deprecated)]
@@ -490,6 +489,47 @@ mod tests {
     use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn ordering_matches_canonical_text() {
+        for (scenario, left, right) in [
+            (
+                "source precedes hardware",
+                PowerShelfId::new(
+                    PowerShelfIdSource::ProductBoardChassisSerial,
+                    [0xff; 32],
+                    PowerShelfType::Host,
+                ),
+                PowerShelfId::new(PowerShelfIdSource::Tpm, [0; 32], PowerShelfType::Host),
+            ),
+            (
+                "hardware breaks a prefix tie",
+                PowerShelfId::new(PowerShelfIdSource::Tpm, [0x55; 32], PowerShelfType::Host),
+                PowerShelfId::new(PowerShelfIdSource::Tpm, [0xff; 32], PowerShelfType::Host),
+            ),
+            (
+                "type precedes source and hardware",
+                PowerShelfId::new(PowerShelfIdSource::Tpm, [0xff; 32], PowerShelfType::Host),
+                PowerShelfId::new(
+                    PowerShelfIdSource::ProductBoardChassisSerial,
+                    [0; 32],
+                    PowerShelfType::Rack,
+                ),
+            ),
+        ] {
+            assert_eq!(
+                left.cmp(&right),
+                left.to_string().cmp(&right.to_string()),
+                "{scenario}"
+            );
+            assert_eq!(
+                right.cmp(&left),
+                right.to_string().cmp(&left.to_string()),
+                "{scenario}"
+            );
+            assert_eq!(left.cmp(&left), Ordering::Equal, "{scenario}");
+        }
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum ParseFailure {

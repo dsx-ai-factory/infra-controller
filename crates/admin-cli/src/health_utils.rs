@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::fmt::Display;
+
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge::{self as forgerpc};
 use prettytable::{Cell, Row, Table, row};
@@ -30,9 +32,9 @@ pub(crate) fn display_health_reports(
 ) -> CarbideCliResult<()> {
     let mut rows = vec![];
     for entry in entries {
-        let report = entry.report.ok_or(CarbideCliError::GenericError(
-            "missing response".to_string(),
-        ))?;
+        let report = entry
+            .report
+            .ok_or_else(|| CarbideCliError::GenericError("missing response".to_string()))?;
         let mode = match forgerpc::HealthReportApplyMode::try_from(entry.mode)
             .map_err(|_| CarbideCliError::GenericError("invalide response".to_string()))?
         {
@@ -122,7 +124,7 @@ fn health_history_table(records: &[HealthHistoryRecordView]) -> Table {
 /// the per-resource `health-history` subcommands, whose only difference is the
 /// RPC that produced `history`.
 pub(crate) fn display_health_history(
-    object_id: &str,
+    object_id: impl Display,
     history: Vec<forgerpc::HealthHistoryRecord>,
     output_format: OutputFormat,
 ) -> CarbideCliResult<()> {

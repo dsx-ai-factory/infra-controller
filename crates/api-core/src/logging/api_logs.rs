@@ -242,8 +242,8 @@ where
 
                         let message = tonic_status
                             .as_ref()
-                            .map(|s| s.message().to_owned())
-                            .unwrap_or_else(String::new);
+                            .map(|s| s.message())
+                            .unwrap_or_default();
 
                         request_span.record("rpc.grpc.status_code", code as u64);
                         request_span.record(

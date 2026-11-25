@@ -31,10 +31,23 @@ impl MachineCreationIdentity {
         database: impl DbReader<'_>,
         machine_id: &MachineId,
     ) -> DatabaseResult<Self> {
-        let query = "SELECT
-            (SELECT created FROM machines WHERE id = $1),
-            (SELECT max(id) FROM machine_state_history WHERE object_id = $1),
-            (SELECT controller_state = $2::jsonb FROM machines WHERE id = $1)";
+        // Existing machines use their creation time; only an absent machine
+        // needs history to detect a completed create/delete cycle. `OFFSET 0`
+        // prevents flattening the filtered subquery into a backward scan of the
+        // global history primary key looking for a match.
+        let query = "WITH current_machine AS MATERIALIZED (
+            SELECT created, controller_state = $2::jsonb AS force_deleting
+            FROM machines WHERE id = $1
+        ) SELECT
+            (SELECT created FROM current_machine),
+            CASE WHEN EXISTS (SELECT 1 FROM current_machine) THEN NULL::bigint
+                ELSE (
+                    SELECT max(id) FROM (
+                        SELECT id FROM machine_state_history WHERE object_id = $1 OFFSET 0
+                    ) history
+                )
+            END,
+            (SELECT force_deleting FROM current_machine)";
         let (created, last_history_id, force_deleting): (
             Option<DateTime<Utc>>,
             Option<i64>,
@@ -47,11 +60,7 @@ impl MachineCreationIdentity {
             .map_err(|error| DatabaseError::query(query, error))?;
         Ok(Self {
             created,
-            last_history_id: if created.is_none() {
-                last_history_id
-            } else {
-                None
-            },
+            last_history_id,
             force_deleting: force_deleting.unwrap_or(false),
         })
     }
@@ -110,7 +119,7 @@ impl MachineCreationIdentity {
     }
 
     /// `created` returns the captured row's immutable creation time, or `None`
-    /// when preparation began before the machine was created.
+    /// when the machine row was absent at capture time.
     pub fn created(&self) -> Option<DateTime<Utc>> {
         self.created
     }
@@ -148,7 +157,21 @@ mod tests {
             CURRENT_STATE_MODEL_VERSION,
         )
         .await?;
+        // Transaction-local counters observe this capture alone, including
+        // uncommitted history from creation, without timing thresholds.
+        let history_scans_query = "SELECT seq_scan + idx_scan FROM pg_stat_xact_user_tables
+            WHERE relname = 'machine_state_history'";
+        let scans_before: i64 = sqlx::query_scalar(history_scans_query)
+            .fetch_one(txn.as_mut())
+            .await?;
         let original = MachineCreationIdentity::capture(txn.as_mut(), &machine_id).await?;
+        let scans_after: i64 = sqlx::query_scalar(history_scans_query)
+            .fetch_one(txn.as_mut())
+            .await?;
+        assert_eq!(
+            scans_before, scans_after,
+            "present capture must skip history"
+        );
         txn.commit().await?;
         original.check(&database, &machine_id).await?;
 
@@ -174,6 +197,12 @@ mod tests {
             original.check(txn.as_mut(), &machine_id).await,
             Err(DatabaseError::FailedPrecondition(_))
         ));
+        let deleting = MachineCreationIdentity::capture(txn.as_mut(), &machine_id).await?;
+        assert!(deleting.force_deleting);
+        assert!(matches!(
+            deleting.check(txn.as_mut(), &machine_id).await,
+            Err(DatabaseError::FailedPrecondition(message)) if message.contains("being force deleted")
+        ));
         txn.rollback().await?;
 
         // Delete the original row without erasing the history that records
@@ -192,6 +221,21 @@ mod tests {
             Err(DatabaseError::FailedPrecondition(_))
         ));
         let mut txn = database.txn_begin().await?;
+        // An absent row with retained history is the positive control: the
+        // same counter must observe the history lookup this branch requires.
+        let scans_before: i64 = sqlx::query_scalar(history_scans_query)
+            .fetch_one(txn.as_mut())
+            .await?;
+        let absent_with_history =
+            MachineCreationIdentity::capture(txn.as_mut(), &machine_id).await?;
+        let scans_after: i64 = sqlx::query_scalar(history_scans_query)
+            .fetch_one(txn.as_mut())
+            .await?;
+        assert!(
+            scans_after > scans_before,
+            "absent capture must read history"
+        );
+        absent_with_history.check(txn.as_mut(), &machine_id).await?;
         assert!(!original.lock_force_deleting(&mut txn, &machine_id).await?);
         txn.rollback().await?;
 

@@ -179,7 +179,7 @@ async fn drop_pg_database_with_retry_if_exists(db_url: &str) -> eyre::Result<()>
         WHERE datname = $1
         AND pid <> pg_backend_pid()"#,
         )
-        .bind(database.to_string())
+        .bind(database)
         .execute(&mut *txn)
         .await?;
         txn.commit().await?;

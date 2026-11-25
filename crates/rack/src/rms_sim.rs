@@ -1306,11 +1306,13 @@ impl RmsApi for MockRmsClient {
             .lock()
             .await
             .pop_front()
-            .unwrap_or(Ok(rms::GetConfigureSwitchCertificateJobStatusResponse {
-                status: rms::ReturnCode::Success as i32,
-                state: "running".to_string(),
-                ..Default::default()
-            }))
+            .unwrap_or_else(|| {
+                Ok(rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    state: "running".to_string(),
+                    ..Default::default()
+                })
+            })
     }
 
     async fn batch_set_scale_up_fabric_state(
@@ -1428,7 +1430,7 @@ impl MockRmsClient {
             .await
             .get(&cmd.job_id)
             .cloned()
-            .unwrap_or(rms::GetSwitchSystemImageJobStatusResponse {
+            .unwrap_or_else(|| rms::GetSwitchSystemImageJobStatusResponse {
                 status: rms::ReturnCode::Failure as i32,
                 job_id: cmd.job_id,
                 message: "mock switch system image job not found".to_string(),

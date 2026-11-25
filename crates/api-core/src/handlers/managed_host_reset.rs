@@ -132,7 +132,7 @@ pub(crate) async fn trigger_managed_host_reset(
         },
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
     })?;

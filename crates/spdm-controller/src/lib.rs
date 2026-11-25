@@ -21,3 +21,6 @@ pub mod context;
 pub mod handler;
 pub mod io;
 pub mod metrics;
+
+#[cfg(test)]
+pub(crate) use carbide_macros::sqlx_test;

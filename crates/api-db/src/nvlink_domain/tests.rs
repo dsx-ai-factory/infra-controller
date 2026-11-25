@@ -3,8 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use model::nvlink_domain::NvLinkDomainMember;
-use model::rack_type::RackCapabilityType;
+use model::nvlink_domain::{NvLinkDomainMember, NvLinkDomainMemberType};
 
 use super::*;
 use crate::TransactionVending as _;
@@ -32,12 +31,12 @@ async fn inventory(pool: &sqlx::PgPool) -> NvLinkDomain {
             NvLinkDomainMember {
                 rack_index: 0,
                 slot_index: 0,
-                component_type: RackCapabilityType::Compute,
+                component_type: NvLinkDomainMemberType::Compute,
             },
             NvLinkDomainMember {
                 rack_index: 0,
                 slot_index: 0,
-                component_type: RackCapabilityType::Switch,
+                component_type: NvLinkDomainMemberType::Switch,
             },
         ],
     }
@@ -131,12 +130,12 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
             NvLinkDomainMember {
                 rack_index: 1,
                 slot_index: 0,
-                component_type: RackCapabilityType::Compute,
+                component_type: NvLinkDomainMemberType::Compute,
             },
             NvLinkDomainMember {
                 rack_index: 1,
                 slot_index: 0,
-                component_type: RackCapabilityType::Switch,
+                component_type: NvLinkDomainMemberType::Switch,
             },
         ],
         ..replacement
@@ -156,30 +155,37 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn membership_storage_constraints(pool: sqlx::PgPool) {
     let domain = inventory(&pool).await;
-    type Mutation = fn(&mut NvLinkDomain);
-    let cases: &[(&str, Mutation)] = &[
-        ("unknown group", |d| {
-            d.rack_group_id = RackGroupId::new("unknown")
-        }),
-        ("power shelf", |d| {
-            d.members[0].component_type = RackCapabilityType::PowerShelf
-        }),
-    ];
-    for (name, mutate) in cases {
-        let mut request = domain.clone();
-        mutate(&mut request);
-        let mut txn = pool.txn_begin().await.unwrap();
-        assert!(create(&mut txn, &request).await.is_err(), "{name}");
-        txn.rollback().await.unwrap();
-        assert!(find_ids(&pool, None).await.unwrap().is_empty());
-    }
+    let mut request = domain.clone();
+    request.rack_group_id = RackGroupId::new("unknown");
+    let mut txn = pool.txn_begin().await.unwrap();
+    assert!(matches!(
+        create(&mut txn, &request).await,
+        Err(DatabaseError::NotFoundError { .. })
+    ));
+    txn.rollback().await.unwrap();
+    assert!(find_ids(&pool, None).await.unwrap().is_empty());
+
+    let mut txn = pool.txn_begin().await.unwrap();
+    create(&mut txn, &domain).await.unwrap();
+    let error = sqlx::query("INSERT INTO nvlink_domain_members (domain_id, rack_group_id, rack_index, slot_index, component_type) VALUES ($1, $2, 0, 0, 'PowerShelf')")
+        .bind(domain.id)
+        .bind(&domain.rack_group_id)
+        .execute(&mut *txn)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
+    txn.rollback().await.unwrap();
+    assert!(find_ids(&pool, None).await.unwrap().is_empty());
 
     // Storage accepts declared positions without resolving RackGroup inventory.
     let declaration = NvLinkDomain {
         members: vec![NvLinkDomainMember {
             rack_index: 99,
             slot_index: u32::MAX,
-            component_type: RackCapabilityType::Compute,
+            component_type: NvLinkDomainMemberType::Compute,
         }],
         ..domain
     };

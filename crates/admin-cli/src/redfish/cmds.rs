@@ -176,7 +176,7 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                         format!(
                             "{} {}",
                             status.health.unwrap_or_default(),
-                            status.state.unwrap_or("".to_string())
+                            status.state.unwrap_or_default()
                         )
                     })
                     .unwrap_or_default();
@@ -229,13 +229,13 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                     }
                 }
                 table.add_row(row![
-                    dev.id.unwrap_or("".to_string()),
-                    dev.manufacturer.unwrap_or("".to_string()),
-                    dev.name.unwrap_or("".to_string()),
-                    dev.model.unwrap_or("".to_string()),
+                    dev.id.unwrap_or_default(),
+                    dev.manufacturer.unwrap_or_default(),
+                    dev.name.unwrap_or_default(),
+                    dev.model.unwrap_or_default(),
                     dev.capacity_bytes.unwrap_or(0) / 1024 / 1024 / 1024,
-                    dev.revision.unwrap_or("".to_string()),
-                    dev.serial_number.unwrap_or("".to_string()),
+                    dev.revision.unwrap_or_default(),
+                    dev.serial_number.unwrap_or_default(),
                     dev.failure_predicted.unwrap_or(true),
                     predictlife,
                     format!(
@@ -678,7 +678,7 @@ async fn show_all_fws(redfish: Box<dyn Redfish>, f: FwFilter) -> Result<(), Redf
     }
 
     if f.only_dpu_os {
-        if !fws.contains(&"DPU_OS".to_string()) {
+        if !fws.iter().any(|fw| fw == "DPU_OS") {
             println!("DPU OS is not found");
             return Err(RedfishError::NoContent);
         }
@@ -686,7 +686,7 @@ async fn show_all_fws(redfish: Box<dyn Redfish>, f: FwFilter) -> Result<(), Redf
     }
 
     if f.only_uefi {
-        if !fws.contains(&"DPU_UEFI".to_string()) {
+        if !fws.iter().any(|fw| fw == "DPU_UEFI") {
             println!("DPU UEFI is not found");
             return Err(RedfishError::NoContent);
         }
@@ -701,7 +701,10 @@ fn convert_fws_to_nice_table(fws: Vec<SoftwareInventory>) -> Box<Table> {
     let mut table = Table::new();
     table.add_row(row!["Id", "Version"]);
     for fw in fws {
-        table.add_row(row![fw.id, fw.version.unwrap_or("(NULL)".to_string())]);
+        table.add_row(row![
+            fw.id,
+            fw.version.unwrap_or_else(|| "(NULL)".to_string())
+        ]);
     }
     table.into()
 }
@@ -721,12 +724,12 @@ fn convert_tasks_to_nice_table(tasks: Vec<Task>) -> Box<Table> {
             task.task_state
                 .unwrap_or(libredfish::model::task::TaskState::Exception)
                 .to_string(),
-            task.task_status.unwrap_or("None".to_string()),
+            task.task_status.unwrap_or_else(|| "None".to_string()),
             task.percent_complete.unwrap_or(0),
             task.messages
                 .pop()
                 .map(|last_message| last_message.message)
-                .unwrap_or("No Message".to_string())
+                .unwrap_or_else(|| "No Message".to_string())
         ]);
     }
     table.into()
@@ -832,16 +835,12 @@ fn convert_ports_to_nice_table(
                         .as_ref()
                         .unwrap_or(&LinkStatus::NoLink)
                         .to_string(),
-                    netdev
-                        .net_dev_func_type
-                        .as_ref()
-                        .unwrap_or(&"None".to_string()),
+                    netdev.net_dev_func_type.as_deref().unwrap_or("None"),
                     netdev
                         .ethernet
                         .as_ref()
-                        .and_then(|ethernet| ethernet.mac_address.as_ref())
-                        .cloned()
-                        .unwrap_or_else(|| "None".to_string()),
+                        .and_then(|ethernet| ethernet.mac_address.as_deref())
+                        .unwrap_or("None"),
                     netdev
                         .ethernet
                         .as_ref()
@@ -924,7 +923,7 @@ fn convert_ethernet_interfaces_to_nice_table(eth_ifs: Vec<EthernetInterface>) ->
         }
 
         table.add_row(row![
-            eth_if.id.as_ref().unwrap_or(&"None".to_string()),
+            eth_if.id.as_deref().unwrap_or("None"),
             eth_if.link_status.unwrap_or(LinkStatus::NoLink).to_string(),
             eth_if.mac_address.as_deref().unwrap_or("None"),
             ips.join(","),
@@ -995,9 +994,9 @@ fn convert_chassis_to_nice_table(chassis_vec: Vec<Chassis>) -> Box<Table> {
 
     for chassis in &chassis_vec {
         table.add_row(row![
-            chassis.id.as_ref().unwrap_or(&"None".to_string()),
-            chassis.manufacturer.as_ref().unwrap_or(&"None".to_string()),
-            chassis.model.as_ref().unwrap_or(&"None".to_string()),
+            chassis.id.as_deref().unwrap_or("None"),
+            chassis.manufacturer.as_deref().unwrap_or("None"),
+            chassis.model.as_deref().unwrap_or("None"),
         ]);
     }
     table.into()

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
-use std::fmt;
+use std::fmt::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -158,9 +158,15 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 }
             }
 
-            let dpu_update_string = machine_updates.iter().fold("".to_string(), |output, dpu| {
-                output + format!("{} ({}) ", dpu.dpu_machine_id, dpu.firmware_version).as_str()
-            });
+            let mut dpu_update_string = String::new();
+            for dpu in &machine_updates {
+                write!(
+                    dpu_update_string,
+                    "{} ({}) ",
+                    dpu.dpu_machine_id, dpu.firmware_version
+                )
+                .expect("writing to a String cannot fail");
+            }
 
             let mut txn = super::update_transaction(pool, work_lock).await?;
             match dpu_machine_update::trigger_reprovisioning_for_managed_host(

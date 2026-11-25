@@ -23,6 +23,8 @@
 //! The only client-side work is resolving an operator-entered MAC to its
 //! managed interface row.
 
+use std::fmt::Write;
+
 use ::rpc::forge as forgerpc;
 use carbide_uuid::machine::MachineInterfaceId;
 use mac_address::MacAddress;
@@ -81,20 +83,23 @@ fn resolve_mac_to_interface_id(
                     .to_string(),
             )
         }),
-        several => Err(CarbideCliError::GenericError(format!(
-            "MAC {mac} matches {} interfaces on this machine (the same MAC can \
-             exist on several segments); pass the machine-interface UUID instead: {}",
-            several.len(),
-            several
-                .iter()
-                .map(|i| {
-                    i.interface_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_else(|| "<unknown id>".to_string())
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        several => {
+            let mut interface_ids = String::new();
+            for (index, interface) in several.iter().enumerate() {
+                if index != 0 {
+                    interface_ids.push_str(", ");
+                }
+                match interface.interface_id {
+                    Some(id) => write!(interface_ids, "{id}")?,
+                    None => interface_ids.push_str("<unknown id>"),
+                }
+            }
+            Err(CarbideCliError::GenericError(format!(
+                "MAC {mac} matches {} interfaces on this machine (the same MAC can \
+                 exist on several segments); pass the machine-interface UUID instead: {interface_ids}",
+                several.len(),
+            )))
+        }
     }
 }
 
@@ -165,13 +170,14 @@ mod tests {
 
     #[test]
     fn a_duplicate_mac_is_refused_not_guessed() {
-        // The same MAC on two segments -- both rows are real, so the resolver
-        // must refuse and point at the UUIDs rather than pick one.
+        // The same MAC on several segments must be refused, including when
+        // the API does not report an ID for one of the matching rows.
         let response = response_with(vec![
             managed_row(
                 "00:11:22:33:44:55",
                 Some("abcdef01-2345-6789-abcd-ef0123456789"),
             ),
+            managed_row("00:11:22:33:44:55", None),
             managed_row(
                 "00:11:22:33:44:55",
                 Some("12345678-1234-5678-90ab-cdef01234567"),
@@ -181,9 +187,13 @@ mod tests {
         let err = resolve_mac_to_interface_id(&response, "00:11:22:33:44:55".parse().unwrap())
             .unwrap_err();
         let message = err.to_string();
-        assert!(message.contains("matches 2 interfaces"));
-        assert!(message.contains("abcdef01-2345-6789-abcd-ef0123456789"));
-        assert!(message.contains("12345678-1234-5678-90ab-cdef01234567"));
+        assert_eq!(
+            message,
+            "generic error: MAC 00:11:22:33:44:55 matches 3 interfaces on this machine \
+             (the same MAC can exist on several segments); pass the machine-interface \
+             UUID instead: abcdef01-2345-6789-abcd-ef0123456789, <unknown id>, \
+             12345678-1234-5678-90ab-cdef01234567"
+        );
     }
 
     #[test]

@@ -32,7 +32,15 @@ const RETRYABLE_CUSTOM_IPXE: &str = "set nico-retry-provisioning 1\nSomeRandomiP
 
 #[crate::sqlx_test]
 async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
+    let mut config = common::api_fixtures::get_config();
+    config
+        .machine_state_controller
+        .instance_reboot_queue_enabled = true;
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        common::api_fixtures::TestEnvOverrides::with_config(config),
+    )
+    .await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
@@ -134,7 +142,14 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     );
 
     // A regular reboot attempt should still lead to returning "exit"
+    let actions = env.redfish_sim.timepoint();
     invoke_instance_power(&env, tinstance.id, false).await;
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .all_hosts()
+            .is_empty()
+    );
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert!(
         pxe.pxe_script.contains("Current state: Assigned/Ready"),
@@ -145,9 +160,49 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
 
+    // Finish the queued ordinary reboot before requesting a different boot mode.
+    env.run_machine_state_controller_iteration().await;
+    assert_eq!(
+        env.redfish_sim.actions_since(&actions).all_hosts(),
+        vec![
+            carbide_redfish::libredfish::test_support::RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ),
+        ]
+    );
+    let mut txn = env.pool.begin().await.unwrap();
+    let ordinary_reboot = db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap();
+    assert!(!ordinary_reboot.is_pending());
+    txn.rollback().await.unwrap();
+    let pxe = host_interface.get_pxe_instructions(host_arch).await;
+    assert!(
+        pxe.pxe_script.contains(
+            "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
+        ),
+        "an accepted ordinary reboot must retain the OS boot mode: {}",
+        pxe.pxe_script
+    );
+
     // A reboot with flag `boot_with_custom_ipxe` should provide the custom iPXE
     // The reboot is handled by the state machine, which makes sure the boot order is configured properly.
     invoke_instance_power(&env, tinstance.id, true).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    assert_eq!(
+        db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .hardware_dispatch,
+        Some(ordinary_reboot.clone())
+    );
+    txn.rollback().await.unwrap();
     env.run_machine_state_controller_iteration_until_state_condition(&mh.id, 5, |machine| {
         matches!(
             machine.current_state(),
@@ -185,7 +240,26 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
 
     // The next reboot should again lead to returning "exit"
+    let actions = env.redfish_sim.timepoint();
     invoke_instance_power(&env, tinstance.id, false).await;
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .all_hosts()
+            .is_empty()
+    );
+    // This must be new work, not the previously settled ordinary reboot.
+    let mut txn = env.pool.begin().await.unwrap();
+    let next_reboot = db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap();
+    assert!(next_reboot.is_pending());
+    assert_ne!(next_reboot.token, ordinary_reboot.token);
+    txn.rollback().await.unwrap();
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert!(
         pxe.pxe_script.contains("Current state: Assigned/Ready"),
@@ -195,6 +269,27 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     assert!(pxe.pxe_script.contains(
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
+    // After custom PXE completes, an ordinary reboot must execute and settle too.
+    env.run_machine_state_controller_iteration().await;
+    assert_eq!(
+        env.redfish_sim.actions_since(&actions).all_hosts(),
+        vec![
+            carbide_redfish::libredfish::test_support::RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ),
+        ]
+    );
+    let mut txn = env.pool.begin().await.unwrap();
+    let final_reboot = db::machine::find_one(txn.as_mut(), &mh.host().id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .hardware_dispatch
+        .unwrap();
+    assert_eq!(final_reboot.token, next_reboot.token);
+    assert!(!final_reboot.is_pending());
+    txn.rollback().await.unwrap();
 }
 
 #[crate::sqlx_test]

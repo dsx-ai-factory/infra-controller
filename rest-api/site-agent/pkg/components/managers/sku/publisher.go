@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverSkuInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("SKU: Successfully registered DiscoverSkuInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

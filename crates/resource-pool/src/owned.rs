@@ -74,6 +74,26 @@ impl<T> AllocationStatus<T> {
     }
 }
 
+/// Identifies a reservation in both provider receipts and Integrated inventory.
+#[derive(Clone, Copy)]
+pub struct AllocationOwnerIds<'a> {
+    /// Permanent entity ID used with the slot to find the provider assignment.
+    pub entity_id: &'a str,
+    /// How to identify the owner name recorded by Integrated at allocation time.
+    pub integrated_owner: IntegratedAllocationOwner<'a>,
+}
+
+/// Integrated inventory records the owner's name when a value is allocated.
+#[derive(Clone, Copy)]
+pub enum IntegratedAllocationOwner<'a> {
+    /// The caller knows the name recorded when the entity was created.
+    Known(&'a str),
+    /// Read the name from the exact pool value and verify its owner type.
+    /// Use only when the caller has locked or deleted the unique entity that
+    /// owns this value. This lets a renamed entity release its original reservation.
+    Recorded,
+}
+
 /// `OwnedAllocation` identifies an attached allocation found under the caller's
 /// database locks.
 /// Use its value and release it in the same transaction as the lookup. Integrated
@@ -294,6 +314,69 @@ impl ResourcePoolRegistry {
             states.push(state);
         }
         Ok(states)
+    }
+
+    /// Release the exact pool value held by a locked entity. Commit this change
+    /// with the entity's deletion. Integrated frees the value in this transaction.
+    /// A provider release saves the original assignment for recovery to return
+    /// after commit. It makes no provider call while the transaction is open.
+    ///
+    /// Cleanup succeeds if the pool is absent, the Integrated value is free
+    /// or missing, or it belongs to a different known name. A recorded name
+    /// requires a matching owner type. A missing or conflicting provider
+    /// assignment fails the operation so the caller can roll back the deletion.
+    pub async fn release_value<T>(
+        &self,
+        pool: &ResourcePool<T>,
+        txn: &mut db::Transaction<'_>,
+        value: T,
+        owner_type: OwnerType,
+        ids: AllocationOwnerIds<'_>,
+        slot: &str,
+    ) -> Result<(), ResourcePoolBackendError>
+    where
+        T: ToString + FromStr + PartialEq + Send + Sync + 'static,
+        T::Err: std::error::Error + Send + Sync + 'static,
+    {
+        let Some(backend) = self.get_or_load_backend(txn, pool.name()).await? else {
+            return Ok(());
+        };
+        match backend {
+            ResourcePoolBackend::Integrated(integrated) => {
+                let released = match ids.integrated_owner {
+                    IntegratedAllocationOwner::Known(owner) => {
+                        integrated
+                            .release(pool, txn, value, owner_type, owner)
+                            .await?
+                    }
+                    IntegratedAllocationOwner::Recorded => {
+                        db::resource_pool::release_by_recorded_owner(pool, txn, value, owner_type)
+                            .await?
+                    }
+                };
+                // An already-free or missing native value needs no further cleanup.
+                match released {
+                    ConditionalWrite::Applied(()) | ConditionalWrite::NotApplied(_) => Ok(()),
+                }
+            }
+            ResourcePoolBackend::Grpc(_) => {
+                let owned = self
+                    .find_owned(pool, txn, owner_type, ids.entity_id, slot)
+                    .await?;
+                let owned = owned.filter(|owned| owned.value() == &value).ok_or_else(|| {
+                    DatabaseError::FailedPrecondition(format!(
+                        "resource pool `{}` has no attached {slot} allocation matching {owner_type} `{}` and value `{}`",
+                        pool.name(), ids.entity_id, value.to_string(),
+                    ))
+                })?;
+                match owned.release(txn).await? {
+                    ConditionalWrite::Applied(()) => Ok(()),
+                    ConditionalWrite::NotApplied(_) => {
+                        Err(RemoteResourcePoolError::NotCurrent.into())
+                    }
+                }
+            }
+        }
     }
 
     /// `find_owned` locks an owner's attached allocation in the caller's transaction.

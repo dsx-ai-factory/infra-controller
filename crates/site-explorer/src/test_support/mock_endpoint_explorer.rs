@@ -285,28 +285,27 @@ impl AuthenticatedBmc for MockEndpointExplorer {
             .into())
     }
 
-    async fn redfish_power_control(
+    async fn prepare_redfish_power_control(
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
         _report: Option<&EndpointExplorationReport>,
         action: ResetType,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_power_control_calls
-            .lock()
-            .unwrap()
-            .push((address, action));
-        if self
-            .power_control_failures
-            .lock()
-            .unwrap()
-            .contains(&action)
-        {
-            return Err(EndpointExplorationError::Unreachable {
-                details: Some(format!("mock: {action:?} refused")),
-            });
-        }
-        Ok(())
+    ) -> Result<crate::PreparedPowerControl, EndpointExplorationError> {
+        let calls = self.redfish_power_control_calls.clone();
+        let failures = self.power_control_failures.clone();
+        Ok(crate::PreparedPowerControl {
+            ipmi_port: None,
+            send: Box::pin(async move {
+                calls.lock().unwrap().push((address, action));
+                if failures.lock().unwrap().contains(&action) {
+                    return Err(EndpointExplorationError::Unreachable {
+                        details: Some(format!("mock: {action:?} refused")),
+                    });
+                }
+                Ok(())
+            }),
+        })
     }
 
     async fn redfish_chassis_reset(
@@ -397,6 +396,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         mode: BlueFieldOperatingMode,
     ) -> Result<(), EndpointExplorationError> {
         self.set_nic_mode_calls
@@ -421,6 +421,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _bmc_ip_address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
     }
@@ -429,6 +430,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         _username: &str,
         _password: &str,
         _role_id: RoleId,
@@ -440,6 +442,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         _username: &str,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
@@ -449,6 +452,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         _new_password: &str,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())

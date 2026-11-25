@@ -6,6 +6,7 @@ package certs
 import (
 	"context"
 	"encoding/pem"
+	"io"
 	"net/http"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
@@ -29,7 +30,7 @@ func (h *pkiCACertificateHandler) reply(ctx context.Context, cert, contentType s
 
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(err.Code())
-	_, errWrite := w.Write([]byte(resp))
+	_, errWrite := io.WriteString(w, resp)
 	if errWrite != nil {
 		log.Error(errWrite)
 		http.Error(w, errWrite.Error(), http.StatusInternalServerError)

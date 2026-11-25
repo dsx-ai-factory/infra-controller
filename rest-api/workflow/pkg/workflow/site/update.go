@@ -4,8 +4,6 @@
 package site
 
 import (
-	"fmt"
-
 	"github.com/rs/zerolog/log"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -33,7 +31,7 @@ func UpdateSiteConfigInventory(ctx workflow.Context, siteIDStr string, coreBuild
 
 	siteID, err := uuid.Parse(siteIDStr)
 	if err != nil {
-		logger.Warn().Err(err).Msg(fmt.Sprintf("workflow triggered with invalid site ID: %s", siteIDStr))
+		logger.Warn().Err(err).Msgf("workflow triggered with invalid site ID: %s", siteIDStr)
 		return err
 	}
 
@@ -75,7 +73,7 @@ func UpdateSiteConfigInventoryV2(ctx workflow.Context, siteIDStr string, invento
 
 	siteID, err := uuid.Parse(siteIDStr)
 	if err != nil {
-		logger.Warn().Err(err).Msg(fmt.Sprintf("workflow triggered with invalid site ID: %s", siteIDStr))
+		logger.Warn().Err(err).Msgf("workflow triggered with invalid site ID: %s", siteIDStr)
 		return err
 	}
 

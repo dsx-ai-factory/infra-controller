@@ -17,7 +17,7 @@
 
 //! What checks read, in words.
 
-use std::fmt::Debug;
+use std::fmt::{Debug, Write};
 
 use bmc_platform::BootOrderStatus;
 use serde_json::Value;
@@ -44,7 +44,7 @@ pub(super) fn differences<'a>(diffs: impl ExactSizeIterator<Item = Difference<'a
         shown.join("; ")
     );
     if count > SHOWN {
-        text.push_str(&format!("; {} more", count - SHOWN));
+        write!(text, "; {} more", count - SHOWN).expect("writing to a String cannot fail");
     }
     text
 }

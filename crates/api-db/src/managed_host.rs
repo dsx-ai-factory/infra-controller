@@ -195,25 +195,21 @@ where
 
     // Perf optimization: Joining through machine_interfaces to look up by DPU ID is slower by 100x
     // or so. If we're searching for DPU ID's, resolve their host ID's now.
-    let requested_host_id_strings = requested_host_ids
-        .iter()
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>();
+    let resolved_host_ids;
     let host_ids = if !requested_dpu_ids.is_empty() {
-        [
-            requested_host_id_strings,
-            crate::machine::DpuHostAssociations::load(&mut *txn, &requested_dpu_ids)
-                .await?
-                .host_machine_ids()
-                .map(|host_id| host_id.to_string())
-                .collect::<Vec<_>>(),
-        ]
-        .concat()
-        .into_iter()
-        .unique()
-        .collect()
+        resolved_host_ids = requested_host_ids
+            .iter()
+            .copied()
+            .chain(
+                crate::machine::DpuHostAssociations::load(&mut *txn, &requested_dpu_ids)
+                    .await?
+                    .host_machine_ids(),
+            )
+            .unique()
+            .collect::<Vec<_>>();
+        resolved_host_ids.as_slice()
     } else {
-        requested_host_id_strings
+        requested_host_ids.as_slice()
     };
 
     // Perf optimization: If we're only requesting one ID, do `WHERE m.id = $1`. In practice on a db
@@ -223,7 +219,7 @@ where
     );
     if host_ids.len() == 1 {
         query.push(" WHERE m.id = ");
-        query.push_bind(&host_ids[0]);
+        query.push_bind(host_ids[0]);
     } else {
         query.push(" WHERE m.id = ANY(");
         query.push_bind(host_ids);

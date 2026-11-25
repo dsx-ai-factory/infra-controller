@@ -61,7 +61,7 @@ use tracing::Instrument;
 use version_compare::Cmp;
 mod attester_inventory;
 mod endpoint_explorer;
-pub use endpoint_explorer::{AuthenticatedBmc, EndpointExplorer};
+pub use endpoint_explorer::{AuthenticatedBmc, EndpointExplorer, PreparedPowerControl};
 mod endpoint_exploration_service;
 pub use endpoint_exploration_service::{
     EndpointExplorationService, EndpointExplorationServiceError,
@@ -76,7 +76,9 @@ pub mod test_support;
 pub use metrics::{SiteExplorationMetrics, site_explorer_latency_histogram_view};
 mod bmc_endpoint_explorer;
 mod redfish;
-pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
+pub use bmc_endpoint_explorer::{
+    AuthenticatedBmcClient, BmcEndpointExplorer, DpfBmcRecoveryDrainCheck,
+};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools, lockdown_report};
 mod boot_interfaces;
 mod host_interfaces;
@@ -117,7 +119,6 @@ use model::network_segment::NetworkSegmentType;
 use model::rack::Rack;
 pub mod config;
 pub mod errors;
-use std::sync::atomic::AtomicBool;
 
 use errors::{SiteExplorerError, SiteExplorerResult};
 
@@ -160,19 +161,14 @@ fn should_scan_underlay_interface_for_redfish(
 /// while the explorer runs.
 pub fn new_bmc_explorer(
     bmc_client: Arc<AuthenticatedBmcClient>,
-    rotate_switch_nvos_credentials: Arc<AtomicBool>,
-    explore_drive_firmware: bool,
+    config: &SiteExplorerConfig,
     database_connection: PgPool,
     instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<BmcEndpointExplorer> {
-    BmcEndpointExplorer::new(
-        bmc_client,
-        rotate_switch_nvos_credentials,
-        Some(database_connection),
-        instrumentation,
-    )
-    .with_drive_firmware(explore_drive_firmware)
-    .into()
+    BmcEndpointExplorer::new(bmc_client, Some(database_connection), instrumentation)
+        .with_drive_firmware(config.explore_drive_firmware)
+        .with_host_serial_rules(config.host_serial_rules.clone())
+        .into()
 }
 
 pub fn enrich_endpoint_exploration_report(
@@ -1070,18 +1066,9 @@ impl SiteExplorer {
             if let Some(expected_machine) = expected_machine {
                 let expected_sn = &expected_machine.data.serial_number;
 
-                // Check expected vs actual serial number
-                // using the primary system serial number.
-                // If nothing found, try again with chassis
-                // serial numbers.
                 if !ep
                     .report
-                    .primary_system()
-                    .is_some_and(|s| s.check_serial_number(expected_sn) || s.check_sku(expected_sn))
-                    && !ep.report.chassis.iter().any(|s| match s.serial_number {
-                        Some(ref sn) => sn == expected_sn,
-                        _ => false,
-                    })
+                    .matches_expected_serial_number(expected_sn, &self.config.host_serial_rules)
                 {
                     metrics
                         .increment_endpoint_explorations_expected_serial_number_mismatches_overall_count(
@@ -1095,7 +1082,7 @@ impl SiteExplorer {
                             target: Some(ep.address.to_string()),
                             in_alert_since: None,
                             message: format!(
-                                "Expected serial number {expected_sn} can not be found"
+                                "Explored inventory does not match expected serial number {expected_sn}"
                             ),
                             tenant_message: None,
                             classifications: vec![
@@ -1260,6 +1247,7 @@ impl SiteExplorer {
                     &dpu_sn_to_endpoint,
                     expected_machine,
                     host_dpu_policy,
+                    &self.config.host_bluefield_rules,
                 )),
             };
             candidates.push(IngestionCandidate {
@@ -1757,7 +1745,12 @@ impl SiteExplorer {
         let interface = self.find_machine_interface_for_ip(dpu_ep.address).await?;
 
         self.bmc_client
-            .set_nic_mode(bmc_target_addr, &interface, target_operating_mode)
+            .set_nic_mode(
+                bmc_target_addr,
+                &interface,
+                Some(&dpu_ep.report),
+                target_operating_mode,
+            )
             .await
             .map_err(|err| SiteExplorerError::EndpointExplorationError {
                 action: "set_nic_mode",
@@ -1778,8 +1771,26 @@ impl SiteExplorer {
             BmcSuppressionSubsystem::SiteExplorer,
         )
         .await?;
+        let rotation_macs = suppressions
+            .iter()
+            .filter(|suppression| {
+                suppression.source
+                    == model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation
+            })
+            .map(|suppression| suppression.bmc_mac_address)
+            .collect::<Vec<_>>();
+        let recovering = if rotation_macs.is_empty() {
+            Vec::new()
+        } else {
+            db::dpf_bmc_rotation::detached_macs(&self.database_connection, &rotation_macs).await?
+        };
         let suppressed_bmc_macs = suppressions
             .iter()
+            .filter(|suppression| {
+                suppression.source
+                    != model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation
+                    || !recovering.contains(&suppression.bmc_mac_address)
+            })
             .map(|suppression| suppression.bmc_mac_address)
             .collect();
 
@@ -2590,12 +2601,11 @@ impl SiteExplorer {
                         .expected
                         .is_some_and(|v| matches!(v, ExpectedEntity::PowerShelf(_)));
 
-                    if !self.config.create_machines.load(Ordering::Relaxed)
-                        || power_shelf_manual_ingestion
+                    if power_shelf_manual_ingestion
                         || is_endpoint_in_managed_host(address, txn.as_pgconn()).await?
                     {
-                        // Manual ingestion must not run automatic setup, and managed BMCs
-                        // must not repeat preingestion for another address. Keep this in the
+                        // Power shelves use manual setup, and managed BMCs must not
+                        // repeat preingestion for another address. Keep this in the
                         // insert branch so refreshes preserve explicit preingestion retries.
                         db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?
                     }
@@ -3047,7 +3057,11 @@ impl SiteExplorer {
         let bmc_target_addr = SocketAddr::new(endpoint.address, bmc_target_port);
 
         self.bmc_client
-            .clear_nvram(bmc_target_addr, endpoint.iface)
+            .clear_nvram(
+                bmc_target_addr,
+                endpoint.iface,
+                endpoint.last_explored.map(|explored| &explored.report),
+            )
             .await
             .map_err(|err| {
                 SiteExplorerError::internal(format!(

@@ -1,7 +1,8 @@
 # REST API agent guidance
 
-Applies to `rest-api/`. Follow the root [AGENTS.md](../AGENTS.md), relevant
-[STYLE_GUIDE.md](../STYLE_GUIDE.md) sections, and the shared
+For files under `rest-api/`, this guide takes precedence over conflicting
+instructions in the root [AGENTS.md](../AGENTS.md). Follow the remaining root
+guidance, relevant [STYLE_GUIDE.md](../STYLE_GUIDE.md) sections, and the shared
 [Engineering Guidelines](../CONTRIBUTING.md#engineering-guidelines) for scope,
 reuse, evidence, and verification.
 
@@ -60,12 +61,13 @@ PostgreSQL container. Its defaults are `postgres:14.4-alpine` on port `30432`.
 | `test-site-agent` | Starts mock Core/Flow gRPC servers; tests only `site-agent/pkg/components/...` with `CGO_ENABLED=1` and `-race` |
 | `test-common`, `test-cert-manager`, `test-site-manager`, `test-site-workflow`, `test-proto`, `test-sdk-simple`, `test-mcp` | Other package targets; see `Makefile` for their scope |
 | `test-cli-commands` | Tests the public CLI commands in `cli/pkg`; the interactive TUI in `cli/tui` is outside this target |
-| `test` | Runs its listed targets, not every package; CLI and the nested standard-SDK module are outside this target |
+| `test-cli` | Tests all packages under `cli/`, including the TUI |
+| `test-sdk-standard` | Tests the nested standard SDK module separately |
+| `test` | Runs its listed targets, including `test-cli`; excludes `test-sdk-standard` |
 
 Without mock servers, site-agent component tests retry on a `40s` backoff until
-the `10m` timeout. Database fixtures reset shared tables, so run packages
-serially; pass `-p 1` whenever running multiple database-backed packages directly.
-Targets generally use `-p 1`, and some use `-race`.
+the `10m` timeout. Run targets that reset the same database tables one at a
+time. Targets such as `test-api` also use `-p 1` to serialize their packages.
 
 ```bash
 make test                  # Aggregate test target
@@ -216,11 +218,12 @@ operation, not an internal Core method or authorization concept.
 - Optional PATCH strings that support clearing use `*string`: omission or
   `null` preserves the value, and `""` clears it. Do not add custom presence
   tracking for this contract.
-- Adding a field to a resource with single and batch endpoints requires the
-  complete surface: create/update DTOs, validation, handlers, DAO inputs,
-  persistence, OpenAPI, SDK, and tests. Preserve endpoint-specific nullability
-  in constructors or distinct models, and test unavailable values at every
-  affected response boundary.
+- For a new field, check which single and batch operations accept or return it.
+  Update each affected response model, the published OpenAPI contract, and the
+  generated SDK. A computed response field can use data the handler already
+  reads. Update request DTOs and validation where clients can supply the field,
+  and DAO inputs and persistence where the operation stores it. Preserve each
+  endpoint's nullability, including when a value is unavailable.
 
 ### Handler flow and responses
 
@@ -265,7 +268,9 @@ transition.
 
 ### Endpoint tests
 
-Tests must exercise the changed surface:
+Use the [root test selection rules](../AGENTS.md#test-selection). Add a case
+where a change to an endpoint's behavior or wiring could pass existing tests.
+Choose the layer that can expose the regression:
 
 - Models: `Validate`, query validation, enums, list-level constraints, and
   `ToProto`/`FromProto` mappings.
@@ -274,8 +279,8 @@ Tests must exercise the changed surface:
 - Lists: paging inputs and the `X-Pagination` header.
 - Site/Core/Flow handlers: workflow/proxy arguments, workflow ID inputs, secret
   field names, relevant timeout behavior, and no secrets in responses or logs.
-- Include route tests and OpenAPI checks in endpoint changes; regenerate SDKs
-  in the same change when required by the repository workflow.
+- Routes: exercise registration and ordering when the change affects dispatch.
+  For published contract changes, run the OpenAPI checks and regenerate the SDK.
 
 ## CLI and sensitive data
 
@@ -310,6 +315,11 @@ Tests must exercise the changed surface:
   identifiers, method names, kinds, and site IDs rather than credential-bearing
   payloads. Operator examples use supported prompts, stdin, or protected files
   instead of credentials in command arguments.
+- When adding or renaming sensitive REST request fields, verify server audit
+  redaction and nicocli HTTP debug output (`cli/pkg/client.go`), echoed commands,
+  and TUI history. Redact nested authentication values regardless of field
+  naming. Cover affected logging paths; audit redaction alone does not protect
+  CLI output.
 
 ## Validation and conversion
 
@@ -355,8 +365,8 @@ upstream.
   `req.ToProto()` rather than passing hidden path context to `req.ToProto(id)`.
 - Requests with no API body, such as deletion by path or entity maintenance,
   stay on the entity as `ToDeletionRequestProto`/`ToMaintenanceRequestProto`.
-- Pass non-model side inputs explicitly, preferably in a nearby `XCredentials`
-  struct that explains why they are not persisted.
+- Pass non-model inputs explicitly. Group related credentials in an
+  `XCredentials` struct when the operation consumes them together.
 - Name reusable sub-message converters after their result, such as
   `ToTargetSpec`/`ToFilters`; see `RackFilter`/`APIRackGetAllRequest`.
 - Proto-based API constructors such as `NewAPITray`/`NewAPIRack` return nil for
@@ -370,8 +380,10 @@ conversion. `InstanceType`, `AttachCapabilities`, `APIMachineCapabilities`, and
 
 ### Named types
 
-A map, slice, or composite representing a domain concept with conversion needs
-must own that behavior through named-type methods, not free conversion functions.
+Convert directly from the source to the destination when the source already
+carries the required values and presence information. A map, slice, or composite
+that represents a domain concept and needs conversion must own that behavior
+through named-type methods, not free conversion functions.
 Use typed string enums with receiver conversion methods too. Entity fields that
 round-trip with protos use the named type; CreateInput/UpdateInput fields may
 retain the primitive type until they need its methods.
@@ -474,6 +486,27 @@ use `ProxyFlowGRPCWithSecrets` when redaction is needed. Callers supply the
 workflow ID and conflict policy. Do not add bespoke workflows per method.
 Preserve the skill's multi-release registration, migration, and retirement order.
 
+Do not persist Temporal execution state in the REST DB, whether as a column,
+a JSONB field or a dedicated table. This covers workflow and run IDs, attempt
+and retry markers, completion flags and observed-at timestamps for a Site
+call. Do not walk workflow history to reconstruct what an earlier run did.
+Instead:
+
+- To dedupe or rejoin an in-flight Site call, use a deterministic workflow ID
+  with a conflict policy, as `common.ExecuteCoreGRPCWithConflictPolicy` and
+  `common.ExecuteFlowGRPC` allow.
+- Make a retry safe through the destination service's idempotent replies,
+  such as Core treating `NotFound` on deletion as done.
+- Report an operation's effect on a resource through its existing status,
+  status detail and flags. Site inventory then reconciles them against the
+  authoritative Site service.
+
+A saved run ID can outlive its Temporal history. After that history expires,
+the saved ID alone cannot recover the earlier result, which can strand tracking
+state that depends on it. Tracking state also forces resource paths to
+special-case it. Remove persisted fields or schema objects only after supported
+releases stop reading or writing them.
+
 When adding or renaming Site inventory workflows, update their registration in
 `workflow/cmd/workflow/main.go` and `inventoryWorkflowTypes` in
 `workflow/pkg/activity/site/retention.go`. Missing types retain successful runs
@@ -512,9 +545,10 @@ are separate. Do not give new helpers generated `api_`/`model_` prefixes.
 - All commits require DCO sign-off (`git commit -s`); missing sign-off blocks
   merging.
 - Write PR descriptions for readers without prior context: explain why, link
-  related issues, and keep one change per PR. Do not add unused code unless
-  the PR is too large to review otherwise. Ensure all CI checks pass before
-  requesting review, including the Go lint and table-test requirements above.
+  related issues, and keep one change per PR. Split large changes into
+  independently used pieces. Introduce each helper with its first caller.
+  Ensure all CI checks pass before requesting review, including the Go lint
+  and table-test requirements above.
 
 [REST CI](../.github/workflows/rest-ci.yml) declares current triggers and jobs:
 manual runs, `main` and pull-request branches, and supported release tags. It

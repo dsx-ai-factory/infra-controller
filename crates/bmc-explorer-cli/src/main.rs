@@ -86,17 +86,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credential_provider = Arc::new(TestCredentialManager::new(fallback_credentials.clone()));
 
     // The explorer performs credential-lifecycle work, so it takes the
-    // credential-operations handle of the direct pool.
+    // direct pool.
     let meter_provider = opentelemetry::metrics::noop::NoopMeterProvider::new();
     let instrumentation = carbide_instrument::Instrumentation::from_meter_provider(&meter_provider);
-    let (_, redfish_client_pool) = carbide_redfish::libredfish::new_pool_with_credential_ops(
+    let (_, redfish_client_pool) = carbide_redfish::libredfish::new_pool_with_direct(
         credential_provider.clone(),
         rf_pool,
         proxy_address.clone(),
         instrumentation.clone(),
     );
-    let rotate_switch_nvos_credentials = Default::default();
-
     let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         redfish_client_pool,
         Arc::new(NvRedfishClientPool::new(proxy_address)),
@@ -107,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let explorer = BmcEndpointExplorer::new(
         bmc_client,
-        rotate_switch_nvos_credentials,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.
         None,
         instrumentation,
@@ -139,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &explorer
                     .generate_exploration_report(
                         bmc_ip_address,
-                        carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
+                        carbide_site_explorer::BmcAccess::Direct(fallback_credentials),
                         boot_interface.as_ref(),
                     )
                     .await?,

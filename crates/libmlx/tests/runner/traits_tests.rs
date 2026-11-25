@@ -279,16 +279,16 @@ fn test_mlx_config_queryable_different_array_sizes() {
     let single = ["SRIOV_EN"];
     let result = single.to_variable_names(&registry).unwrap();
     assert_eq!(result.len(), 1);
-    assert!(result.contains(&"SRIOV_EN".to_string()));
+    assert!(result.iter().any(|value| value == "SRIOV_EN"));
 
     // Test larger arrays
     let large = ["SRIOV_EN", "NUM_OF_VFS", "POWER_MODE", "DEVICE_NAME"];
     let result = large.to_variable_names(&registry).unwrap();
     assert_eq!(result.len(), 4);
-    assert!(result.contains(&"SRIOV_EN".to_string()));
-    assert!(result.contains(&"NUM_OF_VFS".to_string()));
-    assert!(result.contains(&"POWER_MODE".to_string()));
-    assert!(result.contains(&"DEVICE_NAME".to_string()));
+    assert!(result.iter().any(|value| value == "SRIOV_EN"));
+    assert!(result.iter().any(|value| value == "NUM_OF_VFS"));
+    assert!(result.iter().any(|value| value == "POWER_MODE"));
+    assert!(result.iter().any(|value| value == "DEVICE_NAME"));
 }
 
 #[test]
@@ -299,8 +299,8 @@ fn test_mlx_config_queryable_vec_string() {
     let result = variables.to_variable_names(&registry).unwrap();
 
     assert_eq!(result.len(), 2);
-    assert!(result.contains(&"SRIOV_EN".to_string()));
-    assert!(result.contains(&"DEVICE_NAME".to_string()));
+    assert!(result.iter().any(|value| value == "SRIOV_EN"));
+    assert!(result.iter().any(|value| value == "DEVICE_NAME"));
 }
 
 // A full array name expands to one entry per index, sized from the registry
@@ -368,8 +368,8 @@ fn test_mlx_config_queryable_vec_variables() {
     let result = variables.to_variable_names(&registry).unwrap();
 
     assert_eq!(result.len(), 2);
-    assert!(result.contains(&"SRIOV_EN".to_string()));
-    assert!(result.contains(&"NUM_OF_VFS".to_string()));
+    assert!(result.iter().any(|value| value == "SRIOV_EN"));
+    assert!(result.iter().any(|value| value == "NUM_OF_VFS"));
 }
 
 // `parse_array_index` splits a `NAME[idx]` string into its base name and index,
@@ -663,21 +663,21 @@ fn test_mlx_config_queryable_mixed_array_and_indices() {
     assert_eq!(result.len(), 7); // 1 + 4 + 1 + 1
 
     // Verify regular variable
-    assert!(result.contains(&"SRIOV_EN".to_string()));
+    assert!(result.iter().any(|value| value == "SRIOV_EN"));
 
     // Verify full array expansion
-    assert!(result.contains(&"GPIO_ENABLED[0]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[1]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[2]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[3]".to_string()));
+    assert!(result.iter().any(|value| value == "GPIO_ENABLED[0]"));
+    assert!(result.iter().any(|value| value == "GPIO_ENABLED[1]"));
+    assert!(result.iter().any(|value| value == "GPIO_ENABLED[2]"));
+    assert!(result.iter().any(|value| value == "GPIO_ENABLED[3]"));
 
     // Verify specific indices
-    assert!(result.contains(&"THERMAL_SENSORS[1]".to_string()));
-    assert!(result.contains(&"GPIO_MODES[7]".to_string()));
+    assert!(result.iter().any(|value| value == "THERMAL_SENSORS[1]"));
+    assert!(result.iter().any(|value| value == "GPIO_MODES[7]"));
 
     // Should NOT contain other THERMAL_SENSORS or GPIO_MODES indices
-    assert!(!result.contains(&"THERMAL_SENSORS[0]".to_string()));
-    assert!(!result.contains(&"GPIO_MODES[0]".to_string()));
+    assert!(!result.iter().any(|value| value == "THERMAL_SENSORS[0]"));
+    assert!(!result.iter().any(|value| value == "GPIO_MODES[0]"));
 }
 
 #[test]

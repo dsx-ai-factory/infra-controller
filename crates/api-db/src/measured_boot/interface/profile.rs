@@ -274,9 +274,9 @@ fn where_attr_pairs(query: &mut QueryBuilder<Postgres>, values: &HashMap<String,
     query.push("where (key, value) in (");
     for (index, (key, value)) in values.iter().enumerate() {
         query.push("(");
-        query.push_bind(key.clone());
+        query.push_bind(key);
         query.push(",");
-        query.push_bind(value.clone());
+        query.push_bind(value);
         query.push(")");
         if index < values.len() - 1 {
             query.push(", ");

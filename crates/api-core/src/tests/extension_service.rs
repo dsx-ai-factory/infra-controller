@@ -9366,6 +9366,9 @@ async fn test_find_instances_by_extension_service(
         .expect("instance deletion timestamp was persisted")
         .to_string();
 
+    let instance1_id = instance1.id.to_string();
+    let instance2_id = instance2.id.to_string();
+
     // Unfiltered lookup reports each active attachment, including the one whose
     // instance-level deletion supplies its removal timestamp.
     let find_resp = env
@@ -9383,13 +9386,13 @@ async fn test_find_instances_by_extension_service(
 
     // Verify both instances are returned
     let instance_ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
-    assert!(instance_ids.contains(&instance1.id.to_string()));
-    assert!(instance_ids.contains(&instance2.id.to_string()));
+    assert!(instance_ids.contains(&instance1_id));
+    assert!(instance_ids.contains(&instance2_id));
 
     // The upgraded, deleted instance resolves to active v2, not its earlier v1 row.
     let instance1_info = instances
         .iter()
-        .find(|i| i.instance_id == instance1.id.to_string())
+        .find(|i| i.instance_id == instance1_id)
         .unwrap();
     assert_eq!(instance1_info.service_id, service_id);
     assert_eq!(instance1_info.version, version2);
@@ -9401,7 +9404,7 @@ async fn test_find_instances_by_extension_service(
     // The second instance remains an active v2 control with no removal source.
     let instance2_info = instances
         .iter()
-        .find(|i| i.instance_id == instance2.id.to_string())
+        .find(|i| i.instance_id == instance2_id)
         .unwrap();
     assert_eq!(instance2_info.service_id, service_id);
     assert_eq!(instance2_info.version, version2);
@@ -9419,7 +9422,7 @@ async fn test_find_instances_by_extension_service(
         .await?;
     let instances = find_resp.into_inner().instances;
     assert_eq!(instances.len(), 1);
-    assert_eq!(instances[0].instance_id, instance1.id.to_string());
+    assert_eq!(instances[0].instance_id, instance1_id);
     assert_eq!(instances[0].service_id, service_id);
     assert_eq!(instances[0].version, version1);
     assert_eq!(
@@ -9442,7 +9445,7 @@ async fn test_find_instances_by_extension_service(
     assert_eq!(instances.len(), 2);
     let instance1_info = instances
         .iter()
-        .find(|info| info.instance_id == instance1.id.to_string())
+        .find(|info| info.instance_id == instance1_id)
         .expect("deleted instance1 retains its active v2 attachment");
     assert_eq!(instance1_info.service_id, service_id);
     assert_eq!(instance1_info.version, version2);
@@ -9452,7 +9455,7 @@ async fn test_find_instances_by_extension_service(
     );
     let instance2_info = instances
         .iter()
-        .find(|info| info.instance_id == instance2.id.to_string())
+        .find(|info| info.instance_id == instance2_id)
         .expect("active instance2 retains its v2 attachment");
     assert_eq!(instance2_info.service_id, service_id);
     assert_eq!(instance2_info.version, version2);
@@ -9538,7 +9541,7 @@ async fn test_find_instances_by_extension_service(
     let instances = find_resp.into_inner().instances;
     let instance2_infos = instances
         .iter()
-        .filter(|info| info.instance_id == instance2.id.to_string())
+        .filter(|info| info.instance_id == instance2_id)
         .collect::<Vec<_>>();
     assert_eq!(instance2_infos.len(), 1);
     let instance2_info = instance2_infos[0];
@@ -9571,7 +9574,7 @@ async fn test_find_instances_by_extension_service(
             .into_inner()
             .instances
             .into_iter()
-            .filter(|info| info.instance_id == instance2.id.to_string())
+            .filter(|info| info.instance_id == instance2_id)
             .collect::<Vec<_>>();
         assert_eq!(instance2_infos.len(), 1);
         assert_eq!(instance2_infos[0].service_id, service_id);

@@ -150,10 +150,13 @@ async fn assert_dpf_skips_platform_configuration(
     assert_eq!(
         platform_actions
             .iter()
-            .filter(|action| matches!(action, RedfishSimPlatformAction::UefiSetup { dpu: true }))
+            .filter(|action| matches!(
+                action,
+                RedfishSimPlatformAction::ReadBios { host } if *host == dpu_bmc_ip
+            ))
             .count(),
         1,
-        "DPU UEFI credential was not replaced exactly once: {platform_actions:?}"
+        "DPU UEFI credential replacement was not attempted exactly once: {platform_actions:?}"
     );
 
     // No platform mutation or BIOS verification may run after DPF reports Ready.

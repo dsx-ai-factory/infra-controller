@@ -18,9 +18,9 @@ nico-admin-cli expected-rack-group erase <--confirm>
 
 Erase all expected rack groups
 
-Erase fails while any expected NVLink domain declaration references a
-group. Delete all declarations with expected-nvlink-domain delete first;
---confirm does not bypass this restriction.
+Erase fails while any NVLink domain declaration references a group.
+Delete all declarations with nvlink-domain delete first; --confirm does
+not bypass this restriction.
 
 ## OPTIONS
 

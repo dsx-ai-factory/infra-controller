@@ -24,6 +24,9 @@ use clap::Parser;
 // TODO: Possibly add the ability to filter by a list of tenant
 // org IDs and/or VPC IDs.
 #[derive(Parser, Debug)]
+#[command(
+    long_about = "Display instance information. A single instance includes its extension services, desired service VPCs, attachment IDs, and deployment status. RUNNING reflects the deployment Core observed. For Helm it means Core observed placement on each target DPU. Verify workload health, traffic, and DHCP leases separately. Service VPC IDs can be blank for services without a desired VPC, including terminating attachments. Config Status shows Removing when Core marks an attachment as removed, even if its last observed Deployment Status is RUNNING. Attachment ID and both status columns can be blank if the response has no status for the service, and legacy attachments can lack an ID. For a retained VPC selection during cleanup, use extension-service show-instances."
+)]
 #[command(after_long_help = "\
 EXAMPLES:
 

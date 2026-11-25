@@ -4,7 +4,7 @@
 package manager
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -107,7 +107,7 @@ func (r *builtInRegistry) List(
 		rules = append(rules, &rule)
 	}
 	slices.SortFunc(rules, func(a, b *eventrule.Rule) int {
-		return cmp.Compare(a.ID.String(), b.ID.String())
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 
 	total := len(rules)

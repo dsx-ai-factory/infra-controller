@@ -705,7 +705,8 @@ async fn idle_hosts_skip_fanout_and_later_assignment_receives_the_prefix(pool: s
     assert!(
         response
             .site_fabric_prefixes
-            .contains(&"10.69.0.0/24".to_string())
+            .iter()
+            .any(|prefix| prefix == "10.69.0.0/24")
     );
 }
 

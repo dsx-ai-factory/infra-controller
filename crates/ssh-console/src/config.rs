@@ -185,11 +185,11 @@ impl Default for KeyIdFormat {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let cfg = std::fs::read_to_string(path).map_err(|error| ConfigError::CouldNotRead {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })?;
         toml::from_str::<Self>(&cfg).map_err(|error| ConfigError::InvalidToml {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })
     }
@@ -715,7 +715,7 @@ fn serialize_duration<S>(d: &std::time::Duration, serializer: S) -> Result<S::Ok
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{}s", d.as_secs()))
+    serializer.collect_str(&format_args!("{}s", d.as_secs()))
 }
 
 fn serialize_openssh_certificate_ca_fingerprints<S>(
@@ -749,7 +749,7 @@ fn serialize_uri<S>(u: &http::Uri, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{u}"))
+    serializer.collect_str(u)
 }
 
 fn deserialize_uri<'de, D>(deserializer: D) -> Result<http::Uri, D::Error>
@@ -757,7 +757,7 @@ where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    http::Uri::from_str(&s).map_err(serde::de::Error::custom)
+    http::Uri::try_from(s).map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]
@@ -765,6 +765,18 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    #[test]
+    fn uri_deserialization_preserves_parser_results() {
+        use serde::de::value::{Error, StringDeserializer};
+
+        for input in ["https://api.example:1079", "https://bad host/"] {
+            let decoded = deserialize_uri(StringDeserializer::<Error>::new(input.to_string()))
+                .map_err(|error| error.to_string());
+            let parsed = http::Uri::from_str(input).map_err(|error| error.to_string());
+            assert_eq!(decoded, parsed, "{input}");
+        }
+    }
 
     #[test]
     fn test_default_file_is_actually_default() {

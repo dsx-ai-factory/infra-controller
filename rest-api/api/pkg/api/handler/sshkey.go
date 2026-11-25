@@ -118,28 +118,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 
 	cotel.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name))
 
-	// check for name uniqueness for the tenant, ie, tenant cannot have another SSH Key with same name at the site
 	skDAO := cdbm.NewSSHKeyDAO(cskh.dbSession)
-	sks, tot, err := skDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SSHKeyFilterInput{
-			Names:     []string{apiRequest.Name},
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant SSH Key")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create SSH Key due to DB error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key with same name already exists for Tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "An SSH Key with specified name already exists for Tenant", validation.Errors{
-			"id": errors.New(sks[0].ID.String()),
-		})
-	}
 
 	// Verify SSH Key Group ID
 	var dbskg *cdbm.SSHKeyGroup
@@ -182,35 +161,62 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 	// the fingerprint is prefixed by "SHA256:", remove that prefix
 	fingerprint = fingerprint[7:]
 
-	// Check for uniqueness of fingerprint
-	sks, tot, err = skDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SSHKeyFilterInput{
-			TenantIDs:    []uuid.UUID{tenant.ID},
-			Fingerprints: []string{fingerprint},
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant SSHKey")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "SSH Key create failed due to data store error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", tenant.ID.String()).Msg("SSH Key with same fingerprint already exists for tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "An SSH Key with same fingerprint already exists for Tenant", validation.Errors{
-			"id": errors.New(sks[0].ID.String()),
-		})
-	}
-
 	var dbsk *cdbm.SSHKey
 	var skgsas []cdbm.SSHKeyGroupSiteAssociation
 
 	err = cdb.WithTx(ctx, cskh.dbSession, func(tx *cdb.Tx) error {
+		// Check name and fingerprint uniqueness under the Tenant lock that
+		// inventory recovery also holds, so neither can insert a duplicate.
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key, could not acquire data store lock", nil)
+		}
+
+		lockedNameMatches, _, derr := skDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.SSHKeyFilterInput{
+				Names:     []string{apiRequest.Name},
+				TenantIDs: []uuid.UUID{tenant.ID},
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of tenant SSH Key")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key due to DB error", nil)
+		}
+		if len(lockedNameMatches) > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key with same name already exists for Tenant")
+			return cutil.NewAPIError(http.StatusConflict, "An SSH Key with specified name already exists for Tenant", validation.Errors{
+				"id": errors.New(lockedNameMatches[0].ID.String()),
+			})
+		}
+
+		lockedMatches, _, derr := skDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.SSHKeyFilterInput{
+				TenantIDs:    []uuid.UUID{tenant.ID},
+				Fingerprints: []string{fingerprint},
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for fingerprint uniqueness of tenant SSHKey")
+			return cutil.NewAPIError(http.StatusInternalServerError, "SSH Key create failed due to data store error", nil)
+		}
+		if len(lockedMatches) > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Msg("SSH Key with same fingerprint already exists for tenant")
+			return cutil.NewAPIError(http.StatusConflict, "An SSH Key with same fingerprint already exists for Tenant", validation.Errors{
+				"id": errors.New(lockedMatches[0].ID.String()),
+			})
+		}
+
 		// create the ssh key
 		// NOTE: Remove `expires` from DB model
-		var derr error
 		dbsk, derr = skDAO.Create(
 			ctx,
 			tx,
@@ -252,7 +258,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 			}
 
 			// Calculate and set new versions
-			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, dbskg.ID)
+			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, dbskg.ID, false)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error updating current version for SSH Key Group")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to set updated version for SSH Key Group", nil)
@@ -893,6 +899,15 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 	var skgsasToSync []cdbm.SSHKeyGroupSiteAssociation
 
 	err = cdb.WithTx(ctx, dskh.dbSession, func(tx *cdb.Tx) error {
+		// Inventory recovery uses this Tenant-scoped lock before adopting Site
+		// keysets. Hold it before discovering associations so recovery cannot add
+		// an association after this deletion's snapshot.
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete SSH Key, could not acquire data store lock", nil)
+		}
+
 		skas, _, derr := skaDAO.GetAll(ctx, tx, cdbm.SSHKeyAssociationFilterInput{SSHKeyIDs: []uuid.UUID{sk.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SSHKeyGroupRelationName})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving SSH Key association from DB")
@@ -923,7 +938,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 			}
 
 			// Calculate and set new versions
-			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, ska.SSHKeyGroupID)
+			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, ska.SSHKeyGroupID, false)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error calculating current version for SSH Key Group")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to calculate current version for SSH Key Group", nil)

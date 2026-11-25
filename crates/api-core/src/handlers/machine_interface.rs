@@ -38,11 +38,17 @@ pub(crate) async fn find_interfaces(
     let rpc::InterfaceSearchQuery { id, ip } = request.into_inner();
 
     let interfaces: Vec<rpc::MachineInterface> = match (id, ip) {
-        (Some(id), _) => vec![
-            db::machine_interface::find_one(api.pg_pool(), id)
-                .await?
-                .into(),
-        ],
+        (Some(id), _) => match db::machine_interface::find_one(api.pg_pool(), id).await {
+            Ok(interface) => vec![interface.into()],
+            Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => {
+                return Err(CarbideError::NotFoundError {
+                    kind: "Machine Interface",
+                    id: id.to_string(),
+                }
+                .into());
+            }
+            Err(err) => return Err(err.into()),
+        },
         (None, Some(ip)) => match IpAddr::from_str(ip.as_ref()) {
             Ok(ip) => match db::machine_interface::find_by_ip(api.pg_pool(), ip).await? {
                 Some(interface) => vec![interface.into()],

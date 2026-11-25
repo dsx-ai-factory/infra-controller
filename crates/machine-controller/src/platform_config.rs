@@ -20,6 +20,9 @@
 //! boot off, and its boot interface first in the boot order, and the ones its
 //! DPUs need. Each platform's drivers decide what those mean on it.
 
+use std::collections::HashMap;
+
+use bmc_backend::BackendBmc;
 use bmc_platform::{
     BiosSettings, BiosStatus, BootInterfaceSelector, ConsoleState, DriverOutcome, ManagerSettings,
     OperationReference, PlatformError, PlatformIdentity, RshimState, SecureBootStatus, VendorJobId,
@@ -34,8 +37,6 @@ use nv_redfish::schema::secure_boot::SecureBootUpdate;
 use crate::config::{MachineStateHandlerSiteConfig, NamedBiosProfile};
 
 mod legacy;
-
-pub use legacy::PlatformBmc;
 
 pub(crate) const BIOS_PROFILE_LABEL: &str = "bios-profile";
 
@@ -130,9 +131,18 @@ fn model_key(model: &str) -> String {
     model.replace(' ', "_")
 }
 
+pub(crate) fn drivers_bios_profile(
+    site_config: &MachineStateHandlerSiteConfig,
+    host_labels: &HashMap<String, String>,
+    identity: &PlatformIdentity,
+) -> BiosProfileSelection {
+    let bios_profile_label = host_labels.get(BIOS_PROFILE_LABEL).map(String::as_str);
+    BiosProfileSelection::select(site_config, bios_profile_label, identity)
+}
+
 /// The vendor job `outcome` started, which the host must wait for before
 /// restarting; other work is not waited on.
-pub(crate) fn vendor_job_id(outcome: &DriverOutcome) -> Option<VendorJobId> {
+pub fn vendor_job_id(outcome: &DriverOutcome) -> Option<VendorJobId> {
     outcome.references().find_map(|reference| match reference {
         OperationReference::VendorJob { job_id, .. } => Some(job_id.clone()),
         OperationReference::RedfishTask { .. } => None,
@@ -178,28 +188,41 @@ impl PlatformConfig {
 /// configuration work the BMC has queued. A BMC may refuse the secure boot
 /// write while that BIOS work is pending; the BIOS work is still returned, and
 /// secure boot is written once a later apply finds the BIOS settings in effect.
+///
+/// libredfish reports a host without a boot interface as an error, which
+/// stands only when the host has some of its `expected_dpu_count` DPUs.
 pub async fn apply(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     site_config: &MachineStateHandlerSiteConfig,
+    bios_profile: &BiosProfileSelection,
     libredfish_bios_profiles: &BiosProfileVendor,
     boot_interface: Option<&BootInterfaceTarget>,
+    expected_dpu_count: usize,
 ) -> Result<DriverOutcome, PlatformError> {
-    let (bmc, bios_profile) = match bmc {
-        PlatformBmc::Libredfish {
-            client,
-            expected_dpu_count,
-        } => {
-            return legacy::apply(
-                *client,
+    match bmc {
+        BackendBmc::Libredfish(client) => {
+            legacy::apply(
+                client.as_ref(),
                 site_config,
                 libredfish_bios_profiles,
                 boot_interface,
-                *expected_dpu_count,
+                expected_dpu_count,
             )
-            .await;
+            .await
         }
-        PlatformBmc::Drivers { bmc, bios_profile } => (bmc, bios_profile),
-    };
+        BackendBmc::Drivers(bmc) => {
+            apply_through_drivers(bmc, site_config, bios_profile, boot_interface).await
+        }
+    }
+}
+
+/// [`apply`] through the drivers.
+pub async fn apply_through_drivers(
+    bmc: &ConnectedBmc<RedfishBmc>,
+    site_config: &MachineStateHandlerSiteConfig,
+    bios_profile: &BiosProfileSelection,
+    boot_interface: Option<&BootInterfaceTarget>,
+) -> Result<DriverOutcome, PlatformError> {
     let config = PlatformConfig::new(site_config, bmc, bios_profile, boot_interface);
     let apply_settings = async {
         bmc.bmc_control()?
@@ -254,17 +277,19 @@ fn after_pending_bios(
 
 /// Whether every platform setting the platform reports is in effect.
 pub(crate) async fn in_effect(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     site_config: &MachineStateHandlerSiteConfig,
+    host_labels: &HashMap<String, String>,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<bool, PlatformError> {
-    let (bmc, bios_profile) = match bmc {
-        PlatformBmc::Libredfish { client, .. } => {
-            return legacy::in_effect(*client, boot_interface).await;
+    let bmc = match bmc {
+        BackendBmc::Libredfish(client) => {
+            return legacy::in_effect(client.as_ref(), boot_interface).await;
         }
-        PlatformBmc::Drivers { bmc, bios_profile } => (bmc, bios_profile),
+        BackendBmc::Drivers(bmc) => bmc,
     };
-    let config = PlatformConfig::new(site_config, bmc, bios_profile, boot_interface);
+    let bios_profile = drivers_bios_profile(site_config, host_labels, bmc.endpoint().identity());
+    let config = PlatformConfig::new(site_config, bmc, &bios_profile, boot_interface);
     let secure_boot_disabled =
         async { Ok(bmc.secure_boot()?.status().await? == SecureBootStatus::Disabled) };
     let settings_applied = async { Ok(bmc.bmc_control()?.settings_status().await?.is_applied) };
@@ -285,36 +310,42 @@ pub(crate) async fn in_effect(
 
 /// Puts `boot_interface`'s HTTP boot option first in the host's persistent
 /// boot order. The order takes effect on the next host restart, which must
-/// wait for the returned work.
+/// wait for the returned work. See [`apply`] for `expected_dpu_count`.
 pub async fn configure_boot_order(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     boot_interface: &BootInterfaceTarget,
+    expected_dpu_count: usize,
 ) -> Result<DriverOutcome, PlatformError> {
     match bmc {
-        PlatformBmc::Libredfish {
-            client,
-            expected_dpu_count,
-        } => legacy::configure_boot_order(*client, boot_interface, *expected_dpu_count).await,
-        PlatformBmc::Drivers { bmc, .. } => {
-            bmc.boot_order()?
-                .configure(&BootInterfaceSelector::from(boot_interface))
-                .await
+        BackendBmc::Libredfish(client) => {
+            legacy::configure_boot_order(client.as_ref(), boot_interface, expected_dpu_count).await
         }
+        BackendBmc::Drivers(bmc) => configure_boot_order_through_drivers(bmc, boot_interface).await,
     }
+}
+
+/// [`configure_boot_order`] through the drivers.
+pub async fn configure_boot_order_through_drivers(
+    bmc: &ConnectedBmc<RedfishBmc>,
+    boot_interface: &BootInterfaceTarget,
+) -> Result<DriverOutcome, PlatformError> {
+    bmc.boot_order()?
+        .configure(&BootInterfaceSelector::from(boot_interface))
+        .await
 }
 
 /// Whether `boot_interface`'s HTTP boot option is first in the host's boot
 /// order. Unlike the other settings, a platform without boot order support is
 /// an error: the host could not boot for provisioning.
 pub(crate) async fn boot_order_in_effect(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     boot_interface: &BootInterfaceTarget,
 ) -> Result<bool, PlatformError> {
     match bmc {
-        PlatformBmc::Libredfish { client, .. } => {
-            legacy::boot_order_in_effect(*client, boot_interface).await
+        BackendBmc::Libredfish(client) => {
+            legacy::boot_order_in_effect(client.as_ref(), boot_interface).await
         }
-        PlatformBmc::Drivers { bmc, .. } => Ok(bmc
+        BackendBmc::Drivers(bmc) => Ok(bmc
             .boot_order()?
             .status(&BootInterfaceSelector::from(boot_interface))
             .await?
@@ -349,25 +380,22 @@ impl From<&BiosStatus> for DpuSettings {
 /// access off, and one UEFI HTTP boot. The BIOS settings take effect on the
 /// next DPU restart.
 pub(crate) async fn apply_dpu(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     site_config: &MachineStateHandlerSiteConfig,
 ) -> Result<(), PlatformError> {
     let bmc = match bmc {
-        PlatformBmc::Libredfish {
-            client,
-            expected_dpu_count,
-        } => {
+        BackendBmc::Libredfish(client) => {
             return legacy::apply(
-                *client,
+                client.as_ref(),
                 site_config,
                 &site_config.bios_profiles,
                 None,
-                *expected_dpu_count,
+                1,
             )
             .await
             .map(drop);
         }
-        PlatformBmc::Drivers { bmc, .. } => bmc,
+        BackendBmc::Drivers(bmc) => bmc,
     };
     let apply_bios = async { bmc.bios()?.apply(&BiosSettings::default(), None).await };
     let disable_host_rshim = async { bmc.dpu()?.set_host_rshim(RshimState::Disabled).await };
@@ -378,10 +406,10 @@ pub(crate) async fn apply_dpu(
 }
 
 /// Boots the DPU behind `bmc` from UEFI HTTP once, on its next restart.
-pub(crate) async fn boot_http_once(bmc: &PlatformBmc<'_>) -> Result<(), PlatformError> {
+pub(crate) async fn boot_http_once(bmc: &BackendBmc) -> Result<(), PlatformError> {
     match bmc {
-        PlatformBmc::Libredfish { client, .. } => legacy::boot_http_once(*client).await,
-        PlatformBmc::Drivers { bmc, .. } => set_http_boot_once(bmc).await.map(drop),
+        BackendBmc::Libredfish(client) => legacy::boot_http_once(client.as_ref()).await,
+        BackendBmc::Drivers(bmc) => set_http_boot_once(bmc).await.map(drop),
     }
 }
 
@@ -399,10 +427,10 @@ async fn set_http_boot_once(
 }
 
 /// What the DPU behind `bmc` reports of its platform settings.
-pub(crate) async fn dpu_settings(bmc: &PlatformBmc<'_>) -> Result<DpuSettings, PlatformError> {
+pub(crate) async fn dpu_settings(bmc: &BackendBmc) -> Result<DpuSettings, PlatformError> {
     let bmc = match bmc {
-        PlatformBmc::Libredfish { client, .. } => return legacy::dpu_settings(*client).await,
-        PlatformBmc::Drivers { bmc, .. } => bmc,
+        BackendBmc::Libredfish(client) => return legacy::dpu_settings(client.as_ref()).await,
+        BackendBmc::Drivers(bmc) => bmc,
     };
     let status = async {
         bmc.bios()?
@@ -536,6 +564,73 @@ mod tests {
                     => fallback("bios-profile gpu-perf is for model PowerEdge_XE9680 but the host reports no model"),
             }
         );
+    }
+
+    #[test]
+    fn the_drivers_pick_the_named_bios_profile_from_the_host_labels() {
+        let site_config = MachineStateHandlerSiteConfig {
+            named_bios_profiles: HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: "HPE".to_string(),
+                    model: "ProLiant_DL380a_Gen11".to_string(),
+                    attributes: HashMap::from([(
+                        "WorkloadProfile".to_string(),
+                        json!("HighPerformanceCompute"),
+                    )]),
+                },
+            )]),
+            ..MachineStateHandlerSiteConfig::test_default()
+        };
+        let identity = PlatformIdentity {
+            service_root: ServiceRootIdentity {
+                vendor: Some("HPE".to_string()),
+                ..Default::default()
+            },
+            system: Some(SystemIdentity {
+                model: Some("ProLiant DL380a Gen11".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let labels = |bios_profile_label: Option<&str>| {
+            let mut labels = HashMap::from([("rack".to_string(), "r12".to_string())]);
+            if let Some(name) = bios_profile_label {
+                labels.insert(BIOS_PROFILE_LABEL.to_string(), name.to_string());
+            }
+            labels
+        };
+
+        for (scenario, host_labels, expected) in [
+            (
+                "a labelled host with a matching recipe",
+                labels(Some("gpu-perf")),
+                BiosProfileSelection::Named(BiosSettings {
+                    attributes: BTreeMap::from([(
+                        "WorkloadProfile".to_string(),
+                        json!("HighPerformanceCompute"),
+                    )]),
+                }),
+            ),
+            (
+                "an unlabelled host",
+                labels(None),
+                BiosProfileSelection::SiteDefault,
+            ),
+            (
+                "a label naming no recipe",
+                labels(Some("missing")),
+                BiosProfileSelection::Fallback(
+                    "bios-profile missing is not defined in named_bios_profiles".to_string(),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                drivers_bios_profile(&site_config, &host_labels, &identity),
+                expected,
+                "{scenario}"
+            );
+        }
     }
 
     struct DriversHost {
@@ -727,19 +822,24 @@ mod tests {
             oem_manager_profiles: HashMap::new(),
             ..site_config
         };
-        let bmc = PlatformBmc::Drivers {
-            bmc: host.bmc,
-            bios_profile: named,
-        };
+        let bmc = BackendBmc::Drivers(host.bmc);
+        let host_labels = HashMap::from([(BIOS_PROFILE_LABEL.to_string(), "gpu-perf".to_string())]);
         assert!(
-            !in_effect(&bmc, &site_config, None)
+            !in_effect(&bmc, &site_config, &host_labels, None)
                 .await
                 .expect("the drivers read the platform settings"),
             "the named profile is not in effect before it is applied"
         );
-        apply(&bmc, &site_config, &site_config.bios_profiles, None)
-            .await
-            .expect("the drivers apply the platform settings");
+        apply(
+            &bmc,
+            &site_config,
+            &named,
+            &site_config.bios_profiles,
+            None,
+            0,
+        )
+        .await
+        .expect("the drivers apply the platform settings");
         let bios_writes = host.bios_writes.lock().unwrap().clone();
         assert!(
             bios_writes.iter().any(|write| {
@@ -748,7 +848,7 @@ mod tests {
             "the BIOS write carries the named attribute: {bios_writes:?}"
         );
         assert!(
-            in_effect(&bmc, &site_config, None)
+            in_effect(&bmc, &site_config, &host_labels, None)
                 .await
                 .expect("the drivers read the platform settings"),
             "the named profile reads back as in effect"

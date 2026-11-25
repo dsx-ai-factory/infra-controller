@@ -74,7 +74,7 @@ impl Reporter for Terminal {
                 "  {} {:<CHECK_WIDTH$} {:>7}  ",
                 ended.symbol(),
                 result.id,
-                seconds(result.elapsed).dimmed(),
+                ColoredString::from(seconds(result.elapsed)).dimmed(),
             );
             self.print_in_column(&columns, DETAIL_COLUMN, result.outcome.text(), |line| {
                 ended.tint(line)
@@ -93,7 +93,7 @@ impl Reporter for Terminal {
 impl Terminal {
     pub(crate) fn taking_ownership(&self, address: SocketAddr) {
         self.line(
-            &format!("Replacing the factory password of {address} …")
+            &ColoredString::from(format!("Replacing the factory password of {address} …"))
                 .dimmed()
                 .to_string(),
         );
@@ -111,7 +111,11 @@ impl Terminal {
     }
 
     pub(crate) fn discovering(&self, address: SocketAddr) {
-        self.line(&format!("Discovering {address} …").dimmed().to_string());
+        self.line(
+            &ColoredString::from(format!("Discovering {address} …"))
+                .dimmed()
+                .to_string(),
+        );
     }
 
     pub(crate) fn warn(&self, message: &str) {
@@ -122,7 +126,10 @@ impl Terminal {
     }
 
     pub(crate) fn print_identity(&self, address: SocketAddr, identity: &PlatformIdentity) {
-        self.heading(&format!("Platform  {}", address.to_string().dimmed()));
+        self.heading(&format!(
+            "Platform  {}",
+            ColoredString::from(address.to_string()).dimmed()
+        ));
         let root = &identity.service_root;
         let oem = (!root.oem_keys.is_empty()).then(|| format!("oem {}", root.oem_keys.join(", ")));
         self.row(
@@ -131,10 +138,9 @@ impl Terminal {
         );
         self.row(
             "system",
-            &identity
-                .system
-                .as_ref()
-                .map_or("none listed".to_string(), |system| {
+            &identity.system.as_ref().map_or_else(
+                || "none listed".to_string(),
+                |system| {
                     joined([
                         Some(system.id.clone()),
                         joined_words([system.manufacturer.as_deref(), system.model.as_deref()]),
@@ -148,14 +154,14 @@ impl Terminal {
                             .as_ref()
                             .map(|bios| format!("bios {bios}")),
                     ])
-                }),
+                },
+            ),
         );
         self.row(
             "manager",
-            &identity
-                .manager
-                .as_ref()
-                .map_or("none listed".to_string(), |manager| {
+            &identity.manager.as_ref().map_or_else(
+                || "none listed".to_string(),
+                |manager| {
                     joined([
                         Some(manager.id.clone()),
                         manager.model.as_ref().map(|model| format!("model {model}")),
@@ -164,7 +170,8 @@ impl Terminal {
                             .as_ref()
                             .map(|firmware| format!("firmware {firmware}")),
                     ])
-                }),
+                },
+            ),
         );
         for chassis in &identity.chassis {
             self.row(
@@ -188,7 +195,8 @@ impl Terminal {
             .max()
             .unwrap_or_default();
         for capability in Capability::iter() {
-            let driver = format!("{:<driver_width$}", selection.driver(capability));
+            let driver =
+                ColoredString::from(format!("{:<driver_width$}", selection.driver(capability)));
             let driver = if selection.is_supported(capability) {
                 driver.cyan()
             } else {
@@ -197,7 +205,7 @@ impl Terminal {
             self.line(&format!(
                 "  {:<KEY_WIDTH$} {driver}  {}",
                 capability.as_str(),
-                selection.source(capability).dimmed()
+                ColoredString::from(selection.source(capability)).dimmed()
             ));
         }
         self.line("");
@@ -276,13 +284,13 @@ impl Terminal {
             if count == 0 && ended == Ended::Failed {
                 text
             } else {
-                ended.paint(&text).to_string()
+                ended.paint(text).to_string()
             }
         });
         self.heading(&format!(
             "Summary  {}  {}",
             counts.join(" · "),
-            seconds(elapsed).dimmed()
+            ColoredString::from(seconds(elapsed)).dimmed()
         ));
 
         let failures = of(Ended::Failed);
@@ -292,7 +300,7 @@ impl Terminal {
                 self.line(&format!(
                     "  {} {}  {}",
                     Ended::Failed.symbol(),
-                    result.id.to_string().bold(),
+                    ColoredString::from(result.id.to_string()).bold(),
                     result.driver.dimmed()
                 ));
                 self.print_in_column("      ", 6, result.outcome.text(), |line| line.normal());
@@ -370,7 +378,8 @@ impl Ended {
     }
 
     /// `text` in this ending's color, as its symbol and count are drawn.
-    fn paint(self, text: &str) -> ColoredString {
+    fn paint(self, text: impl Into<ColoredString>) -> ColoredString {
+        let text = text.into();
         match self {
             Self::Passed => text.green(),
             Self::Failed => text.red().bold(),

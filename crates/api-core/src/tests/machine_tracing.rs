@@ -268,6 +268,12 @@ async fn provisioning_and_network_config_operations_record_inventory_identity(po
     let mut metrics = carbide_machine_controller::metrics::MachineMetrics::default();
     let mut pending_db_writes = state_controller::db_write_batch::DbWriteBatch::new();
     let mut ctx = state_controller::state_handler::StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,
@@ -295,11 +301,13 @@ async fn provisioning_and_network_config_operations_record_inventory_identity(po
         attribute(span, "nico.managed_host.bmc.ip"),
         Some(expected_bmc_ip.clone())
     );
+    let host_id = host.id.to_string();
     let ingestion = spans
         .iter()
         .find(|span| {
             span.name == "ingest_managed_host"
-                && attribute(span, "nico.machine.bmc.ip") == Some(expected_bmc_ip.clone())
+                && attribute(span, "nico.machine.bmc.ip").as_deref()
+                    == Some(expected_bmc_ip.as_str())
         })
         .unwrap();
     assert!(attribute(ingestion, "nico.machine.predicted_id").is_some());
@@ -307,7 +315,7 @@ async fn provisioning_and_network_config_operations_record_inventory_identity(po
         .iter()
         .find(|span| {
             span.name == "handle_object_state"
-                && attribute(span, "nico.machine.id") == Some(host.id.to_string())
+                && attribute(span, "nico.machine.id").as_deref() == Some(host_id.as_str())
         })
         .unwrap();
     assert_eq!(
