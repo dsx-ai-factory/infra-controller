@@ -74,8 +74,10 @@
 #                          checks the installed DPF version only for a tag on
 #                          the release line of dpf-versions.toml, and phase 5b
 #                          waits until the operator reports that release or a
-#                          later one. Start a custom tag with the
-#                          vMAJOR.MINOR.PATCH of the image's build TAG.
+#                          later one. A reported prerelease of that release
+#                          does not end the wait unless the tag carries the
+#                          same prerelease. Start a custom tag with the
+#                          vMAJOR.MINOR.PATCH of the image's plain build TAG.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
 #                          the GA nvidia/doca images are public and pull
@@ -1695,9 +1697,9 @@ _dpf_prerelease() {
 }
 
 # Whether reported version $1 is at or above the release at the start of image
-# tag $2 by semver precedence: a prerelease of that release is below it, as in
-# nico-api's startup check, unless $2 carries the same prerelease. Holds when
-# either side does not start with a release.
+# tag $2. A prerelease of that release counts as below it unless $2 carries the
+# same prerelease. Prereleases are compared by equality, not ordered. Holds
+# when either side does not start with a release.
 _dpf_version_at_floor() {
     local _have _floor
     _have="$(_dpf_release_key "$1")"

@@ -48,6 +48,10 @@
 #                                Vault resources in nico-prereqs (warning)
 #   4g. DPF upgrade source:      an installed DPF operator is on a release the
 #                                operator this run installs upgrades from
+#                                (warning: the installed version cannot be read,
+#                                the DPFOperatorConfig has no status.version, or
+#                                status.version is a prerelease of the target
+#                                release)
 #   5. Node resources:           at least 3 schedulable (Ready + untainted) nodes
 #   6. MetalLB BGPPeer nodes:    hostnames in config exist in the cluster
 #   7. Per-node checks:          kernel params (sysctl) and DNS on every node
