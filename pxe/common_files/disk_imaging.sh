@@ -36,6 +36,7 @@ distro_release=
 installed_os_bootnum=
 serial_port=
 serial_port_num=
+os_console=
 log_output=
 forge_test_user=
 forge_test_pass=
@@ -1085,6 +1086,18 @@ function add_testing_user() {
 	rm -f /mnt/test_user.sh 2>&1 | tee $log_output
 }
 
+# Apply console settings after image-provided GRUB defaults.
+function write_console_dropin() {
+	local root="$1"
+	[[ -n "$os_console" ]] || return 0
+	mkdir -p "$root/etc/default/grub.d" || return 1
+	cat > "$root/etc/default/grub.d/zz-nke-imager-console.cfg" <<EOF
+# Installed by qcow-imager; regenerate grub.cfg after changing this file.
+GRUB_CMDLINE_LINUX="\$(printf '%s\n' "\${GRUB_CMDLINE_LINUX:-}" | sed -E 's/(^|[[:space:]])console=[^[:space:]]+/\\1console=$os_console,115200/g; /(^|[[:space:]])console=/!s/$/ console=$os_console,115200/')"
+GRUB_CMDLINE_LINUX_DEFAULT="\$(printf '%s\n' "\${GRUB_CMDLINE_LINUX_DEFAULT:-}" | sed -E 's/(^|[[:space:]])console=[^[:space:]]+/\\1console=$os_console,115200/g')"
+EOF
+}
+
 function modify_grub_template() {
 	if [ ! -f "/mnt/etc/default/grub" ]; then
 		return 0
@@ -1159,6 +1172,7 @@ function modify_grub_template() {
 		echo "GRUB_TERMINAL=serial" >> $new_grub_template
 	fi
 	cat $new_grub_template > /mnt/etc/default/grub
+	write_console_dropin /mnt
 }
 
 function parse_kernel_cmdline_argument() {
@@ -1179,6 +1193,9 @@ function parse_kernel_cmdline_argument() {
 			;;
 		image_auth_token=*)
 			image_auth_token=${argument#image_auth_token=}
+			;;
+		os_console=*)
+			os_console=${argument#os_console=}
 			;;
 		image_disk=*)
 			image_disk=${argument#image_disk=}
@@ -1259,6 +1276,9 @@ function main() {
 	# use the disk the tenant specified optionally
 	#  image_disk=/dev/nvme0n1
 	#  image_disk=smallest
+	# Override the installed OS kernel console (115200 baud) before its first boot.
+	#  os_console=ttyS1 (or ttyAMA<N>); omitted keeps existing behavior.
+	# Requires update_grub_template=yes and update_grub_cfg=yes (the defaults).
 	local -a kernel_arguments
 	local argument
 	read -r -a kernel_arguments < /proc/cmdline
@@ -1266,6 +1286,10 @@ function main() {
 	do
 		parse_kernel_cmdline_argument "$argument" || true
 	done
+	if [[ -n "$os_console" && ! "$os_console" =~ ^tty(S|AMA)[0-9]+$ ]]; then
+		echo "os_console must be a serial device such as ttyS1 or ttyAMA0" >&2
+		return 1
+	fi
 	configure_curl_args
 	if [ -z "$rootfs_uuid" ] && [ -z "$rootfs_label" ]; then
 		rootfs_label="cloudimg-rootfs" #default rootfs name for cloud images

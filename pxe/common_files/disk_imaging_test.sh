@@ -69,6 +69,46 @@ assert_log_contains() {
 	fi
 }
 
+echo "console override after image defaults"
+console_root="$temp_dir/console-root"
+os_console='' write_console_dropin "$console_root"
+[ ! -e "$console_root/etc/default/grub.d/zz-nke-imager-console.cfg" ] ||
+	fail "console override was written without os_console"
+mkdir -p "$console_root/etc/default/grub.d"
+cat > "$console_root/etc/default/grub" <<'CFG'
+GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet console=ttyS0,9600 rd.luks.uuid=example-root"
+GRUB_TERMINAL=console
+GRUB_SERIAL_COMMAND="serial --unit=0"
+CFG
+cat > "$console_root/etc/default/grub.d/99-console.cfg" <<'CFG'
+GRUB_CMDLINE_LINUX="root=/dev/mapper/vg-root iommu=pt console=tty0 console=ttyAMA2,9600"
+CFG
+serial_port=ttyS0 serial_port_num=0
+for console_device in ttyS1 ttyAMA0; do
+	parse_kernel_cmdline_argument "os_console=$console_device" || fail "os_console was not parsed"
+	assert_eq "console parameter parsed" "$console_device" "$os_console"
+	write_console_dropin "$console_root" || fail "console drop-in was not written"
+	# Load settings in grub-mkconfig order, using the installed OS's POSIX shell.
+	settings=$(sh -c '
+		. "$1/etc/default/grub"
+		for config in "$1"/etc/default/grub.d/*.cfg; do . "$config"; done
+		printf "%s\n" "$GRUB_CMDLINE_LINUX" "$GRUB_CMDLINE_LINUX_DEFAULT" "$GRUB_TERMINAL" "$GRUB_SERIAL_COMMAND"
+	' sh "$console_root")
+	expected=$(printf '%s\n' \
+		"root=/dev/mapper/vg-root iommu=pt console=$os_console,115200 console=$os_console,115200" \
+		"quiet console=$os_console,115200 rd.luks.uuid=example-root" console 'serial --unit=0')
+	assert_eq "console precedence and retained settings" "$expected" "$settings"
+done
+assert_eq "imager console unchanged" ttyS0 "$serial_port"
+assert_eq "imager serial unit unchanged" 0 "$serial_port_num"
+# Without an existing console argument, add one while retaining boot arguments.
+echo 'GRUB_CMDLINE_LINUX="root=UUID=example-root quiet"' > "$console_root/etc/default/grub.d/99-console.cfg"
+settings=$(sh -c '. "$1/etc/default/grub.d/99-console.cfg"; . "$1/etc/default/grub.d/zz-nke-imager-console.cfg"; printf "%s" "$GRUB_CMDLINE_LINUX"' sh "$console_root")
+assert_eq "console appended when absent" 'root=UUID=example-root quiet console=ttyAMA0,115200' "$settings"
+
+os_console=
+
 set_blkid_result() {
 	mock_blkid_status=$1
 	mock_blkid_stdout=$2
