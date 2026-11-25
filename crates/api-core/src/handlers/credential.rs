@@ -107,6 +107,21 @@ pub(crate) async fn create_credential(
         }
         rpc::CredentialType::Ufm => {
             if let Some(username) = req.username {
+                // Explicit authentication modes require an intentional token value; only legacy
+                // selection uses a blank password to choose the client certificate.
+                if api
+                    .runtime_config
+                    .ib_fabrics
+                    .get(DEFAULT_IB_FABRIC_NAME)
+                    .is_some_and(|fabric| fabric.auth.is_some())
+                    && password.trim().is_empty()
+                {
+                    return Err(CarbideError::InvalidArgument(
+                        "the default fabric sets auth; a blank UFM token is only valid when auth is not set"
+                            .to_string(),
+                    )
+                    .into());
+                }
                 api.credential_manager
                     .set_credentials(
                         &CredentialKey::UfmAuth {

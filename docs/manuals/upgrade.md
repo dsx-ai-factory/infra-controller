@@ -448,7 +448,8 @@ Consider these compatibility details:
   stored keeps selecting the client certificate while `auth` is not set. To use
   the client certificate, set `auth = "client_certificate"`.
 - On a site that stores credentials in Vault, `credential delete-ufm` needs the
-  updated Vault policy from helm-prereqs. Until it is applied, the command fails
+  updated Vault policy from helm-prereqs, which grants metadata deletion only
+  for the default fabric's UFM auth key. Until it is applied, the command fails
   with a permission error.
 - Setting `auth` takes effect when Core restarts.
 
