@@ -277,9 +277,11 @@ so install the Secret before the chart. A generated password reaches the mocks
 the same way. `machineATron.hostBmcPassword` and
 `machineATron.dpuBmcPassword` override the looked-up value, and
 `machineATron.siteCredentialsSecret.name: ""` disables the lookup. With pinned
-passwords site-explorer logs in with the site root and never rotates a BMC. No
-per-BMC credential is written to Vault, and the factory defaults below are not
-consulted.
+passwords site-explorer logs in with the site root and never rotates a BMC. Its
+site-wide fallback stores the site root as the per-BMC credential
+(`try_sitewide_bmc_root_credentials` in
+`crates/site-explorer/src/bmc_endpoint_explorer.rs`), and the factory defaults
+below are not consulted.
 
 ### Factory Defaults for Override Mode
 
@@ -1120,16 +1122,20 @@ gone. Rerun the loop until
 `kubectl get <kind> -n dpf-operator-system --no-headers | wc -l` prints 0 for
 each kind.
 
+The reset also leaves the per-DPU BMC credential Secrets that nico-api creates
+in `dpf-operator-system`. They carry the label
+`carbide.nvidia.com/bmc-credential-device`.
+
 `make -C dev/k8s/dpf-sim-controller undeploy` removes the simulator itself and
 leaves the DPF CRDs and the `DPFOperatorConfig` in place.
 
 ### Per-BMC Vault Credentials
 
-With pinned passwords site-explorer writes no per-BMC credential. In Override
-Mode it rotates every BMC and stores `machines/bmc/<mac>/root` in Vault. A
-surviving entry makes site-explorer present the rotated password to a
-factory-fresh mock after a reset, which latches `AvoidLockout` on that
-endpoint. Delete the entries per MAC:
+With pinned passwords the per-BMC credential that site-explorer stores is the
+site root. In Override Mode it rotates every BMC and stores
+`machines/bmc/<mac>/root` in Vault. A surviving entry makes site-explorer
+present the rotated password to a factory-fresh mock after a reset, which
+latches `AvoidLockout` on that endpoint. Delete the entries per MAC:
 
 ```bash
 nico-admin-cli credential delete-bmc --kind=bmc-root --mac-address <mac>

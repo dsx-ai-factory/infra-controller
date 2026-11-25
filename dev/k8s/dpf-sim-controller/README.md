@@ -54,9 +54,10 @@ simulator walks. The real operator's per-phase logic lives in
 It is not importable (`internal/`), but it is the definitive reference for
 entry/exit criteria of each phase.
 
-> **Pin the dependency** to the doca-platform release whose CRDs match the ones
-> NICo ships in `crates/dpf/crds/*.yaml`, not `public-main`, so the simulator's
-> types and the installed CRDs cannot skew.
+> **The dependency is pinned** to a doca-platform release tag, not
+> `public-main`. The pin is older than the CRDs NICo ships in
+> `crates/dpf/crds/*.yaml`. Refer to
+> [Independence from the real DPF operator](#independence-from-the-real-dpf-operator-and-setupsh).
 
 ## The NICo ⇄ DPF contract this reproduces
 
@@ -178,6 +179,12 @@ nico-api does the following for every DPUDevice it creates:
   under the key `password`.
 - It sets `spec.bmcCredentialSecretName` on the DPUDevice to that name.
 - It deletes these Secrets when the host is deleted, decommissioned, or reset.
+
+A force-delete of a host with DPUs returns `all_done: false` until the DPF
+objects of the host and these Secrets are gone, so it takes more than one call.
+`nico-admin-cli machine force-delete` repeats the call. machine-a-tron sends one
+call and does not read the result, so keep `machineATron.cleanupOnQuit` at its
+default `false`.
 
 The simulator does not reproduce the operator's part:
 
