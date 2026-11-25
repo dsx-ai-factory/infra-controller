@@ -1407,9 +1407,7 @@ without a restart. This refresh is not a safe rotation mechanism.
 If the current rotation target is absent from its authoritative credential
 source, a fresh site leaves the derived Secret unwritten. Once NICo has
 published a value, it retains that last value and logs an error until the
-credential returns. Restore the expected credential. NICo retains the shared
-Secret because coordinated rotation for DPF-managed DPUs is unsupported. Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). A transient
+credential returns. Restore the expected credential. A transient
 source-read failure during background refresh likewise retains the last
 published Secret and retries the read.
 

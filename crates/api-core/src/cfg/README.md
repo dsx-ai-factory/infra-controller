@@ -2203,10 +2203,7 @@ prevents a rolling update from activating local ownership while an older
 replica can still register a DPU that uses the shared credential. On a transient
 rotation-target read failure, a present local v0 permits startup and retry. After
 accepting local v0, NICo retains that last shared value and logs an error if the
-entry disappears. To recover, restore the local value unchanged. NICo does not
-support coordinated DPF-managed DPU credential rotation and retains the shared
-Secret. Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
+entry disappears. To recover, restore the local value unchanged. Other current
 BMC rotation targets follow the same retention rule when absent from their
 authoritative source. During background refresh, a transient source-read
 failure retains the last published Secret and is retried.

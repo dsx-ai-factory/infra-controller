@@ -1662,10 +1662,7 @@ new DPU registration then retries until the credential is accepted and
 transient rotation-target read failure, a present local v0 permits startup and
 retry. After
 NICo accepts local v0, losing the entry retains the last accepted shared Secret
-and logs an error; restore the unchanged value. NICo retains the shared Secret
-because coordinated rotation for DPF-managed DPUs is unsupported.
-Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other missing
+and logs an error. Restore the unchanged value. Other missing
 current BMC rotation targets follow the same retention rule. During background
 refresh, a transient source-read failure retains the last published Secret and
 is retried.

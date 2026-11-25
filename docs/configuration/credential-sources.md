@@ -169,10 +169,7 @@ current or the target cannot be resolved. `local_first` and `backend` mode may
 start while their credential is absent; new DPU registration then retries until
 the credential is accepted and the shared Secret is published.
 After NICo has accepted local v0, losing it retains the last accepted
-shared Secret and logs an error; restore the unchanged local value. NICo does
-not support coordinated DPF-managed DPU credential rotation and retains the
-shared Secret. Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
+shared Secret and logs an error. Restore the unchanged local value. Other current
 BMC rotation targets follow the same retention rule when absent from their
 authoritative source. During background refresh, a transient source-read
 failure retains the last published Secret and is retried.
