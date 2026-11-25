@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,17 +26,17 @@ var _ MappedNullable = &ExpectedMachine{}
 // ExpectedMachine An Expected Machine represents a physical machine that is expected to be discovered at a site, with hardware identifiers and metadata.  Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
 type ExpectedMachine struct {
 	// Unique identifier for the Expected Machine
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the site the Expected Machine belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// MAC address of the Expected Machine's BMC (Baseboard Management Controller)
-	BmcMacAddress *string `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	BmcMacAddress string `json:"bmcMacAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Serial number of the Expected Machine's chassis
-	ChassisSerialNumber *string `json:"chassisSerialNumber,omitempty"`
+	ChassisSerialNumber string `json:"chassisSerialNumber"`
 	// Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
-	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
+	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
 	// Expected host NIC declarations in their configured order
-	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
+	Interfaces []ExpectedMachineInterface `json:"interfaces"`
 	// Stored SKU ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site, including when inventory synchronization imports an entry configured directly in Core.
 	SkuId NullableString `json:"skuId,omitempty"`
 	// SKU information included when `includeRelation=Sku` is specified and the associated SKU belongs to this Expected Machine's Site. For an association to another Site's SKU, REST omits `sku` and returns the stored `skuId`.
@@ -64,25 +66,38 @@ type ExpectedMachine struct {
 	// Host ID within the tray
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Returns the effective setting: true when no value is configured. An explicitly configured false value is returned as false.
-	IsDpfEnabled *bool `json:"isDpfEnabled,omitempty"`
+	IsDpfEnabled bool `json:"isDpfEnabled"`
 	// Whether Site Explorer keeps this BMC's factory-default credentials instead of rotating them when it first stores credentials for the BMC. This is the stored setting, not the current credential state: if it changed to true after rotation, NICo still holds the rotated password. Returns false when no value is stored, as for Expected Machines created before this field existed.
-	RetainBmcCredentials *bool `json:"retainBmcCredentials,omitempty"`
+	RetainBmcCredentials bool `json:"retainBmcCredentials"`
 	// User-defined key-value pairs for organizing and categorizing Expected Machines
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// Optional per-host lifecycle profile
 	HostLifecycleProfile *HostLifecycleProfile `json:"hostLifecycleProfile,omitempty"`
 	// ISO 8601 datetime when the Expected Machine was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// ISO 8601 datetime when the Expected Machine was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _ExpectedMachine ExpectedMachine
 
 // NewExpectedMachine instantiates a new ExpectedMachine object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedMachine() *ExpectedMachine {
+func NewExpectedMachine(id string, siteId string, bmcMacAddress string, chassisSerialNumber string, fallbackDPUSerialNumbers []string, interfaces []ExpectedMachineInterface, isDpfEnabled bool, retainBmcCredentials bool, labels map[string]string, created time.Time, updated time.Time) *ExpectedMachine {
 	this := ExpectedMachine{}
+	this.Id = id
+	this.SiteId = siteId
+	this.BmcMacAddress = bmcMacAddress
+	this.ChassisSerialNumber = chassisSerialNumber
+	this.FallbackDPUSerialNumbers = fallbackDPUSerialNumbers
+	this.Interfaces = interfaces
+	this.IsDpfEnabled = isDpfEnabled
+	this.RetainBmcCredentials = retainBmcCredentials
+	this.Labels = labels
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -94,194 +109,146 @@ func NewExpectedMachineWithDefaults() *ExpectedMachine {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *ExpectedMachine) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *ExpectedMachine) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *ExpectedMachine) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *ExpectedMachine) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetBmcMacAddress returns the BmcMacAddress field value if set, zero value otherwise.
+// GetBmcMacAddress returns the BmcMacAddress field value
 func (o *ExpectedMachine) GetBmcMacAddress() string {
-	if o == nil || IsNil(o.BmcMacAddress) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.BmcMacAddress
+
+	return o.BmcMacAddress
 }
 
-// GetBmcMacAddressOk returns a tuple with the BmcMacAddress field value if set, nil otherwise
+// GetBmcMacAddressOk returns a tuple with the BmcMacAddress field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetBmcMacAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.BmcMacAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.BmcMacAddress, true
+	return &o.BmcMacAddress, true
 }
 
-// HasBmcMacAddress returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasBmcMacAddress() bool {
-	if o != nil && !IsNil(o.BmcMacAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetBmcMacAddress gets a reference to the given string and assigns it to the BmcMacAddress field.
+// SetBmcMacAddress sets field value
 func (o *ExpectedMachine) SetBmcMacAddress(v string) {
-	o.BmcMacAddress = &v
+	o.BmcMacAddress = v
 }
 
-// GetChassisSerialNumber returns the ChassisSerialNumber field value if set, zero value otherwise.
+// GetChassisSerialNumber returns the ChassisSerialNumber field value
 func (o *ExpectedMachine) GetChassisSerialNumber() string {
-	if o == nil || IsNil(o.ChassisSerialNumber) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ChassisSerialNumber
+
+	return o.ChassisSerialNumber
 }
 
-// GetChassisSerialNumberOk returns a tuple with the ChassisSerialNumber field value if set, nil otherwise
+// GetChassisSerialNumberOk returns a tuple with the ChassisSerialNumber field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetChassisSerialNumberOk() (*string, bool) {
-	if o == nil || IsNil(o.ChassisSerialNumber) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ChassisSerialNumber, true
+	return &o.ChassisSerialNumber, true
 }
 
-// HasChassisSerialNumber returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasChassisSerialNumber() bool {
-	if o != nil && !IsNil(o.ChassisSerialNumber) {
-		return true
-	}
-
-	return false
-}
-
-// SetChassisSerialNumber gets a reference to the given string and assigns it to the ChassisSerialNumber field.
+// SetChassisSerialNumber sets field value
 func (o *ExpectedMachine) SetChassisSerialNumber(v string) {
-	o.ChassisSerialNumber = &v
+	o.ChassisSerialNumber = v
 }
 
-// GetFallbackDPUSerialNumbers returns the FallbackDPUSerialNumbers field value if set, zero value otherwise.
+// GetFallbackDPUSerialNumbers returns the FallbackDPUSerialNumbers field value
 func (o *ExpectedMachine) GetFallbackDPUSerialNumbers() []string {
-	if o == nil || IsNil(o.FallbackDPUSerialNumbers) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.FallbackDPUSerialNumbers
 }
 
-// GetFallbackDPUSerialNumbersOk returns a tuple with the FallbackDPUSerialNumbers field value if set, nil otherwise
+// GetFallbackDPUSerialNumbersOk returns a tuple with the FallbackDPUSerialNumbers field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetFallbackDPUSerialNumbersOk() ([]string, bool) {
-	if o == nil || IsNil(o.FallbackDPUSerialNumbers) {
+	if o == nil {
 		return nil, false
 	}
 	return o.FallbackDPUSerialNumbers, true
 }
 
-// HasFallbackDPUSerialNumbers returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasFallbackDPUSerialNumbers() bool {
-	if o != nil && !IsNil(o.FallbackDPUSerialNumbers) {
-		return true
-	}
-
-	return false
-}
-
-// SetFallbackDPUSerialNumbers gets a reference to the given []string and assigns it to the FallbackDPUSerialNumbers field.
+// SetFallbackDPUSerialNumbers sets field value
 func (o *ExpectedMachine) SetFallbackDPUSerialNumbers(v []string) {
 	o.FallbackDPUSerialNumbers = v
 }
 
-// GetInterfaces returns the Interfaces field value if set, zero value otherwise.
+// GetInterfaces returns the Interfaces field value
 func (o *ExpectedMachine) GetInterfaces() []ExpectedMachineInterface {
-	if o == nil || IsNil(o.Interfaces) {
+	if o == nil {
 		var ret []ExpectedMachineInterface
 		return ret
 	}
+
 	return o.Interfaces
 }
 
-// GetInterfacesOk returns a tuple with the Interfaces field value if set, nil otherwise
+// GetInterfacesOk returns a tuple with the Interfaces field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetInterfacesOk() ([]ExpectedMachineInterface, bool) {
-	if o == nil || IsNil(o.Interfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Interfaces, true
 }
 
-// HasInterfaces returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasInterfaces() bool {
-	if o != nil && !IsNil(o.Interfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetInterfaces gets a reference to the given []ExpectedMachineInterface and assigns it to the Interfaces field.
+// SetInterfaces sets field value
 func (o *ExpectedMachine) SetInterfaces(v []ExpectedMachineInterface) {
 	o.Interfaces = v
 }
@@ -866,98 +833,74 @@ func (o *ExpectedMachine) UnsetHostId() {
 	o.HostId.Unset()
 }
 
-// GetIsDpfEnabled returns the IsDpfEnabled field value if set, zero value otherwise.
+// GetIsDpfEnabled returns the IsDpfEnabled field value
 func (o *ExpectedMachine) GetIsDpfEnabled() bool {
-	if o == nil || IsNil(o.IsDpfEnabled) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsDpfEnabled
+
+	return o.IsDpfEnabled
 }
 
-// GetIsDpfEnabledOk returns a tuple with the IsDpfEnabled field value if set, nil otherwise
+// GetIsDpfEnabledOk returns a tuple with the IsDpfEnabled field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetIsDpfEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsDpfEnabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsDpfEnabled, true
+	return &o.IsDpfEnabled, true
 }
 
-// HasIsDpfEnabled returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasIsDpfEnabled() bool {
-	if o != nil && !IsNil(o.IsDpfEnabled) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsDpfEnabled gets a reference to the given bool and assigns it to the IsDpfEnabled field.
+// SetIsDpfEnabled sets field value
 func (o *ExpectedMachine) SetIsDpfEnabled(v bool) {
-	o.IsDpfEnabled = &v
+	o.IsDpfEnabled = v
 }
 
-// GetRetainBmcCredentials returns the RetainBmcCredentials field value if set, zero value otherwise.
+// GetRetainBmcCredentials returns the RetainBmcCredentials field value
 func (o *ExpectedMachine) GetRetainBmcCredentials() bool {
-	if o == nil || IsNil(o.RetainBmcCredentials) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.RetainBmcCredentials
+
+	return o.RetainBmcCredentials
 }
 
-// GetRetainBmcCredentialsOk returns a tuple with the RetainBmcCredentials field value if set, nil otherwise
+// GetRetainBmcCredentialsOk returns a tuple with the RetainBmcCredentials field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetRetainBmcCredentialsOk() (*bool, bool) {
-	if o == nil || IsNil(o.RetainBmcCredentials) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RetainBmcCredentials, true
+	return &o.RetainBmcCredentials, true
 }
 
-// HasRetainBmcCredentials returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasRetainBmcCredentials() bool {
-	if o != nil && !IsNil(o.RetainBmcCredentials) {
-		return true
-	}
-
-	return false
-}
-
-// SetRetainBmcCredentials gets a reference to the given bool and assigns it to the RetainBmcCredentials field.
+// SetRetainBmcCredentials sets field value
 func (o *ExpectedMachine) SetRetainBmcCredentials(v bool) {
-	o.RetainBmcCredentials = &v
+	o.RetainBmcCredentials = v
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *ExpectedMachine) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *ExpectedMachine) SetLabels(v map[string]string) {
 	o.Labels = v
 }
@@ -994,68 +937,52 @@ func (o *ExpectedMachine) SetHostLifecycleProfile(v HostLifecycleProfile) {
 	o.HostLifecycleProfile = &v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *ExpectedMachine) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *ExpectedMachine) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *ExpectedMachine) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachine) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *ExpectedMachine) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *ExpectedMachine) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o ExpectedMachine) MarshalJSON() ([]byte, error) {
@@ -1068,24 +995,12 @@ func (o ExpectedMachine) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedMachine) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.BmcMacAddress) {
-		toSerialize["bmcMacAddress"] = o.BmcMacAddress
-	}
-	if !IsNil(o.ChassisSerialNumber) {
-		toSerialize["chassisSerialNumber"] = o.ChassisSerialNumber
-	}
-	if !IsNil(o.FallbackDPUSerialNumbers) {
-		toSerialize["fallbackDPUSerialNumbers"] = o.FallbackDPUSerialNumbers
-	}
-	if !IsNil(o.Interfaces) {
-		toSerialize["interfaces"] = o.Interfaces
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["bmcMacAddress"] = o.BmcMacAddress
+	toSerialize["chassisSerialNumber"] = o.ChassisSerialNumber
+	toSerialize["fallbackDPUSerialNumbers"] = o.FallbackDPUSerialNumbers
+	toSerialize["interfaces"] = o.Interfaces
 	if o.SkuId.IsSet() {
 		toSerialize["skuId"] = o.SkuId.Get()
 	}
@@ -1128,25 +1043,61 @@ func (o ExpectedMachine) ToMap() (map[string]interface{}, error) {
 	if o.HostId.IsSet() {
 		toSerialize["hostId"] = o.HostId.Get()
 	}
-	if !IsNil(o.IsDpfEnabled) {
-		toSerialize["isDpfEnabled"] = o.IsDpfEnabled
-	}
-	if !IsNil(o.RetainBmcCredentials) {
-		toSerialize["retainBmcCredentials"] = o.RetainBmcCredentials
-	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
+	toSerialize["isDpfEnabled"] = o.IsDpfEnabled
+	toSerialize["retainBmcCredentials"] = o.RetainBmcCredentials
+	toSerialize["labels"] = o.Labels
 	if !IsNil(o.HostLifecycleProfile) {
 		toSerialize["hostLifecycleProfile"] = o.HostLifecycleProfile
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *ExpectedMachine) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"siteId",
+		"bmcMacAddress",
+		"chassisSerialNumber",
+		"fallbackDPUSerialNumbers",
+		"interfaces",
+		"isDpfEnabled",
+		"retainBmcCredentials",
+		"labels",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varExpectedMachine := _ExpectedMachine{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varExpectedMachine)
+
+	if err != nil {
+		return err
+	}
+
+	*o = ExpectedMachine(varExpectedMachine)
+
+	return err
 }
 
 type NullableExpectedMachine struct {

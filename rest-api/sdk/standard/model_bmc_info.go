@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the BMCInfo type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &BMCInfo{}
 // BMCInfo BMC (Baseboard Management Controller) information
 type BMCInfo struct {
 	// BMC type (e.g. BmcTypeHost, BmcTypeDpu)
-	Type *string `json:"type,omitempty"`
+	Type string `json:"type"`
 	// MAC address of the BMC
-	MacAddress *string `json:"macAddress,omitempty"`
+	MacAddress string `json:"macAddress"`
 	// IP address of the BMC
-	IpAddress *string `json:"ipAddress,omitempty"`
+	IpAddress string `json:"ipAddress"`
 }
+
+type _BMCInfo BMCInfo
 
 // NewBMCInfo instantiates a new BMCInfo object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewBMCInfo() *BMCInfo {
+func NewBMCInfo(type_ string, macAddress string, ipAddress string) *BMCInfo {
 	this := BMCInfo{}
+	this.Type = type_
+	this.MacAddress = macAddress
+	this.IpAddress = ipAddress
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewBMCInfoWithDefaults() *BMCInfo {
 	return &this
 }
 
-// GetType returns the Type field value if set, zero value otherwise.
+// GetType returns the Type field value
 func (o *BMCInfo) GetType() string {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Type
+
+	return o.Type
 }
 
-// GetTypeOk returns a tuple with the Type field value if set, nil otherwise
+// GetTypeOk returns a tuple with the Type field value
 // and a boolean to check if the value has been set.
 func (o *BMCInfo) GetTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Type, true
+	return &o.Type, true
 }
 
-// HasType returns a boolean if a field has been set.
-func (o *BMCInfo) HasType() bool {
-	if o != nil && !IsNil(o.Type) {
-		return true
-	}
-
-	return false
-}
-
-// SetType gets a reference to the given string and assigns it to the Type field.
+// SetType sets field value
 func (o *BMCInfo) SetType(v string) {
-	o.Type = &v
+	o.Type = v
 }
 
-// GetMacAddress returns the MacAddress field value if set, zero value otherwise.
+// GetMacAddress returns the MacAddress field value
 func (o *BMCInfo) GetMacAddress() string {
-	if o == nil || IsNil(o.MacAddress) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.MacAddress
+
+	return o.MacAddress
 }
 
-// GetMacAddressOk returns a tuple with the MacAddress field value if set, nil otherwise
+// GetMacAddressOk returns a tuple with the MacAddress field value
 // and a boolean to check if the value has been set.
 func (o *BMCInfo) GetMacAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.MacAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MacAddress, true
+	return &o.MacAddress, true
 }
 
-// HasMacAddress returns a boolean if a field has been set.
-func (o *BMCInfo) HasMacAddress() bool {
-	if o != nil && !IsNil(o.MacAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetMacAddress gets a reference to the given string and assigns it to the MacAddress field.
+// SetMacAddress sets field value
 func (o *BMCInfo) SetMacAddress(v string) {
-	o.MacAddress = &v
+	o.MacAddress = v
 }
 
-// GetIpAddress returns the IpAddress field value if set, zero value otherwise.
+// GetIpAddress returns the IpAddress field value
 func (o *BMCInfo) GetIpAddress() string {
-	if o == nil || IsNil(o.IpAddress) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.IpAddress
+
+	return o.IpAddress
 }
 
-// GetIpAddressOk returns a tuple with the IpAddress field value if set, nil otherwise
+// GetIpAddressOk returns a tuple with the IpAddress field value
 // and a boolean to check if the value has been set.
 func (o *BMCInfo) GetIpAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.IpAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IpAddress, true
+	return &o.IpAddress, true
 }
 
-// HasIpAddress returns a boolean if a field has been set.
-func (o *BMCInfo) HasIpAddress() bool {
-	if o != nil && !IsNil(o.IpAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpAddress gets a reference to the given string and assigns it to the IpAddress field.
+// SetIpAddress sets field value
 func (o *BMCInfo) SetIpAddress(v string) {
-	o.IpAddress = &v
+	o.IpAddress = v
 }
 
 func (o BMCInfo) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o BMCInfo) MarshalJSON() ([]byte, error) {
 
 func (o BMCInfo) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Type) {
-		toSerialize["type"] = o.Type
-	}
-	if !IsNil(o.MacAddress) {
-		toSerialize["macAddress"] = o.MacAddress
-	}
-	if !IsNil(o.IpAddress) {
-		toSerialize["ipAddress"] = o.IpAddress
-	}
+	toSerialize["type"] = o.Type
+	toSerialize["macAddress"] = o.MacAddress
+	toSerialize["ipAddress"] = o.IpAddress
 	return toSerialize, nil
+}
+
+func (o *BMCInfo) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"type",
+		"macAddress",
+		"ipAddress",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varBMCInfo := _BMCInfo{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varBMCInfo)
+
+	if err != nil {
+		return err
+	}
+
+	*o = BMCInfo(varBMCInfo)
+
+	return err
 }
 
 type NullableBMCInfo struct {

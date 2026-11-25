@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,43 +26,55 @@ var _ MappedNullable = &InstanceType{}
 // InstanceType Instance types describe a set of machines that match a certain criteria
 type InstanceType struct {
 	// Unique UUID v4 identifier for the Instance Type
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the Instance Type
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description of the Instance Type
 	Description NullableString `json:"description,omitempty"`
 	// Machine type assigned by Site Controller
 	ControllerMachineType NullableString `json:"controllerMachineType,omitempty"`
 	// ID of the Infrastructure Provider that owns the Instance Type
-	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId string `json:"infrastructureProviderId"`
 	// ID of the Site that owns the Instance Type
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// User-defined key-value labels for the Instance Type
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// List of capabilities that are supported by the Machine's of this Instance Type
-	MachineCapabilities []MachineCapability `json:"machineCapabilities,omitempty"`
+	MachineCapabilities []MachineCapability `json:"machineCapabilities"`
 	// Available only for Providers
 	MachineInstanceTypes []MachineInstanceType `json:"machineInstanceTypes,omitempty"`
 	// summary of machine counts by allocation status
 	AllocationStats *InstanceTypeAllocationStats `json:"allocationStats,omitempty"`
 	// Status of the Instance Type
-	Status *InstanceTypeStatus `json:"status,omitempty"`
+	Status InstanceTypeStatus `json:"status"`
 	// Chronological status history for the Instance Type
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Deprecations active for this resource. Returned only if there are active deprecations.
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 	// Date/time when the InstanceType was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the InstanceType was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _InstanceType InstanceType
 
 // NewInstanceType instantiates a new InstanceType object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstanceType() *InstanceType {
+func NewInstanceType(id string, name string, infrastructureProviderId string, siteId string, labels map[string]string, machineCapabilities []MachineCapability, status InstanceTypeStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *InstanceType {
 	this := InstanceType{}
+	this.Id = id
+	this.Name = name
+	this.InfrastructureProviderId = infrastructureProviderId
+	this.SiteId = siteId
+	this.Labels = labels
+	this.MachineCapabilities = machineCapabilities
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -72,68 +86,52 @@ func NewInstanceTypeWithDefaults() *InstanceType {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *InstanceType) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *InstanceType) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *InstanceType) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *InstanceType) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *InstanceType) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *InstanceType) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -222,130 +220,98 @@ func (o *InstanceType) UnsetControllerMachineType() {
 	o.ControllerMachineType.Unset()
 }
 
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value
 func (o *InstanceType) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId
+
+	return o.InfrastructureProviderId
 }
 
-// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
+// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderId, true
+	return &o.InfrastructureProviderId, true
 }
 
-// HasInfrastructureProviderId returns a boolean if a field has been set.
-func (o *InstanceType) HasInfrastructureProviderId() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId sets field value
 func (o *InstanceType) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId = &v
+	o.InfrastructureProviderId = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *InstanceType) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *InstanceType) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *InstanceType) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *InstanceType) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *InstanceType) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *InstanceType) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetMachineCapabilities returns the MachineCapabilities field value if set, zero value otherwise.
+// GetMachineCapabilities returns the MachineCapabilities field value
 func (o *InstanceType) GetMachineCapabilities() []MachineCapability {
-	if o == nil || IsNil(o.MachineCapabilities) {
+	if o == nil {
 		var ret []MachineCapability
 		return ret
 	}
+
 	return o.MachineCapabilities
 }
 
-// GetMachineCapabilitiesOk returns a tuple with the MachineCapabilities field value if set, nil otherwise
+// GetMachineCapabilitiesOk returns a tuple with the MachineCapabilities field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetMachineCapabilitiesOk() ([]MachineCapability, bool) {
-	if o == nil || IsNil(o.MachineCapabilities) {
+	if o == nil {
 		return nil, false
 	}
 	return o.MachineCapabilities, true
 }
 
-// HasMachineCapabilities returns a boolean if a field has been set.
-func (o *InstanceType) HasMachineCapabilities() bool {
-	if o != nil && !IsNil(o.MachineCapabilities) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachineCapabilities gets a reference to the given []MachineCapability and assigns it to the MachineCapabilities field.
+// SetMachineCapabilities sets field value
 func (o *InstanceType) SetMachineCapabilities(v []MachineCapability) {
 	o.MachineCapabilities = v
 }
@@ -414,66 +380,50 @@ func (o *InstanceType) SetAllocationStats(v InstanceTypeAllocationStats) {
 	o.AllocationStats = &v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *InstanceType) GetStatus() InstanceTypeStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret InstanceTypeStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetStatusOk() (*InstanceTypeStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *InstanceType) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given InstanceTypeStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *InstanceType) SetStatus(v InstanceTypeStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *InstanceType) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *InstanceType) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *InstanceType) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
@@ -510,68 +460,52 @@ func (o *InstanceType) SetDeprecations(v []Deprecation) {
 	o.Deprecations = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *InstanceType) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *InstanceType) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *InstanceType) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *InstanceType) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *InstanceType) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *InstanceType) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *InstanceType) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o InstanceType) MarshalJSON() ([]byte, error) {
@@ -584,52 +518,77 @@ func (o InstanceType) MarshalJSON() ([]byte, error) {
 
 func (o InstanceType) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
 	if o.ControllerMachineType.IsSet() {
 		toSerialize["controllerMachineType"] = o.ControllerMachineType.Get()
 	}
-	if !IsNil(o.InfrastructureProviderId) {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.MachineCapabilities) {
-		toSerialize["machineCapabilities"] = o.MachineCapabilities
-	}
+	toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["labels"] = o.Labels
+	toSerialize["machineCapabilities"] = o.MachineCapabilities
 	if !IsNil(o.MachineInstanceTypes) {
 		toSerialize["machineInstanceTypes"] = o.MachineInstanceTypes
 	}
 	if !IsNil(o.AllocationStats) {
 		toSerialize["allocationStats"] = o.AllocationStats
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *InstanceType) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"infrastructureProviderId",
+		"siteId",
+		"labels",
+		"machineCapabilities",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInstanceType := _InstanceType{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInstanceType)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InstanceType(varInstanceType)
+
+	return err
 }
 
 type NullableInstanceType struct {

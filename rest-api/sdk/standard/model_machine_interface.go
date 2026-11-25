@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,9 +26,9 @@ var _ MappedNullable = &MachineInterface{}
 // MachineInterface Describes an interface attached to a machine
 type MachineInterface struct {
 	// Unique UUID v4 identifier for the Machine Interface
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Machine
-	MachineId *string `json:"machineId,omitempty"`
+	MachineId string `json:"machineId"`
 	// ID of the interface in Site Controller
 	ControllerInterfaceId NullableString `json:"controllerInterfaceId,omitempty"`
 	// ID of the network segment in Site Controller
@@ -38,23 +40,31 @@ type MachineInterface struct {
 	// Hostname of the Machine Interface
 	Hostname NullableString `json:"hostname,omitempty"`
 	// Boolean which indicates if the Machine Interface is primary
-	IsPrimary *bool `json:"isPrimary,omitempty"`
+	IsPrimary bool `json:"isPrimary"`
 	// Mac address of the Machine Interface
 	MacAddress NullableString `json:"macAddress,omitempty"`
 	// Array of IP addresses
-	IpAddresses []string `json:"ipAddresses,omitempty"`
+	IpAddresses []string `json:"ipAddresses"`
 	// Date/time when the Machine Interface was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Machine Interface was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _MachineInterface MachineInterface
 
 // NewMachineInterface instantiates a new MachineInterface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineInterface() *MachineInterface {
+func NewMachineInterface(id string, machineId string, isPrimary bool, ipAddresses []string, created time.Time, updated time.Time) *MachineInterface {
 	this := MachineInterface{}
+	this.Id = id
+	this.MachineId = machineId
+	this.IsPrimary = isPrimary
+	this.IpAddresses = ipAddresses
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -66,68 +76,52 @@ func NewMachineInterfaceWithDefaults() *MachineInterface {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *MachineInterface) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *MachineInterface) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *MachineInterface) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *MachineInterface) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetMachineId returns the MachineId field value if set, zero value otherwise.
+// GetMachineId returns the MachineId field value
 func (o *MachineInterface) GetMachineId() string {
-	if o == nil || IsNil(o.MachineId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.MachineId
+
+	return o.MachineId
 }
 
-// GetMachineIdOk returns a tuple with the MachineId field value if set, nil otherwise
+// GetMachineIdOk returns a tuple with the MachineId field value
 // and a boolean to check if the value has been set.
 func (o *MachineInterface) GetMachineIdOk() (*string, bool) {
-	if o == nil || IsNil(o.MachineId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MachineId, true
+	return &o.MachineId, true
 }
 
-// HasMachineId returns a boolean if a field has been set.
-func (o *MachineInterface) HasMachineId() bool {
-	if o != nil && !IsNil(o.MachineId) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachineId gets a reference to the given string and assigns it to the MachineId field.
+// SetMachineId sets field value
 func (o *MachineInterface) SetMachineId(v string) {
-	o.MachineId = &v
+	o.MachineId = v
 }
 
 // GetControllerInterfaceId returns the ControllerInterfaceId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -345,36 +339,28 @@ func (o *MachineInterface) UnsetHostname() {
 	o.Hostname.Unset()
 }
 
-// GetIsPrimary returns the IsPrimary field value if set, zero value otherwise.
+// GetIsPrimary returns the IsPrimary field value
 func (o *MachineInterface) GetIsPrimary() bool {
-	if o == nil || IsNil(o.IsPrimary) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsPrimary
+
+	return o.IsPrimary
 }
 
-// GetIsPrimaryOk returns a tuple with the IsPrimary field value if set, nil otherwise
+// GetIsPrimaryOk returns a tuple with the IsPrimary field value
 // and a boolean to check if the value has been set.
 func (o *MachineInterface) GetIsPrimaryOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsPrimary) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsPrimary, true
+	return &o.IsPrimary, true
 }
 
-// HasIsPrimary returns a boolean if a field has been set.
-func (o *MachineInterface) HasIsPrimary() bool {
-	if o != nil && !IsNil(o.IsPrimary) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsPrimary gets a reference to the given bool and assigns it to the IsPrimary field.
+// SetIsPrimary sets field value
 func (o *MachineInterface) SetIsPrimary(v bool) {
-	o.IsPrimary = &v
+	o.IsPrimary = v
 }
 
 // GetMacAddress returns the MacAddress field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -420,100 +406,76 @@ func (o *MachineInterface) UnsetMacAddress() {
 	o.MacAddress.Unset()
 }
 
-// GetIpAddresses returns the IpAddresses field value if set, zero value otherwise.
+// GetIpAddresses returns the IpAddresses field value
 func (o *MachineInterface) GetIpAddresses() []string {
-	if o == nil || IsNil(o.IpAddresses) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.IpAddresses
 }
 
-// GetIpAddressesOk returns a tuple with the IpAddresses field value if set, nil otherwise
+// GetIpAddressesOk returns a tuple with the IpAddresses field value
 // and a boolean to check if the value has been set.
 func (o *MachineInterface) GetIpAddressesOk() ([]string, bool) {
-	if o == nil || IsNil(o.IpAddresses) {
+	if o == nil {
 		return nil, false
 	}
 	return o.IpAddresses, true
 }
 
-// HasIpAddresses returns a boolean if a field has been set.
-func (o *MachineInterface) HasIpAddresses() bool {
-	if o != nil && !IsNil(o.IpAddresses) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpAddresses gets a reference to the given []string and assigns it to the IpAddresses field.
+// SetIpAddresses sets field value
 func (o *MachineInterface) SetIpAddresses(v []string) {
 	o.IpAddresses = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *MachineInterface) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *MachineInterface) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *MachineInterface) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *MachineInterface) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *MachineInterface) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *MachineInterface) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *MachineInterface) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *MachineInterface) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o MachineInterface) MarshalJSON() ([]byte, error) {
@@ -526,12 +488,8 @@ func (o MachineInterface) MarshalJSON() ([]byte, error) {
 
 func (o MachineInterface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.MachineId) {
-		toSerialize["machineId"] = o.MachineId
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["machineId"] = o.MachineId
 	if o.ControllerInterfaceId.IsSet() {
 		toSerialize["controllerInterfaceId"] = o.ControllerInterfaceId.Get()
 	}
@@ -547,22 +505,55 @@ func (o MachineInterface) ToMap() (map[string]interface{}, error) {
 	if o.Hostname.IsSet() {
 		toSerialize["hostname"] = o.Hostname.Get()
 	}
-	if !IsNil(o.IsPrimary) {
-		toSerialize["isPrimary"] = o.IsPrimary
-	}
+	toSerialize["isPrimary"] = o.IsPrimary
 	if o.MacAddress.IsSet() {
 		toSerialize["macAddress"] = o.MacAddress.Get()
 	}
-	if !IsNil(o.IpAddresses) {
-		toSerialize["ipAddresses"] = o.IpAddresses
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["ipAddresses"] = o.IpAddresses
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *MachineInterface) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"machineId",
+		"isPrimary",
+		"ipAddresses",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineInterface := _MachineInterface{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineInterface)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineInterface(varMachineInterface)
+
+	return err
 }
 
 type NullableMachineInterface struct {

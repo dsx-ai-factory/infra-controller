@@ -27,8 +27,8 @@ type PowerPolicy struct {
 	// `Available` includes disabled power management. `NotApplicable` applies to managed switches and shelves. `Unavailable` also accompanies section errors.
 	Status string `json:"status"`
 	// Stored policy when `Available`; null otherwise. `PowerManagerDisabled` is a policy, not missing information.
-	State NullableString         `json:"state"`
-	Error NullablePowerReadError `json:"error"`
+	State NullableString         `json:"state,omitempty"`
+	Error NullablePowerReadError `json:"error,omitempty"`
 }
 
 type _PowerPolicy PowerPolicy
@@ -37,11 +37,9 @@ type _PowerPolicy PowerPolicy
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewPowerPolicy(status string, state NullableString, error_ NullablePowerReadError) *PowerPolicy {
+func NewPowerPolicy(status string) *PowerPolicy {
 	this := PowerPolicy{}
 	this.Status = status
-	this.State = state
-	this.Error = error_
 	return &this
 }
 
@@ -77,18 +75,16 @@ func (o *PowerPolicy) SetStatus(v string) {
 	o.Status = v
 }
 
-// GetState returns the State field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetState returns the State field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerPolicy) GetState() string {
-	if o == nil || o.State.Get() == nil {
+	if o == nil || IsNil(o.State.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.State.Get()
 }
 
-// GetStateOk returns a tuple with the State field value
+// GetStateOk returns a tuple with the State field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerPolicy) GetStateOk() (*string, bool) {
@@ -98,23 +94,40 @@ func (o *PowerPolicy) GetStateOk() (*string, bool) {
 	return o.State.Get(), o.State.IsSet()
 }
 
-// SetState sets field value
+// HasState returns a boolean if a field has been set.
+func (o *PowerPolicy) HasState() bool {
+	if o != nil && o.State.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetState gets a reference to the given NullableString and assigns it to the State field.
 func (o *PowerPolicy) SetState(v string) {
 	o.State.Set(&v)
 }
 
-// GetError returns the Error field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// SetStateNil sets the value for State to be an explicit nil
+func (o *PowerPolicy) SetStateNil() {
+	o.State.Set(nil)
+}
+
+// UnsetState ensures that no value is present for State, not even an explicit nil
+func (o *PowerPolicy) UnsetState() {
+	o.State.Unset()
+}
+
+// GetError returns the Error field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerPolicy) GetError() PowerReadError {
-	if o == nil || o.Error.Get() == nil {
+	if o == nil || IsNil(o.Error.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.Error.Get()
 }
 
-// GetErrorOk returns a tuple with the Error field value
+// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerPolicy) GetErrorOk() (*PowerReadError, bool) {
@@ -124,9 +137,28 @@ func (o *PowerPolicy) GetErrorOk() (*PowerReadError, bool) {
 	return o.Error.Get(), o.Error.IsSet()
 }
 
-// SetError sets field value
+// HasError returns a boolean if a field has been set.
+func (o *PowerPolicy) HasError() bool {
+	if o != nil && o.Error.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetError gets a reference to the given NullablePowerReadError and assigns it to the Error field.
 func (o *PowerPolicy) SetError(v PowerReadError) {
 	o.Error.Set(&v)
+}
+
+// SetErrorNil sets the value for Error to be an explicit nil
+func (o *PowerPolicy) SetErrorNil() {
+	o.Error.Set(nil)
+}
+
+// UnsetError ensures that no value is present for Error, not even an explicit nil
+func (o *PowerPolicy) UnsetError() {
+	o.Error.Unset()
 }
 
 func (o PowerPolicy) MarshalJSON() ([]byte, error) {
@@ -140,8 +172,12 @@ func (o PowerPolicy) MarshalJSON() ([]byte, error) {
 func (o PowerPolicy) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["status"] = o.Status
-	toSerialize["state"] = o.State.Get()
-	toSerialize["error"] = o.Error.Get()
+	if o.State.IsSet() {
+		toSerialize["state"] = o.State.Get()
+	}
+	if o.Error.IsSet() {
+		toSerialize["error"] = o.Error.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -151,8 +187,6 @@ func (o *PowerPolicy) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"status",
-		"state",
-		"error",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -163,13 +197,8 @@ func (o *PowerPolicy) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"state": {},
-		"error": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

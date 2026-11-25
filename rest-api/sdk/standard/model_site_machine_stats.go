@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the SiteMachineStats type satisfies the MappedNullable interface at compile time
@@ -23,23 +25,30 @@ var _ MappedNullable = &SiteMachineStats{}
 // SiteMachineStats Machine stats for a Site
 type SiteMachineStats struct {
 	// Total number of Machines at the Site
-	Total *int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// Machine counts grouped by Machine status
-	TotalByStatus *SiteMachineStatsByStatus `json:"totalByStatus,omitempty"`
+	TotalByStatus SiteMachineStatsByStatus `json:"totalByStatus"`
 	// Machine counts grouped by health state
-	TotalByHealth *SiteMachineStatsByHealth `json:"totalByHealth,omitempty"`
+	TotalByHealth SiteMachineStatsByHealth `json:"totalByHealth"`
 	// Machine health counts grouped by Machine status
-	TotalByStatusAndHealth *SiteMachineStatsByStatusAndHealth `json:"totalByStatusAndHealth,omitempty"`
+	TotalByStatusAndHealth SiteMachineStatsByStatusAndHealth `json:"totalByStatusAndHealth"`
 	// Machine counts grouped by allocation and usage state
-	TotalByAllocation *SiteMachineStatsByAllocation `json:"totalByAllocation,omitempty"`
+	TotalByAllocation SiteMachineStatsByAllocation `json:"totalByAllocation"`
 }
+
+type _SiteMachineStats SiteMachineStats
 
 // NewSiteMachineStats instantiates a new SiteMachineStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSiteMachineStats() *SiteMachineStats {
+func NewSiteMachineStats(total int32, totalByStatus SiteMachineStatsByStatus, totalByHealth SiteMachineStatsByHealth, totalByStatusAndHealth SiteMachineStatsByStatusAndHealth, totalByAllocation SiteMachineStatsByAllocation) *SiteMachineStats {
 	this := SiteMachineStats{}
+	this.Total = total
+	this.TotalByStatus = totalByStatus
+	this.TotalByHealth = totalByHealth
+	this.TotalByStatusAndHealth = totalByStatusAndHealth
+	this.TotalByAllocation = totalByAllocation
 	return &this
 }
 
@@ -51,164 +60,124 @@ func NewSiteMachineStatsWithDefaults() *SiteMachineStats {
 	return &this
 }
 
-// GetTotal returns the Total field value if set, zero value otherwise.
+// GetTotal returns the Total field value
 func (o *SiteMachineStats) GetTotal() int32 {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Total
+
+	return o.Total
 }
 
-// GetTotalOk returns a tuple with the Total field value if set, nil otherwise
+// GetTotalOk returns a tuple with the Total field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStats) GetTotalOk() (*int32, bool) {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Total, true
+	return &o.Total, true
 }
 
-// HasTotal returns a boolean if a field has been set.
-func (o *SiteMachineStats) HasTotal() bool {
-	if o != nil && !IsNil(o.Total) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotal gets a reference to the given int32 and assigns it to the Total field.
+// SetTotal sets field value
 func (o *SiteMachineStats) SetTotal(v int32) {
-	o.Total = &v
+	o.Total = v
 }
 
-// GetTotalByStatus returns the TotalByStatus field value if set, zero value otherwise.
+// GetTotalByStatus returns the TotalByStatus field value
 func (o *SiteMachineStats) GetTotalByStatus() SiteMachineStatsByStatus {
-	if o == nil || IsNil(o.TotalByStatus) {
+	if o == nil {
 		var ret SiteMachineStatsByStatus
 		return ret
 	}
-	return *o.TotalByStatus
+
+	return o.TotalByStatus
 }
 
-// GetTotalByStatusOk returns a tuple with the TotalByStatus field value if set, nil otherwise
+// GetTotalByStatusOk returns a tuple with the TotalByStatus field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStats) GetTotalByStatusOk() (*SiteMachineStatsByStatus, bool) {
-	if o == nil || IsNil(o.TotalByStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalByStatus, true
+	return &o.TotalByStatus, true
 }
 
-// HasTotalByStatus returns a boolean if a field has been set.
-func (o *SiteMachineStats) HasTotalByStatus() bool {
-	if o != nil && !IsNil(o.TotalByStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalByStatus gets a reference to the given SiteMachineStatsByStatus and assigns it to the TotalByStatus field.
+// SetTotalByStatus sets field value
 func (o *SiteMachineStats) SetTotalByStatus(v SiteMachineStatsByStatus) {
-	o.TotalByStatus = &v
+	o.TotalByStatus = v
 }
 
-// GetTotalByHealth returns the TotalByHealth field value if set, zero value otherwise.
+// GetTotalByHealth returns the TotalByHealth field value
 func (o *SiteMachineStats) GetTotalByHealth() SiteMachineStatsByHealth {
-	if o == nil || IsNil(o.TotalByHealth) {
+	if o == nil {
 		var ret SiteMachineStatsByHealth
 		return ret
 	}
-	return *o.TotalByHealth
+
+	return o.TotalByHealth
 }
 
-// GetTotalByHealthOk returns a tuple with the TotalByHealth field value if set, nil otherwise
+// GetTotalByHealthOk returns a tuple with the TotalByHealth field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStats) GetTotalByHealthOk() (*SiteMachineStatsByHealth, bool) {
-	if o == nil || IsNil(o.TotalByHealth) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalByHealth, true
+	return &o.TotalByHealth, true
 }
 
-// HasTotalByHealth returns a boolean if a field has been set.
-func (o *SiteMachineStats) HasTotalByHealth() bool {
-	if o != nil && !IsNil(o.TotalByHealth) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalByHealth gets a reference to the given SiteMachineStatsByHealth and assigns it to the TotalByHealth field.
+// SetTotalByHealth sets field value
 func (o *SiteMachineStats) SetTotalByHealth(v SiteMachineStatsByHealth) {
-	o.TotalByHealth = &v
+	o.TotalByHealth = v
 }
 
-// GetTotalByStatusAndHealth returns the TotalByStatusAndHealth field value if set, zero value otherwise.
+// GetTotalByStatusAndHealth returns the TotalByStatusAndHealth field value
 func (o *SiteMachineStats) GetTotalByStatusAndHealth() SiteMachineStatsByStatusAndHealth {
-	if o == nil || IsNil(o.TotalByStatusAndHealth) {
+	if o == nil {
 		var ret SiteMachineStatsByStatusAndHealth
 		return ret
 	}
-	return *o.TotalByStatusAndHealth
+
+	return o.TotalByStatusAndHealth
 }
 
-// GetTotalByStatusAndHealthOk returns a tuple with the TotalByStatusAndHealth field value if set, nil otherwise
+// GetTotalByStatusAndHealthOk returns a tuple with the TotalByStatusAndHealth field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStats) GetTotalByStatusAndHealthOk() (*SiteMachineStatsByStatusAndHealth, bool) {
-	if o == nil || IsNil(o.TotalByStatusAndHealth) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalByStatusAndHealth, true
+	return &o.TotalByStatusAndHealth, true
 }
 
-// HasTotalByStatusAndHealth returns a boolean if a field has been set.
-func (o *SiteMachineStats) HasTotalByStatusAndHealth() bool {
-	if o != nil && !IsNil(o.TotalByStatusAndHealth) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalByStatusAndHealth gets a reference to the given SiteMachineStatsByStatusAndHealth and assigns it to the TotalByStatusAndHealth field.
+// SetTotalByStatusAndHealth sets field value
 func (o *SiteMachineStats) SetTotalByStatusAndHealth(v SiteMachineStatsByStatusAndHealth) {
-	o.TotalByStatusAndHealth = &v
+	o.TotalByStatusAndHealth = v
 }
 
-// GetTotalByAllocation returns the TotalByAllocation field value if set, zero value otherwise.
+// GetTotalByAllocation returns the TotalByAllocation field value
 func (o *SiteMachineStats) GetTotalByAllocation() SiteMachineStatsByAllocation {
-	if o == nil || IsNil(o.TotalByAllocation) {
+	if o == nil {
 		var ret SiteMachineStatsByAllocation
 		return ret
 	}
-	return *o.TotalByAllocation
+
+	return o.TotalByAllocation
 }
 
-// GetTotalByAllocationOk returns a tuple with the TotalByAllocation field value if set, nil otherwise
+// GetTotalByAllocationOk returns a tuple with the TotalByAllocation field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStats) GetTotalByAllocationOk() (*SiteMachineStatsByAllocation, bool) {
-	if o == nil || IsNil(o.TotalByAllocation) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalByAllocation, true
+	return &o.TotalByAllocation, true
 }
 
-// HasTotalByAllocation returns a boolean if a field has been set.
-func (o *SiteMachineStats) HasTotalByAllocation() bool {
-	if o != nil && !IsNil(o.TotalByAllocation) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalByAllocation gets a reference to the given SiteMachineStatsByAllocation and assigns it to the TotalByAllocation field.
+// SetTotalByAllocation sets field value
 func (o *SiteMachineStats) SetTotalByAllocation(v SiteMachineStatsByAllocation) {
-	o.TotalByAllocation = &v
+	o.TotalByAllocation = v
 }
 
 func (o SiteMachineStats) MarshalJSON() ([]byte, error) {
@@ -221,22 +190,52 @@ func (o SiteMachineStats) MarshalJSON() ([]byte, error) {
 
 func (o SiteMachineStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Total) {
-		toSerialize["total"] = o.Total
-	}
-	if !IsNil(o.TotalByStatus) {
-		toSerialize["totalByStatus"] = o.TotalByStatus
-	}
-	if !IsNil(o.TotalByHealth) {
-		toSerialize["totalByHealth"] = o.TotalByHealth
-	}
-	if !IsNil(o.TotalByStatusAndHealth) {
-		toSerialize["totalByStatusAndHealth"] = o.TotalByStatusAndHealth
-	}
-	if !IsNil(o.TotalByAllocation) {
-		toSerialize["totalByAllocation"] = o.TotalByAllocation
-	}
+	toSerialize["total"] = o.Total
+	toSerialize["totalByStatus"] = o.TotalByStatus
+	toSerialize["totalByHealth"] = o.TotalByHealth
+	toSerialize["totalByStatusAndHealth"] = o.TotalByStatusAndHealth
+	toSerialize["totalByAllocation"] = o.TotalByAllocation
 	return toSerialize, nil
+}
+
+func (o *SiteMachineStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"total",
+		"totalByStatus",
+		"totalByHealth",
+		"totalByStatusAndHealth",
+		"totalByAllocation",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSiteMachineStats := _SiteMachineStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSiteMachineStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = SiteMachineStats(varSiteMachineStats)
+
+	return err
 }
 
 type NullableSiteMachineStats struct {

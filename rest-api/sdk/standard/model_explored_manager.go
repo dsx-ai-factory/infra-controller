@@ -25,7 +25,7 @@ var _ MappedNullable = &ExploredManager{}
 // ExploredManager Redfish Manager reported during exploration.
 type ExploredManager struct {
 	Id                 string                      `json:"id"`
-	EthernetInterfaces []ExploredEthernetInterface `json:"ethernetInterfaces,omitempty"`
+	EthernetInterfaces []ExploredEthernetInterface `json:"ethernetInterfaces"`
 }
 
 type _ExploredManager ExploredManager
@@ -34,9 +34,10 @@ type _ExploredManager ExploredManager
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExploredManager(id string) *ExploredManager {
+func NewExploredManager(id string, ethernetInterfaces []ExploredEthernetInterface) *ExploredManager {
 	this := ExploredManager{}
 	this.Id = id
+	this.EthernetInterfaces = ethernetInterfaces
 	return &this
 }
 
@@ -72,34 +73,26 @@ func (o *ExploredManager) SetId(v string) {
 	o.Id = v
 }
 
-// GetEthernetInterfaces returns the EthernetInterfaces field value if set, zero value otherwise.
+// GetEthernetInterfaces returns the EthernetInterfaces field value
 func (o *ExploredManager) GetEthernetInterfaces() []ExploredEthernetInterface {
-	if o == nil || IsNil(o.EthernetInterfaces) {
+	if o == nil {
 		var ret []ExploredEthernetInterface
 		return ret
 	}
+
 	return o.EthernetInterfaces
 }
 
-// GetEthernetInterfacesOk returns a tuple with the EthernetInterfaces field value if set, nil otherwise
+// GetEthernetInterfacesOk returns a tuple with the EthernetInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *ExploredManager) GetEthernetInterfacesOk() ([]ExploredEthernetInterface, bool) {
-	if o == nil || IsNil(o.EthernetInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.EthernetInterfaces, true
 }
 
-// HasEthernetInterfaces returns a boolean if a field has been set.
-func (o *ExploredManager) HasEthernetInterfaces() bool {
-	if o != nil && !IsNil(o.EthernetInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetEthernetInterfaces gets a reference to the given []ExploredEthernetInterface and assigns it to the EthernetInterfaces field.
+// SetEthernetInterfaces sets field value
 func (o *ExploredManager) SetEthernetInterfaces(v []ExploredEthernetInterface) {
 	o.EthernetInterfaces = v
 }
@@ -115,9 +108,7 @@ func (o ExploredManager) MarshalJSON() ([]byte, error) {
 func (o ExploredManager) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
-	if !IsNil(o.EthernetInterfaces) {
-		toSerialize["ethernetInterfaces"] = o.EthernetInterfaces
-	}
+	toSerialize["ethernetInterfaces"] = o.EthernetInterfaces
 	return toSerialize, nil
 }
 
@@ -127,6 +118,7 @@ func (o *ExploredManager) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
+		"ethernetInterfaces",
 	}
 
 	allProperties := make(map[string]interface{})

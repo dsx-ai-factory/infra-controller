@@ -25,9 +25,9 @@ var _ MappedNullable = &SwitchNvosPortInfo{}
 // SwitchNvosPortInfo Observed NVOS management port.
 type SwitchNvosPortInfo struct {
 	// MAC address of the NVOS management port, or null when unavailable.
-	Mac NullableString `json:"mac"`
+	Mac NullableString `json:"mac,omitempty"`
 	// TCP service port for NVOS, or null when unavailable.
-	ServicePort NullableInt64 `json:"servicePort"`
+	ServicePort NullableInt64 `json:"servicePort,omitempty"`
 	// Observed IP addresses. Empty when the port has no addresses.
 	Addresses []IPAddress `json:"addresses"`
 	// Whether this is the operator-declared primary (eth0) NVOS port.
@@ -40,10 +40,8 @@ type _SwitchNvosPortInfo SwitchNvosPortInfo
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSwitchNvosPortInfo(mac NullableString, servicePort NullableInt64, addresses []IPAddress, isPrimary bool) *SwitchNvosPortInfo {
+func NewSwitchNvosPortInfo(addresses []IPAddress, isPrimary bool) *SwitchNvosPortInfo {
 	this := SwitchNvosPortInfo{}
-	this.Mac = mac
-	this.ServicePort = servicePort
 	this.Addresses = addresses
 	this.IsPrimary = isPrimary
 	return &this
@@ -57,18 +55,16 @@ func NewSwitchNvosPortInfoWithDefaults() *SwitchNvosPortInfo {
 	return &this
 }
 
-// GetMac returns the Mac field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetMac returns the Mac field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SwitchNvosPortInfo) GetMac() string {
-	if o == nil || o.Mac.Get() == nil {
+	if o == nil || IsNil(o.Mac.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Mac.Get()
 }
 
-// GetMacOk returns a tuple with the Mac field value
+// GetMacOk returns a tuple with the Mac field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SwitchNvosPortInfo) GetMacOk() (*string, bool) {
@@ -78,23 +74,40 @@ func (o *SwitchNvosPortInfo) GetMacOk() (*string, bool) {
 	return o.Mac.Get(), o.Mac.IsSet()
 }
 
-// SetMac sets field value
+// HasMac returns a boolean if a field has been set.
+func (o *SwitchNvosPortInfo) HasMac() bool {
+	if o != nil && o.Mac.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetMac gets a reference to the given NullableString and assigns it to the Mac field.
 func (o *SwitchNvosPortInfo) SetMac(v string) {
 	o.Mac.Set(&v)
 }
 
-// GetServicePort returns the ServicePort field value
-// If the value is explicit nil, the zero value for int64 will be returned
+// SetMacNil sets the value for Mac to be an explicit nil
+func (o *SwitchNvosPortInfo) SetMacNil() {
+	o.Mac.Set(nil)
+}
+
+// UnsetMac ensures that no value is present for Mac, not even an explicit nil
+func (o *SwitchNvosPortInfo) UnsetMac() {
+	o.Mac.Unset()
+}
+
+// GetServicePort returns the ServicePort field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SwitchNvosPortInfo) GetServicePort() int64 {
-	if o == nil || o.ServicePort.Get() == nil {
+	if o == nil || IsNil(o.ServicePort.Get()) {
 		var ret int64
 		return ret
 	}
-
 	return *o.ServicePort.Get()
 }
 
-// GetServicePortOk returns a tuple with the ServicePort field value
+// GetServicePortOk returns a tuple with the ServicePort field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SwitchNvosPortInfo) GetServicePortOk() (*int64, bool) {
@@ -104,9 +117,28 @@ func (o *SwitchNvosPortInfo) GetServicePortOk() (*int64, bool) {
 	return o.ServicePort.Get(), o.ServicePort.IsSet()
 }
 
-// SetServicePort sets field value
+// HasServicePort returns a boolean if a field has been set.
+func (o *SwitchNvosPortInfo) HasServicePort() bool {
+	if o != nil && o.ServicePort.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetServicePort gets a reference to the given NullableInt64 and assigns it to the ServicePort field.
 func (o *SwitchNvosPortInfo) SetServicePort(v int64) {
 	o.ServicePort.Set(&v)
+}
+
+// SetServicePortNil sets the value for ServicePort to be an explicit nil
+func (o *SwitchNvosPortInfo) SetServicePortNil() {
+	o.ServicePort.Set(nil)
+}
+
+// UnsetServicePort ensures that no value is present for ServicePort, not even an explicit nil
+func (o *SwitchNvosPortInfo) UnsetServicePort() {
+	o.ServicePort.Unset()
 }
 
 // GetAddresses returns the Addresses field value
@@ -167,8 +199,12 @@ func (o SwitchNvosPortInfo) MarshalJSON() ([]byte, error) {
 
 func (o SwitchNvosPortInfo) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["mac"] = o.Mac.Get()
-	toSerialize["servicePort"] = o.ServicePort.Get()
+	if o.Mac.IsSet() {
+		toSerialize["mac"] = o.Mac.Get()
+	}
+	if o.ServicePort.IsSet() {
+		toSerialize["servicePort"] = o.ServicePort.Get()
+	}
 	toSerialize["addresses"] = o.Addresses
 	toSerialize["isPrimary"] = o.IsPrimary
 	return toSerialize, nil
@@ -179,8 +215,6 @@ func (o *SwitchNvosPortInfo) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"mac",
-		"servicePort",
 		"addresses",
 		"isPrimary",
 	}
@@ -193,13 +227,8 @@ func (o *SwitchNvosPortInfo) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"mac":         {},
-		"servicePort": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

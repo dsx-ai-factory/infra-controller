@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantSummary type satisfies the MappedNullable interface at compile time
@@ -23,21 +25,25 @@ var _ MappedNullable = &TenantSummary{}
 // TenantSummary Summarizes a Tenant
 type TenantSummary struct {
 	// Name of the org this tenant belongs to
-	Org *string `json:"org,omitempty"`
+	Org string `json:"org"`
 	// Display name of the org the Tenant belongs to
 	OrgDisplayName NullableString `json:"orgDisplayName,omitempty"`
 	// Deprecated compatibility object. The targetedInstanceCreation property is omitted; use Tenant Account siteCapabilities for the authoritative configuration.
-	Capabilities *TenantCapabilities `json:"capabilities,omitempty"`
+	Capabilities TenantCapabilities `json:"capabilities"`
 	// Deprecation notices for Tenant fields
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 }
+
+type _TenantSummary TenantSummary
 
 // NewTenantSummary instantiates a new TenantSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantSummary() *TenantSummary {
+func NewTenantSummary(org string, capabilities TenantCapabilities) *TenantSummary {
 	this := TenantSummary{}
+	this.Org = org
+	this.Capabilities = capabilities
 	return &this
 }
 
@@ -49,36 +55,28 @@ func NewTenantSummaryWithDefaults() *TenantSummary {
 	return &this
 }
 
-// GetOrg returns the Org field value if set, zero value otherwise.
+// GetOrg returns the Org field value
 func (o *TenantSummary) GetOrg() string {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Org
+
+	return o.Org
 }
 
-// GetOrgOk returns a tuple with the Org field value if set, nil otherwise
+// GetOrgOk returns a tuple with the Org field value
 // and a boolean to check if the value has been set.
 func (o *TenantSummary) GetOrgOk() (*string, bool) {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Org, true
+	return &o.Org, true
 }
 
-// HasOrg returns a boolean if a field has been set.
-func (o *TenantSummary) HasOrg() bool {
-	if o != nil && !IsNil(o.Org) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrg gets a reference to the given string and assigns it to the Org field.
+// SetOrg sets field value
 func (o *TenantSummary) SetOrg(v string) {
-	o.Org = &v
+	o.Org = v
 }
 
 // GetOrgDisplayName returns the OrgDisplayName field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -124,36 +122,28 @@ func (o *TenantSummary) UnsetOrgDisplayName() {
 	o.OrgDisplayName.Unset()
 }
 
-// GetCapabilities returns the Capabilities field value if set, zero value otherwise.
+// GetCapabilities returns the Capabilities field value
 func (o *TenantSummary) GetCapabilities() TenantCapabilities {
-	if o == nil || IsNil(o.Capabilities) {
+	if o == nil {
 		var ret TenantCapabilities
 		return ret
 	}
-	return *o.Capabilities
+
+	return o.Capabilities
 }
 
-// GetCapabilitiesOk returns a tuple with the Capabilities field value if set, nil otherwise
+// GetCapabilitiesOk returns a tuple with the Capabilities field value
 // and a boolean to check if the value has been set.
 func (o *TenantSummary) GetCapabilitiesOk() (*TenantCapabilities, bool) {
-	if o == nil || IsNil(o.Capabilities) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Capabilities, true
+	return &o.Capabilities, true
 }
 
-// HasCapabilities returns a boolean if a field has been set.
-func (o *TenantSummary) HasCapabilities() bool {
-	if o != nil && !IsNil(o.Capabilities) {
-		return true
-	}
-
-	return false
-}
-
-// SetCapabilities gets a reference to the given TenantCapabilities and assigns it to the Capabilities field.
+// SetCapabilities sets field value
 func (o *TenantSummary) SetCapabilities(v TenantCapabilities) {
-	o.Capabilities = &v
+	o.Capabilities = v
 }
 
 // GetDeprecations returns the Deprecations field value if set, zero value otherwise.
@@ -198,19 +188,52 @@ func (o TenantSummary) MarshalJSON() ([]byte, error) {
 
 func (o TenantSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Org) {
-		toSerialize["org"] = o.Org
-	}
+	toSerialize["org"] = o.Org
 	if o.OrgDisplayName.IsSet() {
 		toSerialize["orgDisplayName"] = o.OrgDisplayName.Get()
 	}
-	if !IsNil(o.Capabilities) {
-		toSerialize["capabilities"] = o.Capabilities
-	}
+	toSerialize["capabilities"] = o.Capabilities
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
 	return toSerialize, nil
+}
+
+func (o *TenantSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"org",
+		"capabilities",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantSummary := _TenantSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantSummary(varTenantSummary)
+
+	return err
 }
 
 type NullableTenantSummary struct {

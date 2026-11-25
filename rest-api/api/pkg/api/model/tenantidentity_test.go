@@ -225,70 +225,90 @@ func TestAPITenantIdentityConfigCreateOrUpdateRequest_ToProto(t *testing.T) {
 	})
 }
 
-// TestAPITenantIdentityConfig_FromResponseProto verifies the tenant identity config response correctly mirrors the gRPC reply including signing-key rotation overlap state.
+// TestAPITenantIdentityConfig_FromResponseProto verifies the tenant identity config response mirrors the gRPC reply including signing-key rotation overlap state.
 func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
-	t.Run("full proto, single signing key", func(t *testing.T) {
-		maxUint32 := uint32(math.MaxUint32)
-		created := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
-		updated := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
-		subjectPrefix := "spiffe://carbide.nvidia.com"
-		resp := &APITenantIdentityConfig{}
-		resp.FromResponseProto(&corev1.TenantIdentityConfigResponse{
-			OrganizationId: "acme-corp",
-			Config: &corev1.TenantIdentityConfig{
-				Enabled: true, Issuer: "https://carbide.example.com/iss",
-				DefaultAudience: "openbao", AllowedAudiences: []string{"openbao"},
-				TokenTtlSec: maxUint32, SubjectPrefix: &subjectPrefix,
-			},
-			SigningKeys: []*corev1.TenantIdentitySigningKey{
-				{Kid: "key-123", Alg: "ES256", CurrentSigner: true},
-			},
-			CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(updated),
-		})
-		assert.Equal(t, "acme-corp", resp.Org)
-		assert.True(t, resp.Enabled)
-		assert.Equal(t, "https://carbide.example.com/iss", resp.Issuer)
-		assert.Equal(t, "openbao", resp.DefaultAudience)
-		assert.Equal(t, []string{"openbao"}, resp.AllowedAudiences)
-		assert.Equal(t, maxUint32, resp.TokenTtlSeconds)
-		assert.Equal(t, "spiffe://carbide.nvidia.com", resp.SubjectPrefix)
-		require.Len(t, resp.SigningKeys, 1)
-		assert.Equal(t, "key-123", resp.SigningKeys[0].Kid)
-		assert.Equal(t, "ES256", resp.SigningKeys[0].Alg)
-		assert.True(t, resp.SigningKeys[0].CurrentSigner)
-		assert.Nil(t, resp.SigningKeys[0].ExpireAt)
-		assert.Equal(t, created, resp.Created)
-		assert.Equal(t, updated, resp.Updated)
-	})
+	maxUint32 := uint32(math.MaxUint32)
+	created := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	updated := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+	expire := time.Date(2026, 5, 12, 9, 30, 0, 0, time.UTC)
+	subjectPrefix := "spiffe://carbide.nvidia.com"
 
-	t.Run("rotation overlap: two signing keys, inactive one carries expireAt", func(t *testing.T) {
-		expire := time.Date(2026, 5, 12, 9, 30, 0, 0, time.UTC)
-		resp := &APITenantIdentityConfig{}
-		resp.FromResponseProto(&corev1.TenantIdentityConfigResponse{
-			OrganizationId: "acme-corp",
-			Config:         &corev1.TenantIdentityConfig{Enabled: true},
-			SigningKeys: []*corev1.TenantIdentitySigningKey{
-				{Kid: "kid-old", Alg: "ES256", CurrentSigner: false, ExpireAt: timestamppb.New(expire)},
-				{Kid: "kid-new", Alg: "ES256", CurrentSigner: true},
+	tests := []struct {
+		name  string
+		proto *corev1.TenantIdentityConfigResponse
+		check func(t *testing.T, resp *APITenantIdentityConfig)
+	}{
+		{
+			name: "full proto, single signing key",
+			proto: &corev1.TenantIdentityConfigResponse{
+				OrganizationId: "acme-corp",
+				Config: &corev1.TenantIdentityConfig{
+					Enabled: true, Issuer: "https://carbide.example.com/iss",
+					DefaultAudience: "openbao", AllowedAudiences: []string{"openbao"},
+					TokenTtlSec: maxUint32, SubjectPrefix: &subjectPrefix,
+				},
+				SigningKeys: []*corev1.TenantIdentitySigningKey{
+					{Kid: "key-123", Alg: "ES256", CurrentSigner: true},
+				},
+				CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(updated),
 			},
-		})
-		require.Len(t, resp.SigningKeys, 2)
-		assert.Equal(t, "kid-old", resp.SigningKeys[0].Kid)
-		assert.False(t, resp.SigningKeys[0].CurrentSigner)
-		require.NotNil(t, resp.SigningKeys[0].ExpireAt)
-		assert.Equal(t, expire, *resp.SigningKeys[0].ExpireAt)
-		assert.Equal(t, "kid-new", resp.SigningKeys[1].Kid)
-		assert.True(t, resp.SigningKeys[1].CurrentSigner)
-		assert.Nil(t, resp.SigningKeys[1].ExpireAt)
-	})
+			check: func(t *testing.T, resp *APITenantIdentityConfig) {
+				assert.Equal(t, "acme-corp", resp.Org)
+				assert.True(t, resp.Enabled)
+				assert.Equal(t, "https://carbide.example.com/iss", resp.Issuer)
+				assert.Equal(t, "openbao", resp.DefaultAudience)
+				assert.Equal(t, []string{"openbao"}, resp.AllowedAudiences)
+				assert.Equal(t, maxUint32, resp.TokenTtlSeconds)
+				assert.Equal(t, "spiffe://carbide.nvidia.com", resp.SubjectPrefix)
+				require.Len(t, resp.SigningKeys, 1)
+				assert.Equal(t, "key-123", resp.SigningKeys[0].Kid)
+				assert.Equal(t, "ES256", resp.SigningKeys[0].Alg)
+				assert.True(t, resp.SigningKeys[0].CurrentSigner)
+				assert.Nil(t, resp.SigningKeys[0].ExpireAt)
+				assert.Equal(t, created, resp.Created)
+				assert.Equal(t, updated, resp.Updated)
+			},
+		},
+		{
+			name: "rotation overlap: two signing keys, inactive one carries expireAt",
+			proto: &corev1.TenantIdentityConfigResponse{
+				OrganizationId: "acme-corp",
+				Config:         &corev1.TenantIdentityConfig{Enabled: true},
+				SigningKeys: []*corev1.TenantIdentitySigningKey{
+					{Kid: "kid-old", Alg: "ES256", CurrentSigner: false, ExpireAt: timestamppb.New(expire)},
+					{Kid: "kid-new", Alg: "ES256", CurrentSigner: true},
+				},
+			},
+			check: func(t *testing.T, resp *APITenantIdentityConfig) {
+				require.Len(t, resp.SigningKeys, 2)
+				assert.Equal(t, "kid-old", resp.SigningKeys[0].Kid)
+				assert.False(t, resp.SigningKeys[0].CurrentSigner)
+				require.NotNil(t, resp.SigningKeys[0].ExpireAt)
+				assert.Equal(t, expire, *resp.SigningKeys[0].ExpireAt)
+				assert.Equal(t, "kid-new", resp.SigningKeys[1].Kid)
+				assert.True(t, resp.SigningKeys[1].CurrentSigner)
+				assert.Nil(t, resp.SigningKeys[1].ExpireAt)
+			},
+		},
+		{
+			name:  "minimal proto initializes empty slices",
+			proto: &corev1.TenantIdentityConfigResponse{OrganizationId: "acme-corp"},
+			check: func(t *testing.T, resp *APITenantIdentityConfig) {
+				assert.Equal(t, "acme-corp", resp.Org)
+				assert.Equal(t, []string{}, resp.AllowedAudiences)
+				assert.Equal(t, []APITenantIdentitySigningKey{}, resp.SigningKeys)
+				assert.False(t, resp.Enabled)
+			},
+		},
+	}
 
-	t.Run("minimal proto (no Config, no signing keys)", func(t *testing.T) {
-		resp := &APITenantIdentityConfig{}
-		resp.FromResponseProto(&corev1.TenantIdentityConfigResponse{OrganizationId: "acme-corp"})
-		assert.Equal(t, "acme-corp", resp.Org)
-		assert.Empty(t, resp.SigningKeys)
-		assert.False(t, resp.Enabled)
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &APITenantIdentityConfig{}
+			resp.FromResponseProto(tt.proto)
+			tt.check(t, resp)
+		})
+	}
 }
 
 // TestAPITenantIdentityReencryptSecretsRequest_Validate verifies an optional scope uses the Core tenant organization identifier format without accepting blank scopes.
@@ -570,21 +590,48 @@ func TestAPITenantIdentityTokenDelegation_FromResponseProto(t *testing.T) {
 
 // TestAPIOpenIDConfiguration_FromResponseProto verifies the OpenID discovery response mirrors the gRPC reply, including jwks_uri and the always-empty id_token_signing_alg_values_supported.
 func TestAPIOpenIDConfiguration_FromResponseProto(t *testing.T) {
-	resp := &APIOpenIDConfiguration{}
-	resp.FromResponseProto(&corev1.OpenIdConfiguration{
-		Issuer:                           "https://carbide.example.com/iss",
-		JwksUri:                          "https://carbide.example.com/iss/.well-known/jwks.json",
-		ResponseTypesSupported:           []string{"token"},
-		SubjectTypesSupported:            []string{"public"},
-		IdTokenSigningAlgValuesSupported: []string{},
-		SpiffeJwksUri:                    "https://carbide.example.com/iss/.well-known/spiffe/jwks.json",
-	})
-	assert.Equal(t, "https://carbide.example.com/iss", resp.Issuer)
-	assert.Equal(t, "https://carbide.example.com/iss/.well-known/jwks.json", resp.JwksURI)
-	assert.Equal(t, []string{"token"}, resp.ResponseTypesSupported)
-	assert.Equal(t, []string{"public"}, resp.SubjectTypesSupported)
-	assert.Empty(t, resp.IDTokenSigningAlgValuesSupported)
-	assert.Equal(t, "https://carbide.example.com/iss/.well-known/spiffe/jwks.json", resp.SpiffeJwksURI)
+	tests := []struct {
+		name  string
+		proto *corev1.OpenIdConfiguration
+		want  APIOpenIDConfiguration
+	}{
+		{
+			name: "populated discovery response",
+			proto: &corev1.OpenIdConfiguration{
+				Issuer:                           "https://carbide.example.com/iss",
+				JwksUri:                          "https://carbide.example.com/iss/.well-known/jwks.json",
+				ResponseTypesSupported:           []string{"token"},
+				SubjectTypesSupported:            []string{"public"},
+				IdTokenSigningAlgValuesSupported: []string{},
+				SpiffeJwksUri:                    "https://carbide.example.com/iss/.well-known/spiffe/jwks.json",
+			},
+			want: APIOpenIDConfiguration{
+				Issuer:                           "https://carbide.example.com/iss",
+				JwksURI:                          "https://carbide.example.com/iss/.well-known/jwks.json",
+				ResponseTypesSupported:           []string{"token"},
+				SubjectTypesSupported:            []string{"public"},
+				IDTokenSigningAlgValuesSupported: []string{},
+				SpiffeJwksURI:                    "https://carbide.example.com/iss/.well-known/spiffe/jwks.json",
+			},
+		},
+		{
+			name:  "nil proto slices initialize to empty arrays",
+			proto: &corev1.OpenIdConfiguration{},
+			want: APIOpenIDConfiguration{
+				ResponseTypesSupported:           []string{},
+				SubjectTypesSupported:            []string{},
+				IDTokenSigningAlgValuesSupported: []string{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &APIOpenIDConfiguration{}
+			resp.FromResponseProto(tt.proto)
+			assert.Equal(t, tt.want, *resp)
+		})
+	}
 }
 
 func TestAPITenantIdentityConfig_IsCreated(t *testing.T) {

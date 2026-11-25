@@ -27,11 +27,11 @@ type RackComponentPowerOperations struct {
 	// Tracked Core actions, `Active` before `Pending`; empty when `actionsError` is set.
 	Actions []PowerAction `json:"actions"`
 	// Failure to read this member's Core actions, not a failed action. Null on success, including an empty list; missing service data reports `Unsupported`.
-	ActionsError NullablePowerReadError `json:"actionsError"`
+	ActionsError NullablePowerReadError `json:"actionsError,omitempty"`
 	// References to root tasks selecting or affecting this member, in root task order. Unsupported component types have an empty list and `Unsupported` `tasksError`. A task selecting both supported and unsupported members may still list the unsupported selections in root `operations.tasks[].targets` when that task's `targetsError` is null.
 	Tasks []PowerTaskReference `json:"tasks"`
 	// Failure to read references, not a failed task. Supported members mirror a failed rack task read. Null on successful empty references; missing service data reports `Unsupported`.
-	TasksError NullablePowerReadError `json:"tasksError"`
+	TasksError NullablePowerReadError `json:"tasksError,omitempty"`
 }
 
 type _RackComponentPowerOperations RackComponentPowerOperations
@@ -40,12 +40,10 @@ type _RackComponentPowerOperations RackComponentPowerOperations
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackComponentPowerOperations(actions []PowerAction, actionsError NullablePowerReadError, tasks []PowerTaskReference, tasksError NullablePowerReadError) *RackComponentPowerOperations {
+func NewRackComponentPowerOperations(actions []PowerAction, tasks []PowerTaskReference) *RackComponentPowerOperations {
 	this := RackComponentPowerOperations{}
 	this.Actions = actions
-	this.ActionsError = actionsError
 	this.Tasks = tasks
-	this.TasksError = tasksError
 	return &this
 }
 
@@ -81,18 +79,16 @@ func (o *RackComponentPowerOperations) SetActions(v []PowerAction) {
 	o.Actions = v
 }
 
-// GetActionsError returns the ActionsError field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// GetActionsError returns the ActionsError field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RackComponentPowerOperations) GetActionsError() PowerReadError {
-	if o == nil || o.ActionsError.Get() == nil {
+	if o == nil || IsNil(o.ActionsError.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.ActionsError.Get()
 }
 
-// GetActionsErrorOk returns a tuple with the ActionsError field value
+// GetActionsErrorOk returns a tuple with the ActionsError field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *RackComponentPowerOperations) GetActionsErrorOk() (*PowerReadError, bool) {
@@ -102,9 +98,28 @@ func (o *RackComponentPowerOperations) GetActionsErrorOk() (*PowerReadError, boo
 	return o.ActionsError.Get(), o.ActionsError.IsSet()
 }
 
-// SetActionsError sets field value
+// HasActionsError returns a boolean if a field has been set.
+func (o *RackComponentPowerOperations) HasActionsError() bool {
+	if o != nil && o.ActionsError.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetActionsError gets a reference to the given NullablePowerReadError and assigns it to the ActionsError field.
 func (o *RackComponentPowerOperations) SetActionsError(v PowerReadError) {
 	o.ActionsError.Set(&v)
+}
+
+// SetActionsErrorNil sets the value for ActionsError to be an explicit nil
+func (o *RackComponentPowerOperations) SetActionsErrorNil() {
+	o.ActionsError.Set(nil)
+}
+
+// UnsetActionsError ensures that no value is present for ActionsError, not even an explicit nil
+func (o *RackComponentPowerOperations) UnsetActionsError() {
+	o.ActionsError.Unset()
 }
 
 // GetTasks returns the Tasks field value
@@ -131,18 +146,16 @@ func (o *RackComponentPowerOperations) SetTasks(v []PowerTaskReference) {
 	o.Tasks = v
 }
 
-// GetTasksError returns the TasksError field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// GetTasksError returns the TasksError field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RackComponentPowerOperations) GetTasksError() PowerReadError {
-	if o == nil || o.TasksError.Get() == nil {
+	if o == nil || IsNil(o.TasksError.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.TasksError.Get()
 }
 
-// GetTasksErrorOk returns a tuple with the TasksError field value
+// GetTasksErrorOk returns a tuple with the TasksError field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *RackComponentPowerOperations) GetTasksErrorOk() (*PowerReadError, bool) {
@@ -152,9 +165,28 @@ func (o *RackComponentPowerOperations) GetTasksErrorOk() (*PowerReadError, bool)
 	return o.TasksError.Get(), o.TasksError.IsSet()
 }
 
-// SetTasksError sets field value
+// HasTasksError returns a boolean if a field has been set.
+func (o *RackComponentPowerOperations) HasTasksError() bool {
+	if o != nil && o.TasksError.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTasksError gets a reference to the given NullablePowerReadError and assigns it to the TasksError field.
 func (o *RackComponentPowerOperations) SetTasksError(v PowerReadError) {
 	o.TasksError.Set(&v)
+}
+
+// SetTasksErrorNil sets the value for TasksError to be an explicit nil
+func (o *RackComponentPowerOperations) SetTasksErrorNil() {
+	o.TasksError.Set(nil)
+}
+
+// UnsetTasksError ensures that no value is present for TasksError, not even an explicit nil
+func (o *RackComponentPowerOperations) UnsetTasksError() {
+	o.TasksError.Unset()
 }
 
 func (o RackComponentPowerOperations) MarshalJSON() ([]byte, error) {
@@ -168,9 +200,13 @@ func (o RackComponentPowerOperations) MarshalJSON() ([]byte, error) {
 func (o RackComponentPowerOperations) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["actions"] = o.Actions
-	toSerialize["actionsError"] = o.ActionsError.Get()
+	if o.ActionsError.IsSet() {
+		toSerialize["actionsError"] = o.ActionsError.Get()
+	}
 	toSerialize["tasks"] = o.Tasks
-	toSerialize["tasksError"] = o.TasksError.Get()
+	if o.TasksError.IsSet() {
+		toSerialize["tasksError"] = o.TasksError.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -180,9 +216,7 @@ func (o *RackComponentPowerOperations) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"actions",
-		"actionsError",
 		"tasks",
-		"tasksError",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -193,13 +227,8 @@ func (o *RackComponentPowerOperations) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"actionsError": {},
-		"tasksError":   {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

@@ -32,7 +32,7 @@ type MachineValidationRun struct {
 	// Time the validation run started.
 	StartTime time.Time `json:"startTime"`
 	// Time the validation run completed, or null while it is active.
-	EndTime NullableTime `json:"endTime"`
+	EndTime NullableTime `json:"endTime,omitempty"`
 	// Name of the validation run.
 	Name string `json:"name"`
 	// Context in which the validation run was created.
@@ -48,12 +48,11 @@ type _MachineValidationRun MachineValidationRun
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineValidationRun(validationID string, machineID string, startTime time.Time, endTime NullableTime, name string, context string, status MachineValidationStatus, durationToCompleteSecs int64) *MachineValidationRun {
+func NewMachineValidationRun(validationID string, machineID string, startTime time.Time, name string, context string, status MachineValidationStatus, durationToCompleteSecs int64) *MachineValidationRun {
 	this := MachineValidationRun{}
 	this.ValidationID = validationID
 	this.MachineID = machineID
 	this.StartTime = startTime
-	this.EndTime = endTime
 	this.Name = name
 	this.Context = context
 	this.Status = status
@@ -141,18 +140,16 @@ func (o *MachineValidationRun) SetStartTime(v time.Time) {
 	o.StartTime = v
 }
 
-// GetEndTime returns the EndTime field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// GetEndTime returns the EndTime field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineValidationRun) GetEndTime() time.Time {
-	if o == nil || o.EndTime.Get() == nil {
+	if o == nil || IsNil(o.EndTime.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.EndTime.Get()
 }
 
-// GetEndTimeOk returns a tuple with the EndTime field value
+// GetEndTimeOk returns a tuple with the EndTime field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineValidationRun) GetEndTimeOk() (*time.Time, bool) {
@@ -162,9 +159,28 @@ func (o *MachineValidationRun) GetEndTimeOk() (*time.Time, bool) {
 	return o.EndTime.Get(), o.EndTime.IsSet()
 }
 
-// SetEndTime sets field value
+// HasEndTime returns a boolean if a field has been set.
+func (o *MachineValidationRun) HasEndTime() bool {
+	if o != nil && o.EndTime.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetEndTime gets a reference to the given NullableTime and assigns it to the EndTime field.
 func (o *MachineValidationRun) SetEndTime(v time.Time) {
 	o.EndTime.Set(&v)
+}
+
+// SetEndTimeNil sets the value for EndTime to be an explicit nil
+func (o *MachineValidationRun) SetEndTimeNil() {
+	o.EndTime.Set(nil)
+}
+
+// UnsetEndTime ensures that no value is present for EndTime, not even an explicit nil
+func (o *MachineValidationRun) UnsetEndTime() {
+	o.EndTime.Unset()
 }
 
 // GetName returns the Name field value
@@ -276,7 +292,9 @@ func (o MachineValidationRun) ToMap() (map[string]interface{}, error) {
 	toSerialize["validationID"] = o.ValidationID
 	toSerialize["machineID"] = o.MachineID
 	toSerialize["startTime"] = o.StartTime
-	toSerialize["endTime"] = o.EndTime.Get()
+	if o.EndTime.IsSet() {
+		toSerialize["endTime"] = o.EndTime.Get()
+	}
 	toSerialize["name"] = o.Name
 	toSerialize["context"] = o.Context
 	toSerialize["status"] = o.Status
@@ -292,7 +310,6 @@ func (o *MachineValidationRun) UnmarshalJSON(data []byte) (err error) {
 		"validationID",
 		"machineID",
 		"startTime",
-		"endTime",
 		"name",
 		"context",
 		"status",

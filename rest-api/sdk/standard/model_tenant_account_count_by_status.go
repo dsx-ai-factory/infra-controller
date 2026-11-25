@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantAccountCountByStatus type satisfies the MappedNullable interface at compile time
@@ -23,23 +25,30 @@ var _ MappedNullable = &TenantAccountCountByStatus{}
 // TenantAccountCountByStatus Describes counts of Tenant Accounts in various statuses
 type TenantAccountCountByStatus struct {
 	// Total number of Tenant Accounts
-	Total *int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// Number of Tenant Accounts in Pending status
-	Pending *int32 `json:"pending,omitempty"`
+	Pending int32 `json:"pending"`
 	// Number of Tenant Accounts in Invited status
-	Invited *int32 `json:"invited,omitempty"`
+	Invited int32 `json:"invited"`
 	// Number of Tenant Accounts in Ready status
-	Ready *int32 `json:"ready,omitempty"`
+	Ready int32 `json:"ready"`
 	// Number of Tenant Accounts in Error status
-	Error *int32 `json:"error,omitempty"`
+	Error int32 `json:"error"`
 }
+
+type _TenantAccountCountByStatus TenantAccountCountByStatus
 
 // NewTenantAccountCountByStatus instantiates a new TenantAccountCountByStatus object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccountCountByStatus() *TenantAccountCountByStatus {
+func NewTenantAccountCountByStatus(total int32, pending int32, invited int32, ready int32, error_ int32) *TenantAccountCountByStatus {
 	this := TenantAccountCountByStatus{}
+	this.Total = total
+	this.Pending = pending
+	this.Invited = invited
+	this.Ready = ready
+	this.Error = error_
 	return &this
 }
 
@@ -51,164 +60,124 @@ func NewTenantAccountCountByStatusWithDefaults() *TenantAccountCountByStatus {
 	return &this
 }
 
-// GetTotal returns the Total field value if set, zero value otherwise.
+// GetTotal returns the Total field value
 func (o *TenantAccountCountByStatus) GetTotal() int32 {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Total
+
+	return o.Total
 }
 
-// GetTotalOk returns a tuple with the Total field value if set, nil otherwise
+// GetTotalOk returns a tuple with the Total field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccountCountByStatus) GetTotalOk() (*int32, bool) {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Total, true
+	return &o.Total, true
 }
 
-// HasTotal returns a boolean if a field has been set.
-func (o *TenantAccountCountByStatus) HasTotal() bool {
-	if o != nil && !IsNil(o.Total) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotal gets a reference to the given int32 and assigns it to the Total field.
+// SetTotal sets field value
 func (o *TenantAccountCountByStatus) SetTotal(v int32) {
-	o.Total = &v
+	o.Total = v
 }
 
-// GetPending returns the Pending field value if set, zero value otherwise.
+// GetPending returns the Pending field value
 func (o *TenantAccountCountByStatus) GetPending() int32 {
-	if o == nil || IsNil(o.Pending) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Pending
+
+	return o.Pending
 }
 
-// GetPendingOk returns a tuple with the Pending field value if set, nil otherwise
+// GetPendingOk returns a tuple with the Pending field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccountCountByStatus) GetPendingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Pending) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Pending, true
+	return &o.Pending, true
 }
 
-// HasPending returns a boolean if a field has been set.
-func (o *TenantAccountCountByStatus) HasPending() bool {
-	if o != nil && !IsNil(o.Pending) {
-		return true
-	}
-
-	return false
-}
-
-// SetPending gets a reference to the given int32 and assigns it to the Pending field.
+// SetPending sets field value
 func (o *TenantAccountCountByStatus) SetPending(v int32) {
-	o.Pending = &v
+	o.Pending = v
 }
 
-// GetInvited returns the Invited field value if set, zero value otherwise.
+// GetInvited returns the Invited field value
 func (o *TenantAccountCountByStatus) GetInvited() int32 {
-	if o == nil || IsNil(o.Invited) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Invited
+
+	return o.Invited
 }
 
-// GetInvitedOk returns a tuple with the Invited field value if set, nil otherwise
+// GetInvitedOk returns a tuple with the Invited field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccountCountByStatus) GetInvitedOk() (*int32, bool) {
-	if o == nil || IsNil(o.Invited) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Invited, true
+	return &o.Invited, true
 }
 
-// HasInvited returns a boolean if a field has been set.
-func (o *TenantAccountCountByStatus) HasInvited() bool {
-	if o != nil && !IsNil(o.Invited) {
-		return true
-	}
-
-	return false
-}
-
-// SetInvited gets a reference to the given int32 and assigns it to the Invited field.
+// SetInvited sets field value
 func (o *TenantAccountCountByStatus) SetInvited(v int32) {
-	o.Invited = &v
+	o.Invited = v
 }
 
-// GetReady returns the Ready field value if set, zero value otherwise.
+// GetReady returns the Ready field value
 func (o *TenantAccountCountByStatus) GetReady() int32 {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Ready
+
+	return o.Ready
 }
 
-// GetReadyOk returns a tuple with the Ready field value if set, nil otherwise
+// GetReadyOk returns a tuple with the Ready field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccountCountByStatus) GetReadyOk() (*int32, bool) {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Ready, true
+	return &o.Ready, true
 }
 
-// HasReady returns a boolean if a field has been set.
-func (o *TenantAccountCountByStatus) HasReady() bool {
-	if o != nil && !IsNil(o.Ready) {
-		return true
-	}
-
-	return false
-}
-
-// SetReady gets a reference to the given int32 and assigns it to the Ready field.
+// SetReady sets field value
 func (o *TenantAccountCountByStatus) SetReady(v int32) {
-	o.Ready = &v
+	o.Ready = v
 }
 
-// GetError returns the Error field value if set, zero value otherwise.
+// GetError returns the Error field value
 func (o *TenantAccountCountByStatus) GetError() int32 {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Error
+
+	return o.Error
 }
 
-// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
+// GetErrorOk returns a tuple with the Error field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccountCountByStatus) GetErrorOk() (*int32, bool) {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Error, true
+	return &o.Error, true
 }
 
-// HasError returns a boolean if a field has been set.
-func (o *TenantAccountCountByStatus) HasError() bool {
-	if o != nil && !IsNil(o.Error) {
-		return true
-	}
-
-	return false
-}
-
-// SetError gets a reference to the given int32 and assigns it to the Error field.
+// SetError sets field value
 func (o *TenantAccountCountByStatus) SetError(v int32) {
-	o.Error = &v
+	o.Error = v
 }
 
 func (o TenantAccountCountByStatus) MarshalJSON() ([]byte, error) {
@@ -221,22 +190,52 @@ func (o TenantAccountCountByStatus) MarshalJSON() ([]byte, error) {
 
 func (o TenantAccountCountByStatus) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Total) {
-		toSerialize["total"] = o.Total
-	}
-	if !IsNil(o.Pending) {
-		toSerialize["pending"] = o.Pending
-	}
-	if !IsNil(o.Invited) {
-		toSerialize["invited"] = o.Invited
-	}
-	if !IsNil(o.Ready) {
-		toSerialize["ready"] = o.Ready
-	}
-	if !IsNil(o.Error) {
-		toSerialize["error"] = o.Error
-	}
+	toSerialize["total"] = o.Total
+	toSerialize["pending"] = o.Pending
+	toSerialize["invited"] = o.Invited
+	toSerialize["ready"] = o.Ready
+	toSerialize["error"] = o.Error
 	return toSerialize, nil
+}
+
+func (o *TenantAccountCountByStatus) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"total",
+		"pending",
+		"invited",
+		"ready",
+		"error",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantAccountCountByStatus := _TenantAccountCountByStatus{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantAccountCountByStatus)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantAccountCountByStatus(varTenantAccountCountByStatus)
+
+	return err
 }
 
 type NullableTenantAccountCountByStatus struct {

@@ -25,8 +25,8 @@ var _ MappedNullable = &ExploredEndpoint{}
 // ExploredEndpoint An endpoint discovered and tracked by Site Explorer.
 type ExploredEndpoint struct {
 	// BMC IP address used as the explored endpoint ID.
-	Address string                     `json:"address"`
-	Report  *EndpointExplorationReport `json:"report,omitempty"`
+	Address string                            `json:"address"`
+	Report  NullableEndpointExplorationReport `json:"report,omitempty"`
 	// Version of the exploration report; increases when the report is updated.
 	ReportVersion string `json:"reportVersion"`
 	// Whether the endpoint will be explored in the next Site Explorer run.
@@ -97,36 +97,47 @@ func (o *ExploredEndpoint) SetAddress(v string) {
 	o.Address = v
 }
 
-// GetReport returns the Report field value if set, zero value otherwise.
+// GetReport returns the Report field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExploredEndpoint) GetReport() EndpointExplorationReport {
-	if o == nil || IsNil(o.Report) {
+	if o == nil || IsNil(o.Report.Get()) {
 		var ret EndpointExplorationReport
 		return ret
 	}
-	return *o.Report
+	return *o.Report.Get()
 }
 
 // GetReportOk returns a tuple with the Report field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExploredEndpoint) GetReportOk() (*EndpointExplorationReport, bool) {
-	if o == nil || IsNil(o.Report) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Report, true
+	return o.Report.Get(), o.Report.IsSet()
 }
 
 // HasReport returns a boolean if a field has been set.
 func (o *ExploredEndpoint) HasReport() bool {
-	if o != nil && !IsNil(o.Report) {
+	if o != nil && o.Report.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetReport gets a reference to the given EndpointExplorationReport and assigns it to the Report field.
+// SetReport gets a reference to the given NullableEndpointExplorationReport and assigns it to the Report field.
 func (o *ExploredEndpoint) SetReport(v EndpointExplorationReport) {
-	o.Report = &v
+	o.Report.Set(&v)
+}
+
+// SetReportNil sets the value for Report to be an explicit nil
+func (o *ExploredEndpoint) SetReportNil() {
+	o.Report.Set(nil)
+}
+
+// UnsetReport ensures that no value is present for Report, not even an explicit nil
+func (o *ExploredEndpoint) UnsetReport() {
+	o.Report.Unset()
 }
 
 // GetReportVersion returns the ReportVersion field value
@@ -332,8 +343,8 @@ func (o ExploredEndpoint) MarshalJSON() ([]byte, error) {
 func (o ExploredEndpoint) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["address"] = o.Address
-	if !IsNil(o.Report) {
-		toSerialize["report"] = o.Report
+	if o.Report.IsSet() {
+		toSerialize["report"] = o.Report.Get()
 	}
 	toSerialize["reportVersion"] = o.ReportVersion
 	toSerialize["explorationRequested"] = o.ExplorationRequested

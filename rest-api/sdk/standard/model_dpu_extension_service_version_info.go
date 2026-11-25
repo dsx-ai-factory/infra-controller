@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,23 +26,29 @@ var _ MappedNullable = &DpuExtensionServiceVersionInfo{}
 // DpuExtensionServiceVersionInfo Information about a specific version of DPU Extension Service
 type DpuExtensionServiceVersionInfo struct {
 	// Current version of the DPU Extension Service
-	Version NullableString `json:"version,omitempty"`
+	Version string `json:"version"`
 	// Deployment spec for the DPU Extension Service
-	Data *string `json:"data,omitempty"`
+	Data string `json:"data"`
 	// Indicates whether this version was created with credentials
-	HasCredentials *bool `json:"hasCredentials,omitempty"`
+	HasCredentials bool `json:"hasCredentials"`
 	// Date/time when this version of the DPU Extension Service was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Observability configuration for this DPU Extension Service version
-	Observability *DpuExtensionServiceObservability `json:"observability,omitempty"`
+	Observability NullableDpuExtensionServiceObservability `json:"observability,omitempty"`
 }
+
+type _DpuExtensionServiceVersionInfo DpuExtensionServiceVersionInfo
 
 // NewDpuExtensionServiceVersionInfo instantiates a new DpuExtensionServiceVersionInfo object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuExtensionServiceVersionInfo() *DpuExtensionServiceVersionInfo {
+func NewDpuExtensionServiceVersionInfo(version string, data string, hasCredentials bool, created time.Time) *DpuExtensionServiceVersionInfo {
 	this := DpuExtensionServiceVersionInfo{}
+	this.Version = version
+	this.Data = data
+	this.HasCredentials = hasCredentials
+	this.Created = created
 	return &this
 }
 
@@ -52,175 +60,143 @@ func NewDpuExtensionServiceVersionInfoWithDefaults() *DpuExtensionServiceVersion
 	return &this
 }
 
-// GetVersion returns the Version field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetVersion returns the Version field value
 func (o *DpuExtensionServiceVersionInfo) GetVersion() string {
-	if o == nil || IsNil(o.Version.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Version.Get()
+
+	return o.Version
 }
 
-// GetVersionOk returns a tuple with the Version field value if set, nil otherwise
+// GetVersionOk returns a tuple with the Version field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceVersionInfo) GetVersionOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.Version.Get(), o.Version.IsSet()
+	return &o.Version, true
 }
 
-// HasVersion returns a boolean if a field has been set.
-func (o *DpuExtensionServiceVersionInfo) HasVersion() bool {
-	if o != nil && o.Version.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetVersion gets a reference to the given NullableString and assigns it to the Version field.
+// SetVersion sets field value
 func (o *DpuExtensionServiceVersionInfo) SetVersion(v string) {
-	o.Version.Set(&v)
+	o.Version = v
 }
 
-// SetVersionNil sets the value for Version to be an explicit nil
-func (o *DpuExtensionServiceVersionInfo) SetVersionNil() {
-	o.Version.Set(nil)
-}
-
-// UnsetVersion ensures that no value is present for Version, not even an explicit nil
-func (o *DpuExtensionServiceVersionInfo) UnsetVersion() {
-	o.Version.Unset()
-}
-
-// GetData returns the Data field value if set, zero value otherwise.
+// GetData returns the Data field value
 func (o *DpuExtensionServiceVersionInfo) GetData() string {
-	if o == nil || IsNil(o.Data) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Data
+
+	return o.Data
 }
 
-// GetDataOk returns a tuple with the Data field value if set, nil otherwise
+// GetDataOk returns a tuple with the Data field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceVersionInfo) GetDataOk() (*string, bool) {
-	if o == nil || IsNil(o.Data) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Data, true
+	return &o.Data, true
 }
 
-// HasData returns a boolean if a field has been set.
-func (o *DpuExtensionServiceVersionInfo) HasData() bool {
-	if o != nil && !IsNil(o.Data) {
-		return true
-	}
-
-	return false
-}
-
-// SetData gets a reference to the given string and assigns it to the Data field.
+// SetData sets field value
 func (o *DpuExtensionServiceVersionInfo) SetData(v string) {
-	o.Data = &v
+	o.Data = v
 }
 
-// GetHasCredentials returns the HasCredentials field value if set, zero value otherwise.
+// GetHasCredentials returns the HasCredentials field value
 func (o *DpuExtensionServiceVersionInfo) GetHasCredentials() bool {
-	if o == nil || IsNil(o.HasCredentials) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.HasCredentials
+
+	return o.HasCredentials
 }
 
-// GetHasCredentialsOk returns a tuple with the HasCredentials field value if set, nil otherwise
+// GetHasCredentialsOk returns a tuple with the HasCredentials field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceVersionInfo) GetHasCredentialsOk() (*bool, bool) {
-	if o == nil || IsNil(o.HasCredentials) {
+	if o == nil {
 		return nil, false
 	}
-	return o.HasCredentials, true
+	return &o.HasCredentials, true
 }
 
-// HasHasCredentials returns a boolean if a field has been set.
-func (o *DpuExtensionServiceVersionInfo) HasHasCredentials() bool {
-	if o != nil && !IsNil(o.HasCredentials) {
-		return true
-	}
-
-	return false
-}
-
-// SetHasCredentials gets a reference to the given bool and assigns it to the HasCredentials field.
+// SetHasCredentials sets field value
 func (o *DpuExtensionServiceVersionInfo) SetHasCredentials(v bool) {
-	o.HasCredentials = &v
+	o.HasCredentials = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *DpuExtensionServiceVersionInfo) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceVersionInfo) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *DpuExtensionServiceVersionInfo) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *DpuExtensionServiceVersionInfo) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetObservability returns the Observability field value if set, zero value otherwise.
+// GetObservability returns the Observability field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceVersionInfo) GetObservability() DpuExtensionServiceObservability {
-	if o == nil || IsNil(o.Observability) {
+	if o == nil || IsNil(o.Observability.Get()) {
 		var ret DpuExtensionServiceObservability
 		return ret
 	}
-	return *o.Observability
+	return *o.Observability.Get()
 }
 
 // GetObservabilityOk returns a tuple with the Observability field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceVersionInfo) GetObservabilityOk() (*DpuExtensionServiceObservability, bool) {
-	if o == nil || IsNil(o.Observability) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Observability, true
+	return o.Observability.Get(), o.Observability.IsSet()
 }
 
 // HasObservability returns a boolean if a field has been set.
 func (o *DpuExtensionServiceVersionInfo) HasObservability() bool {
-	if o != nil && !IsNil(o.Observability) {
+	if o != nil && o.Observability.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetObservability gets a reference to the given DpuExtensionServiceObservability and assigns it to the Observability field.
+// SetObservability gets a reference to the given NullableDpuExtensionServiceObservability and assigns it to the Observability field.
 func (o *DpuExtensionServiceVersionInfo) SetObservability(v DpuExtensionServiceObservability) {
-	o.Observability = &v
+	o.Observability.Set(&v)
+}
+
+// SetObservabilityNil sets the value for Observability to be an explicit nil
+func (o *DpuExtensionServiceVersionInfo) SetObservabilityNil() {
+	o.Observability.Set(nil)
+}
+
+// UnsetObservability ensures that no value is present for Observability, not even an explicit nil
+func (o *DpuExtensionServiceVersionInfo) UnsetObservability() {
+	o.Observability.Unset()
 }
 
 func (o DpuExtensionServiceVersionInfo) MarshalJSON() ([]byte, error) {
@@ -233,22 +209,53 @@ func (o DpuExtensionServiceVersionInfo) MarshalJSON() ([]byte, error) {
 
 func (o DpuExtensionServiceVersionInfo) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Version.IsSet() {
-		toSerialize["version"] = o.Version.Get()
-	}
-	if !IsNil(o.Data) {
-		toSerialize["data"] = o.Data
-	}
-	if !IsNil(o.HasCredentials) {
-		toSerialize["hasCredentials"] = o.HasCredentials
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Observability) {
-		toSerialize["observability"] = o.Observability
+	toSerialize["version"] = o.Version
+	toSerialize["data"] = o.Data
+	toSerialize["hasCredentials"] = o.HasCredentials
+	toSerialize["created"] = o.Created
+	if o.Observability.IsSet() {
+		toSerialize["observability"] = o.Observability.Get()
 	}
 	return toSerialize, nil
+}
+
+func (o *DpuExtensionServiceVersionInfo) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"version",
+		"data",
+		"hasCredentials",
+		"created",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDpuExtensionServiceVersionInfo := _DpuExtensionServiceVersionInfo{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDpuExtensionServiceVersionInfo)
+
+	if err != nil {
+		return err
+	}
+
+	*o = DpuExtensionServiceVersionInfo(varDpuExtensionServiceVersionInfo)
+
+	return err
 }
 
 type NullableDpuExtensionServiceVersionInfo struct {

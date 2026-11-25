@@ -26,8 +26,8 @@ var _ MappedNullable = &VpcRoutingProfileUpdateRequest{}
 type VpcRoutingProfileUpdateRequest struct {
 	// Required Site-configured destination profile with the opposite internal setting from the current profile. The REST aliases `external`, `internal`, and `privileged-internal` map to Core's `EXTERNAL`, `INTERNAL`, and `PRIVILEGED_INTERNAL` names. Other configured names are passed unchanged; this is not a closed enum.
 	RoutingProfile string `json:"routingProfile"`
-	// Optional exact destination VNI. Omission or null reuses an allocation retained in the destination pool, otherwise allocates automatically. An exact request must match a retained destination allocation if present; otherwise it must name a free materialized entry in the destination pool, regardless of that entry's automatic-allocation setting. A mismatched, occupied, missing, or already active VNI is rejected without fallback.
-	Vni NullableInt32 `json:"vni,omitempty"`
+	// Optional exact destination VNI. Omission reuses an allocation retained in the destination pool, otherwise allocates automatically. An exact request must match a retained destination allocation if present; otherwise it must name a free materialized entry in the destination pool, regardless of that entry's automatic-allocation setting. A mismatched, occupied, missing, or already active VNI is rejected without fallback.
+	Vni *int32 `json:"vni,omitempty"`
 }
 
 type _VpcRoutingProfileUpdateRequest VpcRoutingProfileUpdateRequest
@@ -74,47 +74,36 @@ func (o *VpcRoutingProfileUpdateRequest) SetRoutingProfile(v string) {
 	o.RoutingProfile = v
 }
 
-// GetVni returns the Vni field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetVni returns the Vni field value if set, zero value otherwise.
 func (o *VpcRoutingProfileUpdateRequest) GetVni() int32 {
-	if o == nil || IsNil(o.Vni.Get()) {
+	if o == nil || IsNil(o.Vni) {
 		var ret int32
 		return ret
 	}
-	return *o.Vni.Get()
+	return *o.Vni
 }
 
 // GetVniOk returns a tuple with the Vni field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcRoutingProfileUpdateRequest) GetVniOk() (*int32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Vni) {
 		return nil, false
 	}
-	return o.Vni.Get(), o.Vni.IsSet()
+	return o.Vni, true
 }
 
 // HasVni returns a boolean if a field has been set.
 func (o *VpcRoutingProfileUpdateRequest) HasVni() bool {
-	if o != nil && o.Vni.IsSet() {
+	if o != nil && !IsNil(o.Vni) {
 		return true
 	}
 
 	return false
 }
 
-// SetVni gets a reference to the given NullableInt32 and assigns it to the Vni field.
+// SetVni gets a reference to the given int32 and assigns it to the Vni field.
 func (o *VpcRoutingProfileUpdateRequest) SetVni(v int32) {
-	o.Vni.Set(&v)
-}
-
-// SetVniNil sets the value for Vni to be an explicit nil
-func (o *VpcRoutingProfileUpdateRequest) SetVniNil() {
-	o.Vni.Set(nil)
-}
-
-// UnsetVni ensures that no value is present for Vni, not even an explicit nil
-func (o *VpcRoutingProfileUpdateRequest) UnsetVni() {
-	o.Vni.Unset()
+	o.Vni = &v
 }
 
 func (o VpcRoutingProfileUpdateRequest) MarshalJSON() ([]byte, error) {
@@ -128,8 +117,8 @@ func (o VpcRoutingProfileUpdateRequest) MarshalJSON() ([]byte, error) {
 func (o VpcRoutingProfileUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["routingProfile"] = o.RoutingProfile
-	if o.Vni.IsSet() {
-		toSerialize["vni"] = o.Vni.Get()
+	if !IsNil(o.Vni) {
+		toSerialize["vni"] = o.Vni
 	}
 	return toSerialize, nil
 }

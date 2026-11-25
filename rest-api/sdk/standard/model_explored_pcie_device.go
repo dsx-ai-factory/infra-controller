@@ -22,15 +22,15 @@ var _ MappedNullable = &ExploredPCIeDevice{}
 
 // ExploredPCIeDevice Redfish PCIe device reported during exploration.
 type ExploredPCIeDevice struct {
-	Description     NullableString        `json:"description,omitempty"`
-	FirmwareVersion NullableString        `json:"firmwareVersion,omitempty"`
-	GpuVendor       NullableString        `json:"gpuVendor,omitempty"`
-	Id              NullableString        `json:"id,omitempty"`
-	Manufacturer    NullableString        `json:"manufacturer,omitempty"`
-	Name            NullableString        `json:"name,omitempty"`
-	PartNumber      NullableString        `json:"partNumber,omitempty"`
-	SerialNumber    NullableString        `json:"serialNumber,omitempty"`
-	Status          *ExploredSystemStatus `json:"status,omitempty"`
+	Description     NullableString               `json:"description,omitempty"`
+	FirmwareVersion NullableString               `json:"firmwareVersion,omitempty"`
+	GpuVendor       NullableString               `json:"gpuVendor,omitempty"`
+	Id              NullableString               `json:"id,omitempty"`
+	Manufacturer    NullableString               `json:"manufacturer,omitempty"`
+	Name            NullableString               `json:"name,omitempty"`
+	PartNumber      NullableString               `json:"partNumber,omitempty"`
+	SerialNumber    NullableString               `json:"serialNumber,omitempty"`
+	Status          NullableExploredSystemStatus `json:"status,omitempty"`
 }
 
 // NewExploredPCIeDevice instantiates a new ExploredPCIeDevice object
@@ -394,36 +394,47 @@ func (o *ExploredPCIeDevice) UnsetSerialNumber() {
 	o.SerialNumber.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExploredPCIeDevice) GetStatus() ExploredSystemStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil || IsNil(o.Status.Get()) {
 		var ret ExploredSystemStatus
 		return ret
 	}
-	return *o.Status
+	return *o.Status.Get()
 }
 
 // GetStatusOk returns a tuple with the Status field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExploredPCIeDevice) GetStatusOk() (*ExploredSystemStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return o.Status.Get(), o.Status.IsSet()
 }
 
 // HasStatus returns a boolean if a field has been set.
 func (o *ExploredPCIeDevice) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
+	if o != nil && o.Status.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetStatus gets a reference to the given ExploredSystemStatus and assigns it to the Status field.
+// SetStatus gets a reference to the given NullableExploredSystemStatus and assigns it to the Status field.
 func (o *ExploredPCIeDevice) SetStatus(v ExploredSystemStatus) {
-	o.Status = &v
+	o.Status.Set(&v)
+}
+
+// SetStatusNil sets the value for Status to be an explicit nil
+func (o *ExploredPCIeDevice) SetStatusNil() {
+	o.Status.Set(nil)
+}
+
+// UnsetStatus ensures that no value is present for Status, not even an explicit nil
+func (o *ExploredPCIeDevice) UnsetStatus() {
+	o.Status.Unset()
 }
 
 func (o ExploredPCIeDevice) MarshalJSON() ([]byte, error) {
@@ -460,8 +471,8 @@ func (o ExploredPCIeDevice) ToMap() (map[string]interface{}, error) {
 	if o.SerialNumber.IsSet() {
 		toSerialize["serialNumber"] = o.SerialNumber.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
+	if o.Status.IsSet() {
+		toSerialize["status"] = o.Status.Get()
 	}
 	return toSerialize, nil
 }

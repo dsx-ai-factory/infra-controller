@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,37 +26,48 @@ var _ MappedNullable = &InfiniBandInterface{}
 // InfiniBandInterface Defines an interface created by associating an Instance with an InfiniBand Partition
 type InfiniBandInterface struct {
 	// Unique UUID v4 identifier for the InfiniBandInterface
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the associated Instance
-	InstanceId *string `json:"instanceId,omitempty"`
+	InstanceId string `json:"instanceId"`
 	// ID of the InfiniBand Partition associated with this interface
-	PartitionId *string `json:"partitionId,omitempty"`
+	PartitionId string `json:"partitionId"`
 	// Name of the InfiniBand device associated with this interface
-	Device *string `json:"device,omitempty"`
+	Device string `json:"device"`
 	// Name of the InfiniBand device vendor associated with this interface
 	Vendor NullableString `json:"vendor,omitempty"`
 	// Index of the device where partition attach to
-	DeviceInstance *int32 `json:"deviceInstance,omitempty"`
+	DeviceInstance int32 `json:"deviceInstance"`
 	// Indicates whether this is a physical interface
-	IsPhysical *bool `json:"isPhysical,omitempty"`
+	IsPhysical bool `json:"isPhysical"`
 	// Must be specified if isPhysical is false
 	VirtualFunctionId NullableInt32 `json:"virtualFunctionId,omitempty"`
 	// Must be specified if isPhysical is false
 	Guid NullableString `json:"guid,omitempty"`
 	// Status of the InfiniBandInterface
-	Status *InfiniBandInterfaceStatus `json:"status,omitempty"`
+	Status InfiniBandInterfaceStatus `json:"status"`
 	// Date/time when the InfiniBandInterface was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the InfiniBandInterface was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _InfiniBandInterface InfiniBandInterface
 
 // NewInfiniBandInterface instantiates a new InfiniBandInterface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInfiniBandInterface() *InfiniBandInterface {
+func NewInfiniBandInterface(id string, instanceId string, partitionId string, device string, deviceInstance int32, isPhysical bool, status InfiniBandInterfaceStatus, created time.Time, updated time.Time) *InfiniBandInterface {
 	this := InfiniBandInterface{}
+	this.Id = id
+	this.InstanceId = instanceId
+	this.PartitionId = partitionId
+	this.Device = device
+	this.DeviceInstance = deviceInstance
+	this.IsPhysical = isPhysical
+	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -66,132 +79,100 @@ func NewInfiniBandInterfaceWithDefaults() *InfiniBandInterface {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *InfiniBandInterface) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *InfiniBandInterface) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetInstanceId returns the InstanceId field value if set, zero value otherwise.
+// GetInstanceId returns the InstanceId field value
 func (o *InfiniBandInterface) GetInstanceId() string {
-	if o == nil || IsNil(o.InstanceId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InstanceId
+
+	return o.InstanceId
 }
 
-// GetInstanceIdOk returns a tuple with the InstanceId field value if set, nil otherwise
+// GetInstanceIdOk returns a tuple with the InstanceId field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetInstanceIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InstanceId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InstanceId, true
+	return &o.InstanceId, true
 }
 
-// HasInstanceId returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasInstanceId() bool {
-	if o != nil && !IsNil(o.InstanceId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInstanceId gets a reference to the given string and assigns it to the InstanceId field.
+// SetInstanceId sets field value
 func (o *InfiniBandInterface) SetInstanceId(v string) {
-	o.InstanceId = &v
+	o.InstanceId = v
 }
 
-// GetPartitionId returns the PartitionId field value if set, zero value otherwise.
+// GetPartitionId returns the PartitionId field value
 func (o *InfiniBandInterface) GetPartitionId() string {
-	if o == nil || IsNil(o.PartitionId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.PartitionId
+
+	return o.PartitionId
 }
 
-// GetPartitionIdOk returns a tuple with the PartitionId field value if set, nil otherwise
+// GetPartitionIdOk returns a tuple with the PartitionId field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetPartitionIdOk() (*string, bool) {
-	if o == nil || IsNil(o.PartitionId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PartitionId, true
+	return &o.PartitionId, true
 }
 
-// HasPartitionId returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasPartitionId() bool {
-	if o != nil && !IsNil(o.PartitionId) {
-		return true
-	}
-
-	return false
-}
-
-// SetPartitionId gets a reference to the given string and assigns it to the PartitionId field.
+// SetPartitionId sets field value
 func (o *InfiniBandInterface) SetPartitionId(v string) {
-	o.PartitionId = &v
+	o.PartitionId = v
 }
 
-// GetDevice returns the Device field value if set, zero value otherwise.
+// GetDevice returns the Device field value
 func (o *InfiniBandInterface) GetDevice() string {
-	if o == nil || IsNil(o.Device) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Device
+
+	return o.Device
 }
 
-// GetDeviceOk returns a tuple with the Device field value if set, nil otherwise
+// GetDeviceOk returns a tuple with the Device field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetDeviceOk() (*string, bool) {
-	if o == nil || IsNil(o.Device) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Device, true
+	return &o.Device, true
 }
 
-// HasDevice returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasDevice() bool {
-	if o != nil && !IsNil(o.Device) {
-		return true
-	}
-
-	return false
-}
-
-// SetDevice gets a reference to the given string and assigns it to the Device field.
+// SetDevice sets field value
 func (o *InfiniBandInterface) SetDevice(v string) {
-	o.Device = &v
+	o.Device = v
 }
 
 // GetVendor returns the Vendor field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -237,68 +218,52 @@ func (o *InfiniBandInterface) UnsetVendor() {
 	o.Vendor.Unset()
 }
 
-// GetDeviceInstance returns the DeviceInstance field value if set, zero value otherwise.
+// GetDeviceInstance returns the DeviceInstance field value
 func (o *InfiniBandInterface) GetDeviceInstance() int32 {
-	if o == nil || IsNil(o.DeviceInstance) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.DeviceInstance
+
+	return o.DeviceInstance
 }
 
-// GetDeviceInstanceOk returns a tuple with the DeviceInstance field value if set, nil otherwise
+// GetDeviceInstanceOk returns a tuple with the DeviceInstance field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetDeviceInstanceOk() (*int32, bool) {
-	if o == nil || IsNil(o.DeviceInstance) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DeviceInstance, true
+	return &o.DeviceInstance, true
 }
 
-// HasDeviceInstance returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasDeviceInstance() bool {
-	if o != nil && !IsNil(o.DeviceInstance) {
-		return true
-	}
-
-	return false
-}
-
-// SetDeviceInstance gets a reference to the given int32 and assigns it to the DeviceInstance field.
+// SetDeviceInstance sets field value
 func (o *InfiniBandInterface) SetDeviceInstance(v int32) {
-	o.DeviceInstance = &v
+	o.DeviceInstance = v
 }
 
-// GetIsPhysical returns the IsPhysical field value if set, zero value otherwise.
+// GetIsPhysical returns the IsPhysical field value
 func (o *InfiniBandInterface) GetIsPhysical() bool {
-	if o == nil || IsNil(o.IsPhysical) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsPhysical
+
+	return o.IsPhysical
 }
 
-// GetIsPhysicalOk returns a tuple with the IsPhysical field value if set, nil otherwise
+// GetIsPhysicalOk returns a tuple with the IsPhysical field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetIsPhysicalOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsPhysical) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsPhysical, true
+	return &o.IsPhysical, true
 }
 
-// HasIsPhysical returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasIsPhysical() bool {
-	if o != nil && !IsNil(o.IsPhysical) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsPhysical gets a reference to the given bool and assigns it to the IsPhysical field.
+// SetIsPhysical sets field value
 func (o *InfiniBandInterface) SetIsPhysical(v bool) {
-	o.IsPhysical = &v
+	o.IsPhysical = v
 }
 
 // GetVirtualFunctionId returns the VirtualFunctionId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -387,100 +352,76 @@ func (o *InfiniBandInterface) UnsetGuid() {
 	o.Guid.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *InfiniBandInterface) GetStatus() InfiniBandInterfaceStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret InfiniBandInterfaceStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetStatusOk() (*InfiniBandInterfaceStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given InfiniBandInterfaceStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *InfiniBandInterface) SetStatus(v InfiniBandInterfaceStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *InfiniBandInterface) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *InfiniBandInterface) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *InfiniBandInterface) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandInterface) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *InfiniBandInterface) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *InfiniBandInterface) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o InfiniBandInterface) MarshalJSON() ([]byte, error) {
@@ -493,43 +434,69 @@ func (o InfiniBandInterface) MarshalJSON() ([]byte, error) {
 
 func (o InfiniBandInterface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.InstanceId) {
-		toSerialize["instanceId"] = o.InstanceId
-	}
-	if !IsNil(o.PartitionId) {
-		toSerialize["partitionId"] = o.PartitionId
-	}
-	if !IsNil(o.Device) {
-		toSerialize["device"] = o.Device
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["instanceId"] = o.InstanceId
+	toSerialize["partitionId"] = o.PartitionId
+	toSerialize["device"] = o.Device
 	if o.Vendor.IsSet() {
 		toSerialize["vendor"] = o.Vendor.Get()
 	}
-	if !IsNil(o.DeviceInstance) {
-		toSerialize["deviceInstance"] = o.DeviceInstance
-	}
-	if !IsNil(o.IsPhysical) {
-		toSerialize["isPhysical"] = o.IsPhysical
-	}
+	toSerialize["deviceInstance"] = o.DeviceInstance
+	toSerialize["isPhysical"] = o.IsPhysical
 	if o.VirtualFunctionId.IsSet() {
 		toSerialize["virtualFunctionId"] = o.VirtualFunctionId.Get()
 	}
 	if o.Guid.IsSet() {
 		toSerialize["guid"] = o.Guid.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["status"] = o.Status
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *InfiniBandInterface) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"instanceId",
+		"partitionId",
+		"device",
+		"deviceInstance",
+		"isPhysical",
+		"status",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInfiniBandInterface := _InfiniBandInterface{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInfiniBandInterface)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InfiniBandInterface(varInfiniBandInterface)
+
+	return err
 }
 
 type NullableInfiniBandInterface struct {

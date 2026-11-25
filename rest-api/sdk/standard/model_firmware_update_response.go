@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the FirmwareUpdateResponse type satisfies the MappedNullable interface at compile time
@@ -23,15 +25,18 @@ var _ MappedNullable = &FirmwareUpdateResponse{}
 // FirmwareUpdateResponse Response for firmware update operations containing task IDs for tracking
 type FirmwareUpdateResponse struct {
 	// List of task IDs created for the firmware update operation
-	TaskIds []string `json:"taskIds,omitempty"`
+	TaskIds []string `json:"taskIds"`
 }
+
+type _FirmwareUpdateResponse FirmwareUpdateResponse
 
 // NewFirmwareUpdateResponse instantiates a new FirmwareUpdateResponse object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewFirmwareUpdateResponse() *FirmwareUpdateResponse {
+func NewFirmwareUpdateResponse(taskIds []string) *FirmwareUpdateResponse {
 	this := FirmwareUpdateResponse{}
+	this.TaskIds = taskIds
 	return &this
 }
 
@@ -43,34 +48,26 @@ func NewFirmwareUpdateResponseWithDefaults() *FirmwareUpdateResponse {
 	return &this
 }
 
-// GetTaskIds returns the TaskIds field value if set, zero value otherwise.
+// GetTaskIds returns the TaskIds field value
 func (o *FirmwareUpdateResponse) GetTaskIds() []string {
-	if o == nil || IsNil(o.TaskIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.TaskIds
 }
 
-// GetTaskIdsOk returns a tuple with the TaskIds field value if set, nil otherwise
+// GetTaskIdsOk returns a tuple with the TaskIds field value
 // and a boolean to check if the value has been set.
 func (o *FirmwareUpdateResponse) GetTaskIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.TaskIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.TaskIds, true
 }
 
-// HasTaskIds returns a boolean if a field has been set.
-func (o *FirmwareUpdateResponse) HasTaskIds() bool {
-	if o != nil && !IsNil(o.TaskIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetTaskIds gets a reference to the given []string and assigns it to the TaskIds field.
+// SetTaskIds sets field value
 func (o *FirmwareUpdateResponse) SetTaskIds(v []string) {
 	o.TaskIds = v
 }
@@ -85,10 +82,44 @@ func (o FirmwareUpdateResponse) MarshalJSON() ([]byte, error) {
 
 func (o FirmwareUpdateResponse) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.TaskIds) {
-		toSerialize["taskIds"] = o.TaskIds
-	}
+	toSerialize["taskIds"] = o.TaskIds
 	return toSerialize, nil
+}
+
+func (o *FirmwareUpdateResponse) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"taskIds",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varFirmwareUpdateResponse := _FirmwareUpdateResponse{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varFirmwareUpdateResponse)
+
+	if err != nil {
+		return err
+	}
+
+	*o = FirmwareUpdateResponse(varFirmwareUpdateResponse)
+
+	return err
 }
 
 type NullableFirmwareUpdateResponse struct {

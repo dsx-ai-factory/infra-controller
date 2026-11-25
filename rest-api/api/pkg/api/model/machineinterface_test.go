@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMachineInterface_NewAPIMachineInterface(t *testing.T) {
-	dbmi := &cdbm.MachineInterface{
+func TestNewAPIMachineInterface(t *testing.T) {
+	populated := &cdbm.MachineInterface{
 		ID:                    uuid.New(),
 		MachineID:             uuid.NewString(),
 		ControllerInterfaceID: cutil.GetPtr(uuid.New()),
@@ -25,18 +25,44 @@ func TestMachineInterface_NewAPIMachineInterface(t *testing.T) {
 		MacAddress:            cutil.GetPtr("00:00:00:00:00:00"),
 		IPAddresses:           []string{"192.168.0.1, 172.168.0.1"},
 	}
-	apimi := NewAPIMachineInterface(dbmi, true)
-	assert.Equal(t, dbmi.ID.String(), apimi.ID)
-	assert.Equal(t, dbmi.MachineID, apimi.MachineID)
-	assert.Equal(t, dbmi.ControllerInterfaceID.String(), *apimi.ControllerInterfaceID)
-	assert.Equal(t, dbmi.ControllerSegmentID.String(), *apimi.ControllerSegmentID)
-	assert.Equal(t, *dbmi.AttachedDPUMachineID, *apimi.AttachedDPUMachineID)
-	assert.Equal(t, dbmi.SubnetID.String(), *apimi.SubnetID)
-	assert.Equal(t, *dbmi.Hostname, *apimi.Hostname)
-	assert.Equal(t, dbmi.IsPrimary, apimi.IsPrimary)
-	assert.Equal(t, *dbmi.MacAddress, *apimi.MacAddress)
-	assert.Equal(t, len(dbmi.IPAddresses), len(apimi.IPAddresses))
-	for i, v := range apimi.IPAddresses {
-		assert.Equal(t, dbmi.IPAddresses[i], v)
+
+	tests := []struct {
+		name              string
+		dbmi              *cdbm.MachineInterface
+		isProviderOrAdmin bool
+		check             func(t *testing.T, got *APIMachineInterface)
+	}{
+		{
+			name:              "populates all interface fields",
+			dbmi:              populated,
+			isProviderOrAdmin: true,
+			check: func(t *testing.T, got *APIMachineInterface) {
+				assert.Equal(t, populated.ID.String(), got.ID)
+				assert.Equal(t, populated.MachineID, got.MachineID)
+				assert.Equal(t, populated.ControllerInterfaceID.String(), *got.ControllerInterfaceID)
+				assert.Equal(t, populated.ControllerSegmentID.String(), *got.ControllerSegmentID)
+				assert.Equal(t, *populated.AttachedDPUMachineID, *got.AttachedDPUMachineID)
+				assert.Equal(t, populated.SubnetID.String(), *got.SubnetID)
+				assert.Equal(t, *populated.Hostname, *got.Hostname)
+				assert.Equal(t, populated.IsPrimary, got.IsPrimary)
+				assert.Equal(t, *populated.MacAddress, *got.MacAddress)
+				assert.Equal(t, populated.IPAddresses, got.IPAddresses)
+			},
+		},
+		{
+			name:              "nil IPAddresses initializes to empty slice",
+			dbmi:              &cdbm.MachineInterface{ID: uuid.New(), MachineID: "m-1"},
+			isProviderOrAdmin: false,
+			check: func(t *testing.T, got *APIMachineInterface) {
+				assert.Equal(t, []string{}, got.IPAddresses)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NewAPIMachineInterface(tt.dbmi, tt.isProviderOrAdmin)
+			tt.check(t, got)
+		})
 	}
 }

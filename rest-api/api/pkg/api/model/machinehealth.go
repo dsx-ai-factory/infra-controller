@@ -86,6 +86,9 @@ type APIMachineHealthReportEntry struct {
 
 // FromProto populates an APIMachineHealthReportEntry from its protobuf form.
 func (amhre *APIMachineHealthReportEntry) FromProto(entry *corev1.HealthReportEntry) {
+	amhre.Successes = []APIHealthProbeSuccess{}
+	amhre.Alerts = []APIHealthProbeAlert{}
+
 	report := entry.GetReport()
 	if report == nil {
 		return
@@ -94,7 +97,6 @@ func (amhre *APIMachineHealthReportEntry) FromProto(entry *corev1.HealthReportEn
 	amhre.TriggeredBy = cutil.GetPtr(report.GetTriggeredBy())
 	amhre.ObservedAt = cutil.ProtoTimePtrToStrPtr(report.GetObservedAt())
 
-	amhre.Successes = []APIHealthProbeSuccess{}
 	for _, protoSuccess := range report.GetSuccesses() {
 		if protoSuccess == nil {
 			continue
@@ -104,7 +106,6 @@ func (amhre *APIMachineHealthReportEntry) FromProto(entry *corev1.HealthReportEn
 		amhre.Successes = append(amhre.Successes, success)
 	}
 
-	amhre.Alerts = []APIHealthProbeAlert{}
 	for _, protoAlert := range report.GetAlerts() {
 		if protoAlert == nil {
 			continue

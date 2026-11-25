@@ -475,7 +475,7 @@ func NewAPIDpuExtensionService(dbdes *cdbm.DpuExtensionService, dbdesds []cdbm.S
 		SiteID:         dbdes.SiteID.String(),
 		TenantID:       dbdes.TenantID.String(),
 		Version:        dbdes.Version,
-		ActiveVersions: dbdes.ActiveVersions,
+		ActiveVersions: append([]string{}, dbdes.ActiveVersions...),
 		Status:         dbdes.Status,
 		StatusHistory:  []APIStatusDetail{},
 		Created:        dbdes.Created,
@@ -812,7 +812,9 @@ func NewAPIDpuExtensionServiceObservability(dbo *cdbm.DpuExtensionServiceObserva
 		return nil
 	}
 
-	apiObservability := &APIDpuExtensionServiceObservability{}
+	apiObservability := &APIDpuExtensionServiceObservability{
+		Configs: []APIDpuExtensionServiceObservabilityConfig{},
+	}
 	apiObservability.FromProto(dbo.DpuExtensionServiceObservability)
 	return apiObservability
 }

@@ -182,21 +182,17 @@ func NewExpectedMachineManager(client *Client) ExpectedMachineManager {
 
 func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 	em := ExpectedMachine{
+		ID:                       api.Id,
+		BmcMacAddress:            api.BmcMacAddress,
+		ChassisSerialNumber:      api.ChassisSerialNumber,
 		FallbackDPUSerialNumbers: api.FallbackDPUSerialNumbers,
 		Interfaces:               expectedMachineInterfacesFromStandard(api.Interfaces),
 		Labels:                   api.Labels,
 		Sku:                      api.Sku,
 		Machine:                  api.Machine,
-		RetainBmcCredentials:     api.GetRetainBmcCredentials(),
-	}
-	if api.Id != nil {
-		em.ID = *api.Id
-	}
-	if api.BmcMacAddress != nil {
-		em.BmcMacAddress = *api.BmcMacAddress
-	}
-	if api.ChassisSerialNumber != nil {
-		em.ChassisSerialNumber = *api.ChassisSerialNumber
+		RetainBmcCredentials:     api.RetainBmcCredentials,
+		Created:                  api.Created,
+		Updated:                  api.Updated,
 	}
 	if api.SkuId.IsSet() {
 		em.SkuID = api.SkuId.Get()
@@ -204,62 +200,37 @@ func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 	if api.MachineId.IsSet() {
 		em.MachineID = api.MachineId.Get()
 	}
-	if api.Created != nil {
-		em.Created = *api.Created
-	}
-	if api.Updated != nil {
-		em.Updated = *api.Updated
-	}
 	return em
 }
 
 func toStandardExpectedMachineCreateRequest(request ExpectedMachineCreateRequest, siteID string) standard.ExpectedMachineCreateRequest {
-	apiReq := standard.ExpectedMachineCreateRequest{
+	return standard.ExpectedMachineCreateRequest{
 		SiteId:                   siteID,
 		BmcMacAddress:            request.BmcMacAddress,
+		DefaultBmcUsername:       request.BmcUsername,
+		DefaultBmcPassword:       request.BmcPassword,
 		ChassisSerialNumber:      request.ChassisSerialNumber,
 		FallbackDPUSerialNumbers: request.FallbackDPUSerialNumbers,
 		Interfaces:               expectedMachineInterfacesToStandard(request.Interfaces),
+		RetainBmcCredentials:     request.RetainBmcCredentials,
 		Labels:                   request.Labels,
 	}
-	if request.BmcUsername != nil {
-		apiReq.DefaultBmcUsername.Set(request.BmcUsername)
-	}
-	if request.BmcPassword != nil {
-		apiReq.DefaultBmcPassword.Set(request.BmcPassword)
-	}
-	if request.RetainBmcCredentials != nil {
-		apiReq.RetainBmcCredentials.Set(request.RetainBmcCredentials)
-	}
-	return apiReq
 }
 
 func toStandardExpectedMachineUpdateRequest(request ExpectedMachineUpdateRequest) standard.ExpectedMachineUpdateRequest {
 	apiReq := standard.ExpectedMachineUpdateRequest{
+		BmcMacAddress:            request.BmcMacAddress,
+		DefaultBmcUsername:       request.BmcUsername,
+		DefaultBmcPassword:       request.BmcPassword,
+		ChassisSerialNumber:      request.ChassisSerialNumber,
 		FallbackDPUSerialNumbers: request.FallbackDPUSerialNumbers,
 		Interfaces:               expectedMachineInterfacesToStandard(request.Interfaces),
+		SkuId:                    request.SkuID,
+		RetainBmcCredentials:     request.RetainBmcCredentials,
 		Labels:                   request.Labels,
 	}
 	if request.ID != "" {
-		apiReq.Id.Set(&request.ID)
-	}
-	if request.BmcMacAddress != nil {
-		apiReq.BmcMacAddress.Set(request.BmcMacAddress)
-	}
-	if request.BmcUsername != nil {
-		apiReq.DefaultBmcUsername.Set(request.BmcUsername)
-	}
-	if request.BmcPassword != nil {
-		apiReq.DefaultBmcPassword.Set(request.BmcPassword)
-	}
-	if request.ChassisSerialNumber != nil {
-		apiReq.ChassisSerialNumber.Set(request.ChassisSerialNumber)
-	}
-	if request.SkuID != nil {
-		apiReq.SkuId.Set(request.SkuID)
-	}
-	if request.RetainBmcCredentials != nil {
-		apiReq.RetainBmcCredentials.Set(request.RetainBmcCredentials)
+		apiReq.SetId(request.ID)
 	}
 	return apiReq
 }

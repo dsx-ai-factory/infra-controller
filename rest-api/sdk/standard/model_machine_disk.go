@@ -31,9 +31,9 @@ type MachineDisk struct {
 	// Serial number of the disk
 	Serial string `json:"serial"`
 	// Size of the disk in megabytes, when the Machine reports it
-	SizeMb NullableUint32 `json:"sizeMb"`
+	SizeMb NullableUint32 `json:"sizeMb,omitempty"`
 	// PCI sysfs path of the disk, when the Machine reports it
-	PciPath NullableString `json:"pciPath"`
+	PciPath NullableString `json:"pciPath,omitempty"`
 }
 
 type _MachineDisk MachineDisk
@@ -42,13 +42,11 @@ type _MachineDisk MachineDisk
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineDisk(type_ string, model string, serial string, sizeMb NullableUint32, pciPath NullableString) *MachineDisk {
+func NewMachineDisk(type_ string, model string, serial string) *MachineDisk {
 	this := MachineDisk{}
 	this.Type = type_
 	this.Model = model
 	this.Serial = serial
-	this.SizeMb = sizeMb
-	this.PciPath = pciPath
 	return &this
 }
 
@@ -132,18 +130,16 @@ func (o *MachineDisk) SetSerial(v string) {
 	o.Serial = v
 }
 
-// GetSizeMb returns the SizeMb field value
-// If the value is explicit nil, the zero value for uint32 will be returned
+// GetSizeMb returns the SizeMb field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineDisk) GetSizeMb() uint32 {
-	if o == nil || o.SizeMb.Get() == nil {
+	if o == nil || IsNil(o.SizeMb.Get()) {
 		var ret uint32
 		return ret
 	}
-
 	return *o.SizeMb.Get()
 }
 
-// GetSizeMbOk returns a tuple with the SizeMb field value
+// GetSizeMbOk returns a tuple with the SizeMb field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineDisk) GetSizeMbOk() (*uint32, bool) {
@@ -153,23 +149,40 @@ func (o *MachineDisk) GetSizeMbOk() (*uint32, bool) {
 	return o.SizeMb.Get(), o.SizeMb.IsSet()
 }
 
-// SetSizeMb sets field value
+// HasSizeMb returns a boolean if a field has been set.
+func (o *MachineDisk) HasSizeMb() bool {
+	if o != nil && o.SizeMb.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetSizeMb gets a reference to the given NullableUint32 and assigns it to the SizeMb field.
 func (o *MachineDisk) SetSizeMb(v uint32) {
 	o.SizeMb.Set(&v)
 }
 
-// GetPciPath returns the PciPath field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetSizeMbNil sets the value for SizeMb to be an explicit nil
+func (o *MachineDisk) SetSizeMbNil() {
+	o.SizeMb.Set(nil)
+}
+
+// UnsetSizeMb ensures that no value is present for SizeMb, not even an explicit nil
+func (o *MachineDisk) UnsetSizeMb() {
+	o.SizeMb.Unset()
+}
+
+// GetPciPath returns the PciPath field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineDisk) GetPciPath() string {
-	if o == nil || o.PciPath.Get() == nil {
+	if o == nil || IsNil(o.PciPath.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.PciPath.Get()
 }
 
-// GetPciPathOk returns a tuple with the PciPath field value
+// GetPciPathOk returns a tuple with the PciPath field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineDisk) GetPciPathOk() (*string, bool) {
@@ -179,9 +192,28 @@ func (o *MachineDisk) GetPciPathOk() (*string, bool) {
 	return o.PciPath.Get(), o.PciPath.IsSet()
 }
 
-// SetPciPath sets field value
+// HasPciPath returns a boolean if a field has been set.
+func (o *MachineDisk) HasPciPath() bool {
+	if o != nil && o.PciPath.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetPciPath gets a reference to the given NullableString and assigns it to the PciPath field.
 func (o *MachineDisk) SetPciPath(v string) {
 	o.PciPath.Set(&v)
+}
+
+// SetPciPathNil sets the value for PciPath to be an explicit nil
+func (o *MachineDisk) SetPciPathNil() {
+	o.PciPath.Set(nil)
+}
+
+// UnsetPciPath ensures that no value is present for PciPath, not even an explicit nil
+func (o *MachineDisk) UnsetPciPath() {
+	o.PciPath.Unset()
 }
 
 func (o MachineDisk) MarshalJSON() ([]byte, error) {
@@ -197,8 +229,12 @@ func (o MachineDisk) ToMap() (map[string]interface{}, error) {
 	toSerialize["type"] = o.Type
 	toSerialize["model"] = o.Model
 	toSerialize["serial"] = o.Serial
-	toSerialize["sizeMb"] = o.SizeMb.Get()
-	toSerialize["pciPath"] = o.PciPath.Get()
+	if o.SizeMb.IsSet() {
+		toSerialize["sizeMb"] = o.SizeMb.Get()
+	}
+	if o.PciPath.IsSet() {
+		toSerialize["pciPath"] = o.PciPath.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -210,8 +246,6 @@ func (o *MachineDisk) UnmarshalJSON(data []byte) (err error) {
 		"type",
 		"model",
 		"serial",
-		"sizeMb",
-		"pciPath",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -222,13 +256,8 @@ func (o *MachineDisk) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"sizeMb":  {},
-		"pciPath": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

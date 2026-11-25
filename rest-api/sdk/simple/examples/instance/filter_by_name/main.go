@@ -42,15 +42,7 @@ func main() {
 	}
 	fmt.Printf("Found %d instances (Total: %d)\n", len(instances), pagination.Total)
 	for _, instance := range instances {
-		name := ""
-		if instance.Name != nil {
-			name = *instance.Name
-		}
-		status := ""
-		if instance.Status != nil {
-			status = string(*instance.Status)
-		}
-		fmt.Printf("  - Name: %s, ID: %s, Status: %s\n", name, instance.GetId(), status)
+		fmt.Printf("  - Name: %s, ID: %s, Status: %s\n", instance.Name, instance.GetId(), instance.Status)
 	}
 
 	// Example 2: Get instances with pagination only
@@ -71,15 +63,7 @@ func main() {
 	fmt.Printf("Page %d: Found %d instances (Total: %d, PageSize: %d)\n",
 		pagination.PageNumber, len(instances), pagination.Total, pagination.PageSize)
 	for _, instance := range instances {
-		name := ""
-		if instance.Name != nil {
-			name = *instance.Name
-		}
-		status := ""
-		if instance.Status != nil {
-			status = string(*instance.Status)
-		}
-		fmt.Printf("  - Name: %s, ID: %s, Status: %s\n", name, instance.GetId(), status)
+		fmt.Printf("  - Name: %s, ID: %s, Status: %s\n", instance.Name, instance.GetId(), instance.Status)
 	}
 
 	// Example 3: Filter instances by name only
@@ -96,17 +80,9 @@ func main() {
 	}
 	fmt.Printf("Found %d instance(s) with name '%s'\n", len(instances), instanceName)
 	for _, instance := range instances {
-		name := ""
-		if instance.Name != nil {
-			name = *instance.Name
-		}
-		status := ""
-		if instance.Status != nil {
-			status = string(*instance.Status)
-		}
 		machineID := instance.GetMachineId()
 		fmt.Printf("  - Name: %s, ID: %s, Status: %s, MachineID: %s\n",
-			name, instance.GetId(), status, machineID)
+			instance.Name, instance.GetId(), instance.Status, machineID)
 		if instance.Description.IsSet() {
 			fmt.Printf("    Description: %s\n", *instance.Description.Get())
 		}
@@ -134,15 +110,7 @@ func main() {
 	fmt.Printf("Found %d instance(s) with name '%s' on page %d (Total: %d)\n",
 		len(instances), instanceName, pagination.PageNumber, pagination.Total)
 	for _, instance := range instances {
-		name := ""
-		if instance.Name != nil {
-			name = *instance.Name
-		}
-		status := ""
-		if instance.Status != nil {
-			status = string(*instance.Status)
-		}
-		fmt.Printf("  - Name: %s, ID: %s, Status: %s\n", name, instance.GetId(), status)
+		fmt.Printf("  - Name: %s, ID: %s, Status: %s\n", instance.Name, instance.GetId(), instance.Status)
 	}
 
 	fmt.Println("\nAll examples completed successfully!")

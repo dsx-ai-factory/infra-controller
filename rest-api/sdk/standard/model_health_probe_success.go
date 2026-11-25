@@ -27,7 +27,7 @@ type HealthProbeSuccess struct {
 	// Health probe identifier
 	Id string `json:"id"`
 	// Specific component targeted by health probe
-	Target NullableString `json:"target"`
+	Target NullableString `json:"target,omitempty"`
 }
 
 type _HealthProbeSuccess HealthProbeSuccess
@@ -36,10 +36,9 @@ type _HealthProbeSuccess HealthProbeSuccess
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewHealthProbeSuccess(id string, target NullableString) *HealthProbeSuccess {
+func NewHealthProbeSuccess(id string) *HealthProbeSuccess {
 	this := HealthProbeSuccess{}
 	this.Id = id
-	this.Target = target
 	return &this
 }
 
@@ -75,18 +74,16 @@ func (o *HealthProbeSuccess) SetId(v string) {
 	o.Id = v
 }
 
-// GetTarget returns the Target field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetTarget returns the Target field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *HealthProbeSuccess) GetTarget() string {
-	if o == nil || o.Target.Get() == nil {
+	if o == nil || IsNil(o.Target.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Target.Get()
 }
 
-// GetTargetOk returns a tuple with the Target field value
+// GetTargetOk returns a tuple with the Target field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *HealthProbeSuccess) GetTargetOk() (*string, bool) {
@@ -96,9 +93,28 @@ func (o *HealthProbeSuccess) GetTargetOk() (*string, bool) {
 	return o.Target.Get(), o.Target.IsSet()
 }
 
-// SetTarget sets field value
+// HasTarget returns a boolean if a field has been set.
+func (o *HealthProbeSuccess) HasTarget() bool {
+	if o != nil && o.Target.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTarget gets a reference to the given NullableString and assigns it to the Target field.
 func (o *HealthProbeSuccess) SetTarget(v string) {
 	o.Target.Set(&v)
+}
+
+// SetTargetNil sets the value for Target to be an explicit nil
+func (o *HealthProbeSuccess) SetTargetNil() {
+	o.Target.Set(nil)
+}
+
+// UnsetTarget ensures that no value is present for Target, not even an explicit nil
+func (o *HealthProbeSuccess) UnsetTarget() {
+	o.Target.Unset()
 }
 
 func (o HealthProbeSuccess) MarshalJSON() ([]byte, error) {
@@ -112,7 +128,9 @@ func (o HealthProbeSuccess) MarshalJSON() ([]byte, error) {
 func (o HealthProbeSuccess) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
-	toSerialize["target"] = o.Target.Get()
+	if o.Target.IsSet() {
+		toSerialize["target"] = o.Target.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -122,7 +140,6 @@ func (o *HealthProbeSuccess) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
-		"target",
 	}
 
 	allProperties := make(map[string]interface{})

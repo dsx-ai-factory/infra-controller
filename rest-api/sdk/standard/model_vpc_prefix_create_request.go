@@ -19,7 +19,7 @@ import (
 	"gopkg.in/validator.v2"
 )
 
-// VpcPrefixCreateRequest - Specify exactly one non-null allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
+// VpcPrefixCreateRequest - Specify exactly one allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
 type VpcPrefixCreateRequest struct {
 	VpcPrefixAutomaticCreateRequest *VpcPrefixAutomaticCreateRequest
 	VpcPrefixExplicitCreateRequest  *VpcPrefixExplicitCreateRequest

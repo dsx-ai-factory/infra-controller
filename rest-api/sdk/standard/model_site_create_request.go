@@ -27,9 +27,9 @@ type SiteCreateRequest struct {
 	// Name for the Site
 	Name string `json:"name"`
 	// Description for the Site
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// Hostname to reach Serial Console for the Site
-	SerialConsoleHostname NullableString `json:"serialConsoleHostname,omitempty"`
+	SerialConsoleHostname *string `json:"serialConsoleHostname,omitempty"`
 	// Site location information
 	Location *SiteLocation `json:"location,omitempty"`
 	// Site contact information
@@ -80,90 +80,68 @@ func (o *SiteCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *SiteCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SiteCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *SiteCreateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *SiteCreateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
+	o.Description = &v
 }
 
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *SiteCreateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *SiteCreateRequest) UnsetDescription() {
-	o.Description.Unset()
-}
-
-// GetSerialConsoleHostname returns the SerialConsoleHostname field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetSerialConsoleHostname returns the SerialConsoleHostname field value if set, zero value otherwise.
 func (o *SiteCreateRequest) GetSerialConsoleHostname() string {
-	if o == nil || IsNil(o.SerialConsoleHostname.Get()) {
+	if o == nil || IsNil(o.SerialConsoleHostname) {
 		var ret string
 		return ret
 	}
-	return *o.SerialConsoleHostname.Get()
+	return *o.SerialConsoleHostname
 }
 
 // GetSerialConsoleHostnameOk returns a tuple with the SerialConsoleHostname field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SiteCreateRequest) GetSerialConsoleHostnameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.SerialConsoleHostname) {
 		return nil, false
 	}
-	return o.SerialConsoleHostname.Get(), o.SerialConsoleHostname.IsSet()
+	return o.SerialConsoleHostname, true
 }
 
 // HasSerialConsoleHostname returns a boolean if a field has been set.
 func (o *SiteCreateRequest) HasSerialConsoleHostname() bool {
-	if o != nil && o.SerialConsoleHostname.IsSet() {
+	if o != nil && !IsNil(o.SerialConsoleHostname) {
 		return true
 	}
 
 	return false
 }
 
-// SetSerialConsoleHostname gets a reference to the given NullableString and assigns it to the SerialConsoleHostname field.
+// SetSerialConsoleHostname gets a reference to the given string and assigns it to the SerialConsoleHostname field.
 func (o *SiteCreateRequest) SetSerialConsoleHostname(v string) {
-	o.SerialConsoleHostname.Set(&v)
-}
-
-// SetSerialConsoleHostnameNil sets the value for SerialConsoleHostname to be an explicit nil
-func (o *SiteCreateRequest) SetSerialConsoleHostnameNil() {
-	o.SerialConsoleHostname.Set(nil)
-}
-
-// UnsetSerialConsoleHostname ensures that no value is present for SerialConsoleHostname, not even an explicit nil
-func (o *SiteCreateRequest) UnsetSerialConsoleHostname() {
-	o.SerialConsoleHostname.Unset()
+	o.SerialConsoleHostname = &v
 }
 
 // GetLocation returns the Location field value if set, zero value otherwise.
@@ -241,11 +219,11 @@ func (o SiteCreateRequest) MarshalJSON() ([]byte, error) {
 func (o SiteCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
-	if o.SerialConsoleHostname.IsSet() {
-		toSerialize["serialConsoleHostname"] = o.SerialConsoleHostname.Get()
+	if !IsNil(o.SerialConsoleHostname) {
+		toSerialize["serialConsoleHostname"] = o.SerialConsoleHostname
 	}
 	if !IsNil(o.Location) {
 		toSerialize["location"] = o.Location

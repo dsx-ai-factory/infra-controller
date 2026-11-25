@@ -31,8 +31,8 @@ type SequenceStep struct {
 	// Maximum number of components of this type processed concurrently. `0` means unlimited, `1` means strictly sequential.
 	MaxParallel *int32 `json:"maxParallel,omitempty"`
 	// Optional child-workflow timeout for this step, as a Go duration string (e.g. `30s`, `2m`). Applies to pre + main + post combined.
-	Timeout *string      `json:"timeout,omitempty"`
-	Retry   *RetryPolicy `json:"retry,omitempty"`
+	Timeout *string             `json:"timeout,omitempty"`
+	Retry   NullableRetryPolicy `json:"retry,omitempty"`
 	// Actions to run before the main operation.
 	PreOperation  []ActionConfig `json:"preOperation,omitempty"`
 	MainOperation ActionConfig   `json:"mainOperation"`
@@ -176,36 +176,47 @@ func (o *SequenceStep) SetTimeout(v string) {
 	o.Timeout = &v
 }
 
-// GetRetry returns the Retry field value if set, zero value otherwise.
+// GetRetry returns the Retry field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SequenceStep) GetRetry() RetryPolicy {
-	if o == nil || IsNil(o.Retry) {
+	if o == nil || IsNil(o.Retry.Get()) {
 		var ret RetryPolicy
 		return ret
 	}
-	return *o.Retry
+	return *o.Retry.Get()
 }
 
 // GetRetryOk returns a tuple with the Retry field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SequenceStep) GetRetryOk() (*RetryPolicy, bool) {
-	if o == nil || IsNil(o.Retry) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Retry, true
+	return o.Retry.Get(), o.Retry.IsSet()
 }
 
 // HasRetry returns a boolean if a field has been set.
 func (o *SequenceStep) HasRetry() bool {
-	if o != nil && !IsNil(o.Retry) {
+	if o != nil && o.Retry.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRetry gets a reference to the given RetryPolicy and assigns it to the Retry field.
+// SetRetry gets a reference to the given NullableRetryPolicy and assigns it to the Retry field.
 func (o *SequenceStep) SetRetry(v RetryPolicy) {
-	o.Retry = &v
+	o.Retry.Set(&v)
+}
+
+// SetRetryNil sets the value for Retry to be an explicit nil
+func (o *SequenceStep) SetRetryNil() {
+	o.Retry.Set(nil)
+}
+
+// UnsetRetry ensures that no value is present for Retry, not even an explicit nil
+func (o *SequenceStep) UnsetRetry() {
+	o.Retry.Unset()
 }
 
 // GetPreOperation returns the PreOperation field value if set, zero value otherwise.
@@ -346,8 +357,8 @@ func (o SequenceStep) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Timeout) {
 		toSerialize["timeout"] = o.Timeout
 	}
-	if !IsNil(o.Retry) {
-		toSerialize["retry"] = o.Retry
+	if o.Retry.IsSet() {
+		toSerialize["retry"] = o.Retry.Get()
 	}
 	if !IsNil(o.PreOperation) {
 		toSerialize["preOperation"] = o.PreOperation

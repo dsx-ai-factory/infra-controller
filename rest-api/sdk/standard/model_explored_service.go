@@ -25,7 +25,7 @@ var _ MappedNullable = &ExploredService{}
 // ExploredService Redfish UpdateService reported during exploration.
 type ExploredService struct {
 	Id          string              `json:"id"`
-	Inventories []ExploredInventory `json:"inventories,omitempty"`
+	Inventories []ExploredInventory `json:"inventories"`
 }
 
 type _ExploredService ExploredService
@@ -34,9 +34,10 @@ type _ExploredService ExploredService
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExploredService(id string) *ExploredService {
+func NewExploredService(id string, inventories []ExploredInventory) *ExploredService {
 	this := ExploredService{}
 	this.Id = id
+	this.Inventories = inventories
 	return &this
 }
 
@@ -72,34 +73,26 @@ func (o *ExploredService) SetId(v string) {
 	o.Id = v
 }
 
-// GetInventories returns the Inventories field value if set, zero value otherwise.
+// GetInventories returns the Inventories field value
 func (o *ExploredService) GetInventories() []ExploredInventory {
-	if o == nil || IsNil(o.Inventories) {
+	if o == nil {
 		var ret []ExploredInventory
 		return ret
 	}
+
 	return o.Inventories
 }
 
-// GetInventoriesOk returns a tuple with the Inventories field value if set, nil otherwise
+// GetInventoriesOk returns a tuple with the Inventories field value
 // and a boolean to check if the value has been set.
 func (o *ExploredService) GetInventoriesOk() ([]ExploredInventory, bool) {
-	if o == nil || IsNil(o.Inventories) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Inventories, true
 }
 
-// HasInventories returns a boolean if a field has been set.
-func (o *ExploredService) HasInventories() bool {
-	if o != nil && !IsNil(o.Inventories) {
-		return true
-	}
-
-	return false
-}
-
-// SetInventories gets a reference to the given []ExploredInventory and assigns it to the Inventories field.
+// SetInventories sets field value
 func (o *ExploredService) SetInventories(v []ExploredInventory) {
 	o.Inventories = v
 }
@@ -115,9 +108,7 @@ func (o ExploredService) MarshalJSON() ([]byte, error) {
 func (o ExploredService) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
-	if !IsNil(o.Inventories) {
-		toSerialize["inventories"] = o.Inventories
-	}
+	toSerialize["inventories"] = o.Inventories
 	return toSerialize, nil
 }
 
@@ -127,6 +118,7 @@ func (o *ExploredService) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
+		"inventories",
 	}
 
 	allProperties := make(map[string]interface{})

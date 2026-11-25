@@ -48,6 +48,6 @@ func (t *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		Header: http.Header{
 			"Content-Type": []string{"application/json"},
 		},
-		Body: io.NopCloser(strings.NewReader(`{"version":"0.2.86"}`)),
+		Body: io.NopCloser(strings.NewReader(`{"version":"0.2.86","buildTime":"2026-01-15T12:00:00Z"}`)),
 	}, nil
 }

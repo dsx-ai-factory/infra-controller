@@ -662,7 +662,7 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 		return
 	}
 
-	at.Type = enumOr(ProtoToAPIComponentTypeName, comp.GetType(), "unknown")
+	at.Type = enumOr(ProtoToAPIComponentTypeName, comp.GetType(), "Unknown")
 	at.FirmwareVersion = comp.GetFirmwareVersion()
 	at.PowerState = comp.GetPowerState()
 	at.OperationStatus = enumOr(ProtoToAPIPhaseName, comp.GetStatus().GetPhase(), "Unknown")
@@ -704,13 +704,11 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	}
 
 	// Get BMCs
-	if len(comp.GetBmcs()) > 0 {
-		at.BMCs = make([]*APIBMC, 0, len(comp.GetBmcs()))
-		for _, bmc := range comp.GetBmcs() {
-			apiBMC := &APIBMC{}
-			apiBMC.FromProto(bmc)
-			at.BMCs = append(at.BMCs, apiBMC)
-		}
+	at.BMCs = make([]*APIBMC, 0, len(comp.GetBmcs()))
+	for _, bmc := range comp.GetBmcs() {
+		apiBMC := &APIBMC{}
+		apiBMC.FromProto(bmc)
+		at.BMCs = append(at.BMCs, apiBMC)
 	}
 
 	// Get rack ID

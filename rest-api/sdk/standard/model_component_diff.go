@@ -25,11 +25,11 @@ var _ MappedNullable = &ComponentDiff{}
 // ComponentDiff A single component difference found during rack validation
 type ComponentDiff struct {
 	// Type of difference: Unknown, Missing, Unexpected, or Mismatch
-	Type *string `json:"type,omitempty"`
+	Type string `json:"type"`
 	// Component ID. Null when type is `Missing`.
-	Id NullableString `json:"id"`
+	Id NullableString `json:"id,omitempty"`
 	// BMC MAC address identifying a missing expected component. Null for other difference types.
-	MacAddress NullableString `json:"macAddress"`
+	MacAddress NullableString `json:"macAddress,omitempty"`
 	// Expected component value
 	Expected *RackComponent `json:"expected,omitempty"`
 	// Actual component value reported by the system
@@ -44,10 +44,9 @@ type _ComponentDiff ComponentDiff
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewComponentDiff(id NullableString, macAddress NullableString) *ComponentDiff {
+func NewComponentDiff(type_ string) *ComponentDiff {
 	this := ComponentDiff{}
-	this.Id = id
-	this.MacAddress = macAddress
+	this.Type = type_
 	return &this
 }
 
@@ -59,50 +58,40 @@ func NewComponentDiffWithDefaults() *ComponentDiff {
 	return &this
 }
 
-// GetType returns the Type field value if set, zero value otherwise.
+// GetType returns the Type field value
 func (o *ComponentDiff) GetType() string {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Type
+
+	return o.Type
 }
 
-// GetTypeOk returns a tuple with the Type field value if set, nil otherwise
+// GetTypeOk returns a tuple with the Type field value
 // and a boolean to check if the value has been set.
 func (o *ComponentDiff) GetTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Type, true
+	return &o.Type, true
 }
 
-// HasType returns a boolean if a field has been set.
-func (o *ComponentDiff) HasType() bool {
-	if o != nil && !IsNil(o.Type) {
-		return true
-	}
-
-	return false
-}
-
-// SetType gets a reference to the given string and assigns it to the Type field.
+// SetType sets field value
 func (o *ComponentDiff) SetType(v string) {
-	o.Type = &v
+	o.Type = v
 }
 
-// GetId returns the Id field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetId returns the Id field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ComponentDiff) GetId() string {
-	if o == nil || o.Id.Get() == nil {
+	if o == nil || IsNil(o.Id.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Id.Get()
 }
 
-// GetIdOk returns a tuple with the Id field value
+// GetIdOk returns a tuple with the Id field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ComponentDiff) GetIdOk() (*string, bool) {
@@ -112,23 +101,40 @@ func (o *ComponentDiff) GetIdOk() (*string, bool) {
 	return o.Id.Get(), o.Id.IsSet()
 }
 
-// SetId sets field value
+// HasId returns a boolean if a field has been set.
+func (o *ComponentDiff) HasId() bool {
+	if o != nil && o.Id.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetId gets a reference to the given NullableString and assigns it to the Id field.
 func (o *ComponentDiff) SetId(v string) {
 	o.Id.Set(&v)
 }
 
-// GetMacAddress returns the MacAddress field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetIdNil sets the value for Id to be an explicit nil
+func (o *ComponentDiff) SetIdNil() {
+	o.Id.Set(nil)
+}
+
+// UnsetId ensures that no value is present for Id, not even an explicit nil
+func (o *ComponentDiff) UnsetId() {
+	o.Id.Unset()
+}
+
+// GetMacAddress returns the MacAddress field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ComponentDiff) GetMacAddress() string {
-	if o == nil || o.MacAddress.Get() == nil {
+	if o == nil || IsNil(o.MacAddress.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.MacAddress.Get()
 }
 
-// GetMacAddressOk returns a tuple with the MacAddress field value
+// GetMacAddressOk returns a tuple with the MacAddress field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ComponentDiff) GetMacAddressOk() (*string, bool) {
@@ -138,9 +144,28 @@ func (o *ComponentDiff) GetMacAddressOk() (*string, bool) {
 	return o.MacAddress.Get(), o.MacAddress.IsSet()
 }
 
-// SetMacAddress sets field value
+// HasMacAddress returns a boolean if a field has been set.
+func (o *ComponentDiff) HasMacAddress() bool {
+	if o != nil && o.MacAddress.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetMacAddress gets a reference to the given NullableString and assigns it to the MacAddress field.
 func (o *ComponentDiff) SetMacAddress(v string) {
 	o.MacAddress.Set(&v)
+}
+
+// SetMacAddressNil sets the value for MacAddress to be an explicit nil
+func (o *ComponentDiff) SetMacAddressNil() {
+	o.MacAddress.Set(nil)
+}
+
+// UnsetMacAddress ensures that no value is present for MacAddress, not even an explicit nil
+func (o *ComponentDiff) UnsetMacAddress() {
+	o.MacAddress.Unset()
 }
 
 // GetExpected returns the Expected field value if set, zero value otherwise.
@@ -249,11 +274,13 @@ func (o ComponentDiff) MarshalJSON() ([]byte, error) {
 
 func (o ComponentDiff) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Type) {
-		toSerialize["type"] = o.Type
+	toSerialize["type"] = o.Type
+	if o.Id.IsSet() {
+		toSerialize["id"] = o.Id.Get()
 	}
-	toSerialize["id"] = o.Id.Get()
-	toSerialize["macAddress"] = o.MacAddress.Get()
+	if o.MacAddress.IsSet() {
+		toSerialize["macAddress"] = o.MacAddress.Get()
+	}
 	if !IsNil(o.Expected) {
 		toSerialize["expected"] = o.Expected
 	}
@@ -271,8 +298,7 @@ func (o *ComponentDiff) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"id",
-		"macAddress",
+		"type",
 	}
 
 	allProperties := make(map[string]interface{})

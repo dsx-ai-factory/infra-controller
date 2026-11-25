@@ -35,8 +35,8 @@ type DpuExtensionServiceDpfHelmChartData struct {
 	DeployInCluster bool                                    `json:"deployInCluster"`
 	Security        DpuExtensionServiceDpfHelmChartSecurity `json:"security"`
 	// Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
-	Values               map[string]interface{}                                  `json:"values,omitempty"`
-	ServiceDaemonSet     NullableDpuExtensionServiceDpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
+	Values               map[string]interface{}                           `json:"values,omitempty"`
+	ServiceDaemonSet     *DpuExtensionServiceDpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
 	AdditionalProperties map[string]interface{}
 }
 
@@ -209,9 +209,9 @@ func (o *DpuExtensionServiceDpfHelmChartData) SetSecurity(v DpuExtensionServiceD
 	o.Security = v
 }
 
-// GetValues returns the Values field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetValues returns the Values field value if set, zero value otherwise.
 func (o *DpuExtensionServiceDpfHelmChartData) GetValues() map[string]interface{} {
-	if o == nil {
+	if o == nil || IsNil(o.Values) {
 		var ret map[string]interface{}
 		return ret
 	}
@@ -241,47 +241,36 @@ func (o *DpuExtensionServiceDpfHelmChartData) SetValues(v map[string]interface{}
 	o.Values = v
 }
 
-// GetServiceDaemonSet returns the ServiceDaemonSet field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetServiceDaemonSet returns the ServiceDaemonSet field value if set, zero value otherwise.
 func (o *DpuExtensionServiceDpfHelmChartData) GetServiceDaemonSet() DpuExtensionServiceDpfHelmChartServiceDaemonSet {
-	if o == nil || IsNil(o.ServiceDaemonSet.Get()) {
+	if o == nil || IsNil(o.ServiceDaemonSet) {
 		var ret DpuExtensionServiceDpfHelmChartServiceDaemonSet
 		return ret
 	}
-	return *o.ServiceDaemonSet.Get()
+	return *o.ServiceDaemonSet
 }
 
 // GetServiceDaemonSetOk returns a tuple with the ServiceDaemonSet field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceDpfHelmChartData) GetServiceDaemonSetOk() (*DpuExtensionServiceDpfHelmChartServiceDaemonSet, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ServiceDaemonSet) {
 		return nil, false
 	}
-	return o.ServiceDaemonSet.Get(), o.ServiceDaemonSet.IsSet()
+	return o.ServiceDaemonSet, true
 }
 
 // HasServiceDaemonSet returns a boolean if a field has been set.
 func (o *DpuExtensionServiceDpfHelmChartData) HasServiceDaemonSet() bool {
-	if o != nil && o.ServiceDaemonSet.IsSet() {
+	if o != nil && !IsNil(o.ServiceDaemonSet) {
 		return true
 	}
 
 	return false
 }
 
-// SetServiceDaemonSet gets a reference to the given NullableDpuExtensionServiceDpfHelmChartServiceDaemonSet and assigns it to the ServiceDaemonSet field.
+// SetServiceDaemonSet gets a reference to the given DpuExtensionServiceDpfHelmChartServiceDaemonSet and assigns it to the ServiceDaemonSet field.
 func (o *DpuExtensionServiceDpfHelmChartData) SetServiceDaemonSet(v DpuExtensionServiceDpfHelmChartServiceDaemonSet) {
-	o.ServiceDaemonSet.Set(&v)
-}
-
-// SetServiceDaemonSetNil sets the value for ServiceDaemonSet to be an explicit nil
-func (o *DpuExtensionServiceDpfHelmChartData) SetServiceDaemonSetNil() {
-	o.ServiceDaemonSet.Set(nil)
-}
-
-// UnsetServiceDaemonSet ensures that no value is present for ServiceDaemonSet, not even an explicit nil
-func (o *DpuExtensionServiceDpfHelmChartData) UnsetServiceDaemonSet() {
-	o.ServiceDaemonSet.Unset()
+	o.ServiceDaemonSet = &v
 }
 
 func (o DpuExtensionServiceDpfHelmChartData) MarshalJSON() ([]byte, error) {
@@ -300,11 +289,11 @@ func (o DpuExtensionServiceDpfHelmChartData) ToMap() (map[string]interface{}, er
 	toSerialize["serviceID"] = o.ServiceID
 	toSerialize["deployInCluster"] = o.DeployInCluster
 	toSerialize["security"] = o.Security
-	if o.Values != nil {
+	if !IsNil(o.Values) {
 		toSerialize["values"] = o.Values
 	}
-	if o.ServiceDaemonSet.IsSet() {
-		toSerialize["serviceDaemonSet"] = o.ServiceDaemonSet.Get()
+	if !IsNil(o.ServiceDaemonSet) {
+		toSerialize["serviceDaemonSet"] = o.ServiceDaemonSet
 	}
 
 	for key, value := range o.AdditionalProperties {

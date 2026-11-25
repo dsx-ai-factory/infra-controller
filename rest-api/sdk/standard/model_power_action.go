@@ -30,13 +30,13 @@ type PowerAction struct {
 	// Recorded operation. For `Reset`, graceful=true identifies an explicit graceful host reboot; legacy records do not preserve the original restart mode.
 	Operation string `json:"operation"`
 	// Saved submission time, not admission/start time; null for legacy admitted requests without metadata.
-	Requested NullableTime `json:"requested"`
+	Requested NullableTime `json:"requested,omitempty"`
 	// Saved initiator, including an explicitly empty string; null when unavailable.
-	Initiator NullableString `json:"initiator"`
+	Initiator NullableString `json:"initiator,omitempty"`
 	// For `PowerOff`, true is graceful and false is forced. For an explicit graceful host reboot, operation is `Reset` and graceful is true. Null for legacy Reset records and other operations.
-	Graceful NullableBool `json:"graceful"`
+	Graceful NullableBool `json:"graceful,omitempty"`
 	// Recorded Redfish chassis identifier for `ChassisReset`, otherwise null.
-	ChassisId NullableString `json:"chassisId"`
+	ChassisId NullableString `json:"chassisId,omitempty"`
 }
 
 type _PowerAction PowerAction
@@ -45,14 +45,10 @@ type _PowerAction PowerAction
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewPowerAction(status string, operation string, requested NullableTime, initiator NullableString, graceful NullableBool, chassisId NullableString) *PowerAction {
+func NewPowerAction(status string, operation string) *PowerAction {
 	this := PowerAction{}
 	this.Status = status
 	this.Operation = operation
-	this.Requested = requested
-	this.Initiator = initiator
-	this.Graceful = graceful
-	this.ChassisId = chassisId
 	return &this
 }
 
@@ -112,18 +108,16 @@ func (o *PowerAction) SetOperation(v string) {
 	o.Operation = v
 }
 
-// GetRequested returns the Requested field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// GetRequested returns the Requested field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerAction) GetRequested() time.Time {
-	if o == nil || o.Requested.Get() == nil {
+	if o == nil || IsNil(o.Requested.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.Requested.Get()
 }
 
-// GetRequestedOk returns a tuple with the Requested field value
+// GetRequestedOk returns a tuple with the Requested field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerAction) GetRequestedOk() (*time.Time, bool) {
@@ -133,23 +127,40 @@ func (o *PowerAction) GetRequestedOk() (*time.Time, bool) {
 	return o.Requested.Get(), o.Requested.IsSet()
 }
 
-// SetRequested sets field value
+// HasRequested returns a boolean if a field has been set.
+func (o *PowerAction) HasRequested() bool {
+	if o != nil && o.Requested.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRequested gets a reference to the given NullableTime and assigns it to the Requested field.
 func (o *PowerAction) SetRequested(v time.Time) {
 	o.Requested.Set(&v)
 }
 
-// GetInitiator returns the Initiator field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetRequestedNil sets the value for Requested to be an explicit nil
+func (o *PowerAction) SetRequestedNil() {
+	o.Requested.Set(nil)
+}
+
+// UnsetRequested ensures that no value is present for Requested, not even an explicit nil
+func (o *PowerAction) UnsetRequested() {
+	o.Requested.Unset()
+}
+
+// GetInitiator returns the Initiator field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerAction) GetInitiator() string {
-	if o == nil || o.Initiator.Get() == nil {
+	if o == nil || IsNil(o.Initiator.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Initiator.Get()
 }
 
-// GetInitiatorOk returns a tuple with the Initiator field value
+// GetInitiatorOk returns a tuple with the Initiator field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerAction) GetInitiatorOk() (*string, bool) {
@@ -159,23 +170,40 @@ func (o *PowerAction) GetInitiatorOk() (*string, bool) {
 	return o.Initiator.Get(), o.Initiator.IsSet()
 }
 
-// SetInitiator sets field value
+// HasInitiator returns a boolean if a field has been set.
+func (o *PowerAction) HasInitiator() bool {
+	if o != nil && o.Initiator.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetInitiator gets a reference to the given NullableString and assigns it to the Initiator field.
 func (o *PowerAction) SetInitiator(v string) {
 	o.Initiator.Set(&v)
 }
 
-// GetGraceful returns the Graceful field value
-// If the value is explicit nil, the zero value for bool will be returned
+// SetInitiatorNil sets the value for Initiator to be an explicit nil
+func (o *PowerAction) SetInitiatorNil() {
+	o.Initiator.Set(nil)
+}
+
+// UnsetInitiator ensures that no value is present for Initiator, not even an explicit nil
+func (o *PowerAction) UnsetInitiator() {
+	o.Initiator.Unset()
+}
+
+// GetGraceful returns the Graceful field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerAction) GetGraceful() bool {
-	if o == nil || o.Graceful.Get() == nil {
+	if o == nil || IsNil(o.Graceful.Get()) {
 		var ret bool
 		return ret
 	}
-
 	return *o.Graceful.Get()
 }
 
-// GetGracefulOk returns a tuple with the Graceful field value
+// GetGracefulOk returns a tuple with the Graceful field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerAction) GetGracefulOk() (*bool, bool) {
@@ -185,23 +213,40 @@ func (o *PowerAction) GetGracefulOk() (*bool, bool) {
 	return o.Graceful.Get(), o.Graceful.IsSet()
 }
 
-// SetGraceful sets field value
+// HasGraceful returns a boolean if a field has been set.
+func (o *PowerAction) HasGraceful() bool {
+	if o != nil && o.Graceful.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetGraceful gets a reference to the given NullableBool and assigns it to the Graceful field.
 func (o *PowerAction) SetGraceful(v bool) {
 	o.Graceful.Set(&v)
 }
 
-// GetChassisId returns the ChassisId field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetGracefulNil sets the value for Graceful to be an explicit nil
+func (o *PowerAction) SetGracefulNil() {
+	o.Graceful.Set(nil)
+}
+
+// UnsetGraceful ensures that no value is present for Graceful, not even an explicit nil
+func (o *PowerAction) UnsetGraceful() {
+	o.Graceful.Unset()
+}
+
+// GetChassisId returns the ChassisId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerAction) GetChassisId() string {
-	if o == nil || o.ChassisId.Get() == nil {
+	if o == nil || IsNil(o.ChassisId.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.ChassisId.Get()
 }
 
-// GetChassisIdOk returns a tuple with the ChassisId field value
+// GetChassisIdOk returns a tuple with the ChassisId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerAction) GetChassisIdOk() (*string, bool) {
@@ -211,9 +256,28 @@ func (o *PowerAction) GetChassisIdOk() (*string, bool) {
 	return o.ChassisId.Get(), o.ChassisId.IsSet()
 }
 
-// SetChassisId sets field value
+// HasChassisId returns a boolean if a field has been set.
+func (o *PowerAction) HasChassisId() bool {
+	if o != nil && o.ChassisId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetChassisId gets a reference to the given NullableString and assigns it to the ChassisId field.
 func (o *PowerAction) SetChassisId(v string) {
 	o.ChassisId.Set(&v)
+}
+
+// SetChassisIdNil sets the value for ChassisId to be an explicit nil
+func (o *PowerAction) SetChassisIdNil() {
+	o.ChassisId.Set(nil)
+}
+
+// UnsetChassisId ensures that no value is present for ChassisId, not even an explicit nil
+func (o *PowerAction) UnsetChassisId() {
+	o.ChassisId.Unset()
 }
 
 func (o PowerAction) MarshalJSON() ([]byte, error) {
@@ -228,10 +292,18 @@ func (o PowerAction) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["status"] = o.Status
 	toSerialize["operation"] = o.Operation
-	toSerialize["requested"] = o.Requested.Get()
-	toSerialize["initiator"] = o.Initiator.Get()
-	toSerialize["graceful"] = o.Graceful.Get()
-	toSerialize["chassisId"] = o.ChassisId.Get()
+	if o.Requested.IsSet() {
+		toSerialize["requested"] = o.Requested.Get()
+	}
+	if o.Initiator.IsSet() {
+		toSerialize["initiator"] = o.Initiator.Get()
+	}
+	if o.Graceful.IsSet() {
+		toSerialize["graceful"] = o.Graceful.Get()
+	}
+	if o.ChassisId.IsSet() {
+		toSerialize["chassisId"] = o.ChassisId.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -242,10 +314,6 @@ func (o *PowerAction) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"status",
 		"operation",
-		"requested",
-		"initiator",
-		"graceful",
-		"chassisId",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -256,15 +324,8 @@ func (o *PowerAction) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"requested": {},
-		"initiator": {},
-		"graceful":  {},
-		"chassisId": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

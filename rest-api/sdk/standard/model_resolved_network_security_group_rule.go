@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the ResolvedNetworkSecurityGroupRule type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,23 @@ var _ MappedNullable = &ResolvedNetworkSecurityGroupRule{}
 // ResolvedNetworkSecurityGroupRule A network security group rule with its source and destination prefixes resolved
 type ResolvedNetworkSecurityGroupRule struct {
 	// The underlying Network Security Group rule
-	Rule *NetworkSecurityGroupRule `json:"rule,omitempty"`
+	Rule NullableNetworkSecurityGroupRule `json:"rule,omitempty"`
 	// Resolved source IP prefixes for the rule
-	SrcPrefixes []string `json:"srcPrefixes,omitempty"`
+	SrcPrefixes []string `json:"srcPrefixes"`
 	// Resolved destination IP prefixes for the rule
-	DstPrefixes []string `json:"dstPrefixes,omitempty"`
+	DstPrefixes []string `json:"dstPrefixes"`
 }
+
+type _ResolvedNetworkSecurityGroupRule ResolvedNetworkSecurityGroupRule
 
 // NewResolvedNetworkSecurityGroupRule instantiates a new ResolvedNetworkSecurityGroupRule object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewResolvedNetworkSecurityGroupRule() *ResolvedNetworkSecurityGroupRule {
+func NewResolvedNetworkSecurityGroupRule(srcPrefixes []string, dstPrefixes []string) *ResolvedNetworkSecurityGroupRule {
 	this := ResolvedNetworkSecurityGroupRule{}
+	this.SrcPrefixes = srcPrefixes
+	this.DstPrefixes = dstPrefixes
 	return &this
 }
 
@@ -47,98 +53,93 @@ func NewResolvedNetworkSecurityGroupRuleWithDefaults() *ResolvedNetworkSecurityG
 	return &this
 }
 
-// GetRule returns the Rule field value if set, zero value otherwise.
+// GetRule returns the Rule field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ResolvedNetworkSecurityGroupRule) GetRule() NetworkSecurityGroupRule {
-	if o == nil || IsNil(o.Rule) {
+	if o == nil || IsNil(o.Rule.Get()) {
 		var ret NetworkSecurityGroupRule
 		return ret
 	}
-	return *o.Rule
+	return *o.Rule.Get()
 }
 
 // GetRuleOk returns a tuple with the Rule field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ResolvedNetworkSecurityGroupRule) GetRuleOk() (*NetworkSecurityGroupRule, bool) {
-	if o == nil || IsNil(o.Rule) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Rule, true
+	return o.Rule.Get(), o.Rule.IsSet()
 }
 
 // HasRule returns a boolean if a field has been set.
 func (o *ResolvedNetworkSecurityGroupRule) HasRule() bool {
-	if o != nil && !IsNil(o.Rule) {
+	if o != nil && o.Rule.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRule gets a reference to the given NetworkSecurityGroupRule and assigns it to the Rule field.
+// SetRule gets a reference to the given NullableNetworkSecurityGroupRule and assigns it to the Rule field.
 func (o *ResolvedNetworkSecurityGroupRule) SetRule(v NetworkSecurityGroupRule) {
-	o.Rule = &v
+	o.Rule.Set(&v)
 }
 
-// GetSrcPrefixes returns the SrcPrefixes field value if set, zero value otherwise.
+// SetRuleNil sets the value for Rule to be an explicit nil
+func (o *ResolvedNetworkSecurityGroupRule) SetRuleNil() {
+	o.Rule.Set(nil)
+}
+
+// UnsetRule ensures that no value is present for Rule, not even an explicit nil
+func (o *ResolvedNetworkSecurityGroupRule) UnsetRule() {
+	o.Rule.Unset()
+}
+
+// GetSrcPrefixes returns the SrcPrefixes field value
 func (o *ResolvedNetworkSecurityGroupRule) GetSrcPrefixes() []string {
-	if o == nil || IsNil(o.SrcPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.SrcPrefixes
 }
 
-// GetSrcPrefixesOk returns a tuple with the SrcPrefixes field value if set, nil otherwise
+// GetSrcPrefixesOk returns a tuple with the SrcPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *ResolvedNetworkSecurityGroupRule) GetSrcPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.SrcPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SrcPrefixes, true
 }
 
-// HasSrcPrefixes returns a boolean if a field has been set.
-func (o *ResolvedNetworkSecurityGroupRule) HasSrcPrefixes() bool {
-	if o != nil && !IsNil(o.SrcPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetSrcPrefixes gets a reference to the given []string and assigns it to the SrcPrefixes field.
+// SetSrcPrefixes sets field value
 func (o *ResolvedNetworkSecurityGroupRule) SetSrcPrefixes(v []string) {
 	o.SrcPrefixes = v
 }
 
-// GetDstPrefixes returns the DstPrefixes field value if set, zero value otherwise.
+// GetDstPrefixes returns the DstPrefixes field value
 func (o *ResolvedNetworkSecurityGroupRule) GetDstPrefixes() []string {
-	if o == nil || IsNil(o.DstPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.DstPrefixes
 }
 
-// GetDstPrefixesOk returns a tuple with the DstPrefixes field value if set, nil otherwise
+// GetDstPrefixesOk returns a tuple with the DstPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *ResolvedNetworkSecurityGroupRule) GetDstPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.DstPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.DstPrefixes, true
 }
 
-// HasDstPrefixes returns a boolean if a field has been set.
-func (o *ResolvedNetworkSecurityGroupRule) HasDstPrefixes() bool {
-	if o != nil && !IsNil(o.DstPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetDstPrefixes gets a reference to the given []string and assigns it to the DstPrefixes field.
+// SetDstPrefixes sets field value
 func (o *ResolvedNetworkSecurityGroupRule) SetDstPrefixes(v []string) {
 	o.DstPrefixes = v
 }
@@ -153,16 +154,49 @@ func (o ResolvedNetworkSecurityGroupRule) MarshalJSON() ([]byte, error) {
 
 func (o ResolvedNetworkSecurityGroupRule) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Rule) {
-		toSerialize["rule"] = o.Rule
+	if o.Rule.IsSet() {
+		toSerialize["rule"] = o.Rule.Get()
 	}
-	if !IsNil(o.SrcPrefixes) {
-		toSerialize["srcPrefixes"] = o.SrcPrefixes
-	}
-	if !IsNil(o.DstPrefixes) {
-		toSerialize["dstPrefixes"] = o.DstPrefixes
-	}
+	toSerialize["srcPrefixes"] = o.SrcPrefixes
+	toSerialize["dstPrefixes"] = o.DstPrefixes
 	return toSerialize, nil
+}
+
+func (o *ResolvedNetworkSecurityGroupRule) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"srcPrefixes",
+		"dstPrefixes",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varResolvedNetworkSecurityGroupRule := _ResolvedNetworkSecurityGroupRule{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varResolvedNetworkSecurityGroupRule)
+
+	if err != nil {
+		return err
+	}
+
+	*o = ResolvedNetworkSecurityGroupRule(varResolvedNetworkSecurityGroupRule)
+
+	return err
 }
 
 type NullableResolvedNetworkSecurityGroupRule struct {

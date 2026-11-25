@@ -26,13 +26,13 @@ var _ MappedNullable = &Interface{}
 // Interface Associates an Instance with a Subnet or VPC-backed network
 type Interface struct {
 	// Unique UUID v4 identifier for the Interface
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the associated Instance
-	InstanceId *string `json:"instanceId,omitempty"`
+	InstanceId string `json:"instanceId"`
 	// ID of the Tenant that owns the associated Instance when it differs from the selected VPC or VPC Prefix owner; null when the owners match
-	InstanceTenantId NullableString `json:"instanceTenantId"`
+	InstanceTenantId NullableString `json:"instanceTenantId,omitempty"`
 	// ID of the Tenant that owns the selected VPC or VPC Prefix when it differs from the Instance owner; null when the owners match
-	VpcTenantId NullableString `json:"vpcTenantId"`
+	VpcTenantId NullableString `json:"vpcTenantId,omitempty"`
 	// ID of the associated Subnet
 	SubnetId NullableString `json:"subnetId,omitempty"`
 	// ID of the VPC Prefix explicitly selected by the caller
@@ -42,7 +42,7 @@ type Interface struct {
 	// Address families requested for Controller prefix selection
 	IpFamilies []IPFamily `json:"ipFamilies,omitempty"`
 	// Indicates whether the network is bound on a physical Interface
-	IsPhysical *bool `json:"isPhysical,omitempty"`
+	IsPhysical bool `json:"isPhysical"`
 	// Name of the device to use
 	Device NullableString `json:"device,omitempty"`
 	// Index of the device, used to identify which interface card to attache the Partition to
@@ -52,19 +52,19 @@ type Interface struct {
 	// MAC address of the Interface
 	MacAddress NullableString `json:"macAddress,omitempty"`
 	// A list of IPv4 or IPv6 addresses
-	IpAddresses []string `json:"ipAddresses,omitempty"`
+	IpAddresses []string `json:"ipAddresses"`
 	// Reported IPv4 or IPv6 prefixes in CIDR notation, ordered IPv4 before IPv6. This list is independent of `ipAddresses`; SLAAC can report an IPv6 prefix without a fixed host address. Match prefixes and addresses by address family, not list position. Empty when no prefixes are available.
-	IpPrefixes []string `json:"ipPrefixes,omitempty"`
+	IpPrefixes []string `json:"ipPrefixes"`
 	// Explicitly requested IP address for the interface. This is only used with an explicit `vpcPrefixId` and is not valid with `subnetId` or VPC-selected interfaces. The least-significant host bit must be 1.
 	RequestedIpAddress NullableString `json:"requestedIpAddress,omitempty"`
 	// Inline interface-local routing profile options. Only valid for VPC-backed interfaces.
 	InlineRoutingProfile NullableInterfaceInlineRoutingProfile `json:"inlineRoutingProfile,omitempty"`
 	// Status of the Interface
-	Status *InterfaceStatus `json:"status,omitempty"`
+	Status InterfaceStatus `json:"status"`
 	// Date/time when the Interface was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Interface was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
 
 type _Interface Interface
@@ -73,10 +73,16 @@ type _Interface Interface
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInterface(instanceTenantId NullableString, vpcTenantId NullableString) *Interface {
+func NewInterface(id string, instanceId string, isPhysical bool, ipAddresses []string, ipPrefixes []string, status InterfaceStatus, created time.Time, updated time.Time) *Interface {
 	this := Interface{}
-	this.InstanceTenantId = instanceTenantId
-	this.VpcTenantId = vpcTenantId
+	this.Id = id
+	this.InstanceId = instanceId
+	this.IsPhysical = isPhysical
+	this.IpAddresses = ipAddresses
+	this.IpPrefixes = ipPrefixes
+	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -88,82 +94,64 @@ func NewInterfaceWithDefaults() *Interface {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Interface) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Interface) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Interface) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetInstanceId returns the InstanceId field value if set, zero value otherwise.
+// GetInstanceId returns the InstanceId field value
 func (o *Interface) GetInstanceId() string {
-	if o == nil || IsNil(o.InstanceId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InstanceId
+
+	return o.InstanceId
 }
 
-// GetInstanceIdOk returns a tuple with the InstanceId field value if set, nil otherwise
+// GetInstanceIdOk returns a tuple with the InstanceId field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetInstanceIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InstanceId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InstanceId, true
+	return &o.InstanceId, true
 }
 
-// HasInstanceId returns a boolean if a field has been set.
-func (o *Interface) HasInstanceId() bool {
-	if o != nil && !IsNil(o.InstanceId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInstanceId gets a reference to the given string and assigns it to the InstanceId field.
+// SetInstanceId sets field value
 func (o *Interface) SetInstanceId(v string) {
-	o.InstanceId = &v
+	o.InstanceId = v
 }
 
-// GetInstanceTenantId returns the InstanceTenantId field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetInstanceTenantId returns the InstanceTenantId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Interface) GetInstanceTenantId() string {
-	if o == nil || o.InstanceTenantId.Get() == nil {
+	if o == nil || IsNil(o.InstanceTenantId.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.InstanceTenantId.Get()
 }
 
-// GetInstanceTenantIdOk returns a tuple with the InstanceTenantId field value
+// GetInstanceTenantIdOk returns a tuple with the InstanceTenantId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Interface) GetInstanceTenantIdOk() (*string, bool) {
@@ -173,23 +161,40 @@ func (o *Interface) GetInstanceTenantIdOk() (*string, bool) {
 	return o.InstanceTenantId.Get(), o.InstanceTenantId.IsSet()
 }
 
-// SetInstanceTenantId sets field value
+// HasInstanceTenantId returns a boolean if a field has been set.
+func (o *Interface) HasInstanceTenantId() bool {
+	if o != nil && o.InstanceTenantId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetInstanceTenantId gets a reference to the given NullableString and assigns it to the InstanceTenantId field.
 func (o *Interface) SetInstanceTenantId(v string) {
 	o.InstanceTenantId.Set(&v)
 }
 
-// GetVpcTenantId returns the VpcTenantId field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetInstanceTenantIdNil sets the value for InstanceTenantId to be an explicit nil
+func (o *Interface) SetInstanceTenantIdNil() {
+	o.InstanceTenantId.Set(nil)
+}
+
+// UnsetInstanceTenantId ensures that no value is present for InstanceTenantId, not even an explicit nil
+func (o *Interface) UnsetInstanceTenantId() {
+	o.InstanceTenantId.Unset()
+}
+
+// GetVpcTenantId returns the VpcTenantId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Interface) GetVpcTenantId() string {
-	if o == nil || o.VpcTenantId.Get() == nil {
+	if o == nil || IsNil(o.VpcTenantId.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.VpcTenantId.Get()
 }
 
-// GetVpcTenantIdOk returns a tuple with the VpcTenantId field value
+// GetVpcTenantIdOk returns a tuple with the VpcTenantId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Interface) GetVpcTenantIdOk() (*string, bool) {
@@ -199,9 +204,28 @@ func (o *Interface) GetVpcTenantIdOk() (*string, bool) {
 	return o.VpcTenantId.Get(), o.VpcTenantId.IsSet()
 }
 
-// SetVpcTenantId sets field value
+// HasVpcTenantId returns a boolean if a field has been set.
+func (o *Interface) HasVpcTenantId() bool {
+	if o != nil && o.VpcTenantId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetVpcTenantId gets a reference to the given NullableString and assigns it to the VpcTenantId field.
 func (o *Interface) SetVpcTenantId(v string) {
 	o.VpcTenantId.Set(&v)
+}
+
+// SetVpcTenantIdNil sets the value for VpcTenantId to be an explicit nil
+func (o *Interface) SetVpcTenantIdNil() {
+	o.VpcTenantId.Set(nil)
+}
+
+// UnsetVpcTenantId ensures that no value is present for VpcTenantId, not even an explicit nil
+func (o *Interface) UnsetVpcTenantId() {
+	o.VpcTenantId.Unset()
 }
 
 // GetSubnetId returns the SubnetId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -354,36 +378,28 @@ func (o *Interface) SetIpFamilies(v []IPFamily) {
 	o.IpFamilies = v
 }
 
-// GetIsPhysical returns the IsPhysical field value if set, zero value otherwise.
+// GetIsPhysical returns the IsPhysical field value
 func (o *Interface) GetIsPhysical() bool {
-	if o == nil || IsNil(o.IsPhysical) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsPhysical
+
+	return o.IsPhysical
 }
 
-// GetIsPhysicalOk returns a tuple with the IsPhysical field value if set, nil otherwise
+// GetIsPhysicalOk returns a tuple with the IsPhysical field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetIsPhysicalOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsPhysical) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsPhysical, true
+	return &o.IsPhysical, true
 }
 
-// HasIsPhysical returns a boolean if a field has been set.
-func (o *Interface) HasIsPhysical() bool {
-	if o != nil && !IsNil(o.IsPhysical) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsPhysical gets a reference to the given bool and assigns it to the IsPhysical field.
+// SetIsPhysical sets field value
 func (o *Interface) SetIsPhysical(v bool) {
-	o.IsPhysical = &v
+	o.IsPhysical = v
 }
 
 // GetDevice returns the Device field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -558,66 +574,50 @@ func (o *Interface) UnsetMacAddress() {
 	o.MacAddress.Unset()
 }
 
-// GetIpAddresses returns the IpAddresses field value if set, zero value otherwise.
+// GetIpAddresses returns the IpAddresses field value
 func (o *Interface) GetIpAddresses() []string {
-	if o == nil || IsNil(o.IpAddresses) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.IpAddresses
 }
 
-// GetIpAddressesOk returns a tuple with the IpAddresses field value if set, nil otherwise
+// GetIpAddressesOk returns a tuple with the IpAddresses field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetIpAddressesOk() ([]string, bool) {
-	if o == nil || IsNil(o.IpAddresses) {
+	if o == nil {
 		return nil, false
 	}
 	return o.IpAddresses, true
 }
 
-// HasIpAddresses returns a boolean if a field has been set.
-func (o *Interface) HasIpAddresses() bool {
-	if o != nil && !IsNil(o.IpAddresses) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpAddresses gets a reference to the given []string and assigns it to the IpAddresses field.
+// SetIpAddresses sets field value
 func (o *Interface) SetIpAddresses(v []string) {
 	o.IpAddresses = v
 }
 
-// GetIpPrefixes returns the IpPrefixes field value if set, zero value otherwise.
+// GetIpPrefixes returns the IpPrefixes field value
 func (o *Interface) GetIpPrefixes() []string {
-	if o == nil || IsNil(o.IpPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.IpPrefixes
 }
 
-// GetIpPrefixesOk returns a tuple with the IpPrefixes field value if set, nil otherwise
+// GetIpPrefixesOk returns a tuple with the IpPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetIpPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.IpPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.IpPrefixes, true
 }
 
-// HasIpPrefixes returns a boolean if a field has been set.
-func (o *Interface) HasIpPrefixes() bool {
-	if o != nil && !IsNil(o.IpPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpPrefixes gets a reference to the given []string and assigns it to the IpPrefixes field.
+// SetIpPrefixes sets field value
 func (o *Interface) SetIpPrefixes(v []string) {
 	o.IpPrefixes = v
 }
@@ -708,100 +708,76 @@ func (o *Interface) UnsetInlineRoutingProfile() {
 	o.InlineRoutingProfile.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *Interface) GetStatus() InterfaceStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret InterfaceStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetStatusOk() (*InterfaceStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *Interface) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given InterfaceStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *Interface) SetStatus(v InterfaceStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *Interface) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *Interface) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *Interface) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *Interface) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *Interface) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *Interface) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *Interface) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o Interface) MarshalJSON() ([]byte, error) {
@@ -814,14 +790,14 @@ func (o Interface) MarshalJSON() ([]byte, error) {
 
 func (o Interface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
+	toSerialize["id"] = o.Id
+	toSerialize["instanceId"] = o.InstanceId
+	if o.InstanceTenantId.IsSet() {
+		toSerialize["instanceTenantId"] = o.InstanceTenantId.Get()
 	}
-	if !IsNil(o.InstanceId) {
-		toSerialize["instanceId"] = o.InstanceId
+	if o.VpcTenantId.IsSet() {
+		toSerialize["vpcTenantId"] = o.VpcTenantId.Get()
 	}
-	toSerialize["instanceTenantId"] = o.InstanceTenantId.Get()
-	toSerialize["vpcTenantId"] = o.VpcTenantId.Get()
 	if o.SubnetId.IsSet() {
 		toSerialize["subnetId"] = o.SubnetId.Get()
 	}
@@ -834,9 +810,7 @@ func (o Interface) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.IpFamilies) {
 		toSerialize["ipFamilies"] = o.IpFamilies
 	}
-	if !IsNil(o.IsPhysical) {
-		toSerialize["isPhysical"] = o.IsPhysical
-	}
+	toSerialize["isPhysical"] = o.IsPhysical
 	if o.Device.IsSet() {
 		toSerialize["device"] = o.Device.Get()
 	}
@@ -849,27 +823,17 @@ func (o Interface) ToMap() (map[string]interface{}, error) {
 	if o.MacAddress.IsSet() {
 		toSerialize["macAddress"] = o.MacAddress.Get()
 	}
-	if !IsNil(o.IpAddresses) {
-		toSerialize["ipAddresses"] = o.IpAddresses
-	}
-	if !IsNil(o.IpPrefixes) {
-		toSerialize["ipPrefixes"] = o.IpPrefixes
-	}
+	toSerialize["ipAddresses"] = o.IpAddresses
+	toSerialize["ipPrefixes"] = o.IpPrefixes
 	if o.RequestedIpAddress.IsSet() {
 		toSerialize["requestedIpAddress"] = o.RequestedIpAddress.Get()
 	}
 	if o.InlineRoutingProfile.IsSet() {
 		toSerialize["inlineRoutingProfile"] = o.InlineRoutingProfile.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["status"] = o.Status
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
 }
 
@@ -878,8 +842,14 @@ func (o *Interface) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"instanceTenantId",
-		"vpcTenantId",
+		"id",
+		"instanceId",
+		"isPhysical",
+		"ipAddresses",
+		"ipPrefixes",
+		"status",
+		"created",
+		"updated",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -890,13 +860,8 @@ func (o *Interface) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"instanceTenantId": {},
-		"vpcTenantId":      {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

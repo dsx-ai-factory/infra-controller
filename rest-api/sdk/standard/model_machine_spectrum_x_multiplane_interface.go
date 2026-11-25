@@ -31,9 +31,9 @@ type MachineSpectrumXMultiplaneInterface struct {
 	// Plane number of this interface, from 0 through 7.
 	Plane int32 `json:"plane"`
 	// Null until an operator requests a mode. True disables links; false enables them.
-	ConfiguredMaintenanceMode NullableBool `json:"configuredMaintenanceMode"`
+	ConfiguredMaintenanceMode NullableBool `json:"configuredMaintenanceMode,omitempty"`
 	// Reference recorded with the maintenance configuration, such as a ticket URL. Null if no reference is stored.
-	Reference NullableString `json:"reference"`
+	Reference NullableString `json:"reference,omitempty"`
 	// Version of this interface's desired maintenance configuration. Compare it with each DPU observation's revision to determine whether the observation describes the current request.
 	Revision string `json:"revision"`
 }
@@ -44,13 +44,11 @@ type _MachineSpectrumXMultiplaneInterface MachineSpectrumXMultiplaneInterface
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineSpectrumXMultiplaneInterface(logicalName string, rail int32, plane int32, configuredMaintenanceMode NullableBool, reference NullableString, revision string) *MachineSpectrumXMultiplaneInterface {
+func NewMachineSpectrumXMultiplaneInterface(logicalName string, rail int32, plane int32, revision string) *MachineSpectrumXMultiplaneInterface {
 	this := MachineSpectrumXMultiplaneInterface{}
 	this.LogicalName = logicalName
 	this.Rail = rail
 	this.Plane = plane
-	this.ConfiguredMaintenanceMode = configuredMaintenanceMode
-	this.Reference = reference
 	this.Revision = revision
 	return &this
 }
@@ -135,18 +133,16 @@ func (o *MachineSpectrumXMultiplaneInterface) SetPlane(v int32) {
 	o.Plane = v
 }
 
-// GetConfiguredMaintenanceMode returns the ConfiguredMaintenanceMode field value
-// If the value is explicit nil, the zero value for bool will be returned
+// GetConfiguredMaintenanceMode returns the ConfiguredMaintenanceMode field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineSpectrumXMultiplaneInterface) GetConfiguredMaintenanceMode() bool {
-	if o == nil || o.ConfiguredMaintenanceMode.Get() == nil {
+	if o == nil || IsNil(o.ConfiguredMaintenanceMode.Get()) {
 		var ret bool
 		return ret
 	}
-
 	return *o.ConfiguredMaintenanceMode.Get()
 }
 
-// GetConfiguredMaintenanceModeOk returns a tuple with the ConfiguredMaintenanceMode field value
+// GetConfiguredMaintenanceModeOk returns a tuple with the ConfiguredMaintenanceMode field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineSpectrumXMultiplaneInterface) GetConfiguredMaintenanceModeOk() (*bool, bool) {
@@ -156,23 +152,40 @@ func (o *MachineSpectrumXMultiplaneInterface) GetConfiguredMaintenanceModeOk() (
 	return o.ConfiguredMaintenanceMode.Get(), o.ConfiguredMaintenanceMode.IsSet()
 }
 
-// SetConfiguredMaintenanceMode sets field value
+// HasConfiguredMaintenanceMode returns a boolean if a field has been set.
+func (o *MachineSpectrumXMultiplaneInterface) HasConfiguredMaintenanceMode() bool {
+	if o != nil && o.ConfiguredMaintenanceMode.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetConfiguredMaintenanceMode gets a reference to the given NullableBool and assigns it to the ConfiguredMaintenanceMode field.
 func (o *MachineSpectrumXMultiplaneInterface) SetConfiguredMaintenanceMode(v bool) {
 	o.ConfiguredMaintenanceMode.Set(&v)
 }
 
-// GetReference returns the Reference field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetConfiguredMaintenanceModeNil sets the value for ConfiguredMaintenanceMode to be an explicit nil
+func (o *MachineSpectrumXMultiplaneInterface) SetConfiguredMaintenanceModeNil() {
+	o.ConfiguredMaintenanceMode.Set(nil)
+}
+
+// UnsetConfiguredMaintenanceMode ensures that no value is present for ConfiguredMaintenanceMode, not even an explicit nil
+func (o *MachineSpectrumXMultiplaneInterface) UnsetConfiguredMaintenanceMode() {
+	o.ConfiguredMaintenanceMode.Unset()
+}
+
+// GetReference returns the Reference field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineSpectrumXMultiplaneInterface) GetReference() string {
-	if o == nil || o.Reference.Get() == nil {
+	if o == nil || IsNil(o.Reference.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Reference.Get()
 }
 
-// GetReferenceOk returns a tuple with the Reference field value
+// GetReferenceOk returns a tuple with the Reference field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineSpectrumXMultiplaneInterface) GetReferenceOk() (*string, bool) {
@@ -182,9 +195,28 @@ func (o *MachineSpectrumXMultiplaneInterface) GetReferenceOk() (*string, bool) {
 	return o.Reference.Get(), o.Reference.IsSet()
 }
 
-// SetReference sets field value
+// HasReference returns a boolean if a field has been set.
+func (o *MachineSpectrumXMultiplaneInterface) HasReference() bool {
+	if o != nil && o.Reference.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetReference gets a reference to the given NullableString and assigns it to the Reference field.
 func (o *MachineSpectrumXMultiplaneInterface) SetReference(v string) {
 	o.Reference.Set(&v)
+}
+
+// SetReferenceNil sets the value for Reference to be an explicit nil
+func (o *MachineSpectrumXMultiplaneInterface) SetReferenceNil() {
+	o.Reference.Set(nil)
+}
+
+// UnsetReference ensures that no value is present for Reference, not even an explicit nil
+func (o *MachineSpectrumXMultiplaneInterface) UnsetReference() {
+	o.Reference.Unset()
 }
 
 // GetRevision returns the Revision field value
@@ -224,8 +256,12 @@ func (o MachineSpectrumXMultiplaneInterface) ToMap() (map[string]interface{}, er
 	toSerialize["logicalName"] = o.LogicalName
 	toSerialize["rail"] = o.Rail
 	toSerialize["plane"] = o.Plane
-	toSerialize["configuredMaintenanceMode"] = o.ConfiguredMaintenanceMode.Get()
-	toSerialize["reference"] = o.Reference.Get()
+	if o.ConfiguredMaintenanceMode.IsSet() {
+		toSerialize["configuredMaintenanceMode"] = o.ConfiguredMaintenanceMode.Get()
+	}
+	if o.Reference.IsSet() {
+		toSerialize["reference"] = o.Reference.Get()
+	}
 	toSerialize["revision"] = o.Revision
 	return toSerialize, nil
 }
@@ -238,8 +274,6 @@ func (o *MachineSpectrumXMultiplaneInterface) UnmarshalJSON(data []byte) (err er
 		"logicalName",
 		"rail",
 		"plane",
-		"configuredMaintenanceMode",
-		"reference",
 		"revision",
 	}
 

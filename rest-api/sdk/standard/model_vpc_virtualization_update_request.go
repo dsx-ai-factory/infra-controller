@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the VpcVirtualizationUpdateRequest type satisfies the MappedNullable interface at compile time
@@ -23,15 +25,18 @@ var _ MappedNullable = &VpcVirtualizationUpdateRequest{}
 // VpcVirtualizationUpdateRequest Request data to update network virtualization type for VPC. Requests are rejected if the VPC already has Subnets or Instances.
 type VpcVirtualizationUpdateRequest struct {
 	// Network virtualization type of the VPC. Can only be updated to `FNN`
-	NetworkVirtualizationType *string `json:"networkVirtualizationType,omitempty"`
+	NetworkVirtualizationType string `json:"networkVirtualizationType"`
 }
+
+type _VpcVirtualizationUpdateRequest VpcVirtualizationUpdateRequest
 
 // NewVpcVirtualizationUpdateRequest instantiates a new VpcVirtualizationUpdateRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcVirtualizationUpdateRequest() *VpcVirtualizationUpdateRequest {
+func NewVpcVirtualizationUpdateRequest(networkVirtualizationType string) *VpcVirtualizationUpdateRequest {
 	this := VpcVirtualizationUpdateRequest{}
+	this.NetworkVirtualizationType = networkVirtualizationType
 	return &this
 }
 
@@ -43,36 +48,28 @@ func NewVpcVirtualizationUpdateRequestWithDefaults() *VpcVirtualizationUpdateReq
 	return &this
 }
 
-// GetNetworkVirtualizationType returns the NetworkVirtualizationType field value if set, zero value otherwise.
+// GetNetworkVirtualizationType returns the NetworkVirtualizationType field value
 func (o *VpcVirtualizationUpdateRequest) GetNetworkVirtualizationType() string {
-	if o == nil || IsNil(o.NetworkVirtualizationType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.NetworkVirtualizationType
+
+	return o.NetworkVirtualizationType
 }
 
-// GetNetworkVirtualizationTypeOk returns a tuple with the NetworkVirtualizationType field value if set, nil otherwise
+// GetNetworkVirtualizationTypeOk returns a tuple with the NetworkVirtualizationType field value
 // and a boolean to check if the value has been set.
 func (o *VpcVirtualizationUpdateRequest) GetNetworkVirtualizationTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.NetworkVirtualizationType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkVirtualizationType, true
+	return &o.NetworkVirtualizationType, true
 }
 
-// HasNetworkVirtualizationType returns a boolean if a field has been set.
-func (o *VpcVirtualizationUpdateRequest) HasNetworkVirtualizationType() bool {
-	if o != nil && !IsNil(o.NetworkVirtualizationType) {
-		return true
-	}
-
-	return false
-}
-
-// SetNetworkVirtualizationType gets a reference to the given string and assigns it to the NetworkVirtualizationType field.
+// SetNetworkVirtualizationType sets field value
 func (o *VpcVirtualizationUpdateRequest) SetNetworkVirtualizationType(v string) {
-	o.NetworkVirtualizationType = &v
+	o.NetworkVirtualizationType = v
 }
 
 func (o VpcVirtualizationUpdateRequest) MarshalJSON() ([]byte, error) {
@@ -85,10 +82,44 @@ func (o VpcVirtualizationUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o VpcVirtualizationUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.NetworkVirtualizationType) {
-		toSerialize["networkVirtualizationType"] = o.NetworkVirtualizationType
-	}
+	toSerialize["networkVirtualizationType"] = o.NetworkVirtualizationType
 	return toSerialize, nil
+}
+
+func (o *VpcVirtualizationUpdateRequest) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"networkVirtualizationType",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varVpcVirtualizationUpdateRequest := _VpcVirtualizationUpdateRequest{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varVpcVirtualizationUpdateRequest)
+
+	if err != nil {
+		return err
+	}
+
+	*o = VpcVirtualizationUpdateRequest(varVpcVirtualizationUpdateRequest)
+
+	return err
 }
 
 type NullableVpcVirtualizationUpdateRequest struct {

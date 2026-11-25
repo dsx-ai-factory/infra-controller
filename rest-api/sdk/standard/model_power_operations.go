@@ -27,11 +27,11 @@ type PowerOperations struct {
 	// At most two explicit tracked power-maintenance actions, `Active` before `Pending`. Empty with a null `actionsError` means no tracked maintenance; direct power dispatch and power steps inside other workflows are not tracked here. Always empty when `actionsError` is set.
 	Actions []PowerAction `json:"actions"`
 	// Why `actions` couldn't be read, or null when the read succeeded. It never describes an individual action.
-	ActionsError NullablePowerReadError `json:"actionsError"`
+	ActionsError NullablePowerReadError `json:"actionsError,omitempty"`
 	// Outstanding power tasks for the current Flow rack that explicitly select this tray, plus tasks selecting a shelf in this tray's current rack that can affect this tray. Ordered by creation time then task UUID ascending. Former-rack tasks and execution reports are excluded; non-power tasks appear only as brief waiting-context references. Always empty when `tasksError` is set.
 	Tasks []PowerTask `json:"tasks"`
 	// Why `tasks` couldn't be read, or null when the read succeeded. It never describes an individual task; each task reports its own `status` and `targetsError`. A missing rack makes the list unavailable. More than 256 outstanding power tasks across the rack, before filtering for this tray, reports `LimitExceeded`. To fit the encoded proxy response allowance, Flow removes optional waiting-context references first, then external target information with a per-task `targetsError` of `LimitExceeded`. If the response is still too large, `tasks` is emptied and this reports `LimitExceeded`; refer to the endpoint description.
-	TasksError NullablePowerReadError `json:"tasksError"`
+	TasksError NullablePowerReadError `json:"tasksError,omitempty"`
 }
 
 type _PowerOperations PowerOperations
@@ -40,12 +40,10 @@ type _PowerOperations PowerOperations
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewPowerOperations(actions []PowerAction, actionsError NullablePowerReadError, tasks []PowerTask, tasksError NullablePowerReadError) *PowerOperations {
+func NewPowerOperations(actions []PowerAction, tasks []PowerTask) *PowerOperations {
 	this := PowerOperations{}
 	this.Actions = actions
-	this.ActionsError = actionsError
 	this.Tasks = tasks
-	this.TasksError = tasksError
 	return &this
 }
 
@@ -81,18 +79,16 @@ func (o *PowerOperations) SetActions(v []PowerAction) {
 	o.Actions = v
 }
 
-// GetActionsError returns the ActionsError field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// GetActionsError returns the ActionsError field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerOperations) GetActionsError() PowerReadError {
-	if o == nil || o.ActionsError.Get() == nil {
+	if o == nil || IsNil(o.ActionsError.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.ActionsError.Get()
 }
 
-// GetActionsErrorOk returns a tuple with the ActionsError field value
+// GetActionsErrorOk returns a tuple with the ActionsError field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerOperations) GetActionsErrorOk() (*PowerReadError, bool) {
@@ -102,9 +98,28 @@ func (o *PowerOperations) GetActionsErrorOk() (*PowerReadError, bool) {
 	return o.ActionsError.Get(), o.ActionsError.IsSet()
 }
 
-// SetActionsError sets field value
+// HasActionsError returns a boolean if a field has been set.
+func (o *PowerOperations) HasActionsError() bool {
+	if o != nil && o.ActionsError.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetActionsError gets a reference to the given NullablePowerReadError and assigns it to the ActionsError field.
 func (o *PowerOperations) SetActionsError(v PowerReadError) {
 	o.ActionsError.Set(&v)
+}
+
+// SetActionsErrorNil sets the value for ActionsError to be an explicit nil
+func (o *PowerOperations) SetActionsErrorNil() {
+	o.ActionsError.Set(nil)
+}
+
+// UnsetActionsError ensures that no value is present for ActionsError, not even an explicit nil
+func (o *PowerOperations) UnsetActionsError() {
+	o.ActionsError.Unset()
 }
 
 // GetTasks returns the Tasks field value
@@ -131,18 +146,16 @@ func (o *PowerOperations) SetTasks(v []PowerTask) {
 	o.Tasks = v
 }
 
-// GetTasksError returns the TasksError field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// GetTasksError returns the TasksError field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerOperations) GetTasksError() PowerReadError {
-	if o == nil || o.TasksError.Get() == nil {
+	if o == nil || IsNil(o.TasksError.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.TasksError.Get()
 }
 
-// GetTasksErrorOk returns a tuple with the TasksError field value
+// GetTasksErrorOk returns a tuple with the TasksError field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerOperations) GetTasksErrorOk() (*PowerReadError, bool) {
@@ -152,9 +165,28 @@ func (o *PowerOperations) GetTasksErrorOk() (*PowerReadError, bool) {
 	return o.TasksError.Get(), o.TasksError.IsSet()
 }
 
-// SetTasksError sets field value
+// HasTasksError returns a boolean if a field has been set.
+func (o *PowerOperations) HasTasksError() bool {
+	if o != nil && o.TasksError.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTasksError gets a reference to the given NullablePowerReadError and assigns it to the TasksError field.
 func (o *PowerOperations) SetTasksError(v PowerReadError) {
 	o.TasksError.Set(&v)
+}
+
+// SetTasksErrorNil sets the value for TasksError to be an explicit nil
+func (o *PowerOperations) SetTasksErrorNil() {
+	o.TasksError.Set(nil)
+}
+
+// UnsetTasksError ensures that no value is present for TasksError, not even an explicit nil
+func (o *PowerOperations) UnsetTasksError() {
+	o.TasksError.Unset()
 }
 
 func (o PowerOperations) MarshalJSON() ([]byte, error) {
@@ -168,9 +200,13 @@ func (o PowerOperations) MarshalJSON() ([]byte, error) {
 func (o PowerOperations) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["actions"] = o.Actions
-	toSerialize["actionsError"] = o.ActionsError.Get()
+	if o.ActionsError.IsSet() {
+		toSerialize["actionsError"] = o.ActionsError.Get()
+	}
 	toSerialize["tasks"] = o.Tasks
-	toSerialize["tasksError"] = o.TasksError.Get()
+	if o.TasksError.IsSet() {
+		toSerialize["tasksError"] = o.TasksError.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -180,9 +216,7 @@ func (o *PowerOperations) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"actions",
-		"actionsError",
 		"tasks",
-		"tasksError",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -193,13 +227,8 @@ func (o *PowerOperations) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"actionsError": {},
-		"tasksError":   {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantStats type satisfies the MappedNullable interface at compile time
@@ -23,21 +25,27 @@ var _ MappedNullable = &TenantStats{}
 // TenantStats Provide operational stats for Tenant
 type TenantStats struct {
 	// Instance status counts for the Tenant
-	Instance *InstanceCountByStatus `json:"instance,omitempty"`
+	Instance InstanceCountByStatus `json:"instance"`
 	// VPC status counts for the Tenant
-	Vpc *VpcCountByStatus `json:"vpc,omitempty"`
+	Vpc VpcCountByStatus `json:"vpc"`
 	// Subnet status counts for the Tenant
-	Subnet *SubnetCountByStatus `json:"subnet,omitempty"`
+	Subnet SubnetCountByStatus `json:"subnet"`
 	// Tenant Account status counts for the Tenant
-	TenantAccount *TenantAccountCountByStatus `json:"tenantAccount,omitempty"`
+	TenantAccount TenantAccountCountByStatus `json:"tenantAccount"`
 }
+
+type _TenantStats TenantStats
 
 // NewTenantStats instantiates a new TenantStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantStats() *TenantStats {
+func NewTenantStats(instance InstanceCountByStatus, vpc VpcCountByStatus, subnet SubnetCountByStatus, tenantAccount TenantAccountCountByStatus) *TenantStats {
 	this := TenantStats{}
+	this.Instance = instance
+	this.Vpc = vpc
+	this.Subnet = subnet
+	this.TenantAccount = tenantAccount
 	return &this
 }
 
@@ -49,132 +57,100 @@ func NewTenantStatsWithDefaults() *TenantStats {
 	return &this
 }
 
-// GetInstance returns the Instance field value if set, zero value otherwise.
+// GetInstance returns the Instance field value
 func (o *TenantStats) GetInstance() InstanceCountByStatus {
-	if o == nil || IsNil(o.Instance) {
+	if o == nil {
 		var ret InstanceCountByStatus
 		return ret
 	}
-	return *o.Instance
+
+	return o.Instance
 }
 
-// GetInstanceOk returns a tuple with the Instance field value if set, nil otherwise
+// GetInstanceOk returns a tuple with the Instance field value
 // and a boolean to check if the value has been set.
 func (o *TenantStats) GetInstanceOk() (*InstanceCountByStatus, bool) {
-	if o == nil || IsNil(o.Instance) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Instance, true
+	return &o.Instance, true
 }
 
-// HasInstance returns a boolean if a field has been set.
-func (o *TenantStats) HasInstance() bool {
-	if o != nil && !IsNil(o.Instance) {
-		return true
-	}
-
-	return false
-}
-
-// SetInstance gets a reference to the given InstanceCountByStatus and assigns it to the Instance field.
+// SetInstance sets field value
 func (o *TenantStats) SetInstance(v InstanceCountByStatus) {
-	o.Instance = &v
+	o.Instance = v
 }
 
-// GetVpc returns the Vpc field value if set, zero value otherwise.
+// GetVpc returns the Vpc field value
 func (o *TenantStats) GetVpc() VpcCountByStatus {
-	if o == nil || IsNil(o.Vpc) {
+	if o == nil {
 		var ret VpcCountByStatus
 		return ret
 	}
-	return *o.Vpc
+
+	return o.Vpc
 }
 
-// GetVpcOk returns a tuple with the Vpc field value if set, nil otherwise
+// GetVpcOk returns a tuple with the Vpc field value
 // and a boolean to check if the value has been set.
 func (o *TenantStats) GetVpcOk() (*VpcCountByStatus, bool) {
-	if o == nil || IsNil(o.Vpc) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Vpc, true
+	return &o.Vpc, true
 }
 
-// HasVpc returns a boolean if a field has been set.
-func (o *TenantStats) HasVpc() bool {
-	if o != nil && !IsNil(o.Vpc) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpc gets a reference to the given VpcCountByStatus and assigns it to the Vpc field.
+// SetVpc sets field value
 func (o *TenantStats) SetVpc(v VpcCountByStatus) {
-	o.Vpc = &v
+	o.Vpc = v
 }
 
-// GetSubnet returns the Subnet field value if set, zero value otherwise.
+// GetSubnet returns the Subnet field value
 func (o *TenantStats) GetSubnet() SubnetCountByStatus {
-	if o == nil || IsNil(o.Subnet) {
+	if o == nil {
 		var ret SubnetCountByStatus
 		return ret
 	}
-	return *o.Subnet
+
+	return o.Subnet
 }
 
-// GetSubnetOk returns a tuple with the Subnet field value if set, nil otherwise
+// GetSubnetOk returns a tuple with the Subnet field value
 // and a boolean to check if the value has been set.
 func (o *TenantStats) GetSubnetOk() (*SubnetCountByStatus, bool) {
-	if o == nil || IsNil(o.Subnet) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Subnet, true
+	return &o.Subnet, true
 }
 
-// HasSubnet returns a boolean if a field has been set.
-func (o *TenantStats) HasSubnet() bool {
-	if o != nil && !IsNil(o.Subnet) {
-		return true
-	}
-
-	return false
-}
-
-// SetSubnet gets a reference to the given SubnetCountByStatus and assigns it to the Subnet field.
+// SetSubnet sets field value
 func (o *TenantStats) SetSubnet(v SubnetCountByStatus) {
-	o.Subnet = &v
+	o.Subnet = v
 }
 
-// GetTenantAccount returns the TenantAccount field value if set, zero value otherwise.
+// GetTenantAccount returns the TenantAccount field value
 func (o *TenantStats) GetTenantAccount() TenantAccountCountByStatus {
-	if o == nil || IsNil(o.TenantAccount) {
+	if o == nil {
 		var ret TenantAccountCountByStatus
 		return ret
 	}
-	return *o.TenantAccount
+
+	return o.TenantAccount
 }
 
-// GetTenantAccountOk returns a tuple with the TenantAccount field value if set, nil otherwise
+// GetTenantAccountOk returns a tuple with the TenantAccount field value
 // and a boolean to check if the value has been set.
 func (o *TenantStats) GetTenantAccountOk() (*TenantAccountCountByStatus, bool) {
-	if o == nil || IsNil(o.TenantAccount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantAccount, true
+	return &o.TenantAccount, true
 }
 
-// HasTenantAccount returns a boolean if a field has been set.
-func (o *TenantStats) HasTenantAccount() bool {
-	if o != nil && !IsNil(o.TenantAccount) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantAccount gets a reference to the given TenantAccountCountByStatus and assigns it to the TenantAccount field.
+// SetTenantAccount sets field value
 func (o *TenantStats) SetTenantAccount(v TenantAccountCountByStatus) {
-	o.TenantAccount = &v
+	o.TenantAccount = v
 }
 
 func (o TenantStats) MarshalJSON() ([]byte, error) {
@@ -187,19 +163,50 @@ func (o TenantStats) MarshalJSON() ([]byte, error) {
 
 func (o TenantStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Instance) {
-		toSerialize["instance"] = o.Instance
-	}
-	if !IsNil(o.Vpc) {
-		toSerialize["vpc"] = o.Vpc
-	}
-	if !IsNil(o.Subnet) {
-		toSerialize["subnet"] = o.Subnet
-	}
-	if !IsNil(o.TenantAccount) {
-		toSerialize["tenantAccount"] = o.TenantAccount
-	}
+	toSerialize["instance"] = o.Instance
+	toSerialize["vpc"] = o.Vpc
+	toSerialize["subnet"] = o.Subnet
+	toSerialize["tenantAccount"] = o.TenantAccount
 	return toSerialize, nil
+}
+
+func (o *TenantStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"instance",
+		"vpc",
+		"subnet",
+		"tenantAccount",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantStats := _TenantStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantStats(varTenantStats)
+
+	return err
 }
 
 type NullableTenantStats struct {

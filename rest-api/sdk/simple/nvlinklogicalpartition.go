@@ -45,24 +45,15 @@ func NewNVLinkLogicalPartitionManager(client *Client) NVLinkLogicalPartitionMana
 }
 
 func nvLinkLogicalPartitionFromStandard(api standard.NVLinkLogicalPartition) NVLinkLogicalPartition {
-	nl := NVLinkLogicalPartition{SiteID: api.GetSiteId()}
-	if api.Id != nil {
-		nl.ID = *api.Id
+	return NVLinkLogicalPartition{
+		ID:          api.Id,
+		SiteID:      api.SiteId,
+		Name:        api.Name,
+		Description: api.Description.Get(),
+		Status:      string(api.Status),
+		Created:     api.Created,
+		Updated:     api.Updated,
 	}
-	if api.Name != nil {
-		nl.Name = *api.Name
-	}
-	nl.Description = api.Description.Get()
-	if api.Status != nil {
-		nl.Status = string(*api.Status)
-	}
-	if api.Created != nil {
-		nl.Created = *api.Created
-	}
-	if api.Updated != nil {
-		nl.Updated = *api.Updated
-	}
-	return nl
 }
 
 // Create creates a new NVLink Logical Partition
@@ -71,11 +62,9 @@ func (nlm NVLinkLogicalPartitionManager) Create(ctx context.Context, request NVL
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, nlm.client.Config.Token)
 
 	apiReq := standard.NVLinkLogicalPartitionCreateRequest{
-		Name:   request.Name,
-		SiteId: nlm.client.apiMetadata.SiteID,
-	}
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
+		Name:        request.Name,
+		Description: request.Description,
+		SiteId:      nlm.client.apiMetadata.SiteID,
 	}
 	apiNl, resp, err := nlm.client.apiClient.NVLinkLogicalPartitionAPI.CreateNvlinkLogicalPartition(ctx, nlm.client.apiMetadata.Organization).
 		NVLinkLogicalPartitionCreateRequest(apiReq).Execute()
@@ -147,12 +136,9 @@ func (nlm NVLinkLogicalPartitionManager) Update(ctx context.Context, id string, 
 	ctx = WithLogger(ctx, nlm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, nlm.client.Config.Token)
 
-	apiReq := standard.NVLinkLogicalPartitionUpdateRequest{}
-	if request.Name != nil {
-		apiReq.Name.Set(request.Name)
-	}
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
+	apiReq := standard.NVLinkLogicalPartitionUpdateRequest{
+		Name:        request.Name,
+		Description: request.Description,
 	}
 	apiNl, resp, err := nlm.client.apiClient.NVLinkLogicalPartitionAPI.UpdateNvlinkLogicalPartition(ctx, nlm.client.apiMetadata.Organization, id).
 		NVLinkLogicalPartitionUpdateRequest(apiReq).Execute()

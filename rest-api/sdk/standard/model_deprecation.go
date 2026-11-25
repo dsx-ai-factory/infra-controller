@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,25 +26,29 @@ var _ MappedNullable = &Deprecation{}
 // Deprecation Details of a particular deprecation in NVIDIA Infra Controller (NICo) API
 type Deprecation struct {
 	// Name of the attribute that is deprecated. Omitted if queryParam or endpoint is being deprecated.
-	Attribute NullableString `json:"attribute,omitempty"`
+	Attribute *string `json:"attribute,omitempty"`
 	// Query parameter that is deprecated. Omitted if attribute or endpoint is being deprecated.
-	QueryParam NullableString `json:"queryParam,omitempty"`
+	QueryParam *string `json:"queryParam,omitempty"`
 	// API endpoint that is deprecated. Omitted if attribute or queryParam is being deprecated.
-	Endpoint NullableString `json:"endpoint,omitempty"`
+	Endpoint *string `json:"endpoint,omitempty"`
 	// Name of the attribute, query parameter, or endpoint that replaces the deprecated item. Omitted if no replacement is available.
-	ReplacedBy NullableString `json:"replacedBy,omitempty"`
+	ReplacedBy *string `json:"replacedBy,omitempty"`
 	// Date/time by which clients should migrate away from the deprecated API surface
-	TakeActionBy *time.Time `json:"takeActionBy,omitempty"`
+	TakeActionBy time.Time `json:"takeActionBy"`
 	// Message describing the deprecation
-	Notice *string `json:"notice,omitempty"`
+	Notice string `json:"notice"`
 }
+
+type _Deprecation Deprecation
 
 // NewDeprecation instantiates a new Deprecation object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDeprecation() *Deprecation {
+func NewDeprecation(takeActionBy time.Time, notice string) *Deprecation {
 	this := Deprecation{}
+	this.TakeActionBy = takeActionBy
+	this.Notice = notice
 	return &this
 }
 
@@ -54,240 +60,180 @@ func NewDeprecationWithDefaults() *Deprecation {
 	return &this
 }
 
-// GetAttribute returns the Attribute field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetAttribute returns the Attribute field value if set, zero value otherwise.
 func (o *Deprecation) GetAttribute() string {
-	if o == nil || IsNil(o.Attribute.Get()) {
+	if o == nil || IsNil(o.Attribute) {
 		var ret string
 		return ret
 	}
-	return *o.Attribute.Get()
+	return *o.Attribute
 }
 
 // GetAttributeOk returns a tuple with the Attribute field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Deprecation) GetAttributeOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Attribute) {
 		return nil, false
 	}
-	return o.Attribute.Get(), o.Attribute.IsSet()
+	return o.Attribute, true
 }
 
 // HasAttribute returns a boolean if a field has been set.
 func (o *Deprecation) HasAttribute() bool {
-	if o != nil && o.Attribute.IsSet() {
+	if o != nil && !IsNil(o.Attribute) {
 		return true
 	}
 
 	return false
 }
 
-// SetAttribute gets a reference to the given NullableString and assigns it to the Attribute field.
+// SetAttribute gets a reference to the given string and assigns it to the Attribute field.
 func (o *Deprecation) SetAttribute(v string) {
-	o.Attribute.Set(&v)
+	o.Attribute = &v
 }
 
-// SetAttributeNil sets the value for Attribute to be an explicit nil
-func (o *Deprecation) SetAttributeNil() {
-	o.Attribute.Set(nil)
-}
-
-// UnsetAttribute ensures that no value is present for Attribute, not even an explicit nil
-func (o *Deprecation) UnsetAttribute() {
-	o.Attribute.Unset()
-}
-
-// GetQueryParam returns the QueryParam field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetQueryParam returns the QueryParam field value if set, zero value otherwise.
 func (o *Deprecation) GetQueryParam() string {
-	if o == nil || IsNil(o.QueryParam.Get()) {
+	if o == nil || IsNil(o.QueryParam) {
 		var ret string
 		return ret
 	}
-	return *o.QueryParam.Get()
+	return *o.QueryParam
 }
 
 // GetQueryParamOk returns a tuple with the QueryParam field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Deprecation) GetQueryParamOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.QueryParam) {
 		return nil, false
 	}
-	return o.QueryParam.Get(), o.QueryParam.IsSet()
+	return o.QueryParam, true
 }
 
 // HasQueryParam returns a boolean if a field has been set.
 func (o *Deprecation) HasQueryParam() bool {
-	if o != nil && o.QueryParam.IsSet() {
+	if o != nil && !IsNil(o.QueryParam) {
 		return true
 	}
 
 	return false
 }
 
-// SetQueryParam gets a reference to the given NullableString and assigns it to the QueryParam field.
+// SetQueryParam gets a reference to the given string and assigns it to the QueryParam field.
 func (o *Deprecation) SetQueryParam(v string) {
-	o.QueryParam.Set(&v)
+	o.QueryParam = &v
 }
 
-// SetQueryParamNil sets the value for QueryParam to be an explicit nil
-func (o *Deprecation) SetQueryParamNil() {
-	o.QueryParam.Set(nil)
-}
-
-// UnsetQueryParam ensures that no value is present for QueryParam, not even an explicit nil
-func (o *Deprecation) UnsetQueryParam() {
-	o.QueryParam.Unset()
-}
-
-// GetEndpoint returns the Endpoint field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetEndpoint returns the Endpoint field value if set, zero value otherwise.
 func (o *Deprecation) GetEndpoint() string {
-	if o == nil || IsNil(o.Endpoint.Get()) {
+	if o == nil || IsNil(o.Endpoint) {
 		var ret string
 		return ret
 	}
-	return *o.Endpoint.Get()
+	return *o.Endpoint
 }
 
 // GetEndpointOk returns a tuple with the Endpoint field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Deprecation) GetEndpointOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Endpoint) {
 		return nil, false
 	}
-	return o.Endpoint.Get(), o.Endpoint.IsSet()
+	return o.Endpoint, true
 }
 
 // HasEndpoint returns a boolean if a field has been set.
 func (o *Deprecation) HasEndpoint() bool {
-	if o != nil && o.Endpoint.IsSet() {
+	if o != nil && !IsNil(o.Endpoint) {
 		return true
 	}
 
 	return false
 }
 
-// SetEndpoint gets a reference to the given NullableString and assigns it to the Endpoint field.
+// SetEndpoint gets a reference to the given string and assigns it to the Endpoint field.
 func (o *Deprecation) SetEndpoint(v string) {
-	o.Endpoint.Set(&v)
+	o.Endpoint = &v
 }
 
-// SetEndpointNil sets the value for Endpoint to be an explicit nil
-func (o *Deprecation) SetEndpointNil() {
-	o.Endpoint.Set(nil)
-}
-
-// UnsetEndpoint ensures that no value is present for Endpoint, not even an explicit nil
-func (o *Deprecation) UnsetEndpoint() {
-	o.Endpoint.Unset()
-}
-
-// GetReplacedBy returns the ReplacedBy field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetReplacedBy returns the ReplacedBy field value if set, zero value otherwise.
 func (o *Deprecation) GetReplacedBy() string {
-	if o == nil || IsNil(o.ReplacedBy.Get()) {
+	if o == nil || IsNil(o.ReplacedBy) {
 		var ret string
 		return ret
 	}
-	return *o.ReplacedBy.Get()
+	return *o.ReplacedBy
 }
 
 // GetReplacedByOk returns a tuple with the ReplacedBy field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Deprecation) GetReplacedByOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ReplacedBy) {
 		return nil, false
 	}
-	return o.ReplacedBy.Get(), o.ReplacedBy.IsSet()
+	return o.ReplacedBy, true
 }
 
 // HasReplacedBy returns a boolean if a field has been set.
 func (o *Deprecation) HasReplacedBy() bool {
-	if o != nil && o.ReplacedBy.IsSet() {
+	if o != nil && !IsNil(o.ReplacedBy) {
 		return true
 	}
 
 	return false
 }
 
-// SetReplacedBy gets a reference to the given NullableString and assigns it to the ReplacedBy field.
+// SetReplacedBy gets a reference to the given string and assigns it to the ReplacedBy field.
 func (o *Deprecation) SetReplacedBy(v string) {
-	o.ReplacedBy.Set(&v)
+	o.ReplacedBy = &v
 }
 
-// SetReplacedByNil sets the value for ReplacedBy to be an explicit nil
-func (o *Deprecation) SetReplacedByNil() {
-	o.ReplacedBy.Set(nil)
-}
-
-// UnsetReplacedBy ensures that no value is present for ReplacedBy, not even an explicit nil
-func (o *Deprecation) UnsetReplacedBy() {
-	o.ReplacedBy.Unset()
-}
-
-// GetTakeActionBy returns the TakeActionBy field value if set, zero value otherwise.
+// GetTakeActionBy returns the TakeActionBy field value
 func (o *Deprecation) GetTakeActionBy() time.Time {
-	if o == nil || IsNil(o.TakeActionBy) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.TakeActionBy
+
+	return o.TakeActionBy
 }
 
-// GetTakeActionByOk returns a tuple with the TakeActionBy field value if set, nil otherwise
+// GetTakeActionByOk returns a tuple with the TakeActionBy field value
 // and a boolean to check if the value has been set.
 func (o *Deprecation) GetTakeActionByOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.TakeActionBy) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TakeActionBy, true
+	return &o.TakeActionBy, true
 }
 
-// HasTakeActionBy returns a boolean if a field has been set.
-func (o *Deprecation) HasTakeActionBy() bool {
-	if o != nil && !IsNil(o.TakeActionBy) {
-		return true
-	}
-
-	return false
-}
-
-// SetTakeActionBy gets a reference to the given time.Time and assigns it to the TakeActionBy field.
+// SetTakeActionBy sets field value
 func (o *Deprecation) SetTakeActionBy(v time.Time) {
-	o.TakeActionBy = &v
+	o.TakeActionBy = v
 }
 
-// GetNotice returns the Notice field value if set, zero value otherwise.
+// GetNotice returns the Notice field value
 func (o *Deprecation) GetNotice() string {
-	if o == nil || IsNil(o.Notice) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Notice
+
+	return o.Notice
 }
 
-// GetNoticeOk returns a tuple with the Notice field value if set, nil otherwise
+// GetNoticeOk returns a tuple with the Notice field value
 // and a boolean to check if the value has been set.
 func (o *Deprecation) GetNoticeOk() (*string, bool) {
-	if o == nil || IsNil(o.Notice) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Notice, true
+	return &o.Notice, true
 }
 
-// HasNotice returns a boolean if a field has been set.
-func (o *Deprecation) HasNotice() bool {
-	if o != nil && !IsNil(o.Notice) {
-		return true
-	}
-
-	return false
-}
-
-// SetNotice gets a reference to the given string and assigns it to the Notice field.
+// SetNotice sets field value
 func (o *Deprecation) SetNotice(v string) {
-	o.Notice = &v
+	o.Notice = v
 }
 
 func (o Deprecation) MarshalJSON() ([]byte, error) {
@@ -300,25 +246,58 @@ func (o Deprecation) MarshalJSON() ([]byte, error) {
 
 func (o Deprecation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Attribute.IsSet() {
-		toSerialize["attribute"] = o.Attribute.Get()
+	if !IsNil(o.Attribute) {
+		toSerialize["attribute"] = o.Attribute
 	}
-	if o.QueryParam.IsSet() {
-		toSerialize["queryParam"] = o.QueryParam.Get()
+	if !IsNil(o.QueryParam) {
+		toSerialize["queryParam"] = o.QueryParam
 	}
-	if o.Endpoint.IsSet() {
-		toSerialize["endpoint"] = o.Endpoint.Get()
+	if !IsNil(o.Endpoint) {
+		toSerialize["endpoint"] = o.Endpoint
 	}
-	if o.ReplacedBy.IsSet() {
-		toSerialize["replacedBy"] = o.ReplacedBy.Get()
+	if !IsNil(o.ReplacedBy) {
+		toSerialize["replacedBy"] = o.ReplacedBy
 	}
-	if !IsNil(o.TakeActionBy) {
-		toSerialize["takeActionBy"] = o.TakeActionBy
-	}
-	if !IsNil(o.Notice) {
-		toSerialize["notice"] = o.Notice
-	}
+	toSerialize["takeActionBy"] = o.TakeActionBy
+	toSerialize["notice"] = o.Notice
 	return toSerialize, nil
+}
+
+func (o *Deprecation) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"takeActionBy",
+		"notice",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDeprecation := _Deprecation{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDeprecation)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Deprecation(varDeprecation)
+
+	return err
 }
 
 type NullableDeprecation struct {

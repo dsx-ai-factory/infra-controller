@@ -25,40 +25,40 @@ var _ MappedNullable = &RackComponent{}
 // RackComponent A component within a Rack (e.g. compute node, switch, PDU)
 type RackComponent struct {
 	// Component ID
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Rack this component belongs to
-	RackId *string `json:"rackId,omitempty"`
+	RackId string `json:"rackId"`
 	// Type of the component (e.g. Compute, NVSwitch, PowerShelf)
-	Type *string `json:"type,omitempty"`
+	Type string `json:"type"`
 	// Name of the component
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Serial number of the component
-	SerialNumber *string `json:"serialNumber,omitempty"`
+	SerialNumber string `json:"serialNumber"`
 	// Manufacturer of the component
-	Manufacturer *string `json:"manufacturer,omitempty"`
+	Manufacturer string `json:"manufacturer"`
 	// Model of the component
-	Model *string `json:"model,omitempty"`
+	Model string `json:"model"`
 	// Description of the component (JSON string)
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Firmware version of the component
-	FirmwareVersion *string `json:"firmwareVersion,omitempty"`
+	FirmwareVersion string `json:"firmwareVersion"`
 	// Slot ID of the component within the rack
-	SlotId *int32 `json:"slotId,omitempty"`
+	SlotId int32 `json:"slotId"`
 	// Tray index of the component
-	TrayIdx *int32 `json:"trayIdx,omitempty"`
+	TrayIdx int32 `json:"trayIdx"`
 	// Host ID of the component
-	HostId *int32 `json:"hostId,omitempty"`
+	HostId int32 `json:"hostId"`
 	// BMC (Baseboard Management Controller) entries for the component
-	Bmcs []BMCInfo `json:"bmcs,omitempty"`
+	Bmcs []BMCInfo `json:"bmcs"`
 	// Current power state of the component
-	PowerState *string `json:"powerState,omitempty"`
+	PowerState string `json:"powerState"`
 	// Flow-derived operability phase of the component
-	OperationStatus *string `json:"operationStatus,omitempty"`
+	OperationStatus string `json:"operationStatus"`
 	// Whether the component is considered leaking coolant
-	LeakStatus         *string             `json:"leakStatus,omitempty"`
-	LeakHandlingStatus *LeakHandlingStatus `json:"leakHandlingStatus,omitempty"`
+	LeakStatus         string             `json:"leakStatus"`
+	LeakHandlingStatus LeakHandlingStatus `json:"leakHandlingStatus"`
 	// Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
-	Health NullableAggregateHealth `json:"health"`
+	Health NullableAggregateHealth `json:"health,omitempty"`
 }
 
 type _RackComponent RackComponent
@@ -67,9 +67,25 @@ type _RackComponent RackComponent
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackComponent(health NullableAggregateHealth) *RackComponent {
+func NewRackComponent(id string, rackId string, type_ string, name string, serialNumber string, manufacturer string, model string, description string, firmwareVersion string, slotId int32, trayIdx int32, hostId int32, bmcs []BMCInfo, powerState string, operationStatus string, leakStatus string, leakHandlingStatus LeakHandlingStatus) *RackComponent {
 	this := RackComponent{}
-	this.Health = health
+	this.Id = id
+	this.RackId = rackId
+	this.Type = type_
+	this.Name = name
+	this.SerialNumber = serialNumber
+	this.Manufacturer = manufacturer
+	this.Model = model
+	this.Description = description
+	this.FirmwareVersion = firmwareVersion
+	this.SlotId = slotId
+	this.TrayIdx = trayIdx
+	this.HostId = hostId
+	this.Bmcs = bmcs
+	this.PowerState = powerState
+	this.OperationStatus = operationStatus
+	this.LeakStatus = leakStatus
+	this.LeakHandlingStatus = leakHandlingStatus
 	return &this
 }
 
@@ -81,562 +97,424 @@ func NewRackComponentWithDefaults() *RackComponent {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *RackComponent) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *RackComponent) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *RackComponent) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetRackId returns the RackId field value if set, zero value otherwise.
+// GetRackId returns the RackId field value
 func (o *RackComponent) GetRackId() string {
-	if o == nil || IsNil(o.RackId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.RackId
+
+	return o.RackId
 }
 
-// GetRackIdOk returns a tuple with the RackId field value if set, nil otherwise
+// GetRackIdOk returns a tuple with the RackId field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetRackIdOk() (*string, bool) {
-	if o == nil || IsNil(o.RackId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RackId, true
+	return &o.RackId, true
 }
 
-// HasRackId returns a boolean if a field has been set.
-func (o *RackComponent) HasRackId() bool {
-	if o != nil && !IsNil(o.RackId) {
-		return true
-	}
-
-	return false
-}
-
-// SetRackId gets a reference to the given string and assigns it to the RackId field.
+// SetRackId sets field value
 func (o *RackComponent) SetRackId(v string) {
-	o.RackId = &v
+	o.RackId = v
 }
 
-// GetType returns the Type field value if set, zero value otherwise.
+// GetType returns the Type field value
 func (o *RackComponent) GetType() string {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Type
+
+	return o.Type
 }
 
-// GetTypeOk returns a tuple with the Type field value if set, nil otherwise
+// GetTypeOk returns a tuple with the Type field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Type, true
+	return &o.Type, true
 }
 
-// HasType returns a boolean if a field has been set.
-func (o *RackComponent) HasType() bool {
-	if o != nil && !IsNil(o.Type) {
-		return true
-	}
-
-	return false
-}
-
-// SetType gets a reference to the given string and assigns it to the Type field.
+// SetType sets field value
 func (o *RackComponent) SetType(v string) {
-	o.Type = &v
+	o.Type = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *RackComponent) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *RackComponent) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *RackComponent) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetSerialNumber returns the SerialNumber field value if set, zero value otherwise.
+// GetSerialNumber returns the SerialNumber field value
 func (o *RackComponent) GetSerialNumber() string {
-	if o == nil || IsNil(o.SerialNumber) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SerialNumber
+
+	return o.SerialNumber
 }
 
-// GetSerialNumberOk returns a tuple with the SerialNumber field value if set, nil otherwise
+// GetSerialNumberOk returns a tuple with the SerialNumber field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetSerialNumberOk() (*string, bool) {
-	if o == nil || IsNil(o.SerialNumber) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SerialNumber, true
+	return &o.SerialNumber, true
 }
 
-// HasSerialNumber returns a boolean if a field has been set.
-func (o *RackComponent) HasSerialNumber() bool {
-	if o != nil && !IsNil(o.SerialNumber) {
-		return true
-	}
-
-	return false
-}
-
-// SetSerialNumber gets a reference to the given string and assigns it to the SerialNumber field.
+// SetSerialNumber sets field value
 func (o *RackComponent) SetSerialNumber(v string) {
-	o.SerialNumber = &v
+	o.SerialNumber = v
 }
 
-// GetManufacturer returns the Manufacturer field value if set, zero value otherwise.
+// GetManufacturer returns the Manufacturer field value
 func (o *RackComponent) GetManufacturer() string {
-	if o == nil || IsNil(o.Manufacturer) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Manufacturer
+
+	return o.Manufacturer
 }
 
-// GetManufacturerOk returns a tuple with the Manufacturer field value if set, nil otherwise
+// GetManufacturerOk returns a tuple with the Manufacturer field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetManufacturerOk() (*string, bool) {
-	if o == nil || IsNil(o.Manufacturer) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Manufacturer, true
+	return &o.Manufacturer, true
 }
 
-// HasManufacturer returns a boolean if a field has been set.
-func (o *RackComponent) HasManufacturer() bool {
-	if o != nil && !IsNil(o.Manufacturer) {
-		return true
-	}
-
-	return false
-}
-
-// SetManufacturer gets a reference to the given string and assigns it to the Manufacturer field.
+// SetManufacturer sets field value
 func (o *RackComponent) SetManufacturer(v string) {
-	o.Manufacturer = &v
+	o.Manufacturer = v
 }
 
-// GetModel returns the Model field value if set, zero value otherwise.
+// GetModel returns the Model field value
 func (o *RackComponent) GetModel() string {
-	if o == nil || IsNil(o.Model) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Model
+
+	return o.Model
 }
 
-// GetModelOk returns a tuple with the Model field value if set, nil otherwise
+// GetModelOk returns a tuple with the Model field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetModelOk() (*string, bool) {
-	if o == nil || IsNil(o.Model) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Model, true
+	return &o.Model, true
 }
 
-// HasModel returns a boolean if a field has been set.
-func (o *RackComponent) HasModel() bool {
-	if o != nil && !IsNil(o.Model) {
-		return true
-	}
-
-	return false
-}
-
-// SetModel gets a reference to the given string and assigns it to the Model field.
+// SetModel sets field value
 func (o *RackComponent) SetModel(v string) {
-	o.Model = &v
+	o.Model = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *RackComponent) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *RackComponent) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *RackComponent) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
-// GetFirmwareVersion returns the FirmwareVersion field value if set, zero value otherwise.
+// GetFirmwareVersion returns the FirmwareVersion field value
 func (o *RackComponent) GetFirmwareVersion() string {
-	if o == nil || IsNil(o.FirmwareVersion) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.FirmwareVersion
+
+	return o.FirmwareVersion
 }
 
-// GetFirmwareVersionOk returns a tuple with the FirmwareVersion field value if set, nil otherwise
+// GetFirmwareVersionOk returns a tuple with the FirmwareVersion field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetFirmwareVersionOk() (*string, bool) {
-	if o == nil || IsNil(o.FirmwareVersion) {
+	if o == nil {
 		return nil, false
 	}
-	return o.FirmwareVersion, true
+	return &o.FirmwareVersion, true
 }
 
-// HasFirmwareVersion returns a boolean if a field has been set.
-func (o *RackComponent) HasFirmwareVersion() bool {
-	if o != nil && !IsNil(o.FirmwareVersion) {
-		return true
-	}
-
-	return false
-}
-
-// SetFirmwareVersion gets a reference to the given string and assigns it to the FirmwareVersion field.
+// SetFirmwareVersion sets field value
 func (o *RackComponent) SetFirmwareVersion(v string) {
-	o.FirmwareVersion = &v
+	o.FirmwareVersion = v
 }
 
-// GetSlotId returns the SlotId field value if set, zero value otherwise.
+// GetSlotId returns the SlotId field value
 func (o *RackComponent) GetSlotId() int32 {
-	if o == nil || IsNil(o.SlotId) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.SlotId
+
+	return o.SlotId
 }
 
-// GetSlotIdOk returns a tuple with the SlotId field value if set, nil otherwise
+// GetSlotIdOk returns a tuple with the SlotId field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetSlotIdOk() (*int32, bool) {
-	if o == nil || IsNil(o.SlotId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SlotId, true
+	return &o.SlotId, true
 }
 
-// HasSlotId returns a boolean if a field has been set.
-func (o *RackComponent) HasSlotId() bool {
-	if o != nil && !IsNil(o.SlotId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSlotId gets a reference to the given int32 and assigns it to the SlotId field.
+// SetSlotId sets field value
 func (o *RackComponent) SetSlotId(v int32) {
-	o.SlotId = &v
+	o.SlotId = v
 }
 
-// GetTrayIdx returns the TrayIdx field value if set, zero value otherwise.
+// GetTrayIdx returns the TrayIdx field value
 func (o *RackComponent) GetTrayIdx() int32 {
-	if o == nil || IsNil(o.TrayIdx) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.TrayIdx
+
+	return o.TrayIdx
 }
 
-// GetTrayIdxOk returns a tuple with the TrayIdx field value if set, nil otherwise
+// GetTrayIdxOk returns a tuple with the TrayIdx field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetTrayIdxOk() (*int32, bool) {
-	if o == nil || IsNil(o.TrayIdx) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TrayIdx, true
+	return &o.TrayIdx, true
 }
 
-// HasTrayIdx returns a boolean if a field has been set.
-func (o *RackComponent) HasTrayIdx() bool {
-	if o != nil && !IsNil(o.TrayIdx) {
-		return true
-	}
-
-	return false
-}
-
-// SetTrayIdx gets a reference to the given int32 and assigns it to the TrayIdx field.
+// SetTrayIdx sets field value
 func (o *RackComponent) SetTrayIdx(v int32) {
-	o.TrayIdx = &v
+	o.TrayIdx = v
 }
 
-// GetHostId returns the HostId field value if set, zero value otherwise.
+// GetHostId returns the HostId field value
 func (o *RackComponent) GetHostId() int32 {
-	if o == nil || IsNil(o.HostId) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.HostId
+
+	return o.HostId
 }
 
-// GetHostIdOk returns a tuple with the HostId field value if set, nil otherwise
+// GetHostIdOk returns a tuple with the HostId field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetHostIdOk() (*int32, bool) {
-	if o == nil || IsNil(o.HostId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.HostId, true
+	return &o.HostId, true
 }
 
-// HasHostId returns a boolean if a field has been set.
-func (o *RackComponent) HasHostId() bool {
-	if o != nil && !IsNil(o.HostId) {
-		return true
-	}
-
-	return false
-}
-
-// SetHostId gets a reference to the given int32 and assigns it to the HostId field.
+// SetHostId sets field value
 func (o *RackComponent) SetHostId(v int32) {
-	o.HostId = &v
+	o.HostId = v
 }
 
-// GetBmcs returns the Bmcs field value if set, zero value otherwise.
+// GetBmcs returns the Bmcs field value
 func (o *RackComponent) GetBmcs() []BMCInfo {
-	if o == nil || IsNil(o.Bmcs) {
+	if o == nil {
 		var ret []BMCInfo
 		return ret
 	}
+
 	return o.Bmcs
 }
 
-// GetBmcsOk returns a tuple with the Bmcs field value if set, nil otherwise
+// GetBmcsOk returns a tuple with the Bmcs field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetBmcsOk() ([]BMCInfo, bool) {
-	if o == nil || IsNil(o.Bmcs) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Bmcs, true
 }
 
-// HasBmcs returns a boolean if a field has been set.
-func (o *RackComponent) HasBmcs() bool {
-	if o != nil && !IsNil(o.Bmcs) {
-		return true
-	}
-
-	return false
-}
-
-// SetBmcs gets a reference to the given []BMCInfo and assigns it to the Bmcs field.
+// SetBmcs sets field value
 func (o *RackComponent) SetBmcs(v []BMCInfo) {
 	o.Bmcs = v
 }
 
-// GetPowerState returns the PowerState field value if set, zero value otherwise.
+// GetPowerState returns the PowerState field value
 func (o *RackComponent) GetPowerState() string {
-	if o == nil || IsNil(o.PowerState) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.PowerState
+
+	return o.PowerState
 }
 
-// GetPowerStateOk returns a tuple with the PowerState field value if set, nil otherwise
+// GetPowerStateOk returns a tuple with the PowerState field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetPowerStateOk() (*string, bool) {
-	if o == nil || IsNil(o.PowerState) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PowerState, true
+	return &o.PowerState, true
 }
 
-// HasPowerState returns a boolean if a field has been set.
-func (o *RackComponent) HasPowerState() bool {
-	if o != nil && !IsNil(o.PowerState) {
-		return true
-	}
-
-	return false
-}
-
-// SetPowerState gets a reference to the given string and assigns it to the PowerState field.
+// SetPowerState sets field value
 func (o *RackComponent) SetPowerState(v string) {
-	o.PowerState = &v
+	o.PowerState = v
 }
 
-// GetOperationStatus returns the OperationStatus field value if set, zero value otherwise.
+// GetOperationStatus returns the OperationStatus field value
 func (o *RackComponent) GetOperationStatus() string {
-	if o == nil || IsNil(o.OperationStatus) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.OperationStatus
+
+	return o.OperationStatus
 }
 
-// GetOperationStatusOk returns a tuple with the OperationStatus field value if set, nil otherwise
+// GetOperationStatusOk returns a tuple with the OperationStatus field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetOperationStatusOk() (*string, bool) {
-	if o == nil || IsNil(o.OperationStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.OperationStatus, true
+	return &o.OperationStatus, true
 }
 
-// HasOperationStatus returns a boolean if a field has been set.
-func (o *RackComponent) HasOperationStatus() bool {
-	if o != nil && !IsNil(o.OperationStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetOperationStatus gets a reference to the given string and assigns it to the OperationStatus field.
+// SetOperationStatus sets field value
 func (o *RackComponent) SetOperationStatus(v string) {
-	o.OperationStatus = &v
+	o.OperationStatus = v
 }
 
-// GetLeakStatus returns the LeakStatus field value if set, zero value otherwise.
+// GetLeakStatus returns the LeakStatus field value
 func (o *RackComponent) GetLeakStatus() string {
-	if o == nil || IsNil(o.LeakStatus) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.LeakStatus
+
+	return o.LeakStatus
 }
 
-// GetLeakStatusOk returns a tuple with the LeakStatus field value if set, nil otherwise
+// GetLeakStatusOk returns a tuple with the LeakStatus field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetLeakStatusOk() (*string, bool) {
-	if o == nil || IsNil(o.LeakStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.LeakStatus, true
+	return &o.LeakStatus, true
 }
 
-// HasLeakStatus returns a boolean if a field has been set.
-func (o *RackComponent) HasLeakStatus() bool {
-	if o != nil && !IsNil(o.LeakStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetLeakStatus gets a reference to the given string and assigns it to the LeakStatus field.
+// SetLeakStatus sets field value
 func (o *RackComponent) SetLeakStatus(v string) {
-	o.LeakStatus = &v
+	o.LeakStatus = v
 }
 
-// GetLeakHandlingStatus returns the LeakHandlingStatus field value if set, zero value otherwise.
+// GetLeakHandlingStatus returns the LeakHandlingStatus field value
 func (o *RackComponent) GetLeakHandlingStatus() LeakHandlingStatus {
-	if o == nil || IsNil(o.LeakHandlingStatus) {
+	if o == nil {
 		var ret LeakHandlingStatus
 		return ret
 	}
-	return *o.LeakHandlingStatus
+
+	return o.LeakHandlingStatus
 }
 
-// GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value if set, nil otherwise
+// GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value
 // and a boolean to check if the value has been set.
 func (o *RackComponent) GetLeakHandlingStatusOk() (*LeakHandlingStatus, bool) {
-	if o == nil || IsNil(o.LeakHandlingStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.LeakHandlingStatus, true
+	return &o.LeakHandlingStatus, true
 }
 
-// HasLeakHandlingStatus returns a boolean if a field has been set.
-func (o *RackComponent) HasLeakHandlingStatus() bool {
-	if o != nil && !IsNil(o.LeakHandlingStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetLeakHandlingStatus gets a reference to the given LeakHandlingStatus and assigns it to the LeakHandlingStatus field.
+// SetLeakHandlingStatus sets field value
 func (o *RackComponent) SetLeakHandlingStatus(v LeakHandlingStatus) {
-	o.LeakHandlingStatus = &v
+	o.LeakHandlingStatus = v
 }
 
-// GetHealth returns the Health field value
-// If the value is explicit nil, the zero value for AggregateHealth will be returned
+// GetHealth returns the Health field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RackComponent) GetHealth() AggregateHealth {
-	if o == nil || o.Health.Get() == nil {
+	if o == nil || IsNil(o.Health.Get()) {
 		var ret AggregateHealth
 		return ret
 	}
-
 	return *o.Health.Get()
 }
 
-// GetHealthOk returns a tuple with the Health field value
+// GetHealthOk returns a tuple with the Health field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *RackComponent) GetHealthOk() (*AggregateHealth, bool) {
@@ -646,9 +524,28 @@ func (o *RackComponent) GetHealthOk() (*AggregateHealth, bool) {
 	return o.Health.Get(), o.Health.IsSet()
 }
 
-// SetHealth sets field value
+// HasHealth returns a boolean if a field has been set.
+func (o *RackComponent) HasHealth() bool {
+	if o != nil && o.Health.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetHealth gets a reference to the given NullableAggregateHealth and assigns it to the Health field.
 func (o *RackComponent) SetHealth(v AggregateHealth) {
 	o.Health.Set(&v)
+}
+
+// SetHealthNil sets the value for Health to be an explicit nil
+func (o *RackComponent) SetHealthNil() {
+	o.Health.Set(nil)
+}
+
+// UnsetHealth ensures that no value is present for Health, not even an explicit nil
+func (o *RackComponent) UnsetHealth() {
+	o.Health.Unset()
 }
 
 func (o RackComponent) MarshalJSON() ([]byte, error) {
@@ -661,58 +558,26 @@ func (o RackComponent) MarshalJSON() ([]byte, error) {
 
 func (o RackComponent) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
+	toSerialize["id"] = o.Id
+	toSerialize["rackId"] = o.RackId
+	toSerialize["type"] = o.Type
+	toSerialize["name"] = o.Name
+	toSerialize["serialNumber"] = o.SerialNumber
+	toSerialize["manufacturer"] = o.Manufacturer
+	toSerialize["model"] = o.Model
+	toSerialize["description"] = o.Description
+	toSerialize["firmwareVersion"] = o.FirmwareVersion
+	toSerialize["slotId"] = o.SlotId
+	toSerialize["trayIdx"] = o.TrayIdx
+	toSerialize["hostId"] = o.HostId
+	toSerialize["bmcs"] = o.Bmcs
+	toSerialize["powerState"] = o.PowerState
+	toSerialize["operationStatus"] = o.OperationStatus
+	toSerialize["leakStatus"] = o.LeakStatus
+	toSerialize["leakHandlingStatus"] = o.LeakHandlingStatus
+	if o.Health.IsSet() {
+		toSerialize["health"] = o.Health.Get()
 	}
-	if !IsNil(o.RackId) {
-		toSerialize["rackId"] = o.RackId
-	}
-	if !IsNil(o.Type) {
-		toSerialize["type"] = o.Type
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.SerialNumber) {
-		toSerialize["serialNumber"] = o.SerialNumber
-	}
-	if !IsNil(o.Manufacturer) {
-		toSerialize["manufacturer"] = o.Manufacturer
-	}
-	if !IsNil(o.Model) {
-		toSerialize["model"] = o.Model
-	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
-	if !IsNil(o.FirmwareVersion) {
-		toSerialize["firmwareVersion"] = o.FirmwareVersion
-	}
-	if !IsNil(o.SlotId) {
-		toSerialize["slotId"] = o.SlotId
-	}
-	if !IsNil(o.TrayIdx) {
-		toSerialize["trayIdx"] = o.TrayIdx
-	}
-	if !IsNil(o.HostId) {
-		toSerialize["hostId"] = o.HostId
-	}
-	if !IsNil(o.Bmcs) {
-		toSerialize["bmcs"] = o.Bmcs
-	}
-	if !IsNil(o.PowerState) {
-		toSerialize["powerState"] = o.PowerState
-	}
-	if !IsNil(o.OperationStatus) {
-		toSerialize["operationStatus"] = o.OperationStatus
-	}
-	if !IsNil(o.LeakStatus) {
-		toSerialize["leakStatus"] = o.LeakStatus
-	}
-	if !IsNil(o.LeakHandlingStatus) {
-		toSerialize["leakHandlingStatus"] = o.LeakHandlingStatus
-	}
-	toSerialize["health"] = o.Health.Get()
 	return toSerialize, nil
 }
 
@@ -721,7 +586,23 @@ func (o *RackComponent) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"health",
+		"id",
+		"rackId",
+		"type",
+		"name",
+		"serialNumber",
+		"manufacturer",
+		"model",
+		"description",
+		"firmwareVersion",
+		"slotId",
+		"trayIdx",
+		"hostId",
+		"bmcs",
+		"powerState",
+		"operationStatus",
+		"leakStatus",
+		"leakHandlingStatus",
 	}
 
 	allProperties := make(map[string]interface{})

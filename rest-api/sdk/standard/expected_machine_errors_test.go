@@ -30,7 +30,7 @@ func TestExpectedMachineInternalServerErrorDecoding(t *testing.T) {
 						SiteId:              "f97df110-f4de-492e-8849-4a6af68026b0",
 						BmcMacAddress:       "00:11:22:33:44:55",
 						ChassisSerialNumber: "test-machine",
-						SkuId:               *NewNullableString(&skuID),
+						SkuId:               &skuID,
 					}).Execute()
 			},
 		},
@@ -39,7 +39,7 @@ func TestExpectedMachineInternalServerErrorDecoding(t *testing.T) {
 			execute: func(client *APIClient) (*ExpectedMachine, *http.Response, error) {
 				return client.ExpectedMachineAPI.UpdateExpectedMachine(context.Background(), "test-org", "6353e613-e4c1-485e-8311-eeb07077735f").
 					ExpectedMachineUpdateRequest(ExpectedMachineUpdateRequest{
-						SkuId: *NewNullableString(&skuID),
+						SkuId: &skuID,
 					}).Execute()
 			},
 		},

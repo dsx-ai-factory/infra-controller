@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the VpcCountByStatus type satisfies the MappedNullable interface at compile time
@@ -23,25 +25,33 @@ var _ MappedNullable = &VpcCountByStatus{}
 // VpcCountByStatus Describes counts of VPCs in various statuses
 type VpcCountByStatus struct {
 	// Total number of VPCs
-	Total *int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// Number of VPCs in Pending status
-	Pending *int32 `json:"pending,omitempty"`
+	Pending int32 `json:"pending"`
 	// Number of VPCs in Provisioning status
-	Provisioning *int32 `json:"provisioning,omitempty"`
+	Provisioning int32 `json:"provisioning"`
 	// Number of VPCs in Ready status
-	Ready *int32 `json:"ready,omitempty"`
+	Ready int32 `json:"ready"`
 	// Number of VPCs in Deleting status
-	Deleting *int32 `json:"deleting,omitempty"`
+	Deleting int32 `json:"deleting"`
 	// Number of VPCs in Error status
-	Error *int32 `json:"error,omitempty"`
+	Error int32 `json:"error"`
 }
+
+type _VpcCountByStatus VpcCountByStatus
 
 // NewVpcCountByStatus instantiates a new VpcCountByStatus object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcCountByStatus() *VpcCountByStatus {
+func NewVpcCountByStatus(total int32, pending int32, provisioning int32, ready int32, deleting int32, error_ int32) *VpcCountByStatus {
 	this := VpcCountByStatus{}
+	this.Total = total
+	this.Pending = pending
+	this.Provisioning = provisioning
+	this.Ready = ready
+	this.Deleting = deleting
+	this.Error = error_
 	return &this
 }
 
@@ -53,196 +63,148 @@ func NewVpcCountByStatusWithDefaults() *VpcCountByStatus {
 	return &this
 }
 
-// GetTotal returns the Total field value if set, zero value otherwise.
+// GetTotal returns the Total field value
 func (o *VpcCountByStatus) GetTotal() int32 {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Total
+
+	return o.Total
 }
 
-// GetTotalOk returns a tuple with the Total field value if set, nil otherwise
+// GetTotalOk returns a tuple with the Total field value
 // and a boolean to check if the value has been set.
 func (o *VpcCountByStatus) GetTotalOk() (*int32, bool) {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Total, true
+	return &o.Total, true
 }
 
-// HasTotal returns a boolean if a field has been set.
-func (o *VpcCountByStatus) HasTotal() bool {
-	if o != nil && !IsNil(o.Total) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotal gets a reference to the given int32 and assigns it to the Total field.
+// SetTotal sets field value
 func (o *VpcCountByStatus) SetTotal(v int32) {
-	o.Total = &v
+	o.Total = v
 }
 
-// GetPending returns the Pending field value if set, zero value otherwise.
+// GetPending returns the Pending field value
 func (o *VpcCountByStatus) GetPending() int32 {
-	if o == nil || IsNil(o.Pending) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Pending
+
+	return o.Pending
 }
 
-// GetPendingOk returns a tuple with the Pending field value if set, nil otherwise
+// GetPendingOk returns a tuple with the Pending field value
 // and a boolean to check if the value has been set.
 func (o *VpcCountByStatus) GetPendingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Pending) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Pending, true
+	return &o.Pending, true
 }
 
-// HasPending returns a boolean if a field has been set.
-func (o *VpcCountByStatus) HasPending() bool {
-	if o != nil && !IsNil(o.Pending) {
-		return true
-	}
-
-	return false
-}
-
-// SetPending gets a reference to the given int32 and assigns it to the Pending field.
+// SetPending sets field value
 func (o *VpcCountByStatus) SetPending(v int32) {
-	o.Pending = &v
+	o.Pending = v
 }
 
-// GetProvisioning returns the Provisioning field value if set, zero value otherwise.
+// GetProvisioning returns the Provisioning field value
 func (o *VpcCountByStatus) GetProvisioning() int32 {
-	if o == nil || IsNil(o.Provisioning) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Provisioning
+
+	return o.Provisioning
 }
 
-// GetProvisioningOk returns a tuple with the Provisioning field value if set, nil otherwise
+// GetProvisioningOk returns a tuple with the Provisioning field value
 // and a boolean to check if the value has been set.
 func (o *VpcCountByStatus) GetProvisioningOk() (*int32, bool) {
-	if o == nil || IsNil(o.Provisioning) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Provisioning, true
+	return &o.Provisioning, true
 }
 
-// HasProvisioning returns a boolean if a field has been set.
-func (o *VpcCountByStatus) HasProvisioning() bool {
-	if o != nil && !IsNil(o.Provisioning) {
-		return true
-	}
-
-	return false
-}
-
-// SetProvisioning gets a reference to the given int32 and assigns it to the Provisioning field.
+// SetProvisioning sets field value
 func (o *VpcCountByStatus) SetProvisioning(v int32) {
-	o.Provisioning = &v
+	o.Provisioning = v
 }
 
-// GetReady returns the Ready field value if set, zero value otherwise.
+// GetReady returns the Ready field value
 func (o *VpcCountByStatus) GetReady() int32 {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Ready
+
+	return o.Ready
 }
 
-// GetReadyOk returns a tuple with the Ready field value if set, nil otherwise
+// GetReadyOk returns a tuple with the Ready field value
 // and a boolean to check if the value has been set.
 func (o *VpcCountByStatus) GetReadyOk() (*int32, bool) {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Ready, true
+	return &o.Ready, true
 }
 
-// HasReady returns a boolean if a field has been set.
-func (o *VpcCountByStatus) HasReady() bool {
-	if o != nil && !IsNil(o.Ready) {
-		return true
-	}
-
-	return false
-}
-
-// SetReady gets a reference to the given int32 and assigns it to the Ready field.
+// SetReady sets field value
 func (o *VpcCountByStatus) SetReady(v int32) {
-	o.Ready = &v
+	o.Ready = v
 }
 
-// GetDeleting returns the Deleting field value if set, zero value otherwise.
+// GetDeleting returns the Deleting field value
 func (o *VpcCountByStatus) GetDeleting() int32 {
-	if o == nil || IsNil(o.Deleting) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Deleting
+
+	return o.Deleting
 }
 
-// GetDeletingOk returns a tuple with the Deleting field value if set, nil otherwise
+// GetDeletingOk returns a tuple with the Deleting field value
 // and a boolean to check if the value has been set.
 func (o *VpcCountByStatus) GetDeletingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Deleting) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Deleting, true
+	return &o.Deleting, true
 }
 
-// HasDeleting returns a boolean if a field has been set.
-func (o *VpcCountByStatus) HasDeleting() bool {
-	if o != nil && !IsNil(o.Deleting) {
-		return true
-	}
-
-	return false
-}
-
-// SetDeleting gets a reference to the given int32 and assigns it to the Deleting field.
+// SetDeleting sets field value
 func (o *VpcCountByStatus) SetDeleting(v int32) {
-	o.Deleting = &v
+	o.Deleting = v
 }
 
-// GetError returns the Error field value if set, zero value otherwise.
+// GetError returns the Error field value
 func (o *VpcCountByStatus) GetError() int32 {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Error
+
+	return o.Error
 }
 
-// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
+// GetErrorOk returns a tuple with the Error field value
 // and a boolean to check if the value has been set.
 func (o *VpcCountByStatus) GetErrorOk() (*int32, bool) {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Error, true
+	return &o.Error, true
 }
 
-// HasError returns a boolean if a field has been set.
-func (o *VpcCountByStatus) HasError() bool {
-	if o != nil && !IsNil(o.Error) {
-		return true
-	}
-
-	return false
-}
-
-// SetError gets a reference to the given int32 and assigns it to the Error field.
+// SetError sets field value
 func (o *VpcCountByStatus) SetError(v int32) {
-	o.Error = &v
+	o.Error = v
 }
 
 func (o VpcCountByStatus) MarshalJSON() ([]byte, error) {
@@ -255,25 +217,54 @@ func (o VpcCountByStatus) MarshalJSON() ([]byte, error) {
 
 func (o VpcCountByStatus) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Total) {
-		toSerialize["total"] = o.Total
-	}
-	if !IsNil(o.Pending) {
-		toSerialize["pending"] = o.Pending
-	}
-	if !IsNil(o.Provisioning) {
-		toSerialize["provisioning"] = o.Provisioning
-	}
-	if !IsNil(o.Ready) {
-		toSerialize["ready"] = o.Ready
-	}
-	if !IsNil(o.Deleting) {
-		toSerialize["deleting"] = o.Deleting
-	}
-	if !IsNil(o.Error) {
-		toSerialize["error"] = o.Error
-	}
+	toSerialize["total"] = o.Total
+	toSerialize["pending"] = o.Pending
+	toSerialize["provisioning"] = o.Provisioning
+	toSerialize["ready"] = o.Ready
+	toSerialize["deleting"] = o.Deleting
+	toSerialize["error"] = o.Error
 	return toSerialize, nil
+}
+
+func (o *VpcCountByStatus) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"total",
+		"pending",
+		"provisioning",
+		"ready",
+		"deleting",
+		"error",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varVpcCountByStatus := _VpcCountByStatus{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varVpcCountByStatus)
+
+	if err != nil {
+		return err
+	}
+
+	*o = VpcCountByStatus(varVpcCountByStatus)
+
+	return err
 }
 
 type NullableVpcCountByStatus struct {

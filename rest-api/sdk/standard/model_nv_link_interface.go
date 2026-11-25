@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,33 +26,42 @@ var _ MappedNullable = &NVLinkInterface{}
 // NVLinkInterface Defines an interface created by associating a GPU of an Instance with an NVLink Logical Partition
 type NVLinkInterface struct {
 	// Unique UUID v4 identifier for the NVLinkInterface
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the associated Instance
-	InstanceId *string `json:"instanceId,omitempty"`
+	InstanceId string `json:"instanceId"`
 	// ID of the NVLink Logical Partition associated with this interface
-	NvLinkLogicalPartitionId *string `json:"nvLinkLogicalPartitionId,omitempty"`
+	NvLinkLogicalPartitionId string `json:"nvLinkLogicalPartitionId"`
 	// Core-reported NVLink domain UUID associated with this Interface, not the rack group ID returned by the Domain API.
 	NvLinkDomainId NullableString `json:"nvLinkDomainId,omitempty"`
 	// Index of the device, used to identify the GPU associated with this Interface
-	DeviceInstance *int32 `json:"deviceInstance,omitempty"`
+	DeviceInstance int32 `json:"deviceInstance"`
 	// Unique ID of the GPU
 	GpuGuid NullableString `json:"gpuGuid,omitempty"`
 	// Status of the NVLinkInterface
-	Status *NVLinkInterfaceStatus `json:"status,omitempty"`
+	Status NVLinkInterfaceStatus `json:"status"`
 	// Date/time when the NVLinkInterface was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the NVLinkInterface was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 	// Deprecations active for this resource. Returned only if there are active deprecations.
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 }
+
+type _NVLinkInterface NVLinkInterface
 
 // NewNVLinkInterface instantiates a new NVLinkInterface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNVLinkInterface() *NVLinkInterface {
+func NewNVLinkInterface(id string, instanceId string, nvLinkLogicalPartitionId string, deviceInstance int32, status NVLinkInterfaceStatus, created time.Time, updated time.Time) *NVLinkInterface {
 	this := NVLinkInterface{}
+	this.Id = id
+	this.InstanceId = instanceId
+	this.NvLinkLogicalPartitionId = nvLinkLogicalPartitionId
+	this.DeviceInstance = deviceInstance
+	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -62,100 +73,76 @@ func NewNVLinkInterfaceWithDefaults() *NVLinkInterface {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *NVLinkInterface) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterface) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *NVLinkInterface) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *NVLinkInterface) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetInstanceId returns the InstanceId field value if set, zero value otherwise.
+// GetInstanceId returns the InstanceId field value
 func (o *NVLinkInterface) GetInstanceId() string {
-	if o == nil || IsNil(o.InstanceId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InstanceId
+
+	return o.InstanceId
 }
 
-// GetInstanceIdOk returns a tuple with the InstanceId field value if set, nil otherwise
+// GetInstanceIdOk returns a tuple with the InstanceId field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterface) GetInstanceIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InstanceId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InstanceId, true
+	return &o.InstanceId, true
 }
 
-// HasInstanceId returns a boolean if a field has been set.
-func (o *NVLinkInterface) HasInstanceId() bool {
-	if o != nil && !IsNil(o.InstanceId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInstanceId gets a reference to the given string and assigns it to the InstanceId field.
+// SetInstanceId sets field value
 func (o *NVLinkInterface) SetInstanceId(v string) {
-	o.InstanceId = &v
+	o.InstanceId = v
 }
 
-// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value if set, zero value otherwise.
+// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value
 func (o *NVLinkInterface) GetNvLinkLogicalPartitionId() string {
-	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.NvLinkLogicalPartitionId
+
+	return o.NvLinkLogicalPartitionId
 }
 
-// GetNvLinkLogicalPartitionIdOk returns a tuple with the NvLinkLogicalPartitionId field value if set, nil otherwise
+// GetNvLinkLogicalPartitionIdOk returns a tuple with the NvLinkLogicalPartitionId field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterface) GetNvLinkLogicalPartitionIdOk() (*string, bool) {
-	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NvLinkLogicalPartitionId, true
+	return &o.NvLinkLogicalPartitionId, true
 }
 
-// HasNvLinkLogicalPartitionId returns a boolean if a field has been set.
-func (o *NVLinkInterface) HasNvLinkLogicalPartitionId() bool {
-	if o != nil && !IsNil(o.NvLinkLogicalPartitionId) {
-		return true
-	}
-
-	return false
-}
-
-// SetNvLinkLogicalPartitionId gets a reference to the given string and assigns it to the NvLinkLogicalPartitionId field.
+// SetNvLinkLogicalPartitionId sets field value
 func (o *NVLinkInterface) SetNvLinkLogicalPartitionId(v string) {
-	o.NvLinkLogicalPartitionId = &v
+	o.NvLinkLogicalPartitionId = v
 }
 
 // GetNvLinkDomainId returns the NvLinkDomainId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -201,36 +188,28 @@ func (o *NVLinkInterface) UnsetNvLinkDomainId() {
 	o.NvLinkDomainId.Unset()
 }
 
-// GetDeviceInstance returns the DeviceInstance field value if set, zero value otherwise.
+// GetDeviceInstance returns the DeviceInstance field value
 func (o *NVLinkInterface) GetDeviceInstance() int32 {
-	if o == nil || IsNil(o.DeviceInstance) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.DeviceInstance
+
+	return o.DeviceInstance
 }
 
-// GetDeviceInstanceOk returns a tuple with the DeviceInstance field value if set, nil otherwise
+// GetDeviceInstanceOk returns a tuple with the DeviceInstance field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterface) GetDeviceInstanceOk() (*int32, bool) {
-	if o == nil || IsNil(o.DeviceInstance) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DeviceInstance, true
+	return &o.DeviceInstance, true
 }
 
-// HasDeviceInstance returns a boolean if a field has been set.
-func (o *NVLinkInterface) HasDeviceInstance() bool {
-	if o != nil && !IsNil(o.DeviceInstance) {
-		return true
-	}
-
-	return false
-}
-
-// SetDeviceInstance gets a reference to the given int32 and assigns it to the DeviceInstance field.
+// SetDeviceInstance sets field value
 func (o *NVLinkInterface) SetDeviceInstance(v int32) {
-	o.DeviceInstance = &v
+	o.DeviceInstance = v
 }
 
 // GetGpuGuid returns the GpuGuid field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -276,100 +255,76 @@ func (o *NVLinkInterface) UnsetGpuGuid() {
 	o.GpuGuid.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *NVLinkInterface) GetStatus() NVLinkInterfaceStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret NVLinkInterfaceStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterface) GetStatusOk() (*NVLinkInterfaceStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *NVLinkInterface) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given NVLinkInterfaceStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *NVLinkInterface) SetStatus(v NVLinkInterfaceStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *NVLinkInterface) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterface) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *NVLinkInterface) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *NVLinkInterface) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *NVLinkInterface) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterface) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *NVLinkInterface) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *NVLinkInterface) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 // GetDeprecations returns the Deprecations field value if set, zero value otherwise.
@@ -414,37 +369,65 @@ func (o NVLinkInterface) MarshalJSON() ([]byte, error) {
 
 func (o NVLinkInterface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.InstanceId) {
-		toSerialize["instanceId"] = o.InstanceId
-	}
-	if !IsNil(o.NvLinkLogicalPartitionId) {
-		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["instanceId"] = o.InstanceId
+	toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId
 	if o.NvLinkDomainId.IsSet() {
 		toSerialize["nvLinkDomainId"] = o.NvLinkDomainId.Get()
 	}
-	if !IsNil(o.DeviceInstance) {
-		toSerialize["deviceInstance"] = o.DeviceInstance
-	}
+	toSerialize["deviceInstance"] = o.DeviceInstance
 	if o.GpuGuid.IsSet() {
 		toSerialize["gpuGuid"] = o.GpuGuid.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["status"] = o.Status
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
 	return toSerialize, nil
+}
+
+func (o *NVLinkInterface) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"instanceId",
+		"nvLinkLogicalPartitionId",
+		"deviceInstance",
+		"status",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varNVLinkInterface := _NVLinkInterface{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varNVLinkInterface)
+
+	if err != nil {
+		return err
+	}
+
+	*o = NVLinkInterface(varNVLinkInterface)
+
+	return err
 }
 
 type NullableNVLinkInterface struct {

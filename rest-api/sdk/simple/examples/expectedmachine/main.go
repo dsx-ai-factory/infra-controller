@@ -67,8 +67,8 @@ func main() {
 			if expectedMachineID == "" {
 				expectedMachineID = em.ID
 			}
-			if em.Sku != nil && em.Sku.Id != nil {
-				fmt.Printf(", SKU ID: %s", *em.Sku.Id)
+			if em.Sku != nil && em.Sku.Id != "" {
+				fmt.Printf(", SKU ID: %s", em.Sku.Id)
 				if em.Sku.DeviceType.IsSet() && em.Sku.DeviceType.Get() != nil {
 					fmt.Printf(" (Device Type: %s)", *em.Sku.DeviceType.Get())
 				}

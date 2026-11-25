@@ -175,13 +175,13 @@ func (h CreateTaskRuleHandler) Handle(c echo.Context) error {
 	// Flow's CreateTaskRule returns only the new rule's ID; echo the
 	// request back so the client gets the canonical view without an extra GET.
 	created := &model.APITaskRule{
-		ID:             flowResponse.GetId().GetId(),
-		Name:           apiRequest.Name,
-		Description:    apiRequest.Description,
-		OperationType:  apiRequest.OperationType,
-		OperationCode:  apiRequest.OperationCode,
-		RuleDefinition: apiRequest.RuleDefinition,
+		ID:            flowResponse.GetId().GetId(),
+		Name:          apiRequest.Name,
+		Description:   apiRequest.Description,
+		OperationType: apiRequest.OperationType,
+		OperationCode: apiRequest.OperationCode,
 	}
+	created.RuleDefinition.FromProto(apiRequest.RuleDefinition.ToProto())
 
 	logger.Info().Str("RuleID", created.ID).Msg("finishing API handler")
 	return c.JSON(http.StatusCreated, created)

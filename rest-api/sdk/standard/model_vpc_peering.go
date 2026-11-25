@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,17 +26,17 @@ var _ MappedNullable = &VpcPeering{}
 // VpcPeering VPC peering connection between two VPCs on the same site
 type VpcPeering struct {
 	// Unique identifier of the VPC peering
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the first VPC in the peering
-	Vpc1Id *string `json:"vpc1Id,omitempty"`
+	Vpc1Id string `json:"vpc1Id"`
 	// Summary of the first VPC in the peering.
 	Vpc1 *VpcPeeringVpcSummary `json:"vpc1,omitempty"`
 	// ID of the second VPC in the peering
-	Vpc2Id *string `json:"vpc2Id,omitempty"`
+	Vpc2Id string `json:"vpc2Id"`
 	// Summary of the second VPC in the peering.
 	Vpc2 *VpcPeeringVpcSummary `json:"vpc2,omitempty"`
 	// ID of the Site where the peering exists
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// Summary of the Site where the peering exists.
 	Site *SiteSummary `json:"site,omitempty"`
 	// ID of the tenant that created the VPC peering.
@@ -42,21 +44,31 @@ type VpcPeering struct {
 	// Summary of the tenant that created the VPC peering.
 	Tenant *TenantSummary `json:"tenant,omitempty"`
 	// Indicates if this is a multi-tenant peering (VPCs from different tenants)
-	IsMultiTenant *bool `json:"isMultiTenant,omitempty"`
+	IsMultiTenant bool `json:"isMultiTenant"`
 	// Status of the VPC peering
-	Status *VpcPeeringStatus `json:"status,omitempty"`
+	Status VpcPeeringStatus `json:"status"`
 	// Date and time when the VPC peering was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date and time when the VPC peering was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _VpcPeering VpcPeering
 
 // NewVpcPeering instantiates a new VpcPeering object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcPeering() *VpcPeering {
+func NewVpcPeering(id string, vpc1Id string, vpc2Id string, siteId string, isMultiTenant bool, status VpcPeeringStatus, created time.Time, updated time.Time) *VpcPeering {
 	this := VpcPeering{}
+	this.Id = id
+	this.Vpc1Id = vpc1Id
+	this.Vpc2Id = vpc2Id
+	this.SiteId = siteId
+	this.IsMultiTenant = isMultiTenant
+	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -68,68 +80,52 @@ func NewVpcPeeringWithDefaults() *VpcPeering {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *VpcPeering) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *VpcPeering) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *VpcPeering) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetVpc1Id returns the Vpc1Id field value if set, zero value otherwise.
+// GetVpc1Id returns the Vpc1Id field value
 func (o *VpcPeering) GetVpc1Id() string {
-	if o == nil || IsNil(o.Vpc1Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Vpc1Id
+
+	return o.Vpc1Id
 }
 
-// GetVpc1IdOk returns a tuple with the Vpc1Id field value if set, nil otherwise
+// GetVpc1IdOk returns a tuple with the Vpc1Id field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetVpc1IdOk() (*string, bool) {
-	if o == nil || IsNil(o.Vpc1Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Vpc1Id, true
+	return &o.Vpc1Id, true
 }
 
-// HasVpc1Id returns a boolean if a field has been set.
-func (o *VpcPeering) HasVpc1Id() bool {
-	if o != nil && !IsNil(o.Vpc1Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpc1Id gets a reference to the given string and assigns it to the Vpc1Id field.
+// SetVpc1Id sets field value
 func (o *VpcPeering) SetVpc1Id(v string) {
-	o.Vpc1Id = &v
+	o.Vpc1Id = v
 }
 
 // GetVpc1 returns the Vpc1 field value if set, zero value otherwise.
@@ -164,36 +160,28 @@ func (o *VpcPeering) SetVpc1(v VpcPeeringVpcSummary) {
 	o.Vpc1 = &v
 }
 
-// GetVpc2Id returns the Vpc2Id field value if set, zero value otherwise.
+// GetVpc2Id returns the Vpc2Id field value
 func (o *VpcPeering) GetVpc2Id() string {
-	if o == nil || IsNil(o.Vpc2Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Vpc2Id
+
+	return o.Vpc2Id
 }
 
-// GetVpc2IdOk returns a tuple with the Vpc2Id field value if set, nil otherwise
+// GetVpc2IdOk returns a tuple with the Vpc2Id field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetVpc2IdOk() (*string, bool) {
-	if o == nil || IsNil(o.Vpc2Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Vpc2Id, true
+	return &o.Vpc2Id, true
 }
 
-// HasVpc2Id returns a boolean if a field has been set.
-func (o *VpcPeering) HasVpc2Id() bool {
-	if o != nil && !IsNil(o.Vpc2Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpc2Id gets a reference to the given string and assigns it to the Vpc2Id field.
+// SetVpc2Id sets field value
 func (o *VpcPeering) SetVpc2Id(v string) {
-	o.Vpc2Id = &v
+	o.Vpc2Id = v
 }
 
 // GetVpc2 returns the Vpc2 field value if set, zero value otherwise.
@@ -228,36 +216,28 @@ func (o *VpcPeering) SetVpc2(v VpcPeeringVpcSummary) {
 	o.Vpc2 = &v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *VpcPeering) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *VpcPeering) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *VpcPeering) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
 // GetSite returns the Site field value if set, zero value otherwise.
@@ -356,132 +336,100 @@ func (o *VpcPeering) SetTenant(v TenantSummary) {
 	o.Tenant = &v
 }
 
-// GetIsMultiTenant returns the IsMultiTenant field value if set, zero value otherwise.
+// GetIsMultiTenant returns the IsMultiTenant field value
 func (o *VpcPeering) GetIsMultiTenant() bool {
-	if o == nil || IsNil(o.IsMultiTenant) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsMultiTenant
+
+	return o.IsMultiTenant
 }
 
-// GetIsMultiTenantOk returns a tuple with the IsMultiTenant field value if set, nil otherwise
+// GetIsMultiTenantOk returns a tuple with the IsMultiTenant field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetIsMultiTenantOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsMultiTenant) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsMultiTenant, true
+	return &o.IsMultiTenant, true
 }
 
-// HasIsMultiTenant returns a boolean if a field has been set.
-func (o *VpcPeering) HasIsMultiTenant() bool {
-	if o != nil && !IsNil(o.IsMultiTenant) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsMultiTenant gets a reference to the given bool and assigns it to the IsMultiTenant field.
+// SetIsMultiTenant sets field value
 func (o *VpcPeering) SetIsMultiTenant(v bool) {
-	o.IsMultiTenant = &v
+	o.IsMultiTenant = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *VpcPeering) GetStatus() VpcPeeringStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret VpcPeeringStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetStatusOk() (*VpcPeeringStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *VpcPeering) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given VpcPeeringStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *VpcPeering) SetStatus(v VpcPeeringStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *VpcPeering) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *VpcPeering) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *VpcPeering) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *VpcPeering) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeering) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *VpcPeering) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *VpcPeering) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o VpcPeering) MarshalJSON() ([]byte, error) {
@@ -494,24 +442,16 @@ func (o VpcPeering) MarshalJSON() ([]byte, error) {
 
 func (o VpcPeering) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Vpc1Id) {
-		toSerialize["vpc1Id"] = o.Vpc1Id
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["vpc1Id"] = o.Vpc1Id
 	if !IsNil(o.Vpc1) {
 		toSerialize["vpc1"] = o.Vpc1
 	}
-	if !IsNil(o.Vpc2Id) {
-		toSerialize["vpc2Id"] = o.Vpc2Id
-	}
+	toSerialize["vpc2Id"] = o.Vpc2Id
 	if !IsNil(o.Vpc2) {
 		toSerialize["vpc2"] = o.Vpc2
 	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
+	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Site) {
 		toSerialize["site"] = o.Site
 	}
@@ -521,19 +461,54 @@ func (o VpcPeering) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Tenant) {
 		toSerialize["tenant"] = o.Tenant
 	}
-	if !IsNil(o.IsMultiTenant) {
-		toSerialize["isMultiTenant"] = o.IsMultiTenant
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["isMultiTenant"] = o.IsMultiTenant
+	toSerialize["status"] = o.Status
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *VpcPeering) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"vpc1Id",
+		"vpc2Id",
+		"siteId",
+		"isMultiTenant",
+		"status",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varVpcPeering := _VpcPeering{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varVpcPeering)
+
+	if err != nil {
+		return err
+	}
+
+	*o = VpcPeering(varVpcPeering)
+
+	return err
 }
 
 type NullableVpcPeering struct {

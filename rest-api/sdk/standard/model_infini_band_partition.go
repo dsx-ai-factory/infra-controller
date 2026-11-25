@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,15 +26,15 @@ var _ MappedNullable = &InfiniBandPartition{}
 // InfiniBandPartition InfiniBand Partitions are network segments utilizing InfiniBand topology
 type InfiniBandPartition struct {
 	// Unique UUID v4 identifier for the InfiniBand Partition
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the InfiniBand Partition
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description of the InfiniBand Partition
 	Description NullableString `json:"description,omitempty"`
 	// ID of the Site
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// ID of the Tenant
-	TenantId *string `json:"tenantId,omitempty"`
+	TenantId string `json:"tenantId"`
 	// ID of the Site Controller InfiniBand partition corresponding to this InfiniBand Partition
 	ControllerIBPartitionId NullableString `json:"controllerIBPartitionId,omitempty"`
 	// Partition key assigned to the InfiniBand Partition
@@ -46,25 +48,36 @@ type InfiniBandPartition struct {
 	// MTU configured for the InfiniBand Partition
 	Mtu NullableInt32 `json:"mtu,omitempty"`
 	// Whether SHARP is enabled for the InfiniBand Partition
-	EnableSharp *bool `json:"enableSharp,omitempty"`
+	EnableSharp NullableBool `json:"enableSharp,omitempty"`
 	// String key-value pairs describing InfiniBand Partition labels. Up to 10 key-value pairs can be specified
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// Status of the InfiniBand Partition
-	Status *InfiniBandPartitionStatus `json:"status,omitempty"`
+	Status InfiniBandPartitionStatus `json:"status"`
 	// Chronological status history for the InfiniBand Partition
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when the InfiniBand Partition was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the InfiniBand Partition was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _InfiniBandPartition InfiniBandPartition
 
 // NewInfiniBandPartition instantiates a new InfiniBandPartition object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInfiniBandPartition() *InfiniBandPartition {
+func NewInfiniBandPartition(id string, name string, siteId string, tenantId string, labels map[string]string, status InfiniBandPartitionStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *InfiniBandPartition {
 	this := InfiniBandPartition{}
+	this.Id = id
+	this.Name = name
+	this.SiteId = siteId
+	this.TenantId = tenantId
+	this.Labels = labels
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -76,68 +89,52 @@ func NewInfiniBandPartitionWithDefaults() *InfiniBandPartition {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *InfiniBandPartition) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *InfiniBandPartition) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *InfiniBandPartition) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *InfiniBandPartition) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -183,68 +180,52 @@ func (o *InfiniBandPartition) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *InfiniBandPartition) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *InfiniBandPartition) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetTenantId returns the TenantId field value if set, zero value otherwise.
+// GetTenantId returns the TenantId field value
 func (o *InfiniBandPartition) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantId
+
+	return o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
+// GetTenantIdOk returns a tuple with the TenantId field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantId, true
+	return &o.TenantId, true
 }
 
-// HasTenantId returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasTenantId() bool {
-	if o != nil && !IsNil(o.TenantId) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
+// SetTenantId sets field value
 func (o *InfiniBandPartition) SetTenantId(v string) {
-	o.TenantId = &v
+	o.TenantId = v
 }
 
 // GetControllerIBPartitionId returns the ControllerIBPartitionId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -505,196 +486,167 @@ func (o *InfiniBandPartition) UnsetMtu() {
 	o.Mtu.Unset()
 }
 
-// GetEnableSharp returns the EnableSharp field value if set, zero value otherwise.
+// GetEnableSharp returns the EnableSharp field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InfiniBandPartition) GetEnableSharp() bool {
-	if o == nil || IsNil(o.EnableSharp) {
+	if o == nil || IsNil(o.EnableSharp.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.EnableSharp
+	return *o.EnableSharp.Get()
 }
 
 // GetEnableSharpOk returns a tuple with the EnableSharp field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InfiniBandPartition) GetEnableSharpOk() (*bool, bool) {
-	if o == nil || IsNil(o.EnableSharp) {
+	if o == nil {
 		return nil, false
 	}
-	return o.EnableSharp, true
+	return o.EnableSharp.Get(), o.EnableSharp.IsSet()
 }
 
 // HasEnableSharp returns a boolean if a field has been set.
 func (o *InfiniBandPartition) HasEnableSharp() bool {
-	if o != nil && !IsNil(o.EnableSharp) {
+	if o != nil && o.EnableSharp.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetEnableSharp gets a reference to the given bool and assigns it to the EnableSharp field.
+// SetEnableSharp gets a reference to the given NullableBool and assigns it to the EnableSharp field.
 func (o *InfiniBandPartition) SetEnableSharp(v bool) {
-	o.EnableSharp = &v
+	o.EnableSharp.Set(&v)
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// SetEnableSharpNil sets the value for EnableSharp to be an explicit nil
+func (o *InfiniBandPartition) SetEnableSharpNil() {
+	o.EnableSharp.Set(nil)
+}
+
+// UnsetEnableSharp ensures that no value is present for EnableSharp, not even an explicit nil
+func (o *InfiniBandPartition) UnsetEnableSharp() {
+	o.EnableSharp.Unset()
+}
+
+// GetLabels returns the Labels field value
 func (o *InfiniBandPartition) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *InfiniBandPartition) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *InfiniBandPartition) GetStatus() InfiniBandPartitionStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret InfiniBandPartitionStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetStatusOk() (*InfiniBandPartitionStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given InfiniBandPartitionStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *InfiniBandPartition) SetStatus(v InfiniBandPartitionStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *InfiniBandPartition) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *InfiniBandPartition) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *InfiniBandPartition) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *InfiniBandPartition) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *InfiniBandPartition) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartition) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *InfiniBandPartition) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *InfiniBandPartition) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o InfiniBandPartition) MarshalJSON() ([]byte, error) {
@@ -707,21 +659,13 @@ func (o InfiniBandPartition) MarshalJSON() ([]byte, error) {
 
 func (o InfiniBandPartition) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.TenantId) {
-		toSerialize["tenantId"] = o.TenantId
-	}
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["tenantId"] = o.TenantId
 	if o.ControllerIBPartitionId.IsSet() {
 		toSerialize["controllerIBPartitionId"] = o.ControllerIBPartitionId.Get()
 	}
@@ -740,25 +684,59 @@ func (o InfiniBandPartition) ToMap() (map[string]interface{}, error) {
 	if o.Mtu.IsSet() {
 		toSerialize["mtu"] = o.Mtu.Get()
 	}
-	if !IsNil(o.EnableSharp) {
-		toSerialize["enableSharp"] = o.EnableSharp
+	if o.EnableSharp.IsSet() {
+		toSerialize["enableSharp"] = o.EnableSharp.Get()
 	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["labels"] = o.Labels
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *InfiniBandPartition) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"siteId",
+		"tenantId",
+		"labels",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInfiniBandPartition := _InfiniBandPartition{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInfiniBandPartition)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InfiniBandPartition(varInfiniBandPartition)
+
+	return err
 }
 
 type NullableInfiniBandPartition struct {

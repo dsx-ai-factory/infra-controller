@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the SiteCapabilities type satisfies the MappedNullable interface at compile time
@@ -23,29 +25,36 @@ var _ MappedNullable = &SiteCapabilities{}
 // SiteCapabilities Boolean flags to indicate features supported by a Site
 type SiteCapabilities struct {
 	// Whether the Site supports native networking
-	NativeNetworking *bool `json:"nativeNetworking,omitempty"`
+	NativeNetworking bool `json:"nativeNetworking"`
 	// Whether the Site supports Network Security Groups
-	NetworkSecurityGroup *bool `json:"networkSecurityGroup,omitempty"`
+	NetworkSecurityGroup bool `json:"networkSecurityGroup"`
 	// Whether the latest successfully stored Site configuration inventory reports that NVLink partitioning is enabled in the Site's Core configuration. False also represents a new Site that has not reported Site configuration inventory yet. An inventory report from an older Core that omits the setting leaves the stored value unchanged. This value is managed by Site configuration inventory and cannot be updated through the Site API.
-	NvLinkPartition *bool `json:"nvLinkPartition,omitempty"`
+	NvLinkPartition bool `json:"nvLinkPartition"`
 	// Whether the Site supports Flow-based operations
-	Flow *bool `json:"flow,omitempty"`
+	Flow bool `json:"flow"`
 	// Whether the Site supports image-based operating system provisioning
-	ImageBasedOperatingSystem *bool `json:"imageBasedOperatingSystem,omitempty"`
+	ImageBasedOperatingSystem bool `json:"imageBasedOperatingSystem"`
 	// Whether the latest successfully stored Site configuration inventory reports that Core supports VPCs with SLAAC enabled. False also represents a missing Site configuration or an inventory report that omits the capability. This value is managed by Site configuration inventory and cannot be updated through the Site API.
-	VpcSlaac *bool `json:"vpcSlaac,omitempty"`
+	VpcSlaac bool `json:"vpcSlaac"`
 	// Whether this Site accepts non-empty power resource groups and power profiles for DPS power management. When false, omission and explicit clearing remain allowed.
-	DpsPowerManagement *bool `json:"dpsPowerManagement,omitempty"`
+	DpsPowerManagement bool `json:"dpsPowerManagement"`
 }
+
+type _SiteCapabilities SiteCapabilities
 
 // NewSiteCapabilities instantiates a new SiteCapabilities object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSiteCapabilities() *SiteCapabilities {
+func NewSiteCapabilities(nativeNetworking bool, networkSecurityGroup bool, nvLinkPartition bool, flow bool, imageBasedOperatingSystem bool, vpcSlaac bool, dpsPowerManagement bool) *SiteCapabilities {
 	this := SiteCapabilities{}
-	var dpsPowerManagement bool = false
-	this.DpsPowerManagement = &dpsPowerManagement
+	this.NativeNetworking = nativeNetworking
+	this.NetworkSecurityGroup = networkSecurityGroup
+	this.NvLinkPartition = nvLinkPartition
+	this.Flow = flow
+	this.ImageBasedOperatingSystem = imageBasedOperatingSystem
+	this.VpcSlaac = vpcSlaac
+	this.DpsPowerManagement = dpsPowerManagement
 	return &this
 }
 
@@ -55,232 +64,176 @@ func NewSiteCapabilities() *SiteCapabilities {
 func NewSiteCapabilitiesWithDefaults() *SiteCapabilities {
 	this := SiteCapabilities{}
 	var dpsPowerManagement bool = false
-	this.DpsPowerManagement = &dpsPowerManagement
+	this.DpsPowerManagement = dpsPowerManagement
 	return &this
 }
 
-// GetNativeNetworking returns the NativeNetworking field value if set, zero value otherwise.
+// GetNativeNetworking returns the NativeNetworking field value
 func (o *SiteCapabilities) GetNativeNetworking() bool {
-	if o == nil || IsNil(o.NativeNetworking) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.NativeNetworking
+
+	return o.NativeNetworking
 }
 
-// GetNativeNetworkingOk returns a tuple with the NativeNetworking field value if set, nil otherwise
+// GetNativeNetworkingOk returns a tuple with the NativeNetworking field value
 // and a boolean to check if the value has been set.
 func (o *SiteCapabilities) GetNativeNetworkingOk() (*bool, bool) {
-	if o == nil || IsNil(o.NativeNetworking) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NativeNetworking, true
+	return &o.NativeNetworking, true
 }
 
-// HasNativeNetworking returns a boolean if a field has been set.
-func (o *SiteCapabilities) HasNativeNetworking() bool {
-	if o != nil && !IsNil(o.NativeNetworking) {
-		return true
-	}
-
-	return false
-}
-
-// SetNativeNetworking gets a reference to the given bool and assigns it to the NativeNetworking field.
+// SetNativeNetworking sets field value
 func (o *SiteCapabilities) SetNativeNetworking(v bool) {
-	o.NativeNetworking = &v
+	o.NativeNetworking = v
 }
 
-// GetNetworkSecurityGroup returns the NetworkSecurityGroup field value if set, zero value otherwise.
+// GetNetworkSecurityGroup returns the NetworkSecurityGroup field value
 func (o *SiteCapabilities) GetNetworkSecurityGroup() bool {
-	if o == nil || IsNil(o.NetworkSecurityGroup) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.NetworkSecurityGroup
+
+	return o.NetworkSecurityGroup
 }
 
-// GetNetworkSecurityGroupOk returns a tuple with the NetworkSecurityGroup field value if set, nil otherwise
+// GetNetworkSecurityGroupOk returns a tuple with the NetworkSecurityGroup field value
 // and a boolean to check if the value has been set.
 func (o *SiteCapabilities) GetNetworkSecurityGroupOk() (*bool, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroup) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroup, true
+	return &o.NetworkSecurityGroup, true
 }
 
-// HasNetworkSecurityGroup returns a boolean if a field has been set.
-func (o *SiteCapabilities) HasNetworkSecurityGroup() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroup) {
-		return true
-	}
-
-	return false
-}
-
-// SetNetworkSecurityGroup gets a reference to the given bool and assigns it to the NetworkSecurityGroup field.
+// SetNetworkSecurityGroup sets field value
 func (o *SiteCapabilities) SetNetworkSecurityGroup(v bool) {
-	o.NetworkSecurityGroup = &v
+	o.NetworkSecurityGroup = v
 }
 
-// GetNvLinkPartition returns the NvLinkPartition field value if set, zero value otherwise.
+// GetNvLinkPartition returns the NvLinkPartition field value
 func (o *SiteCapabilities) GetNvLinkPartition() bool {
-	if o == nil || IsNil(o.NvLinkPartition) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.NvLinkPartition
+
+	return o.NvLinkPartition
 }
 
-// GetNvLinkPartitionOk returns a tuple with the NvLinkPartition field value if set, nil otherwise
+// GetNvLinkPartitionOk returns a tuple with the NvLinkPartition field value
 // and a boolean to check if the value has been set.
 func (o *SiteCapabilities) GetNvLinkPartitionOk() (*bool, bool) {
-	if o == nil || IsNil(o.NvLinkPartition) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NvLinkPartition, true
+	return &o.NvLinkPartition, true
 }
 
-// HasNvLinkPartition returns a boolean if a field has been set.
-func (o *SiteCapabilities) HasNvLinkPartition() bool {
-	if o != nil && !IsNil(o.NvLinkPartition) {
-		return true
-	}
-
-	return false
-}
-
-// SetNvLinkPartition gets a reference to the given bool and assigns it to the NvLinkPartition field.
+// SetNvLinkPartition sets field value
 func (o *SiteCapabilities) SetNvLinkPartition(v bool) {
-	o.NvLinkPartition = &v
+	o.NvLinkPartition = v
 }
 
-// GetFlow returns the Flow field value if set, zero value otherwise.
+// GetFlow returns the Flow field value
 func (o *SiteCapabilities) GetFlow() bool {
-	if o == nil || IsNil(o.Flow) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.Flow
+
+	return o.Flow
 }
 
-// GetFlowOk returns a tuple with the Flow field value if set, nil otherwise
+// GetFlowOk returns a tuple with the Flow field value
 // and a boolean to check if the value has been set.
 func (o *SiteCapabilities) GetFlowOk() (*bool, bool) {
-	if o == nil || IsNil(o.Flow) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Flow, true
+	return &o.Flow, true
 }
 
-// HasFlow returns a boolean if a field has been set.
-func (o *SiteCapabilities) HasFlow() bool {
-	if o != nil && !IsNil(o.Flow) {
-		return true
-	}
-
-	return false
-}
-
-// SetFlow gets a reference to the given bool and assigns it to the Flow field.
+// SetFlow sets field value
 func (o *SiteCapabilities) SetFlow(v bool) {
-	o.Flow = &v
+	o.Flow = v
 }
 
-// GetImageBasedOperatingSystem returns the ImageBasedOperatingSystem field value if set, zero value otherwise.
+// GetImageBasedOperatingSystem returns the ImageBasedOperatingSystem field value
 func (o *SiteCapabilities) GetImageBasedOperatingSystem() bool {
-	if o == nil || IsNil(o.ImageBasedOperatingSystem) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.ImageBasedOperatingSystem
+
+	return o.ImageBasedOperatingSystem
 }
 
-// GetImageBasedOperatingSystemOk returns a tuple with the ImageBasedOperatingSystem field value if set, nil otherwise
+// GetImageBasedOperatingSystemOk returns a tuple with the ImageBasedOperatingSystem field value
 // and a boolean to check if the value has been set.
 func (o *SiteCapabilities) GetImageBasedOperatingSystemOk() (*bool, bool) {
-	if o == nil || IsNil(o.ImageBasedOperatingSystem) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ImageBasedOperatingSystem, true
+	return &o.ImageBasedOperatingSystem, true
 }
 
-// HasImageBasedOperatingSystem returns a boolean if a field has been set.
-func (o *SiteCapabilities) HasImageBasedOperatingSystem() bool {
-	if o != nil && !IsNil(o.ImageBasedOperatingSystem) {
-		return true
-	}
-
-	return false
-}
-
-// SetImageBasedOperatingSystem gets a reference to the given bool and assigns it to the ImageBasedOperatingSystem field.
+// SetImageBasedOperatingSystem sets field value
 func (o *SiteCapabilities) SetImageBasedOperatingSystem(v bool) {
-	o.ImageBasedOperatingSystem = &v
+	o.ImageBasedOperatingSystem = v
 }
 
-// GetVpcSlaac returns the VpcSlaac field value if set, zero value otherwise.
+// GetVpcSlaac returns the VpcSlaac field value
 func (o *SiteCapabilities) GetVpcSlaac() bool {
-	if o == nil || IsNil(o.VpcSlaac) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.VpcSlaac
+
+	return o.VpcSlaac
 }
 
-// GetVpcSlaacOk returns a tuple with the VpcSlaac field value if set, nil otherwise
+// GetVpcSlaacOk returns a tuple with the VpcSlaac field value
 // and a boolean to check if the value has been set.
 func (o *SiteCapabilities) GetVpcSlaacOk() (*bool, bool) {
-	if o == nil || IsNil(o.VpcSlaac) {
+	if o == nil {
 		return nil, false
 	}
-	return o.VpcSlaac, true
+	return &o.VpcSlaac, true
 }
 
-// HasVpcSlaac returns a boolean if a field has been set.
-func (o *SiteCapabilities) HasVpcSlaac() bool {
-	if o != nil && !IsNil(o.VpcSlaac) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpcSlaac gets a reference to the given bool and assigns it to the VpcSlaac field.
+// SetVpcSlaac sets field value
 func (o *SiteCapabilities) SetVpcSlaac(v bool) {
-	o.VpcSlaac = &v
+	o.VpcSlaac = v
 }
 
-// GetDpsPowerManagement returns the DpsPowerManagement field value if set, zero value otherwise.
+// GetDpsPowerManagement returns the DpsPowerManagement field value
 func (o *SiteCapabilities) GetDpsPowerManagement() bool {
-	if o == nil || IsNil(o.DpsPowerManagement) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.DpsPowerManagement
+
+	return o.DpsPowerManagement
 }
 
-// GetDpsPowerManagementOk returns a tuple with the DpsPowerManagement field value if set, nil otherwise
+// GetDpsPowerManagementOk returns a tuple with the DpsPowerManagement field value
 // and a boolean to check if the value has been set.
 func (o *SiteCapabilities) GetDpsPowerManagementOk() (*bool, bool) {
-	if o == nil || IsNil(o.DpsPowerManagement) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DpsPowerManagement, true
+	return &o.DpsPowerManagement, true
 }
 
-// HasDpsPowerManagement returns a boolean if a field has been set.
-func (o *SiteCapabilities) HasDpsPowerManagement() bool {
-	if o != nil && !IsNil(o.DpsPowerManagement) {
-		return true
-	}
-
-	return false
-}
-
-// SetDpsPowerManagement gets a reference to the given bool and assigns it to the DpsPowerManagement field.
+// SetDpsPowerManagement sets field value
 func (o *SiteCapabilities) SetDpsPowerManagement(v bool) {
-	o.DpsPowerManagement = &v
+	o.DpsPowerManagement = v
 }
 
 func (o SiteCapabilities) MarshalJSON() ([]byte, error) {
@@ -293,28 +246,56 @@ func (o SiteCapabilities) MarshalJSON() ([]byte, error) {
 
 func (o SiteCapabilities) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.NativeNetworking) {
-		toSerialize["nativeNetworking"] = o.NativeNetworking
-	}
-	if !IsNil(o.NetworkSecurityGroup) {
-		toSerialize["networkSecurityGroup"] = o.NetworkSecurityGroup
-	}
-	if !IsNil(o.NvLinkPartition) {
-		toSerialize["nvLinkPartition"] = o.NvLinkPartition
-	}
-	if !IsNil(o.Flow) {
-		toSerialize["flow"] = o.Flow
-	}
-	if !IsNil(o.ImageBasedOperatingSystem) {
-		toSerialize["imageBasedOperatingSystem"] = o.ImageBasedOperatingSystem
-	}
-	if !IsNil(o.VpcSlaac) {
-		toSerialize["vpcSlaac"] = o.VpcSlaac
-	}
-	if !IsNil(o.DpsPowerManagement) {
-		toSerialize["dpsPowerManagement"] = o.DpsPowerManagement
-	}
+	toSerialize["nativeNetworking"] = o.NativeNetworking
+	toSerialize["networkSecurityGroup"] = o.NetworkSecurityGroup
+	toSerialize["nvLinkPartition"] = o.NvLinkPartition
+	toSerialize["flow"] = o.Flow
+	toSerialize["imageBasedOperatingSystem"] = o.ImageBasedOperatingSystem
+	toSerialize["vpcSlaac"] = o.VpcSlaac
+	toSerialize["dpsPowerManagement"] = o.DpsPowerManagement
 	return toSerialize, nil
+}
+
+func (o *SiteCapabilities) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"nativeNetworking",
+		"networkSecurityGroup",
+		"nvLinkPartition",
+		"flow",
+		"imageBasedOperatingSystem",
+		"vpcSlaac",
+		"dpsPowerManagement",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSiteCapabilities := _SiteCapabilities{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSiteCapabilities)
+
+	if err != nil {
+		return err
+	}
+
+	*o = SiteCapabilities(varSiteCapabilities)
+
+	return err
 }
 
 type NullableSiteCapabilities struct {

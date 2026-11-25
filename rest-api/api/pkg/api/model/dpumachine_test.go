@@ -465,32 +465,63 @@ func TestNewAPIDpuMachines(t *testing.T) {
 		SiteID:                   uuid.New(),
 		InfrastructureProviderID: uuid.New(),
 	}
-	protoDpuMachines := []*corev1.DpuMachine{
-		nil,
+
+	tests := []struct {
+		name  string
+		input []*corev1.DpuMachine
+		check func(t *testing.T, got []APIDpuMachine)
+	}{
 		{
-			Machine: &corev1.Machine{
-				Id:    &corev1.MachineId{Id: "test-dpu-machine-id-1"},
-				State: "READY",
+			name: "skips nil entries and initializes empty slices",
+			input: []*corev1.DpuMachine{
+				nil,
+				{
+					Machine: &corev1.Machine{
+						Id:    &corev1.MachineId{Id: "test-dpu-machine-id-1"},
+						State: "READY",
+					},
+				},
+				{
+					Machine: &corev1.Machine{
+						Id:    &corev1.MachineId{Id: "test-dpu-machine-id-2"},
+						State: "READY",
+					},
+				},
+			},
+			check: func(t *testing.T, got []APIDpuMachine) {
+				require.Len(t, got, 2)
+				assert.Equal(t, "test-dpu-machine-id-1", got[0].ID)
+				assert.Equal(t, "test-dpu-machine-id-2", got[1].ID)
+				assert.Equal(t, ctx.HostMachineID, got[0].HostMachineID)
+				assert.Equal(t, ctx.SiteID.String(), got[0].SiteID)
+				assert.Equal(t, ctx.InfrastructureProviderID.String(), got[0].InfrastructureProviderID)
+				require.NotNil(t, got[0].DpuNetworkConfig)
+				require.NotNil(t, got[1].DpuNetworkConfig)
+				assert.Equal(t, []APIDpuMachineInterface{}, got[0].Interfaces)
+				assert.Equal(t, []APIDpuMachineSoftwareComponent{}, got[0].SoftwareComponents)
+				assert.Equal(t, []string{}, got[0].DpuNetworkConfig.DhcpServers)
+				assert.Equal(t, []APIFlatInterfaceConfig{}, got[0].DpuNetworkConfig.TenantInterfaces)
+				assert.Equal(t, []string{}, got[0].DpuNetworkConfig.RouteServers)
+				assert.Equal(t, []string{}, got[0].DpuNetworkConfig.DeprecatedDenyPrefixes)
+				assert.Equal(t, []string{}, got[0].DpuNetworkConfig.DenyPrefixes)
+				assert.Equal(t, []string{}, got[0].DpuNetworkConfig.SiteFabricPrefixes)
+				assert.Equal(t, []string{}, got[0].DpuNetworkConfig.AnycastSitePrefixes)
 			},
 		},
 		{
-			Machine: &corev1.Machine{
-				Id:    &corev1.MachineId{Id: "test-dpu-machine-id-2"},
-				State: "READY",
+			name:  "nil input slice returns empty slice",
+			input: nil,
+			check: func(t *testing.T, got []APIDpuMachine) {
+				assert.Equal(t, []APIDpuMachine{}, got)
 			},
 		},
 	}
 
-	apiDpuMachines := NewAPIDpuMachines(protoDpuMachines, ctx)
-
-	assert.Len(t, apiDpuMachines, 2)
-	assert.Equal(t, "test-dpu-machine-id-1", apiDpuMachines[0].ID)
-	assert.Equal(t, "test-dpu-machine-id-2", apiDpuMachines[1].ID)
-	assert.Equal(t, ctx.HostMachineID, apiDpuMachines[0].HostMachineID)
-	assert.Equal(t, ctx.SiteID.String(), apiDpuMachines[0].SiteID)
-	assert.Equal(t, ctx.InfrastructureProviderID.String(), apiDpuMachines[0].InfrastructureProviderID)
-	assert.NotNil(t, apiDpuMachines[0].DpuNetworkConfig)
-	assert.NotNil(t, apiDpuMachines[1].DpuNetworkConfig)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.check(t, NewAPIDpuMachines(tt.input, ctx))
+		})
+	}
 }
 
 func TestAPIDpuMachine_DpuNetworkConfigJSON(t *testing.T) {

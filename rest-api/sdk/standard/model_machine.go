@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,11 +26,11 @@ var _ MappedNullable = &Machine{}
 // Machine Machine is the baremetal server that sits in the datacenter
 type Machine struct {
 	// Unique ID of Machine
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Provider that owns the Machine
-	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId string `json:"infrastructureProviderId"`
 	// ID of the Site the Machine belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// ID of the Instance Type, if assigned
 	InstanceTypeId NullableString `json:"instanceTypeId,omitempty"`
 	// ID of the associated Instance, or null when unassigned. The association remains during termination until Instance inventory confirms deletion. A non-null value precludes Ready status.
@@ -36,7 +38,7 @@ type Machine struct {
 	// ID of the Tenant that owns the Instance if the Machine is assigned to one
 	TenantId NullableString `json:"tenantId,omitempty"`
 	// ID of the Machine at Site, now same as the primary ID
-	ControllerMachineId *string `json:"controllerMachineId,omitempty"`
+	ControllerMachineId string `json:"controllerMachineId"`
 	// Denotes architecture (x86 vs ARM) of the Machine
 	ControllerMachineType NullableString `json:"controllerMachineType,omitempty"`
 	// SKU derived device type of the machine, e.g. cpu, gpu, cache, storage, etc.
@@ -48,40 +50,55 @@ type Machine struct {
 	// Serial number of the Machine, only visible to Provider
 	SerialNumber NullableString `json:"serialNumber,omitempty"`
 	// List of capabilities of the machine
-	MachineCapabilities []MachineCapability `json:"machineCapabilities,omitempty"`
+	MachineCapabilities []MachineCapability `json:"machineCapabilities"`
 	// List of admin interfaces of the machine
-	MachineInterfaces []MachineInterface `json:"machineInterfaces,omitempty"`
+	MachineInterfaces []MachineInterface `json:"machineInterfaces"`
 	// IDs of the DPU Machines attached to this host Machine
-	AssociatedDpuMachineIds []string `json:"associatedDpuMachineIds,omitempty"`
+	AssociatedDpuMachineIds []string `json:"associatedDpuMachineIds"`
 	// Physical placement of the Machine within its Rack, when known
-	PlacementInRack *PlacementInRack `json:"placementInRack,omitempty"`
+	PlacementInRack NullablePlacementInRack `json:"placementInRack,omitempty"`
 	// If the Machine is in maintenance mode, this message will typically describe the reason and how long it is expected to be in maintenance
 	MaintenanceMessage NullableString `json:"maintenanceMessage,omitempty"`
 	// Scout version reported by the Machine, if known
 	ScoutVersion NullableString `json:"scoutVersion,omitempty"`
 	// Health information about the machine
-	Health *MachineHealth `json:"health,omitempty"`
+	Health NullableMachineHealth `json:"health,omitempty"`
 	// Only available to Providers. Returned if the `includeMetadata` query parameter is specified. Otherwise attribute is omitted from response.
 	Metadata *MachineMetadata `json:"metadata,omitempty"`
 	// User-specified Machine labels
-	Labels map[string]string `json:"labels,omitempty"`
-	Status *MachineStatus    `json:"status,omitempty"`
+	Labels map[string]string `json:"labels"`
+	Status MachineStatus     `json:"status"`
 	// Indicates whether the machine is usable by or currently in use by a tenant. It does not indicate that a Machine is available for Instance creation.
-	IsUsableByTenant *bool `json:"isUsableByTenant,omitempty"`
+	IsUsableByTenant bool `json:"isUsableByTenant"`
 	// Chronological status history for the Machine
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when the Machine was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Machine was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _Machine Machine
 
 // NewMachine instantiates a new Machine object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachine() *Machine {
+func NewMachine(id string, infrastructureProviderId string, siteId string, controllerMachineId string, machineCapabilities []MachineCapability, machineInterfaces []MachineInterface, associatedDpuMachineIds []string, labels map[string]string, status MachineStatus, isUsableByTenant bool, statusHistory []StatusDetail, created time.Time, updated time.Time) *Machine {
 	this := Machine{}
+	this.Id = id
+	this.InfrastructureProviderId = infrastructureProviderId
+	this.SiteId = siteId
+	this.ControllerMachineId = controllerMachineId
+	this.MachineCapabilities = machineCapabilities
+	this.MachineInterfaces = machineInterfaces
+	this.AssociatedDpuMachineIds = associatedDpuMachineIds
+	this.Labels = labels
+	this.Status = status
+	this.IsUsableByTenant = isUsableByTenant
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -93,100 +110,76 @@ func NewMachineWithDefaults() *Machine {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Machine) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Machine) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Machine) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value
 func (o *Machine) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId
+
+	return o.InfrastructureProviderId
 }
 
-// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
+// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderId, true
+	return &o.InfrastructureProviderId, true
 }
 
-// HasInfrastructureProviderId returns a boolean if a field has been set.
-func (o *Machine) HasInfrastructureProviderId() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId sets field value
 func (o *Machine) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId = &v
+	o.InfrastructureProviderId = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *Machine) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *Machine) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *Machine) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
 // GetInstanceTypeId returns the InstanceTypeId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -318,36 +311,28 @@ func (o *Machine) UnsetTenantId() {
 	o.TenantId.Unset()
 }
 
-// GetControllerMachineId returns the ControllerMachineId field value if set, zero value otherwise.
+// GetControllerMachineId returns the ControllerMachineId field value
 func (o *Machine) GetControllerMachineId() string {
-	if o == nil || IsNil(o.ControllerMachineId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ControllerMachineId
+
+	return o.ControllerMachineId
 }
 
-// GetControllerMachineIdOk returns a tuple with the ControllerMachineId field value if set, nil otherwise
+// GetControllerMachineIdOk returns a tuple with the ControllerMachineId field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetControllerMachineIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ControllerMachineId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ControllerMachineId, true
+	return &o.ControllerMachineId, true
 }
 
-// HasControllerMachineId returns a boolean if a field has been set.
-func (o *Machine) HasControllerMachineId() bool {
-	if o != nil && !IsNil(o.ControllerMachineId) {
-		return true
-	}
-
-	return false
-}
-
-// SetControllerMachineId gets a reference to the given string and assigns it to the ControllerMachineId field.
+// SetControllerMachineId sets field value
 func (o *Machine) SetControllerMachineId(v string) {
-	o.ControllerMachineId = &v
+	o.ControllerMachineId = v
 }
 
 // GetControllerMachineType returns the ControllerMachineType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -565,132 +550,119 @@ func (o *Machine) UnsetSerialNumber() {
 	o.SerialNumber.Unset()
 }
 
-// GetMachineCapabilities returns the MachineCapabilities field value if set, zero value otherwise.
+// GetMachineCapabilities returns the MachineCapabilities field value
 func (o *Machine) GetMachineCapabilities() []MachineCapability {
-	if o == nil || IsNil(o.MachineCapabilities) {
+	if o == nil {
 		var ret []MachineCapability
 		return ret
 	}
+
 	return o.MachineCapabilities
 }
 
-// GetMachineCapabilitiesOk returns a tuple with the MachineCapabilities field value if set, nil otherwise
+// GetMachineCapabilitiesOk returns a tuple with the MachineCapabilities field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetMachineCapabilitiesOk() ([]MachineCapability, bool) {
-	if o == nil || IsNil(o.MachineCapabilities) {
+	if o == nil {
 		return nil, false
 	}
 	return o.MachineCapabilities, true
 }
 
-// HasMachineCapabilities returns a boolean if a field has been set.
-func (o *Machine) HasMachineCapabilities() bool {
-	if o != nil && !IsNil(o.MachineCapabilities) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachineCapabilities gets a reference to the given []MachineCapability and assigns it to the MachineCapabilities field.
+// SetMachineCapabilities sets field value
 func (o *Machine) SetMachineCapabilities(v []MachineCapability) {
 	o.MachineCapabilities = v
 }
 
-// GetMachineInterfaces returns the MachineInterfaces field value if set, zero value otherwise.
+// GetMachineInterfaces returns the MachineInterfaces field value
 func (o *Machine) GetMachineInterfaces() []MachineInterface {
-	if o == nil || IsNil(o.MachineInterfaces) {
+	if o == nil {
 		var ret []MachineInterface
 		return ret
 	}
+
 	return o.MachineInterfaces
 }
 
-// GetMachineInterfacesOk returns a tuple with the MachineInterfaces field value if set, nil otherwise
+// GetMachineInterfacesOk returns a tuple with the MachineInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetMachineInterfacesOk() ([]MachineInterface, bool) {
-	if o == nil || IsNil(o.MachineInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.MachineInterfaces, true
 }
 
-// HasMachineInterfaces returns a boolean if a field has been set.
-func (o *Machine) HasMachineInterfaces() bool {
-	if o != nil && !IsNil(o.MachineInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachineInterfaces gets a reference to the given []MachineInterface and assigns it to the MachineInterfaces field.
+// SetMachineInterfaces sets field value
 func (o *Machine) SetMachineInterfaces(v []MachineInterface) {
 	o.MachineInterfaces = v
 }
 
-// GetAssociatedDpuMachineIds returns the AssociatedDpuMachineIds field value if set, zero value otherwise.
+// GetAssociatedDpuMachineIds returns the AssociatedDpuMachineIds field value
 func (o *Machine) GetAssociatedDpuMachineIds() []string {
-	if o == nil || IsNil(o.AssociatedDpuMachineIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.AssociatedDpuMachineIds
 }
 
-// GetAssociatedDpuMachineIdsOk returns a tuple with the AssociatedDpuMachineIds field value if set, nil otherwise
+// GetAssociatedDpuMachineIdsOk returns a tuple with the AssociatedDpuMachineIds field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetAssociatedDpuMachineIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.AssociatedDpuMachineIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.AssociatedDpuMachineIds, true
 }
 
-// HasAssociatedDpuMachineIds returns a boolean if a field has been set.
-func (o *Machine) HasAssociatedDpuMachineIds() bool {
-	if o != nil && !IsNil(o.AssociatedDpuMachineIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetAssociatedDpuMachineIds gets a reference to the given []string and assigns it to the AssociatedDpuMachineIds field.
+// SetAssociatedDpuMachineIds sets field value
 func (o *Machine) SetAssociatedDpuMachineIds(v []string) {
 	o.AssociatedDpuMachineIds = v
 }
 
-// GetPlacementInRack returns the PlacementInRack field value if set, zero value otherwise.
+// GetPlacementInRack returns the PlacementInRack field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Machine) GetPlacementInRack() PlacementInRack {
-	if o == nil || IsNil(o.PlacementInRack) {
+	if o == nil || IsNil(o.PlacementInRack.Get()) {
 		var ret PlacementInRack
 		return ret
 	}
-	return *o.PlacementInRack
+	return *o.PlacementInRack.Get()
 }
 
 // GetPlacementInRackOk returns a tuple with the PlacementInRack field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Machine) GetPlacementInRackOk() (*PlacementInRack, bool) {
-	if o == nil || IsNil(o.PlacementInRack) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PlacementInRack, true
+	return o.PlacementInRack.Get(), o.PlacementInRack.IsSet()
 }
 
 // HasPlacementInRack returns a boolean if a field has been set.
 func (o *Machine) HasPlacementInRack() bool {
-	if o != nil && !IsNil(o.PlacementInRack) {
+	if o != nil && o.PlacementInRack.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetPlacementInRack gets a reference to the given PlacementInRack and assigns it to the PlacementInRack field.
+// SetPlacementInRack gets a reference to the given NullablePlacementInRack and assigns it to the PlacementInRack field.
 func (o *Machine) SetPlacementInRack(v PlacementInRack) {
-	o.PlacementInRack = &v
+	o.PlacementInRack.Set(&v)
+}
+
+// SetPlacementInRackNil sets the value for PlacementInRack to be an explicit nil
+func (o *Machine) SetPlacementInRackNil() {
+	o.PlacementInRack.Set(nil)
+}
+
+// UnsetPlacementInRack ensures that no value is present for PlacementInRack, not even an explicit nil
+func (o *Machine) UnsetPlacementInRack() {
+	o.PlacementInRack.Unset()
 }
 
 // GetMaintenanceMessage returns the MaintenanceMessage field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -779,36 +751,47 @@ func (o *Machine) UnsetScoutVersion() {
 	o.ScoutVersion.Unset()
 }
 
-// GetHealth returns the Health field value if set, zero value otherwise.
+// GetHealth returns the Health field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Machine) GetHealth() MachineHealth {
-	if o == nil || IsNil(o.Health) {
+	if o == nil || IsNil(o.Health.Get()) {
 		var ret MachineHealth
 		return ret
 	}
-	return *o.Health
+	return *o.Health.Get()
 }
 
 // GetHealthOk returns a tuple with the Health field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Machine) GetHealthOk() (*MachineHealth, bool) {
-	if o == nil || IsNil(o.Health) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Health, true
+	return o.Health.Get(), o.Health.IsSet()
 }
 
 // HasHealth returns a boolean if a field has been set.
 func (o *Machine) HasHealth() bool {
-	if o != nil && !IsNil(o.Health) {
+	if o != nil && o.Health.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetHealth gets a reference to the given MachineHealth and assigns it to the Health field.
+// SetHealth gets a reference to the given NullableMachineHealth and assigns it to the Health field.
 func (o *Machine) SetHealth(v MachineHealth) {
-	o.Health = &v
+	o.Health.Set(&v)
+}
+
+// SetHealthNil sets the value for Health to be an explicit nil
+func (o *Machine) SetHealthNil() {
+	o.Health.Set(nil)
+}
+
+// UnsetHealth ensures that no value is present for Health, not even an explicit nil
+func (o *Machine) UnsetHealth() {
+	o.Health.Unset()
 }
 
 // GetMetadata returns the Metadata field value if set, zero value otherwise.
@@ -843,196 +826,148 @@ func (o *Machine) SetMetadata(v MachineMetadata) {
 	o.Metadata = &v
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *Machine) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *Machine) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *Machine) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *Machine) GetStatus() MachineStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret MachineStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetStatusOk() (*MachineStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *Machine) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given MachineStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *Machine) SetStatus(v MachineStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetIsUsableByTenant returns the IsUsableByTenant field value if set, zero value otherwise.
+// GetIsUsableByTenant returns the IsUsableByTenant field value
 func (o *Machine) GetIsUsableByTenant() bool {
-	if o == nil || IsNil(o.IsUsableByTenant) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsUsableByTenant
+
+	return o.IsUsableByTenant
 }
 
-// GetIsUsableByTenantOk returns a tuple with the IsUsableByTenant field value if set, nil otherwise
+// GetIsUsableByTenantOk returns a tuple with the IsUsableByTenant field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetIsUsableByTenantOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsUsableByTenant) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsUsableByTenant, true
+	return &o.IsUsableByTenant, true
 }
 
-// HasIsUsableByTenant returns a boolean if a field has been set.
-func (o *Machine) HasIsUsableByTenant() bool {
-	if o != nil && !IsNil(o.IsUsableByTenant) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsUsableByTenant gets a reference to the given bool and assigns it to the IsUsableByTenant field.
+// SetIsUsableByTenant sets field value
 func (o *Machine) SetIsUsableByTenant(v bool) {
-	o.IsUsableByTenant = &v
+	o.IsUsableByTenant = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *Machine) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *Machine) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *Machine) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *Machine) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *Machine) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *Machine) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *Machine) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *Machine) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *Machine) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *Machine) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o Machine) MarshalJSON() ([]byte, error) {
@@ -1045,15 +980,9 @@ func (o Machine) MarshalJSON() ([]byte, error) {
 
 func (o Machine) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.InfrastructureProviderId) {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
+	toSerialize["siteId"] = o.SiteId
 	if o.InstanceTypeId.IsSet() {
 		toSerialize["instanceTypeId"] = o.InstanceTypeId.Get()
 	}
@@ -1063,9 +992,7 @@ func (o Machine) ToMap() (map[string]interface{}, error) {
 	if o.TenantId.IsSet() {
 		toSerialize["tenantId"] = o.TenantId.Get()
 	}
-	if !IsNil(o.ControllerMachineId) {
-		toSerialize["controllerMachineId"] = o.ControllerMachineId
-	}
+	toSerialize["controllerMachineId"] = o.ControllerMachineId
 	if o.ControllerMachineType.IsSet() {
 		toSerialize["controllerMachineType"] = o.ControllerMachineType.Get()
 	}
@@ -1081,17 +1008,11 @@ func (o Machine) ToMap() (map[string]interface{}, error) {
 	if o.SerialNumber.IsSet() {
 		toSerialize["serialNumber"] = o.SerialNumber.Get()
 	}
-	if !IsNil(o.MachineCapabilities) {
-		toSerialize["machineCapabilities"] = o.MachineCapabilities
-	}
-	if !IsNil(o.MachineInterfaces) {
-		toSerialize["machineInterfaces"] = o.MachineInterfaces
-	}
-	if !IsNil(o.AssociatedDpuMachineIds) {
-		toSerialize["associatedDpuMachineIds"] = o.AssociatedDpuMachineIds
-	}
-	if !IsNil(o.PlacementInRack) {
-		toSerialize["placementInRack"] = o.PlacementInRack
+	toSerialize["machineCapabilities"] = o.MachineCapabilities
+	toSerialize["machineInterfaces"] = o.MachineInterfaces
+	toSerialize["associatedDpuMachineIds"] = o.AssociatedDpuMachineIds
+	if o.PlacementInRack.IsSet() {
+		toSerialize["placementInRack"] = o.PlacementInRack.Get()
 	}
 	if o.MaintenanceMessage.IsSet() {
 		toSerialize["maintenanceMessage"] = o.MaintenanceMessage.Get()
@@ -1099,31 +1020,67 @@ func (o Machine) ToMap() (map[string]interface{}, error) {
 	if o.ScoutVersion.IsSet() {
 		toSerialize["scoutVersion"] = o.ScoutVersion.Get()
 	}
-	if !IsNil(o.Health) {
-		toSerialize["health"] = o.Health
+	if o.Health.IsSet() {
+		toSerialize["health"] = o.Health.Get()
 	}
 	if !IsNil(o.Metadata) {
 		toSerialize["metadata"] = o.Metadata
 	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.IsUsableByTenant) {
-		toSerialize["isUsableByTenant"] = o.IsUsableByTenant
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["labels"] = o.Labels
+	toSerialize["status"] = o.Status
+	toSerialize["isUsableByTenant"] = o.IsUsableByTenant
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *Machine) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"infrastructureProviderId",
+		"siteId",
+		"controllerMachineId",
+		"machineCapabilities",
+		"machineInterfaces",
+		"associatedDpuMachineIds",
+		"labels",
+		"status",
+		"isUsableByTenant",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachine := _Machine{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachine)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Machine(varMachine)
+
+	return err
 }
 
 type NullableMachine struct {

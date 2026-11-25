@@ -276,6 +276,7 @@ func (gtitsh GetTenantInstanceTypeStatsHandler) Handle(c echo.Context) error {
 			ID:             t.ID.String(),
 			Org:            t.Org,
 			OrgDisplayName: tenantOrgDisplay,
+			InstanceTypes:  []model.APITenantInstanceTypeStatsEntry{},
 		}
 
 		for itID, details := range itAllocs {

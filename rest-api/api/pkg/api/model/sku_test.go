@@ -102,21 +102,38 @@ func TestNewAPISku(t *testing.T) {
 }
 
 func TestNewAPISkuComponents(t *testing.T) {
-	// Test with nil input
-	t.Run("test new API SKU Components with nil input", func(t *testing.T) {
-		result := NewAPISkuComponents(nil)
-		assert.Nil(t, result)
-	})
+	tests := []struct {
+		name  string
+		in    *corev1.SkuComponents
+		check func(t *testing.T, got *APISkuComponents)
+	}{
+		{
+			name: "nil input returns nil",
+			in:   nil,
+			check: func(t *testing.T, got *APISkuComponents) {
+				assert.Nil(t, got)
+			},
+		},
+		{
+			name: "empty input initializes component slices",
+			in:   &corev1.SkuComponents{},
+			check: func(t *testing.T, got *APISkuComponents) {
+				require.NotNil(t, got)
+				assert.Equal(t, []APISkuCpu{}, got.Cpus)
+				assert.Equal(t, []APISkuGpu{}, got.Gpus)
+				assert.Equal(t, []APISkuMemory{}, got.Memory)
+				assert.Equal(t, []APISkuStorage{}, got.Storage)
+				assert.Equal(t, []APISkuEthernetDevice{}, got.EthernetDevices)
+				assert.Equal(t, []APISkuInfinibandDevice{}, got.InfinibandDevices)
+			},
+		},
+	}
 
-	// Test with empty input
-	t.Run("test new API SKU Components with empty input", func(t *testing.T) {
-		result := NewAPISkuComponents(&corev1.SkuComponents{})
-		assert.NotNil(t, result)
-		assert.Nil(t, result.Cpus)
-		assert.Nil(t, result.Gpus)
-		assert.Nil(t, result.Memory)
-		assert.Nil(t, result.Storage)
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.check(t, NewAPISkuComponents(tt.in))
+		})
+	}
 }
 
 func TestNewAPISkuWithFullComponents(t *testing.T) {
@@ -600,7 +617,8 @@ func TestNewAPISkuEdgeCases(t *testing.T) {
 
 		result := NewAPISku(dbSku)
 		assert.NotNil(t, result)
-		assert.Nil(t, result.AssociatedMachineIds)
+		assert.NotNil(t, result.AssociatedMachineIds)
+		assert.Empty(t, result.AssociatedMachineIds)
 	})
 
 	t.Run("SKU with many AssociatedMachineIds", func(t *testing.T) {

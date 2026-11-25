@@ -28,27 +28,27 @@ type PowerTask struct {
 	// Flow-generated task UUID, usable with the existing task APIs.
 	Id string `json:"id"`
 	// External inventory ID of the task's recorded rack. Null together with targets when targetsError is non-null; never falls back to an internal rack UUID.
-	RackId NullableString `json:"rackId"`
+	RackId NullableString `json:"rackId,omitempty"`
 	// Requested Flow power operation, kept separate from the operation Core stores.
 	Operation string `json:"operation"`
 	// Whether the task bypasses the component readiness gate when it executes.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
 	// Complete recorded selection grouped by type, using external inventory IDs available at read time. Null with targetsError when any external target metadata is unavailable; an empty array with no error means an explicitly empty selection. Groups follow Flow's component-type name order; IDs retain recorded UUID order, including repeated external IDs. IDs are not sorted by their external values or deduplicated across types.
-	Targets []PowerTaskTargetGroup `json:"targets"`
+	Targets []PowerTaskTargetGroup `json:"targets,omitempty"`
 	// Null when rackId and the complete target selection are available. Missing metadata reports `Unsupported`; missing, empty, or purged inventory identities report `NotLinked`. Malformed metadata reports `InvalidResponse`; lookup failures retain their error category. `LimitExceeded` means the recorded target identifiers alone exceed the proxy response allowance, or the tray endpoint removed external metadata to meet that allowance. The rack endpoint preserves metadata and fails the whole request if replacing nonempty successful waiting context lists with `LimitExceeded` cannot make the response fit. Any error makes rackId and targets null, without removing the task or returning a partial selection.
-	TargetsError NullablePowerReadError `json:"targetsError"`
+	TargetsError NullablePowerReadError `json:"targetsError,omitempty"`
 	// `Pending` includes Flow `Waiting` and admitted `Pending`; `Running` does not prove hardware dispatch. `Unknown` represents an unrecognized service value.
 	Status string `json:"status"`
 	// Task creation time; null if the service did not supply a usable timestamp.
-	Created NullableTime `json:"created"`
+	Created NullableTime `json:"created,omitempty"`
 	// Last recorded task update time; null if unavailable.
-	Updated NullableTime `json:"updated"`
+	Updated NullableTime `json:"updated,omitempty"`
 	// Recorded execution start; null until recorded.
-	Started NullableTime `json:"started"`
+	Started NullableTime `json:"started,omitempty"`
 	// `Selected` means a recorded target; `RackAffected` means the task selects a shelf in this tray's current rack and can affect this tray without selecting it. `Unknown` represents an unrecognized or unspecified service value, including root rack task records; their per-member task references supply relevance.
 	Relevance string `json:"relevance"`
 	// Present for every Flow `Waiting` task, which reports public status `Pending`, and null for every other task. When an older service doesn't supply the context, both lists are empty and `error` is `Unsupported`. Neither list establishes a definitive blocker, queue position or future execution order.
-	WaitingContext NullablePowerTaskWaitingContext `json:"waitingContext"`
+	WaitingContext NullablePowerTaskWaitingContext `json:"waitingContext,omitempty"`
 }
 
 type _PowerTask PowerTask
@@ -57,20 +57,13 @@ type _PowerTask PowerTask
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewPowerTask(id string, rackId NullableString, operation string, overrideReadinessCheck bool, targets []PowerTaskTargetGroup, targetsError NullablePowerReadError, status string, created NullableTime, updated NullableTime, started NullableTime, relevance string, waitingContext NullablePowerTaskWaitingContext) *PowerTask {
+func NewPowerTask(id string, operation string, overrideReadinessCheck bool, status string, relevance string) *PowerTask {
 	this := PowerTask{}
 	this.Id = id
-	this.RackId = rackId
 	this.Operation = operation
 	this.OverrideReadinessCheck = overrideReadinessCheck
-	this.Targets = targets
-	this.TargetsError = targetsError
 	this.Status = status
-	this.Created = created
-	this.Updated = updated
-	this.Started = started
 	this.Relevance = relevance
-	this.WaitingContext = waitingContext
 	return &this
 }
 
@@ -106,18 +99,16 @@ func (o *PowerTask) SetId(v string) {
 	o.Id = v
 }
 
-// GetRackId returns the RackId field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetRackId returns the RackId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTask) GetRackId() string {
-	if o == nil || o.RackId.Get() == nil {
+	if o == nil || IsNil(o.RackId.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.RackId.Get()
 }
 
-// GetRackIdOk returns a tuple with the RackId field value
+// GetRackIdOk returns a tuple with the RackId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerTask) GetRackIdOk() (*string, bool) {
@@ -127,9 +118,28 @@ func (o *PowerTask) GetRackIdOk() (*string, bool) {
 	return o.RackId.Get(), o.RackId.IsSet()
 }
 
-// SetRackId sets field value
+// HasRackId returns a boolean if a field has been set.
+func (o *PowerTask) HasRackId() bool {
+	if o != nil && o.RackId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRackId gets a reference to the given NullableString and assigns it to the RackId field.
 func (o *PowerTask) SetRackId(v string) {
 	o.RackId.Set(&v)
+}
+
+// SetRackIdNil sets the value for RackId to be an explicit nil
+func (o *PowerTask) SetRackIdNil() {
+	o.RackId.Set(nil)
+}
+
+// UnsetRackId ensures that no value is present for RackId, not even an explicit nil
+func (o *PowerTask) UnsetRackId() {
+	o.RackId.Unset()
 }
 
 // GetOperation returns the Operation field value
@@ -180,18 +190,16 @@ func (o *PowerTask) SetOverrideReadinessCheck(v bool) {
 	o.OverrideReadinessCheck = v
 }
 
-// GetTargets returns the Targets field value
-// If the value is explicit nil, the zero value for []PowerTaskTargetGroup will be returned
+// GetTargets returns the Targets field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTask) GetTargets() []PowerTaskTargetGroup {
 	if o == nil {
 		var ret []PowerTaskTargetGroup
 		return ret
 	}
-
 	return o.Targets
 }
 
-// GetTargetsOk returns a tuple with the Targets field value
+// GetTargetsOk returns a tuple with the Targets field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *PowerTask) GetTargetsOk() ([]PowerTaskTargetGroup, bool) {
 	if o == nil || IsNil(o.Targets) {
@@ -200,23 +208,30 @@ func (o *PowerTask) GetTargetsOk() ([]PowerTaskTargetGroup, bool) {
 	return o.Targets, true
 }
 
-// SetTargets sets field value
+// HasTargets returns a boolean if a field has been set.
+func (o *PowerTask) HasTargets() bool {
+	if o != nil && !IsNil(o.Targets) {
+		return true
+	}
+
+	return false
+}
+
+// SetTargets gets a reference to the given []PowerTaskTargetGroup and assigns it to the Targets field.
 func (o *PowerTask) SetTargets(v []PowerTaskTargetGroup) {
 	o.Targets = v
 }
 
-// GetTargetsError returns the TargetsError field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// GetTargetsError returns the TargetsError field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTask) GetTargetsError() PowerReadError {
-	if o == nil || o.TargetsError.Get() == nil {
+	if o == nil || IsNil(o.TargetsError.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.TargetsError.Get()
 }
 
-// GetTargetsErrorOk returns a tuple with the TargetsError field value
+// GetTargetsErrorOk returns a tuple with the TargetsError field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerTask) GetTargetsErrorOk() (*PowerReadError, bool) {
@@ -226,9 +241,28 @@ func (o *PowerTask) GetTargetsErrorOk() (*PowerReadError, bool) {
 	return o.TargetsError.Get(), o.TargetsError.IsSet()
 }
 
-// SetTargetsError sets field value
+// HasTargetsError returns a boolean if a field has been set.
+func (o *PowerTask) HasTargetsError() bool {
+	if o != nil && o.TargetsError.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTargetsError gets a reference to the given NullablePowerReadError and assigns it to the TargetsError field.
 func (o *PowerTask) SetTargetsError(v PowerReadError) {
 	o.TargetsError.Set(&v)
+}
+
+// SetTargetsErrorNil sets the value for TargetsError to be an explicit nil
+func (o *PowerTask) SetTargetsErrorNil() {
+	o.TargetsError.Set(nil)
+}
+
+// UnsetTargetsError ensures that no value is present for TargetsError, not even an explicit nil
+func (o *PowerTask) UnsetTargetsError() {
+	o.TargetsError.Unset()
 }
 
 // GetStatus returns the Status field value
@@ -255,18 +289,16 @@ func (o *PowerTask) SetStatus(v string) {
 	o.Status = v
 }
 
-// GetCreated returns the Created field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// GetCreated returns the Created field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTask) GetCreated() time.Time {
-	if o == nil || o.Created.Get() == nil {
+	if o == nil || IsNil(o.Created.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.Created.Get()
 }
 
-// GetCreatedOk returns a tuple with the Created field value
+// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerTask) GetCreatedOk() (*time.Time, bool) {
@@ -276,23 +308,40 @@ func (o *PowerTask) GetCreatedOk() (*time.Time, bool) {
 	return o.Created.Get(), o.Created.IsSet()
 }
 
-// SetCreated sets field value
+// HasCreated returns a boolean if a field has been set.
+func (o *PowerTask) HasCreated() bool {
+	if o != nil && o.Created.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetCreated gets a reference to the given NullableTime and assigns it to the Created field.
 func (o *PowerTask) SetCreated(v time.Time) {
 	o.Created.Set(&v)
 }
 
-// GetUpdated returns the Updated field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// SetCreatedNil sets the value for Created to be an explicit nil
+func (o *PowerTask) SetCreatedNil() {
+	o.Created.Set(nil)
+}
+
+// UnsetCreated ensures that no value is present for Created, not even an explicit nil
+func (o *PowerTask) UnsetCreated() {
+	o.Created.Unset()
+}
+
+// GetUpdated returns the Updated field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTask) GetUpdated() time.Time {
-	if o == nil || o.Updated.Get() == nil {
+	if o == nil || IsNil(o.Updated.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.Updated.Get()
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value
+// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerTask) GetUpdatedOk() (*time.Time, bool) {
@@ -302,23 +351,40 @@ func (o *PowerTask) GetUpdatedOk() (*time.Time, bool) {
 	return o.Updated.Get(), o.Updated.IsSet()
 }
 
-// SetUpdated sets field value
+// HasUpdated returns a boolean if a field has been set.
+func (o *PowerTask) HasUpdated() bool {
+	if o != nil && o.Updated.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetUpdated gets a reference to the given NullableTime and assigns it to the Updated field.
 func (o *PowerTask) SetUpdated(v time.Time) {
 	o.Updated.Set(&v)
 }
 
-// GetStarted returns the Started field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// SetUpdatedNil sets the value for Updated to be an explicit nil
+func (o *PowerTask) SetUpdatedNil() {
+	o.Updated.Set(nil)
+}
+
+// UnsetUpdated ensures that no value is present for Updated, not even an explicit nil
+func (o *PowerTask) UnsetUpdated() {
+	o.Updated.Unset()
+}
+
+// GetStarted returns the Started field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTask) GetStarted() time.Time {
-	if o == nil || o.Started.Get() == nil {
+	if o == nil || IsNil(o.Started.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.Started.Get()
 }
 
-// GetStartedOk returns a tuple with the Started field value
+// GetStartedOk returns a tuple with the Started field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerTask) GetStartedOk() (*time.Time, bool) {
@@ -328,9 +394,28 @@ func (o *PowerTask) GetStartedOk() (*time.Time, bool) {
 	return o.Started.Get(), o.Started.IsSet()
 }
 
-// SetStarted sets field value
+// HasStarted returns a boolean if a field has been set.
+func (o *PowerTask) HasStarted() bool {
+	if o != nil && o.Started.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetStarted gets a reference to the given NullableTime and assigns it to the Started field.
 func (o *PowerTask) SetStarted(v time.Time) {
 	o.Started.Set(&v)
+}
+
+// SetStartedNil sets the value for Started to be an explicit nil
+func (o *PowerTask) SetStartedNil() {
+	o.Started.Set(nil)
+}
+
+// UnsetStarted ensures that no value is present for Started, not even an explicit nil
+func (o *PowerTask) UnsetStarted() {
+	o.Started.Unset()
 }
 
 // GetRelevance returns the Relevance field value
@@ -357,18 +442,16 @@ func (o *PowerTask) SetRelevance(v string) {
 	o.Relevance = v
 }
 
-// GetWaitingContext returns the WaitingContext field value
-// If the value is explicit nil, the zero value for PowerTaskWaitingContext will be returned
+// GetWaitingContext returns the WaitingContext field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTask) GetWaitingContext() PowerTaskWaitingContext {
-	if o == nil || o.WaitingContext.Get() == nil {
+	if o == nil || IsNil(o.WaitingContext.Get()) {
 		var ret PowerTaskWaitingContext
 		return ret
 	}
-
 	return *o.WaitingContext.Get()
 }
 
-// GetWaitingContextOk returns a tuple with the WaitingContext field value
+// GetWaitingContextOk returns a tuple with the WaitingContext field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerTask) GetWaitingContextOk() (*PowerTaskWaitingContext, bool) {
@@ -378,9 +461,28 @@ func (o *PowerTask) GetWaitingContextOk() (*PowerTaskWaitingContext, bool) {
 	return o.WaitingContext.Get(), o.WaitingContext.IsSet()
 }
 
-// SetWaitingContext sets field value
+// HasWaitingContext returns a boolean if a field has been set.
+func (o *PowerTask) HasWaitingContext() bool {
+	if o != nil && o.WaitingContext.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetWaitingContext gets a reference to the given NullablePowerTaskWaitingContext and assigns it to the WaitingContext field.
 func (o *PowerTask) SetWaitingContext(v PowerTaskWaitingContext) {
 	o.WaitingContext.Set(&v)
+}
+
+// SetWaitingContextNil sets the value for WaitingContext to be an explicit nil
+func (o *PowerTask) SetWaitingContextNil() {
+	o.WaitingContext.Set(nil)
+}
+
+// UnsetWaitingContext ensures that no value is present for WaitingContext, not even an explicit nil
+func (o *PowerTask) UnsetWaitingContext() {
+	o.WaitingContext.Unset()
 }
 
 func (o PowerTask) MarshalJSON() ([]byte, error) {
@@ -394,17 +496,31 @@ func (o PowerTask) MarshalJSON() ([]byte, error) {
 func (o PowerTask) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
-	toSerialize["rackId"] = o.RackId.Get()
+	if o.RackId.IsSet() {
+		toSerialize["rackId"] = o.RackId.Get()
+	}
 	toSerialize["operation"] = o.Operation
 	toSerialize["overrideReadinessCheck"] = o.OverrideReadinessCheck
-	toSerialize["targets"] = o.Targets
-	toSerialize["targetsError"] = o.TargetsError.Get()
+	if o.Targets != nil {
+		toSerialize["targets"] = o.Targets
+	}
+	if o.TargetsError.IsSet() {
+		toSerialize["targetsError"] = o.TargetsError.Get()
+	}
 	toSerialize["status"] = o.Status
-	toSerialize["created"] = o.Created.Get()
-	toSerialize["updated"] = o.Updated.Get()
-	toSerialize["started"] = o.Started.Get()
+	if o.Created.IsSet() {
+		toSerialize["created"] = o.Created.Get()
+	}
+	if o.Updated.IsSet() {
+		toSerialize["updated"] = o.Updated.Get()
+	}
+	if o.Started.IsSet() {
+		toSerialize["started"] = o.Started.Get()
+	}
 	toSerialize["relevance"] = o.Relevance
-	toSerialize["waitingContext"] = o.WaitingContext.Get()
+	if o.WaitingContext.IsSet() {
+		toSerialize["waitingContext"] = o.WaitingContext.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -414,17 +530,10 @@ func (o *PowerTask) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
-		"rackId",
 		"operation",
 		"overrideReadinessCheck",
-		"targets",
-		"targetsError",
 		"status",
-		"created",
-		"updated",
-		"started",
 		"relevance",
-		"waitingContext",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -435,18 +544,8 @@ func (o *PowerTask) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"rackId":         {},
-		"targets":        {},
-		"targetsError":   {},
-		"created":        {},
-		"updated":        {},
-		"started":        {},
-		"waitingContext": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

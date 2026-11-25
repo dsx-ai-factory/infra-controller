@@ -33,17 +33,17 @@ type EndpointExplorationReport struct {
 	// Go duration string for the last exploration latency (for example `1.5s`).
 	LastExplorationLatency NullableString `json:"lastExplorationLatency,omitempty"`
 	// Vendor reported by Redfish.
-	Vendor             NullableString              `json:"vendor,omitempty"`
-	Managers           []ExploredManager           `json:"managers,omitempty"`
-	Systems            []ExploredComputerSystem    `json:"systems,omitempty"`
-	Chassis            []ExploredChassis           `json:"chassis,omitempty"`
-	Service            []ExploredService           `json:"service,omitempty"`
-	MachineSetupStatus *ExploredMachineSetupStatus `json:"machineSetupStatus,omitempty"`
-	SecureBootStatus   *ExploredSecureBootStatus   `json:"secureBootStatus,omitempty"`
-	LockdownStatus     *ExploredLockdownStatus     `json:"lockdownStatus,omitempty"`
+	Vendor             NullableString                     `json:"vendor,omitempty"`
+	Managers           []ExploredManager                  `json:"managers"`
+	Systems            []ExploredComputerSystem           `json:"systems"`
+	Chassis            []ExploredChassis                  `json:"chassis"`
+	Service            []ExploredService                  `json:"service"`
+	MachineSetupStatus NullableExploredMachineSetupStatus `json:"machineSetupStatus,omitempty"`
+	SecureBootStatus   NullableExploredSecureBootStatus   `json:"secureBootStatus,omitempty"`
+	LockdownStatus     NullableExploredLockdownStatus     `json:"lockdownStatus,omitempty"`
 	// Parsed firmware component versions keyed by component name.
-	FirmwareVersions           map[string]string    `json:"firmwareVersions,omitempty"`
-	LastExplorationErrorSchema *OperatorErrorSchema `json:"lastExplorationErrorSchema,omitempty"`
+	FirmwareVersions           map[string]string           `json:"firmwareVersions"`
+	LastExplorationErrorSchema NullableOperatorErrorSchema `json:"lastExplorationErrorSchema,omitempty"`
 }
 
 type _EndpointExplorationReport EndpointExplorationReport
@@ -52,9 +52,14 @@ type _EndpointExplorationReport EndpointExplorationReport
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewEndpointExplorationReport(endpointType string) *EndpointExplorationReport {
+func NewEndpointExplorationReport(endpointType string, managers []ExploredManager, systems []ExploredComputerSystem, chassis []ExploredChassis, service []ExploredService, firmwareVersions map[string]string) *EndpointExplorationReport {
 	this := EndpointExplorationReport{}
 	this.EndpointType = endpointType
+	this.Managers = managers
+	this.Systems = systems
+	this.Chassis = chassis
+	this.Service = service
+	this.FirmwareVersions = firmwareVersions
 	return &this
 }
 
@@ -262,292 +267,296 @@ func (o *EndpointExplorationReport) UnsetVendor() {
 	o.Vendor.Unset()
 }
 
-// GetManagers returns the Managers field value if set, zero value otherwise.
+// GetManagers returns the Managers field value
 func (o *EndpointExplorationReport) GetManagers() []ExploredManager {
-	if o == nil || IsNil(o.Managers) {
+	if o == nil {
 		var ret []ExploredManager
 		return ret
 	}
+
 	return o.Managers
 }
 
-// GetManagersOk returns a tuple with the Managers field value if set, nil otherwise
+// GetManagersOk returns a tuple with the Managers field value
 // and a boolean to check if the value has been set.
 func (o *EndpointExplorationReport) GetManagersOk() ([]ExploredManager, bool) {
-	if o == nil || IsNil(o.Managers) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Managers, true
 }
 
-// HasManagers returns a boolean if a field has been set.
-func (o *EndpointExplorationReport) HasManagers() bool {
-	if o != nil && !IsNil(o.Managers) {
-		return true
-	}
-
-	return false
-}
-
-// SetManagers gets a reference to the given []ExploredManager and assigns it to the Managers field.
+// SetManagers sets field value
 func (o *EndpointExplorationReport) SetManagers(v []ExploredManager) {
 	o.Managers = v
 }
 
-// GetSystems returns the Systems field value if set, zero value otherwise.
+// GetSystems returns the Systems field value
 func (o *EndpointExplorationReport) GetSystems() []ExploredComputerSystem {
-	if o == nil || IsNil(o.Systems) {
+	if o == nil {
 		var ret []ExploredComputerSystem
 		return ret
 	}
+
 	return o.Systems
 }
 
-// GetSystemsOk returns a tuple with the Systems field value if set, nil otherwise
+// GetSystemsOk returns a tuple with the Systems field value
 // and a boolean to check if the value has been set.
 func (o *EndpointExplorationReport) GetSystemsOk() ([]ExploredComputerSystem, bool) {
-	if o == nil || IsNil(o.Systems) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Systems, true
 }
 
-// HasSystems returns a boolean if a field has been set.
-func (o *EndpointExplorationReport) HasSystems() bool {
-	if o != nil && !IsNil(o.Systems) {
-		return true
-	}
-
-	return false
-}
-
-// SetSystems gets a reference to the given []ExploredComputerSystem and assigns it to the Systems field.
+// SetSystems sets field value
 func (o *EndpointExplorationReport) SetSystems(v []ExploredComputerSystem) {
 	o.Systems = v
 }
 
-// GetChassis returns the Chassis field value if set, zero value otherwise.
+// GetChassis returns the Chassis field value
 func (o *EndpointExplorationReport) GetChassis() []ExploredChassis {
-	if o == nil || IsNil(o.Chassis) {
+	if o == nil {
 		var ret []ExploredChassis
 		return ret
 	}
+
 	return o.Chassis
 }
 
-// GetChassisOk returns a tuple with the Chassis field value if set, nil otherwise
+// GetChassisOk returns a tuple with the Chassis field value
 // and a boolean to check if the value has been set.
 func (o *EndpointExplorationReport) GetChassisOk() ([]ExploredChassis, bool) {
-	if o == nil || IsNil(o.Chassis) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Chassis, true
 }
 
-// HasChassis returns a boolean if a field has been set.
-func (o *EndpointExplorationReport) HasChassis() bool {
-	if o != nil && !IsNil(o.Chassis) {
-		return true
-	}
-
-	return false
-}
-
-// SetChassis gets a reference to the given []ExploredChassis and assigns it to the Chassis field.
+// SetChassis sets field value
 func (o *EndpointExplorationReport) SetChassis(v []ExploredChassis) {
 	o.Chassis = v
 }
 
-// GetService returns the Service field value if set, zero value otherwise.
+// GetService returns the Service field value
 func (o *EndpointExplorationReport) GetService() []ExploredService {
-	if o == nil || IsNil(o.Service) {
+	if o == nil {
 		var ret []ExploredService
 		return ret
 	}
+
 	return o.Service
 }
 
-// GetServiceOk returns a tuple with the Service field value if set, nil otherwise
+// GetServiceOk returns a tuple with the Service field value
 // and a boolean to check if the value has been set.
 func (o *EndpointExplorationReport) GetServiceOk() ([]ExploredService, bool) {
-	if o == nil || IsNil(o.Service) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Service, true
 }
 
-// HasService returns a boolean if a field has been set.
-func (o *EndpointExplorationReport) HasService() bool {
-	if o != nil && !IsNil(o.Service) {
-		return true
-	}
-
-	return false
-}
-
-// SetService gets a reference to the given []ExploredService and assigns it to the Service field.
+// SetService sets field value
 func (o *EndpointExplorationReport) SetService(v []ExploredService) {
 	o.Service = v
 }
 
-// GetMachineSetupStatus returns the MachineSetupStatus field value if set, zero value otherwise.
+// GetMachineSetupStatus returns the MachineSetupStatus field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *EndpointExplorationReport) GetMachineSetupStatus() ExploredMachineSetupStatus {
-	if o == nil || IsNil(o.MachineSetupStatus) {
+	if o == nil || IsNil(o.MachineSetupStatus.Get()) {
 		var ret ExploredMachineSetupStatus
 		return ret
 	}
-	return *o.MachineSetupStatus
+	return *o.MachineSetupStatus.Get()
 }
 
 // GetMachineSetupStatusOk returns a tuple with the MachineSetupStatus field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *EndpointExplorationReport) GetMachineSetupStatusOk() (*ExploredMachineSetupStatus, bool) {
-	if o == nil || IsNil(o.MachineSetupStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MachineSetupStatus, true
+	return o.MachineSetupStatus.Get(), o.MachineSetupStatus.IsSet()
 }
 
 // HasMachineSetupStatus returns a boolean if a field has been set.
 func (o *EndpointExplorationReport) HasMachineSetupStatus() bool {
-	if o != nil && !IsNil(o.MachineSetupStatus) {
+	if o != nil && o.MachineSetupStatus.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetMachineSetupStatus gets a reference to the given ExploredMachineSetupStatus and assigns it to the MachineSetupStatus field.
+// SetMachineSetupStatus gets a reference to the given NullableExploredMachineSetupStatus and assigns it to the MachineSetupStatus field.
 func (o *EndpointExplorationReport) SetMachineSetupStatus(v ExploredMachineSetupStatus) {
-	o.MachineSetupStatus = &v
+	o.MachineSetupStatus.Set(&v)
 }
 
-// GetSecureBootStatus returns the SecureBootStatus field value if set, zero value otherwise.
+// SetMachineSetupStatusNil sets the value for MachineSetupStatus to be an explicit nil
+func (o *EndpointExplorationReport) SetMachineSetupStatusNil() {
+	o.MachineSetupStatus.Set(nil)
+}
+
+// UnsetMachineSetupStatus ensures that no value is present for MachineSetupStatus, not even an explicit nil
+func (o *EndpointExplorationReport) UnsetMachineSetupStatus() {
+	o.MachineSetupStatus.Unset()
+}
+
+// GetSecureBootStatus returns the SecureBootStatus field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *EndpointExplorationReport) GetSecureBootStatus() ExploredSecureBootStatus {
-	if o == nil || IsNil(o.SecureBootStatus) {
+	if o == nil || IsNil(o.SecureBootStatus.Get()) {
 		var ret ExploredSecureBootStatus
 		return ret
 	}
-	return *o.SecureBootStatus
+	return *o.SecureBootStatus.Get()
 }
 
 // GetSecureBootStatusOk returns a tuple with the SecureBootStatus field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *EndpointExplorationReport) GetSecureBootStatusOk() (*ExploredSecureBootStatus, bool) {
-	if o == nil || IsNil(o.SecureBootStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SecureBootStatus, true
+	return o.SecureBootStatus.Get(), o.SecureBootStatus.IsSet()
 }
 
 // HasSecureBootStatus returns a boolean if a field has been set.
 func (o *EndpointExplorationReport) HasSecureBootStatus() bool {
-	if o != nil && !IsNil(o.SecureBootStatus) {
+	if o != nil && o.SecureBootStatus.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetSecureBootStatus gets a reference to the given ExploredSecureBootStatus and assigns it to the SecureBootStatus field.
+// SetSecureBootStatus gets a reference to the given NullableExploredSecureBootStatus and assigns it to the SecureBootStatus field.
 func (o *EndpointExplorationReport) SetSecureBootStatus(v ExploredSecureBootStatus) {
-	o.SecureBootStatus = &v
+	o.SecureBootStatus.Set(&v)
 }
 
-// GetLockdownStatus returns the LockdownStatus field value if set, zero value otherwise.
+// SetSecureBootStatusNil sets the value for SecureBootStatus to be an explicit nil
+func (o *EndpointExplorationReport) SetSecureBootStatusNil() {
+	o.SecureBootStatus.Set(nil)
+}
+
+// UnsetSecureBootStatus ensures that no value is present for SecureBootStatus, not even an explicit nil
+func (o *EndpointExplorationReport) UnsetSecureBootStatus() {
+	o.SecureBootStatus.Unset()
+}
+
+// GetLockdownStatus returns the LockdownStatus field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *EndpointExplorationReport) GetLockdownStatus() ExploredLockdownStatus {
-	if o == nil || IsNil(o.LockdownStatus) {
+	if o == nil || IsNil(o.LockdownStatus.Get()) {
 		var ret ExploredLockdownStatus
 		return ret
 	}
-	return *o.LockdownStatus
+	return *o.LockdownStatus.Get()
 }
 
 // GetLockdownStatusOk returns a tuple with the LockdownStatus field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *EndpointExplorationReport) GetLockdownStatusOk() (*ExploredLockdownStatus, bool) {
-	if o == nil || IsNil(o.LockdownStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.LockdownStatus, true
+	return o.LockdownStatus.Get(), o.LockdownStatus.IsSet()
 }
 
 // HasLockdownStatus returns a boolean if a field has been set.
 func (o *EndpointExplorationReport) HasLockdownStatus() bool {
-	if o != nil && !IsNil(o.LockdownStatus) {
+	if o != nil && o.LockdownStatus.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetLockdownStatus gets a reference to the given ExploredLockdownStatus and assigns it to the LockdownStatus field.
+// SetLockdownStatus gets a reference to the given NullableExploredLockdownStatus and assigns it to the LockdownStatus field.
 func (o *EndpointExplorationReport) SetLockdownStatus(v ExploredLockdownStatus) {
-	o.LockdownStatus = &v
+	o.LockdownStatus.Set(&v)
 }
 
-// GetFirmwareVersions returns the FirmwareVersions field value if set, zero value otherwise.
+// SetLockdownStatusNil sets the value for LockdownStatus to be an explicit nil
+func (o *EndpointExplorationReport) SetLockdownStatusNil() {
+	o.LockdownStatus.Set(nil)
+}
+
+// UnsetLockdownStatus ensures that no value is present for LockdownStatus, not even an explicit nil
+func (o *EndpointExplorationReport) UnsetLockdownStatus() {
+	o.LockdownStatus.Unset()
+}
+
+// GetFirmwareVersions returns the FirmwareVersions field value
 func (o *EndpointExplorationReport) GetFirmwareVersions() map[string]string {
-	if o == nil || IsNil(o.FirmwareVersions) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.FirmwareVersions
 }
 
-// GetFirmwareVersionsOk returns a tuple with the FirmwareVersions field value if set, an empty map otherwise
+// GetFirmwareVersionsOk returns a tuple with the FirmwareVersions field value
 // and a boolean to check if the value has been set.
 func (o *EndpointExplorationReport) GetFirmwareVersionsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.FirmwareVersions) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.FirmwareVersions, true
 }
 
-// HasFirmwareVersions returns a boolean if a field has been set.
-func (o *EndpointExplorationReport) HasFirmwareVersions() bool {
-	if o != nil && !IsNil(o.FirmwareVersions) {
-		return true
-	}
-
-	return false
-}
-
-// SetFirmwareVersions gets a reference to the given map[string]string and assigns it to the FirmwareVersions field.
+// SetFirmwareVersions sets field value
 func (o *EndpointExplorationReport) SetFirmwareVersions(v map[string]string) {
 	o.FirmwareVersions = v
 }
 
-// GetLastExplorationErrorSchema returns the LastExplorationErrorSchema field value if set, zero value otherwise.
+// GetLastExplorationErrorSchema returns the LastExplorationErrorSchema field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *EndpointExplorationReport) GetLastExplorationErrorSchema() OperatorErrorSchema {
-	if o == nil || IsNil(o.LastExplorationErrorSchema) {
+	if o == nil || IsNil(o.LastExplorationErrorSchema.Get()) {
 		var ret OperatorErrorSchema
 		return ret
 	}
-	return *o.LastExplorationErrorSchema
+	return *o.LastExplorationErrorSchema.Get()
 }
 
 // GetLastExplorationErrorSchemaOk returns a tuple with the LastExplorationErrorSchema field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *EndpointExplorationReport) GetLastExplorationErrorSchemaOk() (*OperatorErrorSchema, bool) {
-	if o == nil || IsNil(o.LastExplorationErrorSchema) {
+	if o == nil {
 		return nil, false
 	}
-	return o.LastExplorationErrorSchema, true
+	return o.LastExplorationErrorSchema.Get(), o.LastExplorationErrorSchema.IsSet()
 }
 
 // HasLastExplorationErrorSchema returns a boolean if a field has been set.
 func (o *EndpointExplorationReport) HasLastExplorationErrorSchema() bool {
-	if o != nil && !IsNil(o.LastExplorationErrorSchema) {
+	if o != nil && o.LastExplorationErrorSchema.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetLastExplorationErrorSchema gets a reference to the given OperatorErrorSchema and assigns it to the LastExplorationErrorSchema field.
+// SetLastExplorationErrorSchema gets a reference to the given NullableOperatorErrorSchema and assigns it to the LastExplorationErrorSchema field.
 func (o *EndpointExplorationReport) SetLastExplorationErrorSchema(v OperatorErrorSchema) {
-	o.LastExplorationErrorSchema = &v
+	o.LastExplorationErrorSchema.Set(&v)
+}
+
+// SetLastExplorationErrorSchemaNil sets the value for LastExplorationErrorSchema to be an explicit nil
+func (o *EndpointExplorationReport) SetLastExplorationErrorSchemaNil() {
+	o.LastExplorationErrorSchema.Set(nil)
+}
+
+// UnsetLastExplorationErrorSchema ensures that no value is present for LastExplorationErrorSchema, not even an explicit nil
+func (o *EndpointExplorationReport) UnsetLastExplorationErrorSchema() {
+	o.LastExplorationErrorSchema.Unset()
 }
 
 func (o EndpointExplorationReport) MarshalJSON() ([]byte, error) {
@@ -573,32 +582,22 @@ func (o EndpointExplorationReport) ToMap() (map[string]interface{}, error) {
 	if o.Vendor.IsSet() {
 		toSerialize["vendor"] = o.Vendor.Get()
 	}
-	if !IsNil(o.Managers) {
-		toSerialize["managers"] = o.Managers
+	toSerialize["managers"] = o.Managers
+	toSerialize["systems"] = o.Systems
+	toSerialize["chassis"] = o.Chassis
+	toSerialize["service"] = o.Service
+	if o.MachineSetupStatus.IsSet() {
+		toSerialize["machineSetupStatus"] = o.MachineSetupStatus.Get()
 	}
-	if !IsNil(o.Systems) {
-		toSerialize["systems"] = o.Systems
+	if o.SecureBootStatus.IsSet() {
+		toSerialize["secureBootStatus"] = o.SecureBootStatus.Get()
 	}
-	if !IsNil(o.Chassis) {
-		toSerialize["chassis"] = o.Chassis
+	if o.LockdownStatus.IsSet() {
+		toSerialize["lockdownStatus"] = o.LockdownStatus.Get()
 	}
-	if !IsNil(o.Service) {
-		toSerialize["service"] = o.Service
-	}
-	if !IsNil(o.MachineSetupStatus) {
-		toSerialize["machineSetupStatus"] = o.MachineSetupStatus
-	}
-	if !IsNil(o.SecureBootStatus) {
-		toSerialize["secureBootStatus"] = o.SecureBootStatus
-	}
-	if !IsNil(o.LockdownStatus) {
-		toSerialize["lockdownStatus"] = o.LockdownStatus
-	}
-	if !IsNil(o.FirmwareVersions) {
-		toSerialize["firmwareVersions"] = o.FirmwareVersions
-	}
-	if !IsNil(o.LastExplorationErrorSchema) {
-		toSerialize["lastExplorationErrorSchema"] = o.LastExplorationErrorSchema
+	toSerialize["firmwareVersions"] = o.FirmwareVersions
+	if o.LastExplorationErrorSchema.IsSet() {
+		toSerialize["lastExplorationErrorSchema"] = o.LastExplorationErrorSchema.Get()
 	}
 	return toSerialize, nil
 }
@@ -609,6 +608,11 @@ func (o *EndpointExplorationReport) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"endpointType",
+		"managers",
+		"systems",
+		"chassis",
+		"service",
+		"firmwareVersions",
 	}
 
 	allProperties := make(map[string]interface{})

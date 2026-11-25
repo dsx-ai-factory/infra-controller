@@ -400,8 +400,8 @@ func TestGeneratedBodyFormRealSchemaResolvesNestedServiceID(t *testing.T) {
 	})
 	prompter := &queuedGeneratedBodyPrompter{
 		choices:  []string{"guided"},
-		confirms: []bool{true, false},
-		texts:    []string{""},
+		confirms: []bool{false},
+		texts:    []string{"V1-T1761856992374052"},
 	}
 
 	value, set, err := promptGeneratedBodyField(
@@ -415,6 +415,7 @@ func TestGeneratedBodyFormRealSchemaResolvesNestedServiceID(t *testing.T) {
 	require.True(t, set)
 	assert.Equal(t, []map[string]interface{}{{
 		"dpuExtensionServiceId": "service-1",
+		"version":               "V1-T1761856992374052",
 	}}, value)
 }
 

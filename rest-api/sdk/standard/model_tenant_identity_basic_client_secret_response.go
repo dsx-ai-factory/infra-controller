@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantIdentityBasicClientSecretResponse type satisfies the MappedNullable interface at compile time
@@ -23,17 +25,21 @@ var _ MappedNullable = &TenantIdentityBasicClientSecretResponse{}
 // TenantIdentityBasicClientSecretResponse Public half of `client_secret_basic` credentials. Only the SHA-256 hash of the secret is returned.
 type TenantIdentityBasicClientSecretResponse struct {
 	// Client identifier used for basic client-secret authentication
-	ClientId *string `json:"clientId,omitempty"`
+	ClientId string `json:"clientId"`
 	// SHA-256 hash of the raw secret.
-	ClientSecretHash *string `json:"clientSecretHash,omitempty"`
+	ClientSecretHash string `json:"clientSecretHash"`
 }
+
+type _TenantIdentityBasicClientSecretResponse TenantIdentityBasicClientSecretResponse
 
 // NewTenantIdentityBasicClientSecretResponse instantiates a new TenantIdentityBasicClientSecretResponse object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantIdentityBasicClientSecretResponse() *TenantIdentityBasicClientSecretResponse {
+func NewTenantIdentityBasicClientSecretResponse(clientId string, clientSecretHash string) *TenantIdentityBasicClientSecretResponse {
 	this := TenantIdentityBasicClientSecretResponse{}
+	this.ClientId = clientId
+	this.ClientSecretHash = clientSecretHash
 	return &this
 }
 
@@ -45,68 +51,52 @@ func NewTenantIdentityBasicClientSecretResponseWithDefaults() *TenantIdentityBas
 	return &this
 }
 
-// GetClientId returns the ClientId field value if set, zero value otherwise.
+// GetClientId returns the ClientId field value
 func (o *TenantIdentityBasicClientSecretResponse) GetClientId() string {
-	if o == nil || IsNil(o.ClientId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ClientId
+
+	return o.ClientId
 }
 
-// GetClientIdOk returns a tuple with the ClientId field value if set, nil otherwise
+// GetClientIdOk returns a tuple with the ClientId field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityBasicClientSecretResponse) GetClientIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ClientId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ClientId, true
+	return &o.ClientId, true
 }
 
-// HasClientId returns a boolean if a field has been set.
-func (o *TenantIdentityBasicClientSecretResponse) HasClientId() bool {
-	if o != nil && !IsNil(o.ClientId) {
-		return true
-	}
-
-	return false
-}
-
-// SetClientId gets a reference to the given string and assigns it to the ClientId field.
+// SetClientId sets field value
 func (o *TenantIdentityBasicClientSecretResponse) SetClientId(v string) {
-	o.ClientId = &v
+	o.ClientId = v
 }
 
-// GetClientSecretHash returns the ClientSecretHash field value if set, zero value otherwise.
+// GetClientSecretHash returns the ClientSecretHash field value
 func (o *TenantIdentityBasicClientSecretResponse) GetClientSecretHash() string {
-	if o == nil || IsNil(o.ClientSecretHash) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ClientSecretHash
+
+	return o.ClientSecretHash
 }
 
-// GetClientSecretHashOk returns a tuple with the ClientSecretHash field value if set, nil otherwise
+// GetClientSecretHashOk returns a tuple with the ClientSecretHash field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityBasicClientSecretResponse) GetClientSecretHashOk() (*string, bool) {
-	if o == nil || IsNil(o.ClientSecretHash) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ClientSecretHash, true
+	return &o.ClientSecretHash, true
 }
 
-// HasClientSecretHash returns a boolean if a field has been set.
-func (o *TenantIdentityBasicClientSecretResponse) HasClientSecretHash() bool {
-	if o != nil && !IsNil(o.ClientSecretHash) {
-		return true
-	}
-
-	return false
-}
-
-// SetClientSecretHash gets a reference to the given string and assigns it to the ClientSecretHash field.
+// SetClientSecretHash sets field value
 func (o *TenantIdentityBasicClientSecretResponse) SetClientSecretHash(v string) {
-	o.ClientSecretHash = &v
+	o.ClientSecretHash = v
 }
 
 func (o TenantIdentityBasicClientSecretResponse) MarshalJSON() ([]byte, error) {
@@ -119,13 +109,46 @@ func (o TenantIdentityBasicClientSecretResponse) MarshalJSON() ([]byte, error) {
 
 func (o TenantIdentityBasicClientSecretResponse) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.ClientId) {
-		toSerialize["clientId"] = o.ClientId
-	}
-	if !IsNil(o.ClientSecretHash) {
-		toSerialize["clientSecretHash"] = o.ClientSecretHash
-	}
+	toSerialize["clientId"] = o.ClientId
+	toSerialize["clientSecretHash"] = o.ClientSecretHash
 	return toSerialize, nil
+}
+
+func (o *TenantIdentityBasicClientSecretResponse) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"clientId",
+		"clientSecretHash",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantIdentityBasicClientSecretResponse := _TenantIdentityBasicClientSecretResponse{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantIdentityBasicClientSecretResponse)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantIdentityBasicClientSecretResponse(varTenantIdentityBasicClientSecretResponse)
+
+	return err
 }
 
 type NullableTenantIdentityBasicClientSecretResponse struct {

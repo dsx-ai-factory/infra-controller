@@ -31,7 +31,7 @@ type InterfaceNetworkSecurityGroupConfig struct {
 	// Source of the Network Security Group configuration
 	Source string `json:"source"`
 	// Resolved rules for the Network Security Group
-	Rules []ResolvedNetworkSecurityGroupRule `json:"rules,omitempty"`
+	Rules []ResolvedNetworkSecurityGroupRule `json:"rules"`
 }
 
 type _InterfaceNetworkSecurityGroupConfig InterfaceNetworkSecurityGroupConfig
@@ -40,11 +40,12 @@ type _InterfaceNetworkSecurityGroupConfig InterfaceNetworkSecurityGroupConfig
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInterfaceNetworkSecurityGroupConfig(id string, version string, source string) *InterfaceNetworkSecurityGroupConfig {
+func NewInterfaceNetworkSecurityGroupConfig(id string, version string, source string, rules []ResolvedNetworkSecurityGroupRule) *InterfaceNetworkSecurityGroupConfig {
 	this := InterfaceNetworkSecurityGroupConfig{}
 	this.Id = id
 	this.Version = version
 	this.Source = source
+	this.Rules = rules
 	return &this
 }
 
@@ -128,34 +129,26 @@ func (o *InterfaceNetworkSecurityGroupConfig) SetSource(v string) {
 	o.Source = v
 }
 
-// GetRules returns the Rules field value if set, zero value otherwise.
+// GetRules returns the Rules field value
 func (o *InterfaceNetworkSecurityGroupConfig) GetRules() []ResolvedNetworkSecurityGroupRule {
-	if o == nil || IsNil(o.Rules) {
+	if o == nil {
 		var ret []ResolvedNetworkSecurityGroupRule
 		return ret
 	}
+
 	return o.Rules
 }
 
-// GetRulesOk returns a tuple with the Rules field value if set, nil otherwise
+// GetRulesOk returns a tuple with the Rules field value
 // and a boolean to check if the value has been set.
 func (o *InterfaceNetworkSecurityGroupConfig) GetRulesOk() ([]ResolvedNetworkSecurityGroupRule, bool) {
-	if o == nil || IsNil(o.Rules) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Rules, true
 }
 
-// HasRules returns a boolean if a field has been set.
-func (o *InterfaceNetworkSecurityGroupConfig) HasRules() bool {
-	if o != nil && !IsNil(o.Rules) {
-		return true
-	}
-
-	return false
-}
-
-// SetRules gets a reference to the given []ResolvedNetworkSecurityGroupRule and assigns it to the Rules field.
+// SetRules sets field value
 func (o *InterfaceNetworkSecurityGroupConfig) SetRules(v []ResolvedNetworkSecurityGroupRule) {
 	o.Rules = v
 }
@@ -173,9 +166,7 @@ func (o InterfaceNetworkSecurityGroupConfig) ToMap() (map[string]interface{}, er
 	toSerialize["id"] = o.Id
 	toSerialize["version"] = o.Version
 	toSerialize["source"] = o.Source
-	if !IsNil(o.Rules) {
-		toSerialize["rules"] = o.Rules
-	}
+	toSerialize["rules"] = o.Rules
 	return toSerialize, nil
 }
 
@@ -187,6 +178,7 @@ func (o *InterfaceNetworkSecurityGroupConfig) UnmarshalJSON(data []byte) (err er
 		"id",
 		"version",
 		"source",
+		"rules",
 	}
 
 	allProperties := make(map[string]interface{})

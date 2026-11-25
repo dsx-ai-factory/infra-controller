@@ -268,29 +268,21 @@ func newAPIEndpointExplorationReport(report *corev1.EndpointExplorationReport) *
 	if report.Vendor != nil {
 		out.Vendor = report.Vendor
 	}
-	if len(report.GetManagers()) > 0 {
-		out.Managers = make([]APIExploredManager, 0, len(report.GetManagers()))
-		for _, m := range report.GetManagers() {
-			out.Managers = append(out.Managers, newAPIExploredManager(m))
-		}
+	out.Managers = make([]APIExploredManager, 0, len(report.GetManagers()))
+	for _, m := range report.GetManagers() {
+		out.Managers = append(out.Managers, newAPIExploredManager(m))
 	}
-	if len(report.GetSystems()) > 0 {
-		out.Systems = make([]APIExploredComputerSystem, 0, len(report.GetSystems()))
-		for _, s := range report.GetSystems() {
-			out.Systems = append(out.Systems, newAPIExploredComputerSystem(s))
-		}
+	out.Systems = make([]APIExploredComputerSystem, 0, len(report.GetSystems()))
+	for _, s := range report.GetSystems() {
+		out.Systems = append(out.Systems, newAPIExploredComputerSystem(s))
 	}
-	if len(report.GetChassis()) > 0 {
-		out.Chassis = make([]APIExploredChassis, 0, len(report.GetChassis()))
-		for _, c := range report.GetChassis() {
-			out.Chassis = append(out.Chassis, newAPIExploredChassis(c))
-		}
+	out.Chassis = make([]APIExploredChassis, 0, len(report.GetChassis()))
+	for _, c := range report.GetChassis() {
+		out.Chassis = append(out.Chassis, newAPIExploredChassis(c))
 	}
-	if len(report.GetService()) > 0 {
-		out.Service = make([]APIExploredService, 0, len(report.GetService()))
-		for _, s := range report.GetService() {
-			out.Service = append(out.Service, newAPIExploredService(s))
-		}
+	out.Service = make([]APIExploredService, 0, len(report.GetService()))
+	for _, s := range report.GetService() {
+		out.Service = append(out.Service, newAPIExploredService(s))
 	}
 	if mss := report.GetMachineSetupStatus(); mss != nil {
 		out.MachineSetupStatus = newAPIMachineSetupStatus(mss)
@@ -302,11 +294,9 @@ func newAPIEndpointExplorationReport(report *corev1.EndpointExplorationReport) *
 		out.LockdownStatus = &APILockdownStatus{Message: ls.GetMessage()}
 		out.LockdownStatus.Status.FromProto(ls.GetStatus())
 	}
-	if len(report.GetFirmwareVersions()) > 0 {
-		out.FirmwareVersions = make(map[string]string, len(report.GetFirmwareVersions()))
-		for k, v := range report.GetFirmwareVersions() {
-			out.FirmwareVersions[k] = v
-		}
+	out.FirmwareVersions = make(map[string]string, len(report.GetFirmwareVersions()))
+	for k, v := range report.GetFirmwareVersions() {
+		out.FirmwareVersions[k] = v
 	}
 	if schema := report.GetLastExplorationErrorSchema(); schema != nil {
 		out.LastExplorationErrorSchema = &APIOperatorErrorSchema{
@@ -321,12 +311,12 @@ func newAPIEndpointExplorationReport(report *corev1.EndpointExplorationReport) *
 }
 
 func newAPIExploredManager(m *corev1.Manager) APIExploredManager {
-	out := APIExploredManager{ID: m.GetId()}
-	if len(m.GetEthernetInterfaces()) > 0 {
-		out.EthernetInterfaces = make([]APIExploredEthernetInterface, 0, len(m.GetEthernetInterfaces()))
-		for _, iface := range m.GetEthernetInterfaces() {
-			out.EthernetInterfaces = append(out.EthernetInterfaces, newAPIExploredEthernetInterface(iface))
-		}
+	out := APIExploredManager{
+		ID:                 m.GetId(),
+		EthernetInterfaces: make([]APIExploredEthernetInterface, 0, len(m.GetEthernetInterfaces())),
+	}
+	for _, iface := range m.GetEthernetInterfaces() {
+		out.EthernetInterfaces = append(out.EthernetInterfaces, newAPIExploredEthernetInterface(iface))
 	}
 	return out
 }
@@ -353,17 +343,13 @@ func newAPIExploredComputerSystem(s *corev1.ComputerSystem) APIExploredComputerS
 			out.Attributes.NicMode = &mode
 		}
 	}
-	if len(s.GetEthernetInterfaces()) > 0 {
-		out.EthernetInterfaces = make([]APIExploredEthernetInterface, 0, len(s.GetEthernetInterfaces()))
-		for _, iface := range s.GetEthernetInterfaces() {
-			out.EthernetInterfaces = append(out.EthernetInterfaces, newAPIExploredEthernetInterface(iface))
-		}
+	out.EthernetInterfaces = make([]APIExploredEthernetInterface, 0, len(s.GetEthernetInterfaces()))
+	for _, iface := range s.GetEthernetInterfaces() {
+		out.EthernetInterfaces = append(out.EthernetInterfaces, newAPIExploredEthernetInterface(iface))
 	}
-	if len(s.GetPcieDevices()) > 0 {
-		out.PCIeDevices = make([]APIExploredPCIeDevice, 0, len(s.GetPcieDevices()))
-		for _, d := range s.GetPcieDevices() {
-			out.PCIeDevices = append(out.PCIeDevices, newAPIExploredPCIeDevice(d))
-		}
+	out.PCIeDevices = make([]APIExploredPCIeDevice, 0, len(s.GetPcieDevices()))
+	for _, d := range s.GetPcieDevices() {
+		out.PCIeDevices = append(out.PCIeDevices, newAPIExploredPCIeDevice(d))
 	}
 	if bo := s.GetBootOrder(); bo != nil {
 		out.BootOrder = newAPIBootOrder(bo)
@@ -405,11 +391,9 @@ func newAPIExploredChassis(c *corev1.Chassis) APIExploredChassis {
 	if c.SerialNumber != nil {
 		out.SerialNumber = c.SerialNumber
 	}
-	if len(c.GetNetworkAdapters()) > 0 {
-		out.NetworkAdapters = make([]APIExploredNetworkAdapter, 0, len(c.GetNetworkAdapters()))
-		for _, a := range c.GetNetworkAdapters() {
-			out.NetworkAdapters = append(out.NetworkAdapters, newAPIExploredNetworkAdapter(a))
-		}
+	out.NetworkAdapters = make([]APIExploredNetworkAdapter, 0, len(c.GetNetworkAdapters()))
+	for _, a := range c.GetNetworkAdapters() {
+		out.NetworkAdapters = append(out.NetworkAdapters, newAPIExploredNetworkAdapter(a))
 	}
 	return out
 }
@@ -432,12 +416,12 @@ func newAPIExploredNetworkAdapter(a *corev1.NetworkAdapter) APIExploredNetworkAd
 }
 
 func newAPIExploredService(s *corev1.Service) APIExploredService {
-	out := APIExploredService{ID: s.GetId()}
-	if len(s.GetInventories()) > 0 {
-		out.Inventories = make([]APIExploredInventory, 0, len(s.GetInventories()))
-		for _, inv := range s.GetInventories() {
-			out.Inventories = append(out.Inventories, newAPIExploredInventory(inv))
-		}
+	out := APIExploredService{
+		ID:          s.GetId(),
+		Inventories: make([]APIExploredInventory, 0, len(s.GetInventories())),
+	}
+	for _, inv := range s.GetInventories() {
+		out.Inventories = append(out.Inventories, newAPIExploredInventory(inv))
 	}
 	return out
 }
@@ -457,16 +441,16 @@ func newAPIExploredInventory(inv *corev1.Inventory) APIExploredInventory {
 }
 
 func newAPIMachineSetupStatus(mss *corev1.MachineSetupStatus) *APIMachineSetupStatus {
-	out := &APIMachineSetupStatus{IsDone: mss.GetIsDone()}
-	if len(mss.GetDiffs()) > 0 {
-		out.Diffs = make([]APIMachineSetupDiff, 0, len(mss.GetDiffs()))
-		for _, d := range mss.GetDiffs() {
-			out.Diffs = append(out.Diffs, APIMachineSetupDiff{
-				Key:      d.GetKey(),
-				Expected: d.GetExpected(),
-				Actual:   d.GetActual(),
-			})
-		}
+	out := &APIMachineSetupStatus{
+		IsDone: mss.GetIsDone(),
+		Diffs:  make([]APIMachineSetupDiff, 0, len(mss.GetDiffs())),
+	}
+	for _, d := range mss.GetDiffs() {
+		out.Diffs = append(out.Diffs, APIMachineSetupDiff{
+			Key:      d.GetKey(),
+			Expected: d.GetExpected(),
+			Actual:   d.GetActual(),
+		})
 	}
 	if target := mss.GetEvaluatedBootInterface(); target != nil {
 		out.EvaluatedBootInterface = &APIMachineBootInterfaceTarget{}
@@ -532,22 +516,21 @@ func newAPIExploredPCIeDevice(d *corev1.PCIeDevice) APIExploredPCIeDevice {
 }
 
 func newAPIBootOrder(bo *corev1.BootOrder) *APIBootOrder {
-	out := &APIBootOrder{}
-	if len(bo.GetBootOrder()) > 0 {
-		out.BootOrder = make([]APIBootOption, 0, len(bo.GetBootOrder()))
-		for _, opt := range bo.GetBootOrder() {
-			item := APIBootOption{
-				DisplayName: opt.GetDisplayName(),
-				ID:          opt.GetId(),
-			}
-			if opt.BootOptionEnabled != nil {
-				item.BootOptionEnabled = opt.BootOptionEnabled
-			}
-			if opt.UefiDevicePath != nil {
-				item.UefiDevicePath = opt.UefiDevicePath
-			}
-			out.BootOrder = append(out.BootOrder, item)
+	out := &APIBootOrder{
+		BootOrder: make([]APIBootOption, 0, len(bo.GetBootOrder())),
+	}
+	for _, opt := range bo.GetBootOrder() {
+		item := APIBootOption{
+			DisplayName: opt.GetDisplayName(),
+			ID:          opt.GetId(),
 		}
+		if opt.BootOptionEnabled != nil {
+			item.BootOptionEnabled = opt.BootOptionEnabled
+		}
+		if opt.UefiDevicePath != nil {
+			item.UefiDevicePath = opt.UefiDevicePath
+		}
+		out.BootOrder = append(out.BootOrder, item)
 	}
 	return out
 }

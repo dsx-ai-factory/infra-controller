@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the DpuMachineSoftwareComponent type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &DpuMachineSoftwareComponent{}
 // DpuMachineSoftwareComponent A software component reported on a DPU Machine
 type DpuMachineSoftwareComponent struct {
 	// Name of the software component
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Version of the software component
-	Version *string `json:"version,omitempty"`
+	Version string `json:"version"`
 	// URL where the software component can be obtained
-	Url *string `json:"url,omitempty"`
+	Url string `json:"url"`
 }
+
+type _DpuMachineSoftwareComponent DpuMachineSoftwareComponent
 
 // NewDpuMachineSoftwareComponent instantiates a new DpuMachineSoftwareComponent object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuMachineSoftwareComponent() *DpuMachineSoftwareComponent {
+func NewDpuMachineSoftwareComponent(name string, version string, url string) *DpuMachineSoftwareComponent {
 	this := DpuMachineSoftwareComponent{}
+	this.Name = name
+	this.Version = version
+	this.Url = url
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewDpuMachineSoftwareComponentWithDefaults() *DpuMachineSoftwareComponent {
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *DpuMachineSoftwareComponent) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineSoftwareComponent) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *DpuMachineSoftwareComponent) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *DpuMachineSoftwareComponent) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetVersion returns the Version field value if set, zero value otherwise.
+// GetVersion returns the Version field value
 func (o *DpuMachineSoftwareComponent) GetVersion() string {
-	if o == nil || IsNil(o.Version) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Version
+
+	return o.Version
 }
 
-// GetVersionOk returns a tuple with the Version field value if set, nil otherwise
+// GetVersionOk returns a tuple with the Version field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineSoftwareComponent) GetVersionOk() (*string, bool) {
-	if o == nil || IsNil(o.Version) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Version, true
+	return &o.Version, true
 }
 
-// HasVersion returns a boolean if a field has been set.
-func (o *DpuMachineSoftwareComponent) HasVersion() bool {
-	if o != nil && !IsNil(o.Version) {
-		return true
-	}
-
-	return false
-}
-
-// SetVersion gets a reference to the given string and assigns it to the Version field.
+// SetVersion sets field value
 func (o *DpuMachineSoftwareComponent) SetVersion(v string) {
-	o.Version = &v
+	o.Version = v
 }
 
-// GetUrl returns the Url field value if set, zero value otherwise.
+// GetUrl returns the Url field value
 func (o *DpuMachineSoftwareComponent) GetUrl() string {
-	if o == nil || IsNil(o.Url) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Url
+
+	return o.Url
 }
 
-// GetUrlOk returns a tuple with the Url field value if set, nil otherwise
+// GetUrlOk returns a tuple with the Url field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineSoftwareComponent) GetUrlOk() (*string, bool) {
-	if o == nil || IsNil(o.Url) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Url, true
+	return &o.Url, true
 }
 
-// HasUrl returns a boolean if a field has been set.
-func (o *DpuMachineSoftwareComponent) HasUrl() bool {
-	if o != nil && !IsNil(o.Url) {
-		return true
-	}
-
-	return false
-}
-
-// SetUrl gets a reference to the given string and assigns it to the Url field.
+// SetUrl sets field value
 func (o *DpuMachineSoftwareComponent) SetUrl(v string) {
-	o.Url = &v
+	o.Url = v
 }
 
 func (o DpuMachineSoftwareComponent) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o DpuMachineSoftwareComponent) MarshalJSON() ([]byte, error) {
 
 func (o DpuMachineSoftwareComponent) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.Version) {
-		toSerialize["version"] = o.Version
-	}
-	if !IsNil(o.Url) {
-		toSerialize["url"] = o.Url
-	}
+	toSerialize["name"] = o.Name
+	toSerialize["version"] = o.Version
+	toSerialize["url"] = o.Url
 	return toSerialize, nil
+}
+
+func (o *DpuMachineSoftwareComponent) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"name",
+		"version",
+		"url",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDpuMachineSoftwareComponent := _DpuMachineSoftwareComponent{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDpuMachineSoftwareComponent)
+
+	if err != nil {
+		return err
+	}
+
+	*o = DpuMachineSoftwareComponent(varDpuMachineSoftwareComponent)
+
+	return err
 }
 
 type NullableDpuMachineSoftwareComponent struct {

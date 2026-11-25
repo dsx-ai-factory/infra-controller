@@ -255,7 +255,7 @@ func TestAPIIPBlockNew(t *testing.T) {
 				ProtocolVersion:          dbObj.ProtocolVersion,
 				UsageStats: &APIIPBlockUsageStats{
 					AvailableIPs:              1,
-					AvailablePrefixes:         nil,
+					AvailablePrefixes:         []string{},
 					AcquiredIPs:               0,
 					AcquiredPrefixes:          0,
 					AvailableSmallestPrefixes: 0,

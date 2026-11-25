@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,41 +26,54 @@ var _ MappedNullable = &DhcpOptionSet{}
 // DhcpOptionSet DHCP Option Set is a Tenant-defined set of DHCP values that replace NICo's defaults in DHCP replies
 type DhcpOptionSet struct {
 	// Unique UUID v4 identifier for the DHCP Option Set
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the DHCP Option Set
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description of the DHCP Option Set
 	Description NullableString `json:"description,omitempty"`
 	// ID of the Site
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// Summary of the Site, present when requested through includeRelation
 	Site *SiteSummary `json:"site,omitempty"`
 	// ID of the Tenant
-	TenantId *string `json:"tenantId,omitempty"`
+	TenantId string `json:"tenantId"`
 	// Summary of the Tenant, present when requested through includeRelation
 	Tenant *TenantSummary `json:"tenant,omitempty"`
 	// DHCPv4 values
-	Ipv4 *DhcpOptions `json:"ipv4,omitempty"`
+	Ipv4 DhcpOptions `json:"ipv4"`
 	// DHCPv6 values
-	Ipv6 *DhcpOptions `json:"ipv6,omitempty"`
+	Ipv6 DhcpOptions `json:"ipv6"`
 	// Set of labels/tags for the DHCP Option Set
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// Status of the DHCP Option Set
-	Status *DhcpOptionSetStatus `json:"status,omitempty"`
+	Status DhcpOptionSetStatus `json:"status"`
 	// Chronological status history for the DHCP Option Set
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when the DHCP Option Set was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the DHCP Option Set was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _DhcpOptionSet DhcpOptionSet
 
 // NewDhcpOptionSet instantiates a new DhcpOptionSet object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDhcpOptionSet() *DhcpOptionSet {
+func NewDhcpOptionSet(id string, name string, siteId string, tenantId string, ipv4 DhcpOptions, ipv6 DhcpOptions, labels map[string]string, status DhcpOptionSetStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *DhcpOptionSet {
 	this := DhcpOptionSet{}
+	this.Id = id
+	this.Name = name
+	this.SiteId = siteId
+	this.TenantId = tenantId
+	this.Ipv4 = ipv4
+	this.Ipv6 = ipv6
+	this.Labels = labels
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -70,68 +85,52 @@ func NewDhcpOptionSetWithDefaults() *DhcpOptionSet {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *DhcpOptionSet) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *DhcpOptionSet) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *DhcpOptionSet) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *DhcpOptionSet) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -177,36 +176,28 @@ func (o *DhcpOptionSet) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *DhcpOptionSet) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *DhcpOptionSet) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
 // GetSite returns the Site field value if set, zero value otherwise.
@@ -241,36 +232,28 @@ func (o *DhcpOptionSet) SetSite(v SiteSummary) {
 	o.Site = &v
 }
 
-// GetTenantId returns the TenantId field value if set, zero value otherwise.
+// GetTenantId returns the TenantId field value
 func (o *DhcpOptionSet) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantId
+
+	return o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
+// GetTenantIdOk returns a tuple with the TenantId field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantId, true
+	return &o.TenantId, true
 }
 
-// HasTenantId returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasTenantId() bool {
-	if o != nil && !IsNil(o.TenantId) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
+// SetTenantId sets field value
 func (o *DhcpOptionSet) SetTenantId(v string) {
-	o.TenantId = &v
+	o.TenantId = v
 }
 
 // GetTenant returns the Tenant field value if set, zero value otherwise.
@@ -305,228 +288,172 @@ func (o *DhcpOptionSet) SetTenant(v TenantSummary) {
 	o.Tenant = &v
 }
 
-// GetIpv4 returns the Ipv4 field value if set, zero value otherwise.
+// GetIpv4 returns the Ipv4 field value
 func (o *DhcpOptionSet) GetIpv4() DhcpOptions {
-	if o == nil || IsNil(o.Ipv4) {
+	if o == nil {
 		var ret DhcpOptions
 		return ret
 	}
-	return *o.Ipv4
+
+	return o.Ipv4
 }
 
-// GetIpv4Ok returns a tuple with the Ipv4 field value if set, nil otherwise
+// GetIpv4Ok returns a tuple with the Ipv4 field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetIpv4Ok() (*DhcpOptions, bool) {
-	if o == nil || IsNil(o.Ipv4) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Ipv4, true
+	return &o.Ipv4, true
 }
 
-// HasIpv4 returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasIpv4() bool {
-	if o != nil && !IsNil(o.Ipv4) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpv4 gets a reference to the given DhcpOptions and assigns it to the Ipv4 field.
+// SetIpv4 sets field value
 func (o *DhcpOptionSet) SetIpv4(v DhcpOptions) {
-	o.Ipv4 = &v
+	o.Ipv4 = v
 }
 
-// GetIpv6 returns the Ipv6 field value if set, zero value otherwise.
+// GetIpv6 returns the Ipv6 field value
 func (o *DhcpOptionSet) GetIpv6() DhcpOptions {
-	if o == nil || IsNil(o.Ipv6) {
+	if o == nil {
 		var ret DhcpOptions
 		return ret
 	}
-	return *o.Ipv6
+
+	return o.Ipv6
 }
 
-// GetIpv6Ok returns a tuple with the Ipv6 field value if set, nil otherwise
+// GetIpv6Ok returns a tuple with the Ipv6 field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetIpv6Ok() (*DhcpOptions, bool) {
-	if o == nil || IsNil(o.Ipv6) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Ipv6, true
+	return &o.Ipv6, true
 }
 
-// HasIpv6 returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasIpv6() bool {
-	if o != nil && !IsNil(o.Ipv6) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpv6 gets a reference to the given DhcpOptions and assigns it to the Ipv6 field.
+// SetIpv6 sets field value
 func (o *DhcpOptionSet) SetIpv6(v DhcpOptions) {
-	o.Ipv6 = &v
+	o.Ipv6 = v
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *DhcpOptionSet) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *DhcpOptionSet) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *DhcpOptionSet) GetStatus() DhcpOptionSetStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret DhcpOptionSetStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetStatusOk() (*DhcpOptionSetStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given DhcpOptionSetStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *DhcpOptionSet) SetStatus(v DhcpOptionSetStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *DhcpOptionSet) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *DhcpOptionSet) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *DhcpOptionSet) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *DhcpOptionSet) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *DhcpOptionSet) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *DhcpOptionSet) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *DhcpOptionSet) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *DhcpOptionSet) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o DhcpOptionSet) MarshalJSON() ([]byte, error) {
@@ -539,49 +466,73 @@ func (o DhcpOptionSet) MarshalJSON() ([]byte, error) {
 
 func (o DhcpOptionSet) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
+	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Site) {
 		toSerialize["site"] = o.Site
 	}
-	if !IsNil(o.TenantId) {
-		toSerialize["tenantId"] = o.TenantId
-	}
+	toSerialize["tenantId"] = o.TenantId
 	if !IsNil(o.Tenant) {
 		toSerialize["tenant"] = o.Tenant
 	}
-	if !IsNil(o.Ipv4) {
-		toSerialize["ipv4"] = o.Ipv4
-	}
-	if !IsNil(o.Ipv6) {
-		toSerialize["ipv6"] = o.Ipv6
-	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["ipv4"] = o.Ipv4
+	toSerialize["ipv6"] = o.Ipv6
+	toSerialize["labels"] = o.Labels
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *DhcpOptionSet) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"siteId",
+		"tenantId",
+		"ipv4",
+		"ipv6",
+		"labels",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDhcpOptionSet := _DhcpOptionSet{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDhcpOptionSet)
+
+	if err != nil {
+		return err
+	}
+
+	*o = DhcpOptionSet(varDhcpOptionSet)
+
+	return err
 }
 
 type NullableDhcpOptionSet struct {

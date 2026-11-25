@@ -31,8 +31,8 @@ type SkuComponents struct {
 	// Storage components
 	Storage []SkuStorage `json:"storage,omitempty"`
 	// Chassis component
-	Chassis *SkuChassis `json:"chassis,omitempty"`
-	// Read-only Ethernet device components reported by Core. Omit this property from REST mutation requests; null and an empty array are accepted for compatibility, while a non-empty array is rejected with HTTP 400.
+	Chassis NullableSkuChassis `json:"chassis,omitempty"`
+	// Read-only Ethernet device components reported by Core. Omit this property from REST mutation requests; an empty array is accepted for compatibility, while a non-empty array is rejected with HTTP 400.
 	EthernetDevices []SkuEthernetDevice `json:"ethernetDevices,omitempty"`
 	// Infiniband device components
 	InfinibandDevices []SkuInfinibandDevice `json:"infinibandDevices,omitempty"`
@@ -185,36 +185,47 @@ func (o *SkuComponents) SetStorage(v []SkuStorage) {
 	o.Storage = v
 }
 
-// GetChassis returns the Chassis field value if set, zero value otherwise.
+// GetChassis returns the Chassis field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuComponents) GetChassis() SkuChassis {
-	if o == nil || IsNil(o.Chassis) {
+	if o == nil || IsNil(o.Chassis.Get()) {
 		var ret SkuChassis
 		return ret
 	}
-	return *o.Chassis
+	return *o.Chassis.Get()
 }
 
 // GetChassisOk returns a tuple with the Chassis field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SkuComponents) GetChassisOk() (*SkuChassis, bool) {
-	if o == nil || IsNil(o.Chassis) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Chassis, true
+	return o.Chassis.Get(), o.Chassis.IsSet()
 }
 
 // HasChassis returns a boolean if a field has been set.
 func (o *SkuComponents) HasChassis() bool {
-	if o != nil && !IsNil(o.Chassis) {
+	if o != nil && o.Chassis.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetChassis gets a reference to the given SkuChassis and assigns it to the Chassis field.
+// SetChassis gets a reference to the given NullableSkuChassis and assigns it to the Chassis field.
 func (o *SkuComponents) SetChassis(v SkuChassis) {
-	o.Chassis = &v
+	o.Chassis.Set(&v)
+}
+
+// SetChassisNil sets the value for Chassis to be an explicit nil
+func (o *SkuComponents) SetChassisNil() {
+	o.Chassis.Set(nil)
+}
+
+// UnsetChassis ensures that no value is present for Chassis, not even an explicit nil
+func (o *SkuComponents) UnsetChassis() {
+	o.Chassis.Unset()
 }
 
 // GetEthernetDevices returns the EthernetDevices field value if set, zero value otherwise.
@@ -346,8 +357,8 @@ func (o SkuComponents) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Storage) {
 		toSerialize["storage"] = o.Storage
 	}
-	if !IsNil(o.Chassis) {
-		toSerialize["chassis"] = o.Chassis
+	if o.Chassis.IsSet() {
+		toSerialize["chassis"] = o.Chassis.Get()
 	}
 	if !IsNil(o.EthernetDevices) {
 		toSerialize["ethernetDevices"] = o.EthernetDevices

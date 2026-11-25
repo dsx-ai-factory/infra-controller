@@ -52,9 +52,9 @@ type SpectrumXAttachment struct {
 	// Status of the SpectrumX Attachment
 	Status string `json:"status"`
 	// ISO datetime string for when the SpectrumX Attachment was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// ISO datetime string for when the SpectrumX Attachment was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
 
 type _SpectrumXAttachment SpectrumXAttachment
@@ -63,7 +63,7 @@ type _SpectrumXAttachment SpectrumXAttachment
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSpectrumXAttachment(id string, instanceId string, spectrumXPartitionId string, device string, deviceInstance int32, attachmentType string, status string) *SpectrumXAttachment {
+func NewSpectrumXAttachment(id string, instanceId string, spectrumXPartitionId string, device string, deviceInstance int32, attachmentType string, status string, created time.Time, updated time.Time) *SpectrumXAttachment {
 	this := SpectrumXAttachment{}
 	this.Id = id
 	this.InstanceId = instanceId
@@ -72,6 +72,8 @@ func NewSpectrumXAttachment(id string, instanceId string, spectrumXPartitionId s
 	this.DeviceInstance = deviceInstance
 	this.AttachmentType = attachmentType
 	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -498,68 +500,52 @@ func (o *SpectrumXAttachment) SetStatus(v string) {
 	o.Status = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *SpectrumXAttachment) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *SpectrumXAttachment) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *SpectrumXAttachment) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *SpectrumXAttachment) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *SpectrumXAttachment) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *SpectrumXAttachment) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *SpectrumXAttachment) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *SpectrumXAttachment) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o SpectrumXAttachment) MarshalJSON() ([]byte, error) {
@@ -597,12 +583,8 @@ func (o SpectrumXAttachment) ToMap() (map[string]interface{}, error) {
 		toSerialize["ipAddress"] = o.IpAddress.Get()
 	}
 	toSerialize["status"] = o.Status
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
 }
 
@@ -618,6 +600,8 @@ func (o *SpectrumXAttachment) UnmarshalJSON(data []byte) (err error) {
 		"deviceInstance",
 		"attachmentType",
 		"status",
+		"created",
+		"updated",
 	}
 
 	allProperties := make(map[string]interface{})

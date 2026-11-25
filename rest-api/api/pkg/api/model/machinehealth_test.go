@@ -121,3 +121,22 @@ func TestAPITrayHealthReportEntryRequest_Validate(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIMachineHealthReportEntry_FromProto(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry *corev1.HealthReportEntry
+	}{
+		{name: "nil report initializes probe slices", entry: &corev1.HealthReportEntry{}},
+		{name: "empty report initializes probe slices", entry: &corev1.HealthReportEntry{Report: &corev1.HealthReport{Source: "probe"}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got APIMachineHealthReportEntry
+			got.FromProto(tc.entry)
+			assert.Equal(t, []APIHealthProbeSuccess{}, got.Successes)
+			assert.Equal(t, []APIHealthProbeAlert{}, got.Alerts)
+		})
+	}
+}

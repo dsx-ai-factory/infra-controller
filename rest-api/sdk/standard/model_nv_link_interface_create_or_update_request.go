@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the NVLinkInterfaceCreateOrUpdateRequest type satisfies the MappedNullable interface at compile time
@@ -23,17 +25,20 @@ var _ MappedNullable = &NVLinkInterfaceCreateOrUpdateRequest{}
 // NVLinkInterfaceCreateOrUpdateRequest Request data to create an NVLink Interface for an Instance by associating a specific GPU index with an NVLink Logical Partition.
 type NVLinkInterfaceCreateOrUpdateRequest struct {
 	// ID of the NVLink Logical Partition the Interface should attach to
-	NvLinkLogicalPartitionId *string `json:"nvLinkLogicalPartitionId,omitempty"`
+	NvLinkLogicalPartitionId string `json:"nvLinkLogicalPartitionId"`
 	// GPU index for this NVLink interface. Must be non-negative, unique within the request, and within the GPU count exposed by the selected Machine or Instance Type.
 	DeviceInstance *int32 `json:"deviceInstance,omitempty"`
 }
+
+type _NVLinkInterfaceCreateOrUpdateRequest NVLinkInterfaceCreateOrUpdateRequest
 
 // NewNVLinkInterfaceCreateOrUpdateRequest instantiates a new NVLinkInterfaceCreateOrUpdateRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNVLinkInterfaceCreateOrUpdateRequest() *NVLinkInterfaceCreateOrUpdateRequest {
+func NewNVLinkInterfaceCreateOrUpdateRequest(nvLinkLogicalPartitionId string) *NVLinkInterfaceCreateOrUpdateRequest {
 	this := NVLinkInterfaceCreateOrUpdateRequest{}
+	this.NvLinkLogicalPartitionId = nvLinkLogicalPartitionId
 	return &this
 }
 
@@ -45,36 +50,28 @@ func NewNVLinkInterfaceCreateOrUpdateRequestWithDefaults() *NVLinkInterfaceCreat
 	return &this
 }
 
-// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value if set, zero value otherwise.
+// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value
 func (o *NVLinkInterfaceCreateOrUpdateRequest) GetNvLinkLogicalPartitionId() string {
-	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.NvLinkLogicalPartitionId
+
+	return o.NvLinkLogicalPartitionId
 }
 
-// GetNvLinkLogicalPartitionIdOk returns a tuple with the NvLinkLogicalPartitionId field value if set, nil otherwise
+// GetNvLinkLogicalPartitionIdOk returns a tuple with the NvLinkLogicalPartitionId field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkInterfaceCreateOrUpdateRequest) GetNvLinkLogicalPartitionIdOk() (*string, bool) {
-	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NvLinkLogicalPartitionId, true
+	return &o.NvLinkLogicalPartitionId, true
 }
 
-// HasNvLinkLogicalPartitionId returns a boolean if a field has been set.
-func (o *NVLinkInterfaceCreateOrUpdateRequest) HasNvLinkLogicalPartitionId() bool {
-	if o != nil && !IsNil(o.NvLinkLogicalPartitionId) {
-		return true
-	}
-
-	return false
-}
-
-// SetNvLinkLogicalPartitionId gets a reference to the given string and assigns it to the NvLinkLogicalPartitionId field.
+// SetNvLinkLogicalPartitionId sets field value
 func (o *NVLinkInterfaceCreateOrUpdateRequest) SetNvLinkLogicalPartitionId(v string) {
-	o.NvLinkLogicalPartitionId = &v
+	o.NvLinkLogicalPartitionId = v
 }
 
 // GetDeviceInstance returns the DeviceInstance field value if set, zero value otherwise.
@@ -119,13 +116,47 @@ func (o NVLinkInterfaceCreateOrUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o NVLinkInterfaceCreateOrUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.NvLinkLogicalPartitionId) {
-		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId
-	}
+	toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId
 	if !IsNil(o.DeviceInstance) {
 		toSerialize["deviceInstance"] = o.DeviceInstance
 	}
 	return toSerialize, nil
+}
+
+func (o *NVLinkInterfaceCreateOrUpdateRequest) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"nvLinkLogicalPartitionId",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varNVLinkInterfaceCreateOrUpdateRequest := _NVLinkInterfaceCreateOrUpdateRequest{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varNVLinkInterfaceCreateOrUpdateRequest)
+
+	if err != nil {
+		return err
+	}
+
+	*o = NVLinkInterfaceCreateOrUpdateRequest(varNVLinkInterfaceCreateOrUpdateRequest)
+
+	return err
 }
 
 type NullableNVLinkInterfaceCreateOrUpdateRequest struct {

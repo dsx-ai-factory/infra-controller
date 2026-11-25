@@ -11,42 +11,60 @@ import (
 )
 
 // The REST server sends `"driveModel": null` for every component that is not a
-// Drive, so the SDK must accept a required null there.
+// Drive, while OpenAPI models nullable response fields as optional (`driveModel`
+// is nullable and non-required).
 func TestHostFirmwareComponent_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
-		name       string
-		payload    string
-		driveModel *string
+		name              string
+		payload           string
+		wantErr           string
+		wantDriveModelSet bool
+		wantDriveModel    *string
 	}{
 		{
-			name:    "non-drive component with null driveModel",
-			payload: `{"type":"BMC","driveModel":null,"firmware":[]}`,
+			name:              "non-drive component with null driveModel",
+			payload:           `{"type":"BMC","driveModel":null,"firmware":[]}`,
+			wantDriveModelSet: true,
 		},
 		{
-			name:       "drive component",
-			payload:    `{"type":"Drive","driveModel":"ST24000NM005H","firmware":[]}`,
-			driveModel: PtrString("ST24000NM005H"),
+			name:              "drive component",
+			payload:           `{"type":"Drive","driveModel":"ST24000NM005H","firmware":[]}`,
+			wantDriveModelSet: true,
+			wantDriveModel:    PtrString("ST24000NM005H"),
+		},
+		{
+			name:    "omitted driveModel",
+			payload: `{"type":"BMC","firmware":[]}`,
+		},
+		{
+			name:    "missing required type",
+			payload: `{"firmware":[]}`,
+			wantErr: "required property type",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var component HostFirmwareComponent
-			require.NoError(t, json.Unmarshal([]byte(tt.payload), &component))
-			require.Equal(t, tt.driveModel, component.DriveModel.Get())
+			err := json.Unmarshal([]byte(tt.payload), &component)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantDriveModelSet, component.DriveModel.IsSet())
+			require.Equal(t, tt.wantDriveModel, component.DriveModel.Get())
 
 			encoded, err := json.Marshal(component)
 			require.NoError(t, err)
 			var fields map[string]any
 			require.NoError(t, json.Unmarshal(encoded, &fields))
-			require.Contains(t, fields, "driveModel")
+			if tt.wantDriveModelSet {
+				require.Contains(t, fields, "driveModel")
+			} else {
+				require.NotContains(t, fields, "driveModel")
+			}
 		})
 	}
-
-	t.Run("rejects missing driveModel", func(t *testing.T) {
-		var component HostFirmwareComponent
-		err := json.Unmarshal([]byte(`{"type":"BMC","firmware":[]}`), &component)
-		require.ErrorContains(t, err, "required property driveModel")
-	})
 }
 
 // The REST server writes an ordering entry without a drive model as its bare

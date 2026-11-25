@@ -27,13 +27,13 @@ type AllocationCreateRequest struct {
 	// Concise and descriptive name for the Allocation
 	Name string `json:"name"`
 	// Detailed description for the Allocation
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// ID of the Tenant that should receive the Allocation
 	TenantId string `json:"tenantId"`
 	// ID of the Site where resources should be allocated
 	SiteId string `json:"siteId"`
 	// List of Allocation Constraint objects
-	AllocationConstraints []AllocationConstraintCreateRequest `json:"allocationConstraints,omitempty"`
+	AllocationConstraints []AllocationConstraintCreateRequest `json:"allocationConstraints"`
 }
 
 type _AllocationCreateRequest AllocationCreateRequest
@@ -42,11 +42,12 @@ type _AllocationCreateRequest AllocationCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewAllocationCreateRequest(name string, tenantId string, siteId string) *AllocationCreateRequest {
+func NewAllocationCreateRequest(name string, tenantId string, siteId string, allocationConstraints []AllocationConstraintCreateRequest) *AllocationCreateRequest {
 	this := AllocationCreateRequest{}
 	this.Name = name
 	this.TenantId = tenantId
 	this.SiteId = siteId
+	this.AllocationConstraints = allocationConstraints
 	return &this
 }
 
@@ -82,47 +83,36 @@ func (o *AllocationCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *AllocationCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *AllocationCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *AllocationCreateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *AllocationCreateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
-}
-
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *AllocationCreateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *AllocationCreateRequest) UnsetDescription() {
-	o.Description.Unset()
+	o.Description = &v
 }
 
 // GetTenantId returns the TenantId field value
@@ -173,34 +163,26 @@ func (o *AllocationCreateRequest) SetSiteId(v string) {
 	o.SiteId = v
 }
 
-// GetAllocationConstraints returns the AllocationConstraints field value if set, zero value otherwise.
+// GetAllocationConstraints returns the AllocationConstraints field value
 func (o *AllocationCreateRequest) GetAllocationConstraints() []AllocationConstraintCreateRequest {
-	if o == nil || IsNil(o.AllocationConstraints) {
+	if o == nil {
 		var ret []AllocationConstraintCreateRequest
 		return ret
 	}
+
 	return o.AllocationConstraints
 }
 
-// GetAllocationConstraintsOk returns a tuple with the AllocationConstraints field value if set, nil otherwise
+// GetAllocationConstraintsOk returns a tuple with the AllocationConstraints field value
 // and a boolean to check if the value has been set.
 func (o *AllocationCreateRequest) GetAllocationConstraintsOk() ([]AllocationConstraintCreateRequest, bool) {
-	if o == nil || IsNil(o.AllocationConstraints) {
+	if o == nil {
 		return nil, false
 	}
 	return o.AllocationConstraints, true
 }
 
-// HasAllocationConstraints returns a boolean if a field has been set.
-func (o *AllocationCreateRequest) HasAllocationConstraints() bool {
-	if o != nil && !IsNil(o.AllocationConstraints) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllocationConstraints gets a reference to the given []AllocationConstraintCreateRequest and assigns it to the AllocationConstraints field.
+// SetAllocationConstraints sets field value
 func (o *AllocationCreateRequest) SetAllocationConstraints(v []AllocationConstraintCreateRequest) {
 	o.AllocationConstraints = v
 }
@@ -216,14 +198,12 @@ func (o AllocationCreateRequest) MarshalJSON() ([]byte, error) {
 func (o AllocationCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
 	toSerialize["tenantId"] = o.TenantId
 	toSerialize["siteId"] = o.SiteId
-	if !IsNil(o.AllocationConstraints) {
-		toSerialize["allocationConstraints"] = o.AllocationConstraints
-	}
+	toSerialize["allocationConstraints"] = o.AllocationConstraints
 	return toSerialize, nil
 }
 
@@ -235,6 +215,7 @@ func (o *AllocationCreateRequest) UnmarshalJSON(data []byte) (err error) {
 		"name",
 		"tenantId",
 		"siteId",
+		"allocationConstraints",
 	}
 
 	allProperties := make(map[string]interface{})

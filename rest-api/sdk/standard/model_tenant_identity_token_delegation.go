@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,23 +26,29 @@ var _ MappedNullable = &TenantIdentityTokenDelegation{}
 // TenantIdentityTokenDelegation Current token delegation configuration for the org.
 type TenantIdentityTokenDelegation struct {
 	// Token endpoint used to exchange delegated Tenant identity tokens
-	TokenEndpoint *string `json:"tokenEndpoint,omitempty"`
+	TokenEndpoint string `json:"tokenEndpoint"`
 	// Client-secret basic authentication settings for token delegation
 	ClientSecretBasic *TenantIdentityBasicClientSecretResponse `json:"clientSecretBasic,omitempty"`
 	// Audience value expected on the subject token
-	SubjectTokenAudience *string `json:"subjectTokenAudience,omitempty"`
+	SubjectTokenAudience string `json:"subjectTokenAudience"`
 	// Date/time when the token delegation configuration was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the token delegation configuration was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _TenantIdentityTokenDelegation TenantIdentityTokenDelegation
 
 // NewTenantIdentityTokenDelegation instantiates a new TenantIdentityTokenDelegation object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantIdentityTokenDelegation() *TenantIdentityTokenDelegation {
+func NewTenantIdentityTokenDelegation(tokenEndpoint string, subjectTokenAudience string, created time.Time, updated time.Time) *TenantIdentityTokenDelegation {
 	this := TenantIdentityTokenDelegation{}
+	this.TokenEndpoint = tokenEndpoint
+	this.SubjectTokenAudience = subjectTokenAudience
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -52,36 +60,28 @@ func NewTenantIdentityTokenDelegationWithDefaults() *TenantIdentityTokenDelegati
 	return &this
 }
 
-// GetTokenEndpoint returns the TokenEndpoint field value if set, zero value otherwise.
+// GetTokenEndpoint returns the TokenEndpoint field value
 func (o *TenantIdentityTokenDelegation) GetTokenEndpoint() string {
-	if o == nil || IsNil(o.TokenEndpoint) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TokenEndpoint
+
+	return o.TokenEndpoint
 }
 
-// GetTokenEndpointOk returns a tuple with the TokenEndpoint field value if set, nil otherwise
+// GetTokenEndpointOk returns a tuple with the TokenEndpoint field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityTokenDelegation) GetTokenEndpointOk() (*string, bool) {
-	if o == nil || IsNil(o.TokenEndpoint) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TokenEndpoint, true
+	return &o.TokenEndpoint, true
 }
 
-// HasTokenEndpoint returns a boolean if a field has been set.
-func (o *TenantIdentityTokenDelegation) HasTokenEndpoint() bool {
-	if o != nil && !IsNil(o.TokenEndpoint) {
-		return true
-	}
-
-	return false
-}
-
-// SetTokenEndpoint gets a reference to the given string and assigns it to the TokenEndpoint field.
+// SetTokenEndpoint sets field value
 func (o *TenantIdentityTokenDelegation) SetTokenEndpoint(v string) {
-	o.TokenEndpoint = &v
+	o.TokenEndpoint = v
 }
 
 // GetClientSecretBasic returns the ClientSecretBasic field value if set, zero value otherwise.
@@ -116,100 +116,76 @@ func (o *TenantIdentityTokenDelegation) SetClientSecretBasic(v TenantIdentityBas
 	o.ClientSecretBasic = &v
 }
 
-// GetSubjectTokenAudience returns the SubjectTokenAudience field value if set, zero value otherwise.
+// GetSubjectTokenAudience returns the SubjectTokenAudience field value
 func (o *TenantIdentityTokenDelegation) GetSubjectTokenAudience() string {
-	if o == nil || IsNil(o.SubjectTokenAudience) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SubjectTokenAudience
+
+	return o.SubjectTokenAudience
 }
 
-// GetSubjectTokenAudienceOk returns a tuple with the SubjectTokenAudience field value if set, nil otherwise
+// GetSubjectTokenAudienceOk returns a tuple with the SubjectTokenAudience field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityTokenDelegation) GetSubjectTokenAudienceOk() (*string, bool) {
-	if o == nil || IsNil(o.SubjectTokenAudience) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SubjectTokenAudience, true
+	return &o.SubjectTokenAudience, true
 }
 
-// HasSubjectTokenAudience returns a boolean if a field has been set.
-func (o *TenantIdentityTokenDelegation) HasSubjectTokenAudience() bool {
-	if o != nil && !IsNil(o.SubjectTokenAudience) {
-		return true
-	}
-
-	return false
-}
-
-// SetSubjectTokenAudience gets a reference to the given string and assigns it to the SubjectTokenAudience field.
+// SetSubjectTokenAudience sets field value
 func (o *TenantIdentityTokenDelegation) SetSubjectTokenAudience(v string) {
-	o.SubjectTokenAudience = &v
+	o.SubjectTokenAudience = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *TenantIdentityTokenDelegation) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityTokenDelegation) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *TenantIdentityTokenDelegation) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *TenantIdentityTokenDelegation) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *TenantIdentityTokenDelegation) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityTokenDelegation) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *TenantIdentityTokenDelegation) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *TenantIdentityTokenDelegation) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o TenantIdentityTokenDelegation) MarshalJSON() ([]byte, error) {
@@ -222,22 +198,53 @@ func (o TenantIdentityTokenDelegation) MarshalJSON() ([]byte, error) {
 
 func (o TenantIdentityTokenDelegation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.TokenEndpoint) {
-		toSerialize["tokenEndpoint"] = o.TokenEndpoint
-	}
+	toSerialize["tokenEndpoint"] = o.TokenEndpoint
 	if !IsNil(o.ClientSecretBasic) {
 		toSerialize["clientSecretBasic"] = o.ClientSecretBasic
 	}
-	if !IsNil(o.SubjectTokenAudience) {
-		toSerialize["subjectTokenAudience"] = o.SubjectTokenAudience
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["subjectTokenAudience"] = o.SubjectTokenAudience
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *TenantIdentityTokenDelegation) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"tokenEndpoint",
+		"subjectTokenAudience",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantIdentityTokenDelegation := _TenantIdentityTokenDelegation{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantIdentityTokenDelegation)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantIdentityTokenDelegation(varTenantIdentityTokenDelegation)
+
+	return err
 }
 
 type NullableTenantIdentityTokenDelegation struct {

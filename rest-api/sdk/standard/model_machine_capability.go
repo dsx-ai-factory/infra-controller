@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineCapability type satisfies the MappedNullable interface at compile time
@@ -23,35 +25,39 @@ var _ MappedNullable = &MachineCapability{}
 // MachineCapability Describes capabilities of a Machine
 type MachineCapability struct {
 	// Type of the Capability
-	Type *string `json:"type,omitempty"`
+	Type string `json:"type"`
 	// Name of the Capability component
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Frequency of the Capability component, if available
-	Frequency NullableString `json:"frequency,omitempty"`
+	Frequency *string `json:"frequency,omitempty"`
 	// Number of Cores in the Capability component, if applicable
-	Cores NullableUint32 `json:"cores,omitempty"`
+	Cores *uint32 `json:"cores,omitempty"`
 	// Number of Threads in the Capability component, if applicable
-	Threads NullableUint32 `json:"threads,omitempty"`
+	Threads *uint32 `json:"threads,omitempty"`
 	// Capacity of the Capability component, if applicable
-	Capacity NullableString `json:"capacity,omitempty"`
+	Capacity *string `json:"capacity,omitempty"`
 	// Vendor of the Capability component, if available
-	Vendor NullableString `json:"vendor,omitempty"`
+	Vendor *string `json:"vendor,omitempty"`
 	// Hardware revision of the Capability component, if available
-	HardwareRevision NullableString `json:"hardwareRevision,omitempty"`
+	HardwareRevision *string `json:"hardwareRevision,omitempty"`
 	// A list of inactive devices
 	InactiveDevices []uint32 `json:"inactiveDevices,omitempty"`
 	// Count of the Capability component
 	Count NullableUint32 `json:"count,omitempty"`
 	// Device Type of the Capability component, if available
-	DeviceType NullableString `json:"deviceType,omitempty"`
+	DeviceType *string `json:"deviceType,omitempty"`
 }
+
+type _MachineCapability MachineCapability
 
 // NewMachineCapability instantiates a new MachineCapability object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineCapability() *MachineCapability {
+func NewMachineCapability(type_ string, name string) *MachineCapability {
 	this := MachineCapability{}
+	this.Type = type_
+	this.Name = name
 	return &this
 }
 
@@ -63,326 +69,244 @@ func NewMachineCapabilityWithDefaults() *MachineCapability {
 	return &this
 }
 
-// GetType returns the Type field value if set, zero value otherwise.
+// GetType returns the Type field value
 func (o *MachineCapability) GetType() string {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Type
+
+	return o.Type
 }
 
-// GetTypeOk returns a tuple with the Type field value if set, nil otherwise
+// GetTypeOk returns a tuple with the Type field value
 // and a boolean to check if the value has been set.
 func (o *MachineCapability) GetTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Type, true
+	return &o.Type, true
 }
 
-// HasType returns a boolean if a field has been set.
-func (o *MachineCapability) HasType() bool {
-	if o != nil && !IsNil(o.Type) {
-		return true
-	}
-
-	return false
-}
-
-// SetType gets a reference to the given string and assigns it to the Type field.
+// SetType sets field value
 func (o *MachineCapability) SetType(v string) {
-	o.Type = &v
+	o.Type = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *MachineCapability) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *MachineCapability) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *MachineCapability) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *MachineCapability) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetFrequency returns the Frequency field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetFrequency returns the Frequency field value if set, zero value otherwise.
 func (o *MachineCapability) GetFrequency() string {
-	if o == nil || IsNil(o.Frequency.Get()) {
+	if o == nil || IsNil(o.Frequency) {
 		var ret string
 		return ret
 	}
-	return *o.Frequency.Get()
+	return *o.Frequency
 }
 
 // GetFrequencyOk returns a tuple with the Frequency field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineCapability) GetFrequencyOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Frequency) {
 		return nil, false
 	}
-	return o.Frequency.Get(), o.Frequency.IsSet()
+	return o.Frequency, true
 }
 
 // HasFrequency returns a boolean if a field has been set.
 func (o *MachineCapability) HasFrequency() bool {
-	if o != nil && o.Frequency.IsSet() {
+	if o != nil && !IsNil(o.Frequency) {
 		return true
 	}
 
 	return false
 }
 
-// SetFrequency gets a reference to the given NullableString and assigns it to the Frequency field.
+// SetFrequency gets a reference to the given string and assigns it to the Frequency field.
 func (o *MachineCapability) SetFrequency(v string) {
-	o.Frequency.Set(&v)
+	o.Frequency = &v
 }
 
-// SetFrequencyNil sets the value for Frequency to be an explicit nil
-func (o *MachineCapability) SetFrequencyNil() {
-	o.Frequency.Set(nil)
-}
-
-// UnsetFrequency ensures that no value is present for Frequency, not even an explicit nil
-func (o *MachineCapability) UnsetFrequency() {
-	o.Frequency.Unset()
-}
-
-// GetCores returns the Cores field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetCores returns the Cores field value if set, zero value otherwise.
 func (o *MachineCapability) GetCores() uint32 {
-	if o == nil || IsNil(o.Cores.Get()) {
+	if o == nil || IsNil(o.Cores) {
 		var ret uint32
 		return ret
 	}
-	return *o.Cores.Get()
+	return *o.Cores
 }
 
 // GetCoresOk returns a tuple with the Cores field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineCapability) GetCoresOk() (*uint32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Cores) {
 		return nil, false
 	}
-	return o.Cores.Get(), o.Cores.IsSet()
+	return o.Cores, true
 }
 
 // HasCores returns a boolean if a field has been set.
 func (o *MachineCapability) HasCores() bool {
-	if o != nil && o.Cores.IsSet() {
+	if o != nil && !IsNil(o.Cores) {
 		return true
 	}
 
 	return false
 }
 
-// SetCores gets a reference to the given NullableUint32 and assigns it to the Cores field.
+// SetCores gets a reference to the given uint32 and assigns it to the Cores field.
 func (o *MachineCapability) SetCores(v uint32) {
-	o.Cores.Set(&v)
+	o.Cores = &v
 }
 
-// SetCoresNil sets the value for Cores to be an explicit nil
-func (o *MachineCapability) SetCoresNil() {
-	o.Cores.Set(nil)
-}
-
-// UnsetCores ensures that no value is present for Cores, not even an explicit nil
-func (o *MachineCapability) UnsetCores() {
-	o.Cores.Unset()
-}
-
-// GetThreads returns the Threads field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetThreads returns the Threads field value if set, zero value otherwise.
 func (o *MachineCapability) GetThreads() uint32 {
-	if o == nil || IsNil(o.Threads.Get()) {
+	if o == nil || IsNil(o.Threads) {
 		var ret uint32
 		return ret
 	}
-	return *o.Threads.Get()
+	return *o.Threads
 }
 
 // GetThreadsOk returns a tuple with the Threads field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineCapability) GetThreadsOk() (*uint32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Threads) {
 		return nil, false
 	}
-	return o.Threads.Get(), o.Threads.IsSet()
+	return o.Threads, true
 }
 
 // HasThreads returns a boolean if a field has been set.
 func (o *MachineCapability) HasThreads() bool {
-	if o != nil && o.Threads.IsSet() {
+	if o != nil && !IsNil(o.Threads) {
 		return true
 	}
 
 	return false
 }
 
-// SetThreads gets a reference to the given NullableUint32 and assigns it to the Threads field.
+// SetThreads gets a reference to the given uint32 and assigns it to the Threads field.
 func (o *MachineCapability) SetThreads(v uint32) {
-	o.Threads.Set(&v)
+	o.Threads = &v
 }
 
-// SetThreadsNil sets the value for Threads to be an explicit nil
-func (o *MachineCapability) SetThreadsNil() {
-	o.Threads.Set(nil)
-}
-
-// UnsetThreads ensures that no value is present for Threads, not even an explicit nil
-func (o *MachineCapability) UnsetThreads() {
-	o.Threads.Unset()
-}
-
-// GetCapacity returns the Capacity field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetCapacity returns the Capacity field value if set, zero value otherwise.
 func (o *MachineCapability) GetCapacity() string {
-	if o == nil || IsNil(o.Capacity.Get()) {
+	if o == nil || IsNil(o.Capacity) {
 		var ret string
 		return ret
 	}
-	return *o.Capacity.Get()
+	return *o.Capacity
 }
 
 // GetCapacityOk returns a tuple with the Capacity field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineCapability) GetCapacityOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Capacity) {
 		return nil, false
 	}
-	return o.Capacity.Get(), o.Capacity.IsSet()
+	return o.Capacity, true
 }
 
 // HasCapacity returns a boolean if a field has been set.
 func (o *MachineCapability) HasCapacity() bool {
-	if o != nil && o.Capacity.IsSet() {
+	if o != nil && !IsNil(o.Capacity) {
 		return true
 	}
 
 	return false
 }
 
-// SetCapacity gets a reference to the given NullableString and assigns it to the Capacity field.
+// SetCapacity gets a reference to the given string and assigns it to the Capacity field.
 func (o *MachineCapability) SetCapacity(v string) {
-	o.Capacity.Set(&v)
+	o.Capacity = &v
 }
 
-// SetCapacityNil sets the value for Capacity to be an explicit nil
-func (o *MachineCapability) SetCapacityNil() {
-	o.Capacity.Set(nil)
-}
-
-// UnsetCapacity ensures that no value is present for Capacity, not even an explicit nil
-func (o *MachineCapability) UnsetCapacity() {
-	o.Capacity.Unset()
-}
-
-// GetVendor returns the Vendor field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetVendor returns the Vendor field value if set, zero value otherwise.
 func (o *MachineCapability) GetVendor() string {
-	if o == nil || IsNil(o.Vendor.Get()) {
+	if o == nil || IsNil(o.Vendor) {
 		var ret string
 		return ret
 	}
-	return *o.Vendor.Get()
+	return *o.Vendor
 }
 
 // GetVendorOk returns a tuple with the Vendor field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineCapability) GetVendorOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Vendor) {
 		return nil, false
 	}
-	return o.Vendor.Get(), o.Vendor.IsSet()
+	return o.Vendor, true
 }
 
 // HasVendor returns a boolean if a field has been set.
 func (o *MachineCapability) HasVendor() bool {
-	if o != nil && o.Vendor.IsSet() {
+	if o != nil && !IsNil(o.Vendor) {
 		return true
 	}
 
 	return false
 }
 
-// SetVendor gets a reference to the given NullableString and assigns it to the Vendor field.
+// SetVendor gets a reference to the given string and assigns it to the Vendor field.
 func (o *MachineCapability) SetVendor(v string) {
-	o.Vendor.Set(&v)
+	o.Vendor = &v
 }
 
-// SetVendorNil sets the value for Vendor to be an explicit nil
-func (o *MachineCapability) SetVendorNil() {
-	o.Vendor.Set(nil)
-}
-
-// UnsetVendor ensures that no value is present for Vendor, not even an explicit nil
-func (o *MachineCapability) UnsetVendor() {
-	o.Vendor.Unset()
-}
-
-// GetHardwareRevision returns the HardwareRevision field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetHardwareRevision returns the HardwareRevision field value if set, zero value otherwise.
 func (o *MachineCapability) GetHardwareRevision() string {
-	if o == nil || IsNil(o.HardwareRevision.Get()) {
+	if o == nil || IsNil(o.HardwareRevision) {
 		var ret string
 		return ret
 	}
-	return *o.HardwareRevision.Get()
+	return *o.HardwareRevision
 }
 
 // GetHardwareRevisionOk returns a tuple with the HardwareRevision field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineCapability) GetHardwareRevisionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.HardwareRevision) {
 		return nil, false
 	}
-	return o.HardwareRevision.Get(), o.HardwareRevision.IsSet()
+	return o.HardwareRevision, true
 }
 
 // HasHardwareRevision returns a boolean if a field has been set.
 func (o *MachineCapability) HasHardwareRevision() bool {
-	if o != nil && o.HardwareRevision.IsSet() {
+	if o != nil && !IsNil(o.HardwareRevision) {
 		return true
 	}
 
 	return false
 }
 
-// SetHardwareRevision gets a reference to the given NullableString and assigns it to the HardwareRevision field.
+// SetHardwareRevision gets a reference to the given string and assigns it to the HardwareRevision field.
 func (o *MachineCapability) SetHardwareRevision(v string) {
-	o.HardwareRevision.Set(&v)
-}
-
-// SetHardwareRevisionNil sets the value for HardwareRevision to be an explicit nil
-func (o *MachineCapability) SetHardwareRevisionNil() {
-	o.HardwareRevision.Set(nil)
-}
-
-// UnsetHardwareRevision ensures that no value is present for HardwareRevision, not even an explicit nil
-func (o *MachineCapability) UnsetHardwareRevision() {
-	o.HardwareRevision.Unset()
+	o.HardwareRevision = &v
 }
 
 // GetInactiveDevices returns the InactiveDevices field value if set, zero value otherwise.
@@ -460,47 +384,36 @@ func (o *MachineCapability) UnsetCount() {
 	o.Count.Unset()
 }
 
-// GetDeviceType returns the DeviceType field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDeviceType returns the DeviceType field value if set, zero value otherwise.
 func (o *MachineCapability) GetDeviceType() string {
-	if o == nil || IsNil(o.DeviceType.Get()) {
+	if o == nil || IsNil(o.DeviceType) {
 		var ret string
 		return ret
 	}
-	return *o.DeviceType.Get()
+	return *o.DeviceType
 }
 
 // GetDeviceTypeOk returns a tuple with the DeviceType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineCapability) GetDeviceTypeOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.DeviceType) {
 		return nil, false
 	}
-	return o.DeviceType.Get(), o.DeviceType.IsSet()
+	return o.DeviceType, true
 }
 
 // HasDeviceType returns a boolean if a field has been set.
 func (o *MachineCapability) HasDeviceType() bool {
-	if o != nil && o.DeviceType.IsSet() {
+	if o != nil && !IsNil(o.DeviceType) {
 		return true
 	}
 
 	return false
 }
 
-// SetDeviceType gets a reference to the given NullableString and assigns it to the DeviceType field.
+// SetDeviceType gets a reference to the given string and assigns it to the DeviceType field.
 func (o *MachineCapability) SetDeviceType(v string) {
-	o.DeviceType.Set(&v)
-}
-
-// SetDeviceTypeNil sets the value for DeviceType to be an explicit nil
-func (o *MachineCapability) SetDeviceTypeNil() {
-	o.DeviceType.Set(nil)
-}
-
-// UnsetDeviceType ensures that no value is present for DeviceType, not even an explicit nil
-func (o *MachineCapability) UnsetDeviceType() {
-	o.DeviceType.Unset()
+	o.DeviceType = &v
 }
 
 func (o MachineCapability) MarshalJSON() ([]byte, error) {
@@ -513,29 +426,25 @@ func (o MachineCapability) MarshalJSON() ([]byte, error) {
 
 func (o MachineCapability) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Type) {
-		toSerialize["type"] = o.Type
+	toSerialize["type"] = o.Type
+	toSerialize["name"] = o.Name
+	if !IsNil(o.Frequency) {
+		toSerialize["frequency"] = o.Frequency
 	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
+	if !IsNil(o.Cores) {
+		toSerialize["cores"] = o.Cores
 	}
-	if o.Frequency.IsSet() {
-		toSerialize["frequency"] = o.Frequency.Get()
+	if !IsNil(o.Threads) {
+		toSerialize["threads"] = o.Threads
 	}
-	if o.Cores.IsSet() {
-		toSerialize["cores"] = o.Cores.Get()
+	if !IsNil(o.Capacity) {
+		toSerialize["capacity"] = o.Capacity
 	}
-	if o.Threads.IsSet() {
-		toSerialize["threads"] = o.Threads.Get()
+	if !IsNil(o.Vendor) {
+		toSerialize["vendor"] = o.Vendor
 	}
-	if o.Capacity.IsSet() {
-		toSerialize["capacity"] = o.Capacity.Get()
-	}
-	if o.Vendor.IsSet() {
-		toSerialize["vendor"] = o.Vendor.Get()
-	}
-	if o.HardwareRevision.IsSet() {
-		toSerialize["hardwareRevision"] = o.HardwareRevision.Get()
+	if !IsNil(o.HardwareRevision) {
+		toSerialize["hardwareRevision"] = o.HardwareRevision
 	}
 	if !IsNil(o.InactiveDevices) {
 		toSerialize["inactiveDevices"] = o.InactiveDevices
@@ -543,10 +452,47 @@ func (o MachineCapability) ToMap() (map[string]interface{}, error) {
 	if o.Count.IsSet() {
 		toSerialize["count"] = o.Count.Get()
 	}
-	if o.DeviceType.IsSet() {
-		toSerialize["deviceType"] = o.DeviceType.Get()
+	if !IsNil(o.DeviceType) {
+		toSerialize["deviceType"] = o.DeviceType
 	}
 	return toSerialize, nil
+}
+
+func (o *MachineCapability) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"type",
+		"name",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineCapability := _MachineCapability{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineCapability)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineCapability(varMachineCapability)
+
+	return err
 }
 
 type NullableMachineCapability struct {

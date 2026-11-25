@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the FieldDiff type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &FieldDiff{}
 // FieldDiff A single field difference between expected and actual component state
 type FieldDiff struct {
 	// Name of the field that differs (e.g. firmware_version, position.slot_id)
-	FieldName *string `json:"fieldName,omitempty"`
+	FieldName string `json:"fieldName"`
 	// Expected value of the field
-	ExpectedValue *string `json:"expectedValue,omitempty"`
+	ExpectedValue string `json:"expectedValue"`
 	// Actual value of the field
-	ActualValue *string `json:"actualValue,omitempty"`
+	ActualValue string `json:"actualValue"`
 }
+
+type _FieldDiff FieldDiff
 
 // NewFieldDiff instantiates a new FieldDiff object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewFieldDiff() *FieldDiff {
+func NewFieldDiff(fieldName string, expectedValue string, actualValue string) *FieldDiff {
 	this := FieldDiff{}
+	this.FieldName = fieldName
+	this.ExpectedValue = expectedValue
+	this.ActualValue = actualValue
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewFieldDiffWithDefaults() *FieldDiff {
 	return &this
 }
 
-// GetFieldName returns the FieldName field value if set, zero value otherwise.
+// GetFieldName returns the FieldName field value
 func (o *FieldDiff) GetFieldName() string {
-	if o == nil || IsNil(o.FieldName) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.FieldName
+
+	return o.FieldName
 }
 
-// GetFieldNameOk returns a tuple with the FieldName field value if set, nil otherwise
+// GetFieldNameOk returns a tuple with the FieldName field value
 // and a boolean to check if the value has been set.
 func (o *FieldDiff) GetFieldNameOk() (*string, bool) {
-	if o == nil || IsNil(o.FieldName) {
+	if o == nil {
 		return nil, false
 	}
-	return o.FieldName, true
+	return &o.FieldName, true
 }
 
-// HasFieldName returns a boolean if a field has been set.
-func (o *FieldDiff) HasFieldName() bool {
-	if o != nil && !IsNil(o.FieldName) {
-		return true
-	}
-
-	return false
-}
-
-// SetFieldName gets a reference to the given string and assigns it to the FieldName field.
+// SetFieldName sets field value
 func (o *FieldDiff) SetFieldName(v string) {
-	o.FieldName = &v
+	o.FieldName = v
 }
 
-// GetExpectedValue returns the ExpectedValue field value if set, zero value otherwise.
+// GetExpectedValue returns the ExpectedValue field value
 func (o *FieldDiff) GetExpectedValue() string {
-	if o == nil || IsNil(o.ExpectedValue) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ExpectedValue
+
+	return o.ExpectedValue
 }
 
-// GetExpectedValueOk returns a tuple with the ExpectedValue field value if set, nil otherwise
+// GetExpectedValueOk returns a tuple with the ExpectedValue field value
 // and a boolean to check if the value has been set.
 func (o *FieldDiff) GetExpectedValueOk() (*string, bool) {
-	if o == nil || IsNil(o.ExpectedValue) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ExpectedValue, true
+	return &o.ExpectedValue, true
 }
 
-// HasExpectedValue returns a boolean if a field has been set.
-func (o *FieldDiff) HasExpectedValue() bool {
-	if o != nil && !IsNil(o.ExpectedValue) {
-		return true
-	}
-
-	return false
-}
-
-// SetExpectedValue gets a reference to the given string and assigns it to the ExpectedValue field.
+// SetExpectedValue sets field value
 func (o *FieldDiff) SetExpectedValue(v string) {
-	o.ExpectedValue = &v
+	o.ExpectedValue = v
 }
 
-// GetActualValue returns the ActualValue field value if set, zero value otherwise.
+// GetActualValue returns the ActualValue field value
 func (o *FieldDiff) GetActualValue() string {
-	if o == nil || IsNil(o.ActualValue) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ActualValue
+
+	return o.ActualValue
 }
 
-// GetActualValueOk returns a tuple with the ActualValue field value if set, nil otherwise
+// GetActualValueOk returns a tuple with the ActualValue field value
 // and a boolean to check if the value has been set.
 func (o *FieldDiff) GetActualValueOk() (*string, bool) {
-	if o == nil || IsNil(o.ActualValue) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ActualValue, true
+	return &o.ActualValue, true
 }
 
-// HasActualValue returns a boolean if a field has been set.
-func (o *FieldDiff) HasActualValue() bool {
-	if o != nil && !IsNil(o.ActualValue) {
-		return true
-	}
-
-	return false
-}
-
-// SetActualValue gets a reference to the given string and assigns it to the ActualValue field.
+// SetActualValue sets field value
 func (o *FieldDiff) SetActualValue(v string) {
-	o.ActualValue = &v
+	o.ActualValue = v
 }
 
 func (o FieldDiff) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o FieldDiff) MarshalJSON() ([]byte, error) {
 
 func (o FieldDiff) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.FieldName) {
-		toSerialize["fieldName"] = o.FieldName
-	}
-	if !IsNil(o.ExpectedValue) {
-		toSerialize["expectedValue"] = o.ExpectedValue
-	}
-	if !IsNil(o.ActualValue) {
-		toSerialize["actualValue"] = o.ActualValue
-	}
+	toSerialize["fieldName"] = o.FieldName
+	toSerialize["expectedValue"] = o.ExpectedValue
+	toSerialize["actualValue"] = o.ActualValue
 	return toSerialize, nil
+}
+
+func (o *FieldDiff) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"fieldName",
+		"expectedValue",
+		"actualValue",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varFieldDiff := _FieldDiff{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varFieldDiff)
+
+	if err != nil {
+		return err
+	}
+
+	*o = FieldDiff(varFieldDiff)
+
+	return err
 }
 
 type NullableFieldDiff struct {

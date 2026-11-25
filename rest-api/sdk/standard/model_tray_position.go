@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TrayPosition type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &TrayPosition{}
 // TrayPosition Position of a tray within a rack
 type TrayPosition struct {
 	// Slot number of the tray in the rack
-	SlotId *int32 `json:"slotId,omitempty"`
+	SlotId int32 `json:"slotId"`
 	// Index of the tray within its slot
-	TrayIdx *int32 `json:"trayIdx,omitempty"`
+	TrayIdx int32 `json:"trayIdx"`
 	// Host ID associated with the tray
-	HostId *int32 `json:"hostId,omitempty"`
+	HostId int32 `json:"hostId"`
 }
+
+type _TrayPosition TrayPosition
 
 // NewTrayPosition instantiates a new TrayPosition object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTrayPosition() *TrayPosition {
+func NewTrayPosition(slotId int32, trayIdx int32, hostId int32) *TrayPosition {
 	this := TrayPosition{}
+	this.SlotId = slotId
+	this.TrayIdx = trayIdx
+	this.HostId = hostId
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewTrayPositionWithDefaults() *TrayPosition {
 	return &this
 }
 
-// GetSlotId returns the SlotId field value if set, zero value otherwise.
+// GetSlotId returns the SlotId field value
 func (o *TrayPosition) GetSlotId() int32 {
-	if o == nil || IsNil(o.SlotId) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.SlotId
+
+	return o.SlotId
 }
 
-// GetSlotIdOk returns a tuple with the SlotId field value if set, nil otherwise
+// GetSlotIdOk returns a tuple with the SlotId field value
 // and a boolean to check if the value has been set.
 func (o *TrayPosition) GetSlotIdOk() (*int32, bool) {
-	if o == nil || IsNil(o.SlotId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SlotId, true
+	return &o.SlotId, true
 }
 
-// HasSlotId returns a boolean if a field has been set.
-func (o *TrayPosition) HasSlotId() bool {
-	if o != nil && !IsNil(o.SlotId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSlotId gets a reference to the given int32 and assigns it to the SlotId field.
+// SetSlotId sets field value
 func (o *TrayPosition) SetSlotId(v int32) {
-	o.SlotId = &v
+	o.SlotId = v
 }
 
-// GetTrayIdx returns the TrayIdx field value if set, zero value otherwise.
+// GetTrayIdx returns the TrayIdx field value
 func (o *TrayPosition) GetTrayIdx() int32 {
-	if o == nil || IsNil(o.TrayIdx) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.TrayIdx
+
+	return o.TrayIdx
 }
 
-// GetTrayIdxOk returns a tuple with the TrayIdx field value if set, nil otherwise
+// GetTrayIdxOk returns a tuple with the TrayIdx field value
 // and a boolean to check if the value has been set.
 func (o *TrayPosition) GetTrayIdxOk() (*int32, bool) {
-	if o == nil || IsNil(o.TrayIdx) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TrayIdx, true
+	return &o.TrayIdx, true
 }
 
-// HasTrayIdx returns a boolean if a field has been set.
-func (o *TrayPosition) HasTrayIdx() bool {
-	if o != nil && !IsNil(o.TrayIdx) {
-		return true
-	}
-
-	return false
-}
-
-// SetTrayIdx gets a reference to the given int32 and assigns it to the TrayIdx field.
+// SetTrayIdx sets field value
 func (o *TrayPosition) SetTrayIdx(v int32) {
-	o.TrayIdx = &v
+	o.TrayIdx = v
 }
 
-// GetHostId returns the HostId field value if set, zero value otherwise.
+// GetHostId returns the HostId field value
 func (o *TrayPosition) GetHostId() int32 {
-	if o == nil || IsNil(o.HostId) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.HostId
+
+	return o.HostId
 }
 
-// GetHostIdOk returns a tuple with the HostId field value if set, nil otherwise
+// GetHostIdOk returns a tuple with the HostId field value
 // and a boolean to check if the value has been set.
 func (o *TrayPosition) GetHostIdOk() (*int32, bool) {
-	if o == nil || IsNil(o.HostId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.HostId, true
+	return &o.HostId, true
 }
 
-// HasHostId returns a boolean if a field has been set.
-func (o *TrayPosition) HasHostId() bool {
-	if o != nil && !IsNil(o.HostId) {
-		return true
-	}
-
-	return false
-}
-
-// SetHostId gets a reference to the given int32 and assigns it to the HostId field.
+// SetHostId sets field value
 func (o *TrayPosition) SetHostId(v int32) {
-	o.HostId = &v
+	o.HostId = v
 }
 
 func (o TrayPosition) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o TrayPosition) MarshalJSON() ([]byte, error) {
 
 func (o TrayPosition) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.SlotId) {
-		toSerialize["slotId"] = o.SlotId
-	}
-	if !IsNil(o.TrayIdx) {
-		toSerialize["trayIdx"] = o.TrayIdx
-	}
-	if !IsNil(o.HostId) {
-		toSerialize["hostId"] = o.HostId
-	}
+	toSerialize["slotId"] = o.SlotId
+	toSerialize["trayIdx"] = o.TrayIdx
+	toSerialize["hostId"] = o.HostId
 	return toSerialize, nil
+}
+
+func (o *TrayPosition) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"slotId",
+		"trayIdx",
+		"hostId",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTrayPosition := _TrayPosition{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTrayPosition)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TrayPosition(varTrayPosition)
+
+	return err
 }
 
 type NullableTrayPosition struct {

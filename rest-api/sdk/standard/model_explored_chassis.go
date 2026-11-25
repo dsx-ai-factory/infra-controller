@@ -25,7 +25,7 @@ var _ MappedNullable = &ExploredChassis{}
 // ExploredChassis Redfish Chassis reported during exploration.
 type ExploredChassis struct {
 	Id              string                   `json:"id"`
-	NetworkAdapters []ExploredNetworkAdapter `json:"networkAdapters,omitempty"`
+	NetworkAdapters []ExploredNetworkAdapter `json:"networkAdapters"`
 	Manufacturer    NullableString           `json:"manufacturer,omitempty"`
 	Model           NullableString           `json:"model,omitempty"`
 	PartNumber      NullableString           `json:"partNumber,omitempty"`
@@ -38,9 +38,10 @@ type _ExploredChassis ExploredChassis
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExploredChassis(id string) *ExploredChassis {
+func NewExploredChassis(id string, networkAdapters []ExploredNetworkAdapter) *ExploredChassis {
 	this := ExploredChassis{}
 	this.Id = id
+	this.NetworkAdapters = networkAdapters
 	return &this
 }
 
@@ -76,34 +77,26 @@ func (o *ExploredChassis) SetId(v string) {
 	o.Id = v
 }
 
-// GetNetworkAdapters returns the NetworkAdapters field value if set, zero value otherwise.
+// GetNetworkAdapters returns the NetworkAdapters field value
 func (o *ExploredChassis) GetNetworkAdapters() []ExploredNetworkAdapter {
-	if o == nil || IsNil(o.NetworkAdapters) {
+	if o == nil {
 		var ret []ExploredNetworkAdapter
 		return ret
 	}
+
 	return o.NetworkAdapters
 }
 
-// GetNetworkAdaptersOk returns a tuple with the NetworkAdapters field value if set, nil otherwise
+// GetNetworkAdaptersOk returns a tuple with the NetworkAdapters field value
 // and a boolean to check if the value has been set.
 func (o *ExploredChassis) GetNetworkAdaptersOk() ([]ExploredNetworkAdapter, bool) {
-	if o == nil || IsNil(o.NetworkAdapters) {
+	if o == nil {
 		return nil, false
 	}
 	return o.NetworkAdapters, true
 }
 
-// HasNetworkAdapters returns a boolean if a field has been set.
-func (o *ExploredChassis) HasNetworkAdapters() bool {
-	if o != nil && !IsNil(o.NetworkAdapters) {
-		return true
-	}
-
-	return false
-}
-
-// SetNetworkAdapters gets a reference to the given []ExploredNetworkAdapter and assigns it to the NetworkAdapters field.
+// SetNetworkAdapters sets field value
 func (o *ExploredChassis) SetNetworkAdapters(v []ExploredNetworkAdapter) {
 	o.NetworkAdapters = v
 }
@@ -291,9 +284,7 @@ func (o ExploredChassis) MarshalJSON() ([]byte, error) {
 func (o ExploredChassis) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
-	if !IsNil(o.NetworkAdapters) {
-		toSerialize["networkAdapters"] = o.NetworkAdapters
-	}
+	toSerialize["networkAdapters"] = o.NetworkAdapters
 	if o.Manufacturer.IsSet() {
 		toSerialize["manufacturer"] = o.Manufacturer.Get()
 	}
@@ -315,6 +306,7 @@ func (o *ExploredChassis) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
+		"networkAdapters",
 	}
 
 	allProperties := make(map[string]interface{})

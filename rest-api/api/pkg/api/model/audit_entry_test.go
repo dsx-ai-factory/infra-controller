@@ -85,12 +85,35 @@ func TestNewAPIAuditEntry(t *testing.T) {
 				QueryParams: dbAuditEntry.QueryParams,
 				Method:      dbAuditEntry.Method,
 				Body:        dbAuditEntry.Body,
+				ExtraData:   map[string]interface{}{},
 				StatusCode:  dbAuditEntry.StatusCode,
 				ClientIP:    dbAuditEntry.ClientIP,
 				UserID:      util.GetUUIDPtrToStrPtr(dbAuditEntry.UserID),
 				OrgName:     dbAuditEntry.OrgName,
 				Timestamp:   dbAuditEntry.Timestamp,
 				DurationMs:  dbAuditEntry.Duration.Milliseconds(),
+			},
+		},
+		{
+			name: "new AuditEntry initializes nil maps to empty objects",
+			args: args{
+				dbAuditEntry: cdbm.AuditEntry{
+					ID:        dbAuditEntry.ID,
+					Endpoint:  dbAuditEntry.Endpoint,
+					Method:    "GET",
+					OrgName:   dbAuditEntry.OrgName,
+					Timestamp: dbAuditEntry.Timestamp,
+				},
+			},
+			want: APIAuditEntry{
+				ID:          dbAuditEntry.ID.String(),
+				Endpoint:    dbAuditEntry.Endpoint,
+				QueryParams: url.Values{},
+				Method:      "GET",
+				Body:        map[string]interface{}{},
+				ExtraData:   map[string]interface{}{},
+				OrgName:     dbAuditEntry.OrgName,
+				Timestamp:   dbAuditEntry.Timestamp,
 			},
 		},
 	}
@@ -102,6 +125,7 @@ func TestNewAPIAuditEntry(t *testing.T) {
 			assert.Equal(t, tt.want.QueryParams, got.QueryParams)
 			assert.Equal(t, tt.want.Method, got.Method)
 			assert.Equal(t, tt.want.Body, got.Body)
+			assert.NotNil(t, got.ExtraData)
 			assert.Equal(t, tt.want.StatusCode, got.StatusCode)
 			assert.Equal(t, tt.want.ClientIP, got.ClientIP)
 			assert.Equal(t, tt.want.UserID, got.UserID)

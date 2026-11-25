@@ -48,6 +48,15 @@ func NewAPIAuditEntry(dbAuditEntry cdbm.AuditEntry, dbUser *cdbm.User) APIAuditE
 		APIVersion:    dbAuditEntry.APIVersion,
 	}
 
+	if dbAuditEntry.QueryParams == nil {
+		apiAuditEntry.QueryParams = url.Values{}
+	}
+	if dbAuditEntry.Body == nil {
+		apiAuditEntry.Body = map[string]interface{}{}
+	}
+	if dbAuditEntry.ExtraData == nil {
+		apiAuditEntry.ExtraData = map[string]interface{}{}
+	}
 	if dbAuditEntry.UserID != nil {
 		apiAuditEntry.UserID = util.GetUUIDPtrToStrPtr(dbAuditEntry.UserID)
 	}

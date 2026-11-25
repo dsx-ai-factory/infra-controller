@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the Metadata type satisfies the MappedNullable interface at compile time
@@ -23,17 +25,21 @@ var _ MappedNullable = &Metadata{}
 // Metadata Metadata about the API server
 type Metadata struct {
 	// Current version of the API
-	Version *string `json:"version,omitempty"`
+	Version string `json:"version"`
 	// Date/time when the API was built
-	BuildTime *string `json:"buildTime,omitempty"`
+	BuildTime string `json:"buildTime"`
 }
+
+type _Metadata Metadata
 
 // NewMetadata instantiates a new Metadata object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMetadata() *Metadata {
+func NewMetadata(version string, buildTime string) *Metadata {
 	this := Metadata{}
+	this.Version = version
+	this.BuildTime = buildTime
 	return &this
 }
 
@@ -45,68 +51,52 @@ func NewMetadataWithDefaults() *Metadata {
 	return &this
 }
 
-// GetVersion returns the Version field value if set, zero value otherwise.
+// GetVersion returns the Version field value
 func (o *Metadata) GetVersion() string {
-	if o == nil || IsNil(o.Version) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Version
+
+	return o.Version
 }
 
-// GetVersionOk returns a tuple with the Version field value if set, nil otherwise
+// GetVersionOk returns a tuple with the Version field value
 // and a boolean to check if the value has been set.
 func (o *Metadata) GetVersionOk() (*string, bool) {
-	if o == nil || IsNil(o.Version) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Version, true
+	return &o.Version, true
 }
 
-// HasVersion returns a boolean if a field has been set.
-func (o *Metadata) HasVersion() bool {
-	if o != nil && !IsNil(o.Version) {
-		return true
-	}
-
-	return false
-}
-
-// SetVersion gets a reference to the given string and assigns it to the Version field.
+// SetVersion sets field value
 func (o *Metadata) SetVersion(v string) {
-	o.Version = &v
+	o.Version = v
 }
 
-// GetBuildTime returns the BuildTime field value if set, zero value otherwise.
+// GetBuildTime returns the BuildTime field value
 func (o *Metadata) GetBuildTime() string {
-	if o == nil || IsNil(o.BuildTime) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.BuildTime
+
+	return o.BuildTime
 }
 
-// GetBuildTimeOk returns a tuple with the BuildTime field value if set, nil otherwise
+// GetBuildTimeOk returns a tuple with the BuildTime field value
 // and a boolean to check if the value has been set.
 func (o *Metadata) GetBuildTimeOk() (*string, bool) {
-	if o == nil || IsNil(o.BuildTime) {
+	if o == nil {
 		return nil, false
 	}
-	return o.BuildTime, true
+	return &o.BuildTime, true
 }
 
-// HasBuildTime returns a boolean if a field has been set.
-func (o *Metadata) HasBuildTime() bool {
-	if o != nil && !IsNil(o.BuildTime) {
-		return true
-	}
-
-	return false
-}
-
-// SetBuildTime gets a reference to the given string and assigns it to the BuildTime field.
+// SetBuildTime sets field value
 func (o *Metadata) SetBuildTime(v string) {
-	o.BuildTime = &v
+	o.BuildTime = v
 }
 
 func (o Metadata) MarshalJSON() ([]byte, error) {
@@ -119,13 +109,46 @@ func (o Metadata) MarshalJSON() ([]byte, error) {
 
 func (o Metadata) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Version) {
-		toSerialize["version"] = o.Version
-	}
-	if !IsNil(o.BuildTime) {
-		toSerialize["buildTime"] = o.BuildTime
-	}
+	toSerialize["version"] = o.Version
+	toSerialize["buildTime"] = o.BuildTime
 	return toSerialize, nil
+}
+
+func (o *Metadata) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"version",
+		"buildTime",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMetadata := _Metadata{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMetadata)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Metadata(varMetadata)
+
+	return err
 }
 
 type NullableMetadata struct {

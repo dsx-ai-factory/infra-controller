@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the VpcPeeringVpcSummary type satisfies the MappedNullable interface at compile time
@@ -23,25 +25,31 @@ var _ MappedNullable = &VpcPeeringVpcSummary{}
 // VpcPeeringVpcSummary Summarizes a VPC in context of a VPC Peering
 type VpcPeeringVpcSummary struct {
 	// ID of the VPC
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the VPC
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// ID of the tenant
-	TenantId *string `json:"tenantId,omitempty"`
+	TenantId string `json:"tenantId"`
 	// Summary of the tenant
-	Tenant *VpcPeeringTenantSummary `json:"tenant,omitempty"`
+	Tenant NullableVpcPeeringTenantSummary `json:"tenant,omitempty"`
 	// Network virtualization type of the VPC
 	NetworkVirtualizationType NullableString `json:"networkVirtualizationType,omitempty"`
 	// Status of the VPC
-	Status *VpcStatus `json:"status,omitempty"`
+	Status VpcStatus `json:"status"`
 }
+
+type _VpcPeeringVpcSummary VpcPeeringVpcSummary
 
 // NewVpcPeeringVpcSummary instantiates a new VpcPeeringVpcSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcPeeringVpcSummary() *VpcPeeringVpcSummary {
+func NewVpcPeeringVpcSummary(id string, name string, tenantId string, status VpcStatus) *VpcPeeringVpcSummary {
 	this := VpcPeeringVpcSummary{}
+	this.Id = id
+	this.Name = name
+	this.TenantId = tenantId
+	this.Status = status
 	return &this
 }
 
@@ -53,132 +61,119 @@ func NewVpcPeeringVpcSummaryWithDefaults() *VpcPeeringVpcSummary {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *VpcPeeringVpcSummary) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeeringVpcSummary) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *VpcPeeringVpcSummary) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *VpcPeeringVpcSummary) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *VpcPeeringVpcSummary) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeeringVpcSummary) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *VpcPeeringVpcSummary) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *VpcPeeringVpcSummary) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetTenantId returns the TenantId field value if set, zero value otherwise.
+// GetTenantId returns the TenantId field value
 func (o *VpcPeeringVpcSummary) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantId
+
+	return o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
+// GetTenantIdOk returns a tuple with the TenantId field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeeringVpcSummary) GetTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantId, true
+	return &o.TenantId, true
 }
 
-// HasTenantId returns a boolean if a field has been set.
-func (o *VpcPeeringVpcSummary) HasTenantId() bool {
-	if o != nil && !IsNil(o.TenantId) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
+// SetTenantId sets field value
 func (o *VpcPeeringVpcSummary) SetTenantId(v string) {
-	o.TenantId = &v
+	o.TenantId = v
 }
 
-// GetTenant returns the Tenant field value if set, zero value otherwise.
+// GetTenant returns the Tenant field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcPeeringVpcSummary) GetTenant() VpcPeeringTenantSummary {
-	if o == nil || IsNil(o.Tenant) {
+	if o == nil || IsNil(o.Tenant.Get()) {
 		var ret VpcPeeringTenantSummary
 		return ret
 	}
-	return *o.Tenant
+	return *o.Tenant.Get()
 }
 
 // GetTenantOk returns a tuple with the Tenant field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcPeeringVpcSummary) GetTenantOk() (*VpcPeeringTenantSummary, bool) {
-	if o == nil || IsNil(o.Tenant) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Tenant, true
+	return o.Tenant.Get(), o.Tenant.IsSet()
 }
 
 // HasTenant returns a boolean if a field has been set.
 func (o *VpcPeeringVpcSummary) HasTenant() bool {
-	if o != nil && !IsNil(o.Tenant) {
+	if o != nil && o.Tenant.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetTenant gets a reference to the given VpcPeeringTenantSummary and assigns it to the Tenant field.
+// SetTenant gets a reference to the given NullableVpcPeeringTenantSummary and assigns it to the Tenant field.
 func (o *VpcPeeringVpcSummary) SetTenant(v VpcPeeringTenantSummary) {
-	o.Tenant = &v
+	o.Tenant.Set(&v)
+}
+
+// SetTenantNil sets the value for Tenant to be an explicit nil
+func (o *VpcPeeringVpcSummary) SetTenantNil() {
+	o.Tenant.Set(nil)
+}
+
+// UnsetTenant ensures that no value is present for Tenant, not even an explicit nil
+func (o *VpcPeeringVpcSummary) UnsetTenant() {
+	o.Tenant.Unset()
 }
 
 // GetNetworkVirtualizationType returns the NetworkVirtualizationType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -224,36 +219,28 @@ func (o *VpcPeeringVpcSummary) UnsetNetworkVirtualizationType() {
 	o.NetworkVirtualizationType.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *VpcPeeringVpcSummary) GetStatus() VpcStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret VpcStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeeringVpcSummary) GetStatusOk() (*VpcStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *VpcPeeringVpcSummary) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given VpcStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *VpcPeeringVpcSummary) SetStatus(v VpcStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 func (o VpcPeeringVpcSummary) MarshalJSON() ([]byte, error) {
@@ -266,25 +253,56 @@ func (o VpcPeeringVpcSummary) MarshalJSON() ([]byte, error) {
 
 func (o VpcPeeringVpcSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.TenantId) {
-		toSerialize["tenantId"] = o.TenantId
-	}
-	if !IsNil(o.Tenant) {
-		toSerialize["tenant"] = o.Tenant
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
+	toSerialize["tenantId"] = o.TenantId
+	if o.Tenant.IsSet() {
+		toSerialize["tenant"] = o.Tenant.Get()
 	}
 	if o.NetworkVirtualizationType.IsSet() {
 		toSerialize["networkVirtualizationType"] = o.NetworkVirtualizationType.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["status"] = o.Status
 	return toSerialize, nil
+}
+
+func (o *VpcPeeringVpcSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"tenantId",
+		"status",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varVpcPeeringVpcSummary := _VpcPeeringVpcSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varVpcPeeringVpcSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = VpcPeeringVpcSummary(varVpcPeeringVpcSummary)
+
+	return err
 }
 
 type NullableVpcPeeringVpcSummary struct {

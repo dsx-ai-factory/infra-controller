@@ -29,15 +29,15 @@ type NVLinkDomain struct {
 	// Rack group ID, identical to id.
 	RackGroupId string `json:"rackGroupId"`
 	// NMX-C cluster UUID observed on the group's switches. Null when no valid observation is available. Conflicting observations are logged and preserve the last valid cluster without interrupting inventory sync.
-	NmxcClusterId NullableString `json:"nmxcClusterId"`
+	NmxcClusterId NullableString `json:"nmxcClusterId,omitempty"`
 	// Domain display name. Empty for newly inventory-created Domains; inventory sync preserves existing names.
 	Name string `json:"name"`
 	// Common member-rack profile ID without the qualified vendor and optional _NO_POWERSHELF suffix. Null when unavailable, unrecognized, or inconsistent across member racks.
-	Topology NullableString `json:"topology"`
+	Topology NullableString `json:"topology,omitempty"`
 	// Operability phase aggregated across member racks, not the Core lifecycle state.
 	OperationStatus string `json:"operationStatus"`
 	// Components belonging to this Domain. Null when includeComponents is false; an empty array when requested but none are known.
-	Components []RackComponent `json:"components"`
+	Components []RackComponent `json:"components,omitempty"`
 }
 
 type _NVLinkDomain NVLinkDomain
@@ -46,15 +46,12 @@ type _NVLinkDomain NVLinkDomain
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNVLinkDomain(id string, rackGroupId string, nmxcClusterId NullableString, name string, topology NullableString, operationStatus string, components []RackComponent) *NVLinkDomain {
+func NewNVLinkDomain(id string, rackGroupId string, name string, operationStatus string) *NVLinkDomain {
 	this := NVLinkDomain{}
 	this.Id = id
 	this.RackGroupId = rackGroupId
-	this.NmxcClusterId = nmxcClusterId
 	this.Name = name
-	this.Topology = topology
 	this.OperationStatus = operationStatus
-	this.Components = components
 	return &this
 }
 
@@ -114,18 +111,16 @@ func (o *NVLinkDomain) SetRackGroupId(v string) {
 	o.RackGroupId = v
 }
 
-// GetNmxcClusterId returns the NmxcClusterId field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetNmxcClusterId returns the NmxcClusterId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *NVLinkDomain) GetNmxcClusterId() string {
-	if o == nil || o.NmxcClusterId.Get() == nil {
+	if o == nil || IsNil(o.NmxcClusterId.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.NmxcClusterId.Get()
 }
 
-// GetNmxcClusterIdOk returns a tuple with the NmxcClusterId field value
+// GetNmxcClusterIdOk returns a tuple with the NmxcClusterId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *NVLinkDomain) GetNmxcClusterIdOk() (*string, bool) {
@@ -135,9 +130,28 @@ func (o *NVLinkDomain) GetNmxcClusterIdOk() (*string, bool) {
 	return o.NmxcClusterId.Get(), o.NmxcClusterId.IsSet()
 }
 
-// SetNmxcClusterId sets field value
+// HasNmxcClusterId returns a boolean if a field has been set.
+func (o *NVLinkDomain) HasNmxcClusterId() bool {
+	if o != nil && o.NmxcClusterId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetNmxcClusterId gets a reference to the given NullableString and assigns it to the NmxcClusterId field.
 func (o *NVLinkDomain) SetNmxcClusterId(v string) {
 	o.NmxcClusterId.Set(&v)
+}
+
+// SetNmxcClusterIdNil sets the value for NmxcClusterId to be an explicit nil
+func (o *NVLinkDomain) SetNmxcClusterIdNil() {
+	o.NmxcClusterId.Set(nil)
+}
+
+// UnsetNmxcClusterId ensures that no value is present for NmxcClusterId, not even an explicit nil
+func (o *NVLinkDomain) UnsetNmxcClusterId() {
+	o.NmxcClusterId.Unset()
 }
 
 // GetName returns the Name field value
@@ -164,18 +178,16 @@ func (o *NVLinkDomain) SetName(v string) {
 	o.Name = v
 }
 
-// GetTopology returns the Topology field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetTopology returns the Topology field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *NVLinkDomain) GetTopology() string {
-	if o == nil || o.Topology.Get() == nil {
+	if o == nil || IsNil(o.Topology.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Topology.Get()
 }
 
-// GetTopologyOk returns a tuple with the Topology field value
+// GetTopologyOk returns a tuple with the Topology field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *NVLinkDomain) GetTopologyOk() (*string, bool) {
@@ -185,9 +197,28 @@ func (o *NVLinkDomain) GetTopologyOk() (*string, bool) {
 	return o.Topology.Get(), o.Topology.IsSet()
 }
 
-// SetTopology sets field value
+// HasTopology returns a boolean if a field has been set.
+func (o *NVLinkDomain) HasTopology() bool {
+	if o != nil && o.Topology.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTopology gets a reference to the given NullableString and assigns it to the Topology field.
 func (o *NVLinkDomain) SetTopology(v string) {
 	o.Topology.Set(&v)
+}
+
+// SetTopologyNil sets the value for Topology to be an explicit nil
+func (o *NVLinkDomain) SetTopologyNil() {
+	o.Topology.Set(nil)
+}
+
+// UnsetTopology ensures that no value is present for Topology, not even an explicit nil
+func (o *NVLinkDomain) UnsetTopology() {
+	o.Topology.Unset()
 }
 
 // GetOperationStatus returns the OperationStatus field value
@@ -214,18 +245,16 @@ func (o *NVLinkDomain) SetOperationStatus(v string) {
 	o.OperationStatus = v
 }
 
-// GetComponents returns the Components field value
-// If the value is explicit nil, the zero value for []RackComponent will be returned
+// GetComponents returns the Components field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *NVLinkDomain) GetComponents() []RackComponent {
 	if o == nil {
 		var ret []RackComponent
 		return ret
 	}
-
 	return o.Components
 }
 
-// GetComponentsOk returns a tuple with the Components field value
+// GetComponentsOk returns a tuple with the Components field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *NVLinkDomain) GetComponentsOk() ([]RackComponent, bool) {
 	if o == nil || IsNil(o.Components) {
@@ -234,7 +263,16 @@ func (o *NVLinkDomain) GetComponentsOk() ([]RackComponent, bool) {
 	return o.Components, true
 }
 
-// SetComponents sets field value
+// HasComponents returns a boolean if a field has been set.
+func (o *NVLinkDomain) HasComponents() bool {
+	if o != nil && !IsNil(o.Components) {
+		return true
+	}
+
+	return false
+}
+
+// SetComponents gets a reference to the given []RackComponent and assigns it to the Components field.
 func (o *NVLinkDomain) SetComponents(v []RackComponent) {
 	o.Components = v
 }
@@ -251,9 +289,13 @@ func (o NVLinkDomain) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
 	toSerialize["rackGroupId"] = o.RackGroupId
-	toSerialize["nmxcClusterId"] = o.NmxcClusterId.Get()
+	if o.NmxcClusterId.IsSet() {
+		toSerialize["nmxcClusterId"] = o.NmxcClusterId.Get()
+	}
 	toSerialize["name"] = o.Name
-	toSerialize["topology"] = o.Topology.Get()
+	if o.Topology.IsSet() {
+		toSerialize["topology"] = o.Topology.Get()
+	}
 	toSerialize["operationStatus"] = o.OperationStatus
 	if o.Components != nil {
 		toSerialize["components"] = o.Components
@@ -268,11 +310,8 @@ func (o *NVLinkDomain) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"id",
 		"rackGroupId",
-		"nmxcClusterId",
 		"name",
-		"topology",
 		"operationStatus",
-		"components",
 	}
 
 	allProperties := make(map[string]interface{})

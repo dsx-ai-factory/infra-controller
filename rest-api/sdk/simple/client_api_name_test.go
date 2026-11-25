@@ -51,13 +51,13 @@ func TestClient_Authenticate(t *testing.T) {
 
 				switch r.URL.Path {
 				case "/v2/org/test-org/nico/metadata":
-					_, _ = io.WriteString(w, `{"version":"`+tt.metadataVersion+`"}`)
+					_, _ = io.WriteString(w, `{"version":"`+tt.metadataVersion+`","buildTime":"2026-01-15T12:00:00Z"}`)
 				case "/v2/org/test-org/nico/infrastructure-provider/current":
-					_, _ = io.WriteString(w, `{"id":"provider-1"}`)
+					_, _ = io.WriteString(w, `{"id":"provider-1","org":"test-org","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}`)
 				case "/v2/org/test-org/nico/tenant/current":
-					_, _ = io.WriteString(w, `{"id":"tenant-1"}`)
+					_, _ = io.WriteString(w, `{"id":"tenant-1","org":"test-org","capabilities":{},"created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}`)
 				case "/v2/org/test-org/nico/site":
-					_, _ = io.WriteString(w, `[{"id":"site-1","name":"site-1"}]`)
+					_, _ = io.WriteString(w, `[{"id":"site-1","name":"site-1","org":"test-org","infrastructureProviderId":"provider-1","isSerialConsoleEnabled":false,"isOnline":true,"status":"Registered","statusHistory":[],"capabilities":{"nativeNetworking":true,"networkSecurityGroup":true,"nvLinkPartition":false,"flow":false,"imageBasedOperatingSystem":false,"vpcSlaac":false,"dpsPowerManagement":false},"created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}]`)
 				case "/v2/org/test-org/nico/vpc":
 					_, _ = io.WriteString(w, `[]`)
 				default:

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the IpBlockUsageStats type satisfies the MappedNullable interface at compile time
@@ -23,23 +25,30 @@ var _ MappedNullable = &IpBlockUsageStats{}
 // IpBlockUsageStats Usage statistics for an IP Block, VPC Prefix or Subnet
 type IpBlockUsageStats struct {
 	// Total number of IP addresses in the block (acquired and unused), capped at 2,147,483,647. An IP Block allocated to one child prefix of the same size reports zero.
-	AvailableIPs *uint64 `json:"availableIPs,omitempty"`
+	AvailableIPs uint64 `json:"availableIPs"`
 	// Number of individual IP addresses acquired from the block
-	AcquiredIPs *uint64 `json:"acquiredIPs,omitempty"`
+	AcquiredIPs uint64 `json:"acquiredIPs"`
 	// Example prefixes available to acquire
-	AvailablePrefixes []string `json:"availablePrefixes,omitempty"`
+	AvailablePrefixes []string `json:"availablePrefixes"`
 	// Number of complete `/30` IPv4 prefixes or `/126` IPv6 prefixes remaining after acquired child prefixes are excluded. Both prefix sizes contain four addresses. The count is capped at 2,147,483,647. The `acquiredIPs` count is not subtracted.
-	AvailableSmallestPrefixes *uint64 `json:"availableSmallestPrefixes,omitempty"`
+	AvailableSmallestPrefixes uint64 `json:"availableSmallestPrefixes"`
 	// Total number of prefixes (of any size) acquired from this block
-	AcquiredPrefixes *uint64 `json:"acquiredPrefixes,omitempty"`
+	AcquiredPrefixes uint64 `json:"acquiredPrefixes"`
 }
+
+type _IpBlockUsageStats IpBlockUsageStats
 
 // NewIpBlockUsageStats instantiates a new IpBlockUsageStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewIpBlockUsageStats() *IpBlockUsageStats {
+func NewIpBlockUsageStats(availableIPs uint64, acquiredIPs uint64, availablePrefixes []string, availableSmallestPrefixes uint64, acquiredPrefixes uint64) *IpBlockUsageStats {
 	this := IpBlockUsageStats{}
+	this.AvailableIPs = availableIPs
+	this.AcquiredIPs = acquiredIPs
+	this.AvailablePrefixes = availablePrefixes
+	this.AvailableSmallestPrefixes = availableSmallestPrefixes
+	this.AcquiredPrefixes = acquiredPrefixes
 	return &this
 }
 
@@ -51,164 +60,124 @@ func NewIpBlockUsageStatsWithDefaults() *IpBlockUsageStats {
 	return &this
 }
 
-// GetAvailableIPs returns the AvailableIPs field value if set, zero value otherwise.
+// GetAvailableIPs returns the AvailableIPs field value
 func (o *IpBlockUsageStats) GetAvailableIPs() uint64 {
-	if o == nil || IsNil(o.AvailableIPs) {
+	if o == nil {
 		var ret uint64
 		return ret
 	}
-	return *o.AvailableIPs
+
+	return o.AvailableIPs
 }
 
-// GetAvailableIPsOk returns a tuple with the AvailableIPs field value if set, nil otherwise
+// GetAvailableIPsOk returns a tuple with the AvailableIPs field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockUsageStats) GetAvailableIPsOk() (*uint64, bool) {
-	if o == nil || IsNil(o.AvailableIPs) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AvailableIPs, true
+	return &o.AvailableIPs, true
 }
 
-// HasAvailableIPs returns a boolean if a field has been set.
-func (o *IpBlockUsageStats) HasAvailableIPs() bool {
-	if o != nil && !IsNil(o.AvailableIPs) {
-		return true
-	}
-
-	return false
-}
-
-// SetAvailableIPs gets a reference to the given uint64 and assigns it to the AvailableIPs field.
+// SetAvailableIPs sets field value
 func (o *IpBlockUsageStats) SetAvailableIPs(v uint64) {
-	o.AvailableIPs = &v
+	o.AvailableIPs = v
 }
 
-// GetAcquiredIPs returns the AcquiredIPs field value if set, zero value otherwise.
+// GetAcquiredIPs returns the AcquiredIPs field value
 func (o *IpBlockUsageStats) GetAcquiredIPs() uint64 {
-	if o == nil || IsNil(o.AcquiredIPs) {
+	if o == nil {
 		var ret uint64
 		return ret
 	}
-	return *o.AcquiredIPs
+
+	return o.AcquiredIPs
 }
 
-// GetAcquiredIPsOk returns a tuple with the AcquiredIPs field value if set, nil otherwise
+// GetAcquiredIPsOk returns a tuple with the AcquiredIPs field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockUsageStats) GetAcquiredIPsOk() (*uint64, bool) {
-	if o == nil || IsNil(o.AcquiredIPs) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AcquiredIPs, true
+	return &o.AcquiredIPs, true
 }
 
-// HasAcquiredIPs returns a boolean if a field has been set.
-func (o *IpBlockUsageStats) HasAcquiredIPs() bool {
-	if o != nil && !IsNil(o.AcquiredIPs) {
-		return true
-	}
-
-	return false
-}
-
-// SetAcquiredIPs gets a reference to the given uint64 and assigns it to the AcquiredIPs field.
+// SetAcquiredIPs sets field value
 func (o *IpBlockUsageStats) SetAcquiredIPs(v uint64) {
-	o.AcquiredIPs = &v
+	o.AcquiredIPs = v
 }
 
-// GetAvailablePrefixes returns the AvailablePrefixes field value if set, zero value otherwise.
+// GetAvailablePrefixes returns the AvailablePrefixes field value
 func (o *IpBlockUsageStats) GetAvailablePrefixes() []string {
-	if o == nil || IsNil(o.AvailablePrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.AvailablePrefixes
 }
 
-// GetAvailablePrefixesOk returns a tuple with the AvailablePrefixes field value if set, nil otherwise
+// GetAvailablePrefixesOk returns a tuple with the AvailablePrefixes field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockUsageStats) GetAvailablePrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.AvailablePrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.AvailablePrefixes, true
 }
 
-// HasAvailablePrefixes returns a boolean if a field has been set.
-func (o *IpBlockUsageStats) HasAvailablePrefixes() bool {
-	if o != nil && !IsNil(o.AvailablePrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetAvailablePrefixes gets a reference to the given []string and assigns it to the AvailablePrefixes field.
+// SetAvailablePrefixes sets field value
 func (o *IpBlockUsageStats) SetAvailablePrefixes(v []string) {
 	o.AvailablePrefixes = v
 }
 
-// GetAvailableSmallestPrefixes returns the AvailableSmallestPrefixes field value if set, zero value otherwise.
+// GetAvailableSmallestPrefixes returns the AvailableSmallestPrefixes field value
 func (o *IpBlockUsageStats) GetAvailableSmallestPrefixes() uint64 {
-	if o == nil || IsNil(o.AvailableSmallestPrefixes) {
+	if o == nil {
 		var ret uint64
 		return ret
 	}
-	return *o.AvailableSmallestPrefixes
+
+	return o.AvailableSmallestPrefixes
 }
 
-// GetAvailableSmallestPrefixesOk returns a tuple with the AvailableSmallestPrefixes field value if set, nil otherwise
+// GetAvailableSmallestPrefixesOk returns a tuple with the AvailableSmallestPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockUsageStats) GetAvailableSmallestPrefixesOk() (*uint64, bool) {
-	if o == nil || IsNil(o.AvailableSmallestPrefixes) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AvailableSmallestPrefixes, true
+	return &o.AvailableSmallestPrefixes, true
 }
 
-// HasAvailableSmallestPrefixes returns a boolean if a field has been set.
-func (o *IpBlockUsageStats) HasAvailableSmallestPrefixes() bool {
-	if o != nil && !IsNil(o.AvailableSmallestPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetAvailableSmallestPrefixes gets a reference to the given uint64 and assigns it to the AvailableSmallestPrefixes field.
+// SetAvailableSmallestPrefixes sets field value
 func (o *IpBlockUsageStats) SetAvailableSmallestPrefixes(v uint64) {
-	o.AvailableSmallestPrefixes = &v
+	o.AvailableSmallestPrefixes = v
 }
 
-// GetAcquiredPrefixes returns the AcquiredPrefixes field value if set, zero value otherwise.
+// GetAcquiredPrefixes returns the AcquiredPrefixes field value
 func (o *IpBlockUsageStats) GetAcquiredPrefixes() uint64 {
-	if o == nil || IsNil(o.AcquiredPrefixes) {
+	if o == nil {
 		var ret uint64
 		return ret
 	}
-	return *o.AcquiredPrefixes
+
+	return o.AcquiredPrefixes
 }
 
-// GetAcquiredPrefixesOk returns a tuple with the AcquiredPrefixes field value if set, nil otherwise
+// GetAcquiredPrefixesOk returns a tuple with the AcquiredPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockUsageStats) GetAcquiredPrefixesOk() (*uint64, bool) {
-	if o == nil || IsNil(o.AcquiredPrefixes) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AcquiredPrefixes, true
+	return &o.AcquiredPrefixes, true
 }
 
-// HasAcquiredPrefixes returns a boolean if a field has been set.
-func (o *IpBlockUsageStats) HasAcquiredPrefixes() bool {
-	if o != nil && !IsNil(o.AcquiredPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetAcquiredPrefixes gets a reference to the given uint64 and assigns it to the AcquiredPrefixes field.
+// SetAcquiredPrefixes sets field value
 func (o *IpBlockUsageStats) SetAcquiredPrefixes(v uint64) {
-	o.AcquiredPrefixes = &v
+	o.AcquiredPrefixes = v
 }
 
 func (o IpBlockUsageStats) MarshalJSON() ([]byte, error) {
@@ -221,22 +190,52 @@ func (o IpBlockUsageStats) MarshalJSON() ([]byte, error) {
 
 func (o IpBlockUsageStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.AvailableIPs) {
-		toSerialize["availableIPs"] = o.AvailableIPs
-	}
-	if !IsNil(o.AcquiredIPs) {
-		toSerialize["acquiredIPs"] = o.AcquiredIPs
-	}
-	if !IsNil(o.AvailablePrefixes) {
-		toSerialize["availablePrefixes"] = o.AvailablePrefixes
-	}
-	if !IsNil(o.AvailableSmallestPrefixes) {
-		toSerialize["availableSmallestPrefixes"] = o.AvailableSmallestPrefixes
-	}
-	if !IsNil(o.AcquiredPrefixes) {
-		toSerialize["acquiredPrefixes"] = o.AcquiredPrefixes
-	}
+	toSerialize["availableIPs"] = o.AvailableIPs
+	toSerialize["acquiredIPs"] = o.AcquiredIPs
+	toSerialize["availablePrefixes"] = o.AvailablePrefixes
+	toSerialize["availableSmallestPrefixes"] = o.AvailableSmallestPrefixes
+	toSerialize["acquiredPrefixes"] = o.AcquiredPrefixes
 	return toSerialize, nil
+}
+
+func (o *IpBlockUsageStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"availableIPs",
+		"acquiredIPs",
+		"availablePrefixes",
+		"availableSmallestPrefixes",
+		"acquiredPrefixes",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varIpBlockUsageStats := _IpBlockUsageStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varIpBlockUsageStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = IpBlockUsageStats(varIpBlockUsageStats)
+
+	return err
 }
 
 type NullableIpBlockUsageStats struct {

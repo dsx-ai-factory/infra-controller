@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,29 +26,36 @@ var _ MappedNullable = &Sku{}
 // Sku A SKU (Stock Keeping Unit) represents a unique hardware configuration discovered at a site. SKUs are automatically derived from machine hardware characteristics and used to group similar machines.
 type Sku struct {
 	// Unique identifier for the SKU
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Site this SKU belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// Human-readable SKU description
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Core SKU schema version when available
-	SchemaVersion *uint32 `json:"schemaVersion,omitempty"`
+	SchemaVersion uint32 `json:"schemaVersion"`
 	// Optional device type identifier (e.g. \"gpu\", \"cpu\", \"storage\")
 	DeviceType NullableString `json:"deviceType,omitempty"`
 	// List of machine IDs associated with this SKU
-	AssociatedMachineIds []string `json:"associatedMachineIds,omitempty"`
+	AssociatedMachineIds []string `json:"associatedMachineIds"`
 	// Hardware components of this SKU
-	Components *SkuComponents `json:"components,omitempty"`
+	Components NullableSkuComponents `json:"components,omitempty"`
 	// ISO 8601 datetime when the SKU was created, using the Site-reported timestamp when available
-	Created *time.Time `json:"created,omitempty"`
+	Created NullableTime `json:"created,omitempty"`
 }
+
+type _Sku Sku
 
 // NewSku instantiates a new Sku object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSku() *Sku {
+func NewSku(id string, siteId string, description string, schemaVersion uint32, associatedMachineIds []string) *Sku {
 	this := Sku{}
+	this.Id = id
+	this.SiteId = siteId
+	this.Description = description
+	this.SchemaVersion = schemaVersion
+	this.AssociatedMachineIds = associatedMachineIds
 	return &this
 }
 
@@ -58,132 +67,100 @@ func NewSkuWithDefaults() *Sku {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Sku) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Sku) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Sku) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Sku) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *Sku) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *Sku) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *Sku) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *Sku) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *Sku) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *Sku) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *Sku) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *Sku) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
-// GetSchemaVersion returns the SchemaVersion field value if set, zero value otherwise.
+// GetSchemaVersion returns the SchemaVersion field value
 func (o *Sku) GetSchemaVersion() uint32 {
-	if o == nil || IsNil(o.SchemaVersion) {
+	if o == nil {
 		var ret uint32
 		return ret
 	}
-	return *o.SchemaVersion
+
+	return o.SchemaVersion
 }
 
-// GetSchemaVersionOk returns a tuple with the SchemaVersion field value if set, nil otherwise
+// GetSchemaVersionOk returns a tuple with the SchemaVersion field value
 // and a boolean to check if the value has been set.
 func (o *Sku) GetSchemaVersionOk() (*uint32, bool) {
-	if o == nil || IsNil(o.SchemaVersion) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SchemaVersion, true
+	return &o.SchemaVersion, true
 }
 
-// HasSchemaVersion returns a boolean if a field has been set.
-func (o *Sku) HasSchemaVersion() bool {
-	if o != nil && !IsNil(o.SchemaVersion) {
-		return true
-	}
-
-	return false
-}
-
-// SetSchemaVersion gets a reference to the given uint32 and assigns it to the SchemaVersion field.
+// SetSchemaVersion sets field value
 func (o *Sku) SetSchemaVersion(v uint32) {
-	o.SchemaVersion = &v
+	o.SchemaVersion = v
 }
 
 // GetDeviceType returns the DeviceType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -229,100 +206,114 @@ func (o *Sku) UnsetDeviceType() {
 	o.DeviceType.Unset()
 }
 
-// GetAssociatedMachineIds returns the AssociatedMachineIds field value if set, zero value otherwise.
+// GetAssociatedMachineIds returns the AssociatedMachineIds field value
 func (o *Sku) GetAssociatedMachineIds() []string {
-	if o == nil || IsNil(o.AssociatedMachineIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.AssociatedMachineIds
 }
 
-// GetAssociatedMachineIdsOk returns a tuple with the AssociatedMachineIds field value if set, nil otherwise
+// GetAssociatedMachineIdsOk returns a tuple with the AssociatedMachineIds field value
 // and a boolean to check if the value has been set.
 func (o *Sku) GetAssociatedMachineIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.AssociatedMachineIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.AssociatedMachineIds, true
 }
 
-// HasAssociatedMachineIds returns a boolean if a field has been set.
-func (o *Sku) HasAssociatedMachineIds() bool {
-	if o != nil && !IsNil(o.AssociatedMachineIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetAssociatedMachineIds gets a reference to the given []string and assigns it to the AssociatedMachineIds field.
+// SetAssociatedMachineIds sets field value
 func (o *Sku) SetAssociatedMachineIds(v []string) {
 	o.AssociatedMachineIds = v
 }
 
-// GetComponents returns the Components field value if set, zero value otherwise.
+// GetComponents returns the Components field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Sku) GetComponents() SkuComponents {
-	if o == nil || IsNil(o.Components) {
+	if o == nil || IsNil(o.Components.Get()) {
 		var ret SkuComponents
 		return ret
 	}
-	return *o.Components
+	return *o.Components.Get()
 }
 
 // GetComponentsOk returns a tuple with the Components field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Sku) GetComponentsOk() (*SkuComponents, bool) {
-	if o == nil || IsNil(o.Components) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Components, true
+	return o.Components.Get(), o.Components.IsSet()
 }
 
 // HasComponents returns a boolean if a field has been set.
 func (o *Sku) HasComponents() bool {
-	if o != nil && !IsNil(o.Components) {
+	if o != nil && o.Components.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetComponents gets a reference to the given SkuComponents and assigns it to the Components field.
+// SetComponents gets a reference to the given NullableSkuComponents and assigns it to the Components field.
 func (o *Sku) SetComponents(v SkuComponents) {
-	o.Components = &v
+	o.Components.Set(&v)
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// SetComponentsNil sets the value for Components to be an explicit nil
+func (o *Sku) SetComponentsNil() {
+	o.Components.Set(nil)
+}
+
+// UnsetComponents ensures that no value is present for Components, not even an explicit nil
+func (o *Sku) UnsetComponents() {
+	o.Components.Unset()
+}
+
+// GetCreated returns the Created field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Sku) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil || IsNil(o.Created.Get()) {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+	return *o.Created.Get()
 }
 
 // GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Sku) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return o.Created.Get(), o.Created.IsSet()
 }
 
 // HasCreated returns a boolean if a field has been set.
 func (o *Sku) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
+	if o != nil && o.Created.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated gets a reference to the given NullableTime and assigns it to the Created field.
 func (o *Sku) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created.Set(&v)
+}
+
+// SetCreatedNil sets the value for Created to be an explicit nil
+func (o *Sku) SetCreatedNil() {
+	o.Created.Set(nil)
+}
+
+// UnsetCreated ensures that no value is present for Created, not even an explicit nil
+func (o *Sku) UnsetCreated() {
+	o.Created.Unset()
 }
 
 func (o Sku) MarshalJSON() ([]byte, error) {
@@ -335,31 +326,61 @@ func (o Sku) MarshalJSON() ([]byte, error) {
 
 func (o Sku) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
-	if !IsNil(o.SchemaVersion) {
-		toSerialize["schemaVersion"] = o.SchemaVersion
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["description"] = o.Description
+	toSerialize["schemaVersion"] = o.SchemaVersion
 	if o.DeviceType.IsSet() {
 		toSerialize["deviceType"] = o.DeviceType.Get()
 	}
-	if !IsNil(o.AssociatedMachineIds) {
-		toSerialize["associatedMachineIds"] = o.AssociatedMachineIds
+	toSerialize["associatedMachineIds"] = o.AssociatedMachineIds
+	if o.Components.IsSet() {
+		toSerialize["components"] = o.Components.Get()
 	}
-	if !IsNil(o.Components) {
-		toSerialize["components"] = o.Components
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
+	if o.Created.IsSet() {
+		toSerialize["created"] = o.Created.Get()
 	}
 	return toSerialize, nil
+}
+
+func (o *Sku) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"siteId",
+		"description",
+		"schemaVersion",
+		"associatedMachineIds",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSku := _Sku{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSku)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Sku(varSku)
+
+	return err
 }
 
 type NullableSku struct {

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineGPUStats type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &MachineGPUStats{}
 // MachineGPUStats GPU summary stats for a single GPU type across machines at a site
 type MachineGPUStats struct {
 	// GPU name from the MachineCapability record
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Total number of GPUs (summation of all Machine GPU capability counts)
-	Gpus *int32 `json:"gpus,omitempty"`
+	Gpus int32 `json:"gpus"`
 	// Number of machines that have this GPU capability
-	Machines *int32 `json:"machines,omitempty"`
+	Machines int32 `json:"machines"`
 }
+
+type _MachineGPUStats MachineGPUStats
 
 // NewMachineGPUStats instantiates a new MachineGPUStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineGPUStats() *MachineGPUStats {
+func NewMachineGPUStats(name string, gpus int32, machines int32) *MachineGPUStats {
 	this := MachineGPUStats{}
+	this.Name = name
+	this.Gpus = gpus
+	this.Machines = machines
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewMachineGPUStatsWithDefaults() *MachineGPUStats {
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *MachineGPUStats) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *MachineGPUStats) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *MachineGPUStats) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *MachineGPUStats) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetGpus returns the Gpus field value if set, zero value otherwise.
+// GetGpus returns the Gpus field value
 func (o *MachineGPUStats) GetGpus() int32 {
-	if o == nil || IsNil(o.Gpus) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Gpus
+
+	return o.Gpus
 }
 
-// GetGpusOk returns a tuple with the Gpus field value if set, nil otherwise
+// GetGpusOk returns a tuple with the Gpus field value
 // and a boolean to check if the value has been set.
 func (o *MachineGPUStats) GetGpusOk() (*int32, bool) {
-	if o == nil || IsNil(o.Gpus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Gpus, true
+	return &o.Gpus, true
 }
 
-// HasGpus returns a boolean if a field has been set.
-func (o *MachineGPUStats) HasGpus() bool {
-	if o != nil && !IsNil(o.Gpus) {
-		return true
-	}
-
-	return false
-}
-
-// SetGpus gets a reference to the given int32 and assigns it to the Gpus field.
+// SetGpus sets field value
 func (o *MachineGPUStats) SetGpus(v int32) {
-	o.Gpus = &v
+	o.Gpus = v
 }
 
-// GetMachines returns the Machines field value if set, zero value otherwise.
+// GetMachines returns the Machines field value
 func (o *MachineGPUStats) GetMachines() int32 {
-	if o == nil || IsNil(o.Machines) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Machines
+
+	return o.Machines
 }
 
-// GetMachinesOk returns a tuple with the Machines field value if set, nil otherwise
+// GetMachinesOk returns a tuple with the Machines field value
 // and a boolean to check if the value has been set.
 func (o *MachineGPUStats) GetMachinesOk() (*int32, bool) {
-	if o == nil || IsNil(o.Machines) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Machines, true
+	return &o.Machines, true
 }
 
-// HasMachines returns a boolean if a field has been set.
-func (o *MachineGPUStats) HasMachines() bool {
-	if o != nil && !IsNil(o.Machines) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachines gets a reference to the given int32 and assigns it to the Machines field.
+// SetMachines sets field value
 func (o *MachineGPUStats) SetMachines(v int32) {
-	o.Machines = &v
+	o.Machines = v
 }
 
 func (o MachineGPUStats) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o MachineGPUStats) MarshalJSON() ([]byte, error) {
 
 func (o MachineGPUStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.Gpus) {
-		toSerialize["gpus"] = o.Gpus
-	}
-	if !IsNil(o.Machines) {
-		toSerialize["machines"] = o.Machines
-	}
+	toSerialize["name"] = o.Name
+	toSerialize["gpus"] = o.Gpus
+	toSerialize["machines"] = o.Machines
 	return toSerialize, nil
+}
+
+func (o *MachineGPUStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"name",
+		"gpus",
+		"machines",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineGPUStats := _MachineGPUStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineGPUStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineGPUStats(varMachineGPUStats)
+
+	return err
 }
 
 type NullableMachineGPUStats struct {

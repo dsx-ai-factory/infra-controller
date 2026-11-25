@@ -307,6 +307,7 @@ func TestNewAPIRack(t *testing.T) {
 					assert.Equal(t, wantComp.OperationStatus, gotComp.OperationStatus)
 					assert.Equal(t, wantComp.LeakStatus, gotComp.LeakStatus)
 					assert.Equal(t, wantComp.LeakHandlingStatus, gotComp.LeakHandlingStatus)
+					assert.NotNil(t, gotComp.BMCs)
 				}
 			} else {
 				assert.Nil(t, got.Components)

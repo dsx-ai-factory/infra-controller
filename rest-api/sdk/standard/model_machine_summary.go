@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineSummary type satisfies the MappedNullable interface at compile time
@@ -23,9 +25,9 @@ var _ MappedNullable = &MachineSummary{}
 // MachineSummary Describes a subset of core attributes for a Machine
 type MachineSummary struct {
 	// Unique ID of Machine
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Machine at Site, now same as the primary ID
-	ControllerMachineId *string `json:"controllerMachineId,omitempty"`
+	ControllerMachineId string `json:"controllerMachineId"`
 	// Denotes architecture (x86 vs ARM) of the Machine
 	ControllerMachineType NullableString `json:"controllerMachineType,omitempty"`
 	// SKU derived device type of the machine, e.g. cpu, gpu, cache, storage, etc.
@@ -37,15 +39,20 @@ type MachineSummary struct {
 	// If the Machine is in maintenance mode, this message will typically describe the reason and how long it is expected to be in maintenance
 	MaintenanceMessage NullableString `json:"maintenanceMessage,omitempty"`
 	// Status represents the status of the machine
-	Status *MachineStatus `json:"status,omitempty"`
+	Status MachineStatus `json:"status"`
 }
+
+type _MachineSummary MachineSummary
 
 // NewMachineSummary instantiates a new MachineSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineSummary() *MachineSummary {
+func NewMachineSummary(id string, controllerMachineId string, status MachineStatus) *MachineSummary {
 	this := MachineSummary{}
+	this.Id = id
+	this.ControllerMachineId = controllerMachineId
+	this.Status = status
 	return &this
 }
 
@@ -57,68 +64,52 @@ func NewMachineSummaryWithDefaults() *MachineSummary {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *MachineSummary) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *MachineSummary) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *MachineSummary) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *MachineSummary) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetControllerMachineId returns the ControllerMachineId field value if set, zero value otherwise.
+// GetControllerMachineId returns the ControllerMachineId field value
 func (o *MachineSummary) GetControllerMachineId() string {
-	if o == nil || IsNil(o.ControllerMachineId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ControllerMachineId
+
+	return o.ControllerMachineId
 }
 
-// GetControllerMachineIdOk returns a tuple with the ControllerMachineId field value if set, nil otherwise
+// GetControllerMachineIdOk returns a tuple with the ControllerMachineId field value
 // and a boolean to check if the value has been set.
 func (o *MachineSummary) GetControllerMachineIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ControllerMachineId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ControllerMachineId, true
+	return &o.ControllerMachineId, true
 }
 
-// HasControllerMachineId returns a boolean if a field has been set.
-func (o *MachineSummary) HasControllerMachineId() bool {
-	if o != nil && !IsNil(o.ControllerMachineId) {
-		return true
-	}
-
-	return false
-}
-
-// SetControllerMachineId gets a reference to the given string and assigns it to the ControllerMachineId field.
+// SetControllerMachineId sets field value
 func (o *MachineSummary) SetControllerMachineId(v string) {
-	o.ControllerMachineId = &v
+	o.ControllerMachineId = v
 }
 
 // GetControllerMachineType returns the ControllerMachineType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -336,36 +327,28 @@ func (o *MachineSummary) UnsetMaintenanceMessage() {
 	o.MaintenanceMessage.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *MachineSummary) GetStatus() MachineStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret MachineStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *MachineSummary) GetStatusOk() (*MachineStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *MachineSummary) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given MachineStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *MachineSummary) SetStatus(v MachineStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 func (o MachineSummary) MarshalJSON() ([]byte, error) {
@@ -378,12 +361,8 @@ func (o MachineSummary) MarshalJSON() ([]byte, error) {
 
 func (o MachineSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.ControllerMachineId) {
-		toSerialize["controllerMachineId"] = o.ControllerMachineId
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["controllerMachineId"] = o.ControllerMachineId
 	if o.ControllerMachineType.IsSet() {
 		toSerialize["controllerMachineType"] = o.ControllerMachineType.Get()
 	}
@@ -399,10 +378,46 @@ func (o MachineSummary) ToMap() (map[string]interface{}, error) {
 	if o.MaintenanceMessage.IsSet() {
 		toSerialize["maintenanceMessage"] = o.MaintenanceMessage.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["status"] = o.Status
 	return toSerialize, nil
+}
+
+func (o *MachineSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"controllerMachineId",
+		"status",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineSummary := _MachineSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineSummary(varMachineSummary)
+
+	return err
 }
 
 type NullableMachineSummary struct {

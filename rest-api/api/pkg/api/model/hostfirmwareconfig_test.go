@@ -485,6 +485,25 @@ func TestAPIHostFirmwareConfig_FromProto(t *testing.T) {
 				}, resp.Ordering)
 			},
 		},
+		{
+			name: "empty firmware and artifact lists initialize to empty slices",
+			proto: &corev1.HostFirmwareConfigResponse{
+				Components: []*corev1.HostFirmwareComponentConfigResponse{
+					{Type: corev1.HostFirmwareComponentType_HOST_FIRMWARE_COMPONENT_TYPE_UEFI},
+					{
+						Type:     bmc,
+						Firmware: []*corev1.HostFirmwareVersionConfig{{Version: "1.0"}},
+					},
+				},
+			},
+			check: func(t *testing.T, resp *APIHostFirmwareConfig) {
+				assert.Equal(t, []APIHostFirmwareComponentRef{}, resp.Ordering)
+				require.Len(t, resp.Components, 2)
+				assert.Equal(t, []APIHostFirmwareVersionConfig{}, resp.Components[0].Firmware)
+				require.Len(t, resp.Components[1].Firmware, 1)
+				assert.Equal(t, []APIHostFirmwareArtifact{}, resp.Components[1].Firmware[0].Artifacts)
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

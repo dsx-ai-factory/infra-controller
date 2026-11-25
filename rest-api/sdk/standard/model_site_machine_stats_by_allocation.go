@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the SiteMachineStatsByAllocation type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &SiteMachineStatsByAllocation{}
 // SiteMachineStatsByAllocation Machine stats for a Site by allocation
 type SiteMachineStatsByAllocation struct {
 	// Number of allocated Machines currently in use
-	AllocatedInUse *int32 `json:"allocatedInUse,omitempty"`
+	AllocatedInUse int32 `json:"allocatedInUse"`
 	// Number of allocated Machines not currently in use
-	AllocatedNotInUse *int32 `json:"allocatedNotInUse,omitempty"`
+	AllocatedNotInUse int32 `json:"allocatedNotInUse"`
 	// Number of Machines not currently allocated
-	Unallocated *int32 `json:"unallocated,omitempty"`
+	Unallocated int32 `json:"unallocated"`
 }
+
+type _SiteMachineStatsByAllocation SiteMachineStatsByAllocation
 
 // NewSiteMachineStatsByAllocation instantiates a new SiteMachineStatsByAllocation object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSiteMachineStatsByAllocation() *SiteMachineStatsByAllocation {
+func NewSiteMachineStatsByAllocation(allocatedInUse int32, allocatedNotInUse int32, unallocated int32) *SiteMachineStatsByAllocation {
 	this := SiteMachineStatsByAllocation{}
+	this.AllocatedInUse = allocatedInUse
+	this.AllocatedNotInUse = allocatedNotInUse
+	this.Unallocated = unallocated
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewSiteMachineStatsByAllocationWithDefaults() *SiteMachineStatsByAllocation
 	return &this
 }
 
-// GetAllocatedInUse returns the AllocatedInUse field value if set, zero value otherwise.
+// GetAllocatedInUse returns the AllocatedInUse field value
 func (o *SiteMachineStatsByAllocation) GetAllocatedInUse() int32 {
-	if o == nil || IsNil(o.AllocatedInUse) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.AllocatedInUse
+
+	return o.AllocatedInUse
 }
 
-// GetAllocatedInUseOk returns a tuple with the AllocatedInUse field value if set, nil otherwise
+// GetAllocatedInUseOk returns a tuple with the AllocatedInUse field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStatsByAllocation) GetAllocatedInUseOk() (*int32, bool) {
-	if o == nil || IsNil(o.AllocatedInUse) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AllocatedInUse, true
+	return &o.AllocatedInUse, true
 }
 
-// HasAllocatedInUse returns a boolean if a field has been set.
-func (o *SiteMachineStatsByAllocation) HasAllocatedInUse() bool {
-	if o != nil && !IsNil(o.AllocatedInUse) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllocatedInUse gets a reference to the given int32 and assigns it to the AllocatedInUse field.
+// SetAllocatedInUse sets field value
 func (o *SiteMachineStatsByAllocation) SetAllocatedInUse(v int32) {
-	o.AllocatedInUse = &v
+	o.AllocatedInUse = v
 }
 
-// GetAllocatedNotInUse returns the AllocatedNotInUse field value if set, zero value otherwise.
+// GetAllocatedNotInUse returns the AllocatedNotInUse field value
 func (o *SiteMachineStatsByAllocation) GetAllocatedNotInUse() int32 {
-	if o == nil || IsNil(o.AllocatedNotInUse) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.AllocatedNotInUse
+
+	return o.AllocatedNotInUse
 }
 
-// GetAllocatedNotInUseOk returns a tuple with the AllocatedNotInUse field value if set, nil otherwise
+// GetAllocatedNotInUseOk returns a tuple with the AllocatedNotInUse field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStatsByAllocation) GetAllocatedNotInUseOk() (*int32, bool) {
-	if o == nil || IsNil(o.AllocatedNotInUse) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AllocatedNotInUse, true
+	return &o.AllocatedNotInUse, true
 }
 
-// HasAllocatedNotInUse returns a boolean if a field has been set.
-func (o *SiteMachineStatsByAllocation) HasAllocatedNotInUse() bool {
-	if o != nil && !IsNil(o.AllocatedNotInUse) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllocatedNotInUse gets a reference to the given int32 and assigns it to the AllocatedNotInUse field.
+// SetAllocatedNotInUse sets field value
 func (o *SiteMachineStatsByAllocation) SetAllocatedNotInUse(v int32) {
-	o.AllocatedNotInUse = &v
+	o.AllocatedNotInUse = v
 }
 
-// GetUnallocated returns the Unallocated field value if set, zero value otherwise.
+// GetUnallocated returns the Unallocated field value
 func (o *SiteMachineStatsByAllocation) GetUnallocated() int32 {
-	if o == nil || IsNil(o.Unallocated) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Unallocated
+
+	return o.Unallocated
 }
 
-// GetUnallocatedOk returns a tuple with the Unallocated field value if set, nil otherwise
+// GetUnallocatedOk returns a tuple with the Unallocated field value
 // and a boolean to check if the value has been set.
 func (o *SiteMachineStatsByAllocation) GetUnallocatedOk() (*int32, bool) {
-	if o == nil || IsNil(o.Unallocated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Unallocated, true
+	return &o.Unallocated, true
 }
 
-// HasUnallocated returns a boolean if a field has been set.
-func (o *SiteMachineStatsByAllocation) HasUnallocated() bool {
-	if o != nil && !IsNil(o.Unallocated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnallocated gets a reference to the given int32 and assigns it to the Unallocated field.
+// SetUnallocated sets field value
 func (o *SiteMachineStatsByAllocation) SetUnallocated(v int32) {
-	o.Unallocated = &v
+	o.Unallocated = v
 }
 
 func (o SiteMachineStatsByAllocation) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o SiteMachineStatsByAllocation) MarshalJSON() ([]byte, error) {
 
 func (o SiteMachineStatsByAllocation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.AllocatedInUse) {
-		toSerialize["allocatedInUse"] = o.AllocatedInUse
-	}
-	if !IsNil(o.AllocatedNotInUse) {
-		toSerialize["allocatedNotInUse"] = o.AllocatedNotInUse
-	}
-	if !IsNil(o.Unallocated) {
-		toSerialize["unallocated"] = o.Unallocated
-	}
+	toSerialize["allocatedInUse"] = o.AllocatedInUse
+	toSerialize["allocatedNotInUse"] = o.AllocatedNotInUse
+	toSerialize["unallocated"] = o.Unallocated
 	return toSerialize, nil
+}
+
+func (o *SiteMachineStatsByAllocation) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"allocatedInUse",
+		"allocatedNotInUse",
+		"unallocated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSiteMachineStatsByAllocation := _SiteMachineStatsByAllocation{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSiteMachineStatsByAllocation)
+
+	if err != nil {
+		return err
+	}
+
+	*o = SiteMachineStatsByAllocation(varSiteMachineStatsByAllocation)
+
+	return err
 }
 
 type NullableSiteMachineStatsByAllocation struct {

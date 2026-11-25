@@ -28,13 +28,13 @@ type MachineHealthReportEntry struct {
 	// Health report source.
 	Source string `json:"source"`
 	// Person or system that triggered this health report.
-	TriggeredBy *string `json:"triggeredBy,omitempty"`
+	TriggeredBy NullableString `json:"triggeredBy,omitempty"`
 	// Date/time when the health report was observed.
-	ObservedAt *time.Time `json:"observedAt,omitempty"`
+	ObservedAt NullableTime `json:"observedAt,omitempty"`
 	// Results from successful health probes for the Machine.
-	Successes []MachineHealthProbeSuccess `json:"successes,omitempty"`
+	Successes []MachineHealthProbeSuccess `json:"successes"`
 	// Results from failed health probes for the Machine.
-	Alerts []MachineHealthProbeAlert `json:"alerts,omitempty"`
+	Alerts []MachineHealthProbeAlert `json:"alerts"`
 	// How this health report was updated
 	Mode string `json:"mode"`
 }
@@ -45,9 +45,11 @@ type _MachineHealthReportEntry MachineHealthReportEntry
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineHealthReportEntry(source string, mode string) *MachineHealthReportEntry {
+func NewMachineHealthReportEntry(source string, successes []MachineHealthProbeSuccess, alerts []MachineHealthProbeAlert, mode string) *MachineHealthReportEntry {
 	this := MachineHealthReportEntry{}
 	this.Source = source
+	this.Successes = successes
+	this.Alerts = alerts
 	this.Mode = mode
 	return &this
 }
@@ -84,130 +86,136 @@ func (o *MachineHealthReportEntry) SetSource(v string) {
 	o.Source = v
 }
 
-// GetTriggeredBy returns the TriggeredBy field value if set, zero value otherwise.
+// GetTriggeredBy returns the TriggeredBy field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineHealthReportEntry) GetTriggeredBy() string {
-	if o == nil || IsNil(o.TriggeredBy) {
+	if o == nil || IsNil(o.TriggeredBy.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.TriggeredBy
+	return *o.TriggeredBy.Get()
 }
 
 // GetTriggeredByOk returns a tuple with the TriggeredBy field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineHealthReportEntry) GetTriggeredByOk() (*string, bool) {
-	if o == nil || IsNil(o.TriggeredBy) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TriggeredBy, true
+	return o.TriggeredBy.Get(), o.TriggeredBy.IsSet()
 }
 
 // HasTriggeredBy returns a boolean if a field has been set.
 func (o *MachineHealthReportEntry) HasTriggeredBy() bool {
-	if o != nil && !IsNil(o.TriggeredBy) {
+	if o != nil && o.TriggeredBy.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetTriggeredBy gets a reference to the given string and assigns it to the TriggeredBy field.
+// SetTriggeredBy gets a reference to the given NullableString and assigns it to the TriggeredBy field.
 func (o *MachineHealthReportEntry) SetTriggeredBy(v string) {
-	o.TriggeredBy = &v
+	o.TriggeredBy.Set(&v)
 }
 
-// GetObservedAt returns the ObservedAt field value if set, zero value otherwise.
+// SetTriggeredByNil sets the value for TriggeredBy to be an explicit nil
+func (o *MachineHealthReportEntry) SetTriggeredByNil() {
+	o.TriggeredBy.Set(nil)
+}
+
+// UnsetTriggeredBy ensures that no value is present for TriggeredBy, not even an explicit nil
+func (o *MachineHealthReportEntry) UnsetTriggeredBy() {
+	o.TriggeredBy.Unset()
+}
+
+// GetObservedAt returns the ObservedAt field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineHealthReportEntry) GetObservedAt() time.Time {
-	if o == nil || IsNil(o.ObservedAt) {
+	if o == nil || IsNil(o.ObservedAt.Get()) {
 		var ret time.Time
 		return ret
 	}
-	return *o.ObservedAt
+	return *o.ObservedAt.Get()
 }
 
 // GetObservedAtOk returns a tuple with the ObservedAt field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineHealthReportEntry) GetObservedAtOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.ObservedAt) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ObservedAt, true
+	return o.ObservedAt.Get(), o.ObservedAt.IsSet()
 }
 
 // HasObservedAt returns a boolean if a field has been set.
 func (o *MachineHealthReportEntry) HasObservedAt() bool {
-	if o != nil && !IsNil(o.ObservedAt) {
+	if o != nil && o.ObservedAt.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetObservedAt gets a reference to the given time.Time and assigns it to the ObservedAt field.
+// SetObservedAt gets a reference to the given NullableTime and assigns it to the ObservedAt field.
 func (o *MachineHealthReportEntry) SetObservedAt(v time.Time) {
-	o.ObservedAt = &v
+	o.ObservedAt.Set(&v)
 }
 
-// GetSuccesses returns the Successes field value if set, zero value otherwise.
+// SetObservedAtNil sets the value for ObservedAt to be an explicit nil
+func (o *MachineHealthReportEntry) SetObservedAtNil() {
+	o.ObservedAt.Set(nil)
+}
+
+// UnsetObservedAt ensures that no value is present for ObservedAt, not even an explicit nil
+func (o *MachineHealthReportEntry) UnsetObservedAt() {
+	o.ObservedAt.Unset()
+}
+
+// GetSuccesses returns the Successes field value
 func (o *MachineHealthReportEntry) GetSuccesses() []MachineHealthProbeSuccess {
-	if o == nil || IsNil(o.Successes) {
+	if o == nil {
 		var ret []MachineHealthProbeSuccess
 		return ret
 	}
+
 	return o.Successes
 }
 
-// GetSuccessesOk returns a tuple with the Successes field value if set, nil otherwise
+// GetSuccessesOk returns a tuple with the Successes field value
 // and a boolean to check if the value has been set.
 func (o *MachineHealthReportEntry) GetSuccessesOk() ([]MachineHealthProbeSuccess, bool) {
-	if o == nil || IsNil(o.Successes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Successes, true
 }
 
-// HasSuccesses returns a boolean if a field has been set.
-func (o *MachineHealthReportEntry) HasSuccesses() bool {
-	if o != nil && !IsNil(o.Successes) {
-		return true
-	}
-
-	return false
-}
-
-// SetSuccesses gets a reference to the given []MachineHealthProbeSuccess and assigns it to the Successes field.
+// SetSuccesses sets field value
 func (o *MachineHealthReportEntry) SetSuccesses(v []MachineHealthProbeSuccess) {
 	o.Successes = v
 }
 
-// GetAlerts returns the Alerts field value if set, zero value otherwise.
+// GetAlerts returns the Alerts field value
 func (o *MachineHealthReportEntry) GetAlerts() []MachineHealthProbeAlert {
-	if o == nil || IsNil(o.Alerts) {
+	if o == nil {
 		var ret []MachineHealthProbeAlert
 		return ret
 	}
+
 	return o.Alerts
 }
 
-// GetAlertsOk returns a tuple with the Alerts field value if set, nil otherwise
+// GetAlertsOk returns a tuple with the Alerts field value
 // and a boolean to check if the value has been set.
 func (o *MachineHealthReportEntry) GetAlertsOk() ([]MachineHealthProbeAlert, bool) {
-	if o == nil || IsNil(o.Alerts) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Alerts, true
 }
 
-// HasAlerts returns a boolean if a field has been set.
-func (o *MachineHealthReportEntry) HasAlerts() bool {
-	if o != nil && !IsNil(o.Alerts) {
-		return true
-	}
-
-	return false
-}
-
-// SetAlerts gets a reference to the given []MachineHealthProbeAlert and assigns it to the Alerts field.
+// SetAlerts sets field value
 func (o *MachineHealthReportEntry) SetAlerts(v []MachineHealthProbeAlert) {
 	o.Alerts = v
 }
@@ -247,18 +255,14 @@ func (o MachineHealthReportEntry) MarshalJSON() ([]byte, error) {
 func (o MachineHealthReportEntry) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["source"] = o.Source
-	if !IsNil(o.TriggeredBy) {
-		toSerialize["triggeredBy"] = o.TriggeredBy
+	if o.TriggeredBy.IsSet() {
+		toSerialize["triggeredBy"] = o.TriggeredBy.Get()
 	}
-	if !IsNil(o.ObservedAt) {
-		toSerialize["observedAt"] = o.ObservedAt
+	if o.ObservedAt.IsSet() {
+		toSerialize["observedAt"] = o.ObservedAt.Get()
 	}
-	if !IsNil(o.Successes) {
-		toSerialize["successes"] = o.Successes
-	}
-	if !IsNil(o.Alerts) {
-		toSerialize["alerts"] = o.Alerts
-	}
+	toSerialize["successes"] = o.Successes
+	toSerialize["alerts"] = o.Alerts
 	toSerialize["mode"] = o.Mode
 	return toSerialize, nil
 }
@@ -269,6 +273,8 @@ func (o *MachineHealthReportEntry) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"source",
+		"successes",
+		"alerts",
 		"mode",
 	}
 

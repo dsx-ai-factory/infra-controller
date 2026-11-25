@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,37 +26,49 @@ var _ MappedNullable = &ExpectedRackGroup{}
 // ExpectedRackGroup An Expected Rack Group declares a group-level NVLink topology, racks, and expected device members. The `rackGroupId` is an operator-supplied string identifier (UUID syntax is not required) that uniquely identifies the group within the Site. Topology is supplied by the external inventory system.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
 type ExpectedRackGroup struct {
 	// Unique identifier (UUID) for the Expected Rack Group
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Operator-supplied identifier for the rack group (opaque string; UUID syntax is not required). Unique within a Site.
-	RackGroupId *string `json:"rackGroupId,omitempty"`
+	RackGroupId string `json:"rackGroupId"`
 	// ID of the Site the Expected Rack Group belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// Site details when requested through includeRelation; otherwise null.
 	Site NullableSite `json:"site,omitempty"`
 	// External group-level NVLink topology identifier.
-	Topology *string `json:"topology,omitempty"`
+	Topology string `json:"topology"`
 	// Rack fabric protocol, or null when unspecified.
 	Protocol NullableString `json:"protocol,omitempty"`
 	// Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
-	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`
+	Racks []ExpectedRackGroupRack `json:"racks"`
 	// Human-readable name of the Expected Rack Group
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Human-readable description of the Expected Rack Group
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// User-defined key-value pairs for organizing and categorizing Expected Rack Groups. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// ISO 8601 datetime when the Expected Rack Group was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// ISO 8601 datetime when the Expected Rack Group was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _ExpectedRackGroup ExpectedRackGroup
 
 // NewExpectedRackGroup instantiates a new ExpectedRackGroup object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedRackGroup() *ExpectedRackGroup {
+func NewExpectedRackGroup(id string, rackGroupId string, siteId string, topology string, racks []ExpectedRackGroupRack, name string, description string, labels map[string]string, created time.Time, updated time.Time) *ExpectedRackGroup {
 	this := ExpectedRackGroup{}
+	this.Id = id
+	this.RackGroupId = rackGroupId
+	this.SiteId = siteId
+	this.Topology = topology
+	this.Racks = racks
+	this.Name = name
+	this.Description = description
+	this.Labels = labels
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -66,100 +80,76 @@ func NewExpectedRackGroupWithDefaults() *ExpectedRackGroup {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *ExpectedRackGroup) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *ExpectedRackGroup) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetRackGroupId returns the RackGroupId field value if set, zero value otherwise.
+// GetRackGroupId returns the RackGroupId field value
 func (o *ExpectedRackGroup) GetRackGroupId() string {
-	if o == nil || IsNil(o.RackGroupId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.RackGroupId
+
+	return o.RackGroupId
 }
 
-// GetRackGroupIdOk returns a tuple with the RackGroupId field value if set, nil otherwise
+// GetRackGroupIdOk returns a tuple with the RackGroupId field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetRackGroupIdOk() (*string, bool) {
-	if o == nil || IsNil(o.RackGroupId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RackGroupId, true
+	return &o.RackGroupId, true
 }
 
-// HasRackGroupId returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasRackGroupId() bool {
-	if o != nil && !IsNil(o.RackGroupId) {
-		return true
-	}
-
-	return false
-}
-
-// SetRackGroupId gets a reference to the given string and assigns it to the RackGroupId field.
+// SetRackGroupId sets field value
 func (o *ExpectedRackGroup) SetRackGroupId(v string) {
-	o.RackGroupId = &v
+	o.RackGroupId = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *ExpectedRackGroup) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *ExpectedRackGroup) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
 // GetSite returns the Site field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -205,36 +195,28 @@ func (o *ExpectedRackGroup) UnsetSite() {
 	o.Site.Unset()
 }
 
-// GetTopology returns the Topology field value if set, zero value otherwise.
+// GetTopology returns the Topology field value
 func (o *ExpectedRackGroup) GetTopology() string {
-	if o == nil || IsNil(o.Topology) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Topology
+
+	return o.Topology
 }
 
-// GetTopologyOk returns a tuple with the Topology field value if set, nil otherwise
+// GetTopologyOk returns a tuple with the Topology field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetTopologyOk() (*string, bool) {
-	if o == nil || IsNil(o.Topology) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Topology, true
+	return &o.Topology, true
 }
 
-// HasTopology returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasTopology() bool {
-	if o != nil && !IsNil(o.Topology) {
-		return true
-	}
-
-	return false
-}
-
-// SetTopology gets a reference to the given string and assigns it to the Topology field.
+// SetTopology sets field value
 func (o *ExpectedRackGroup) SetTopology(v string) {
-	o.Topology = &v
+	o.Topology = v
 }
 
 // GetProtocol returns the Protocol field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -280,196 +262,148 @@ func (o *ExpectedRackGroup) UnsetProtocol() {
 	o.Protocol.Unset()
 }
 
-// GetRacks returns the Racks field value if set, zero value otherwise.
+// GetRacks returns the Racks field value
 func (o *ExpectedRackGroup) GetRacks() []ExpectedRackGroupRack {
-	if o == nil || IsNil(o.Racks) {
+	if o == nil {
 		var ret []ExpectedRackGroupRack
 		return ret
 	}
+
 	return o.Racks
 }
 
-// GetRacksOk returns a tuple with the Racks field value if set, nil otherwise
+// GetRacksOk returns a tuple with the Racks field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetRacksOk() ([]ExpectedRackGroupRack, bool) {
-	if o == nil || IsNil(o.Racks) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Racks, true
 }
 
-// HasRacks returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasRacks() bool {
-	if o != nil && !IsNil(o.Racks) {
-		return true
-	}
-
-	return false
-}
-
-// SetRacks gets a reference to the given []ExpectedRackGroupRack and assigns it to the Racks field.
+// SetRacks sets field value
 func (o *ExpectedRackGroup) SetRacks(v []ExpectedRackGroupRack) {
 	o.Racks = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *ExpectedRackGroup) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *ExpectedRackGroup) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *ExpectedRackGroup) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *ExpectedRackGroup) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *ExpectedRackGroup) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *ExpectedRackGroup) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *ExpectedRackGroup) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *ExpectedRackGroup) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *ExpectedRackGroup) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroup) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *ExpectedRackGroup) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *ExpectedRackGroup) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o ExpectedRackGroup) MarshalJSON() ([]byte, error) {
@@ -482,43 +416,68 @@ func (o ExpectedRackGroup) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedRackGroup) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.RackGroupId) {
-		toSerialize["rackGroupId"] = o.RackGroupId
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["rackGroupId"] = o.RackGroupId
+	toSerialize["siteId"] = o.SiteId
 	if o.Site.IsSet() {
 		toSerialize["site"] = o.Site.Get()
 	}
-	if !IsNil(o.Topology) {
-		toSerialize["topology"] = o.Topology
-	}
+	toSerialize["topology"] = o.Topology
 	if o.Protocol.IsSet() {
 		toSerialize["protocol"] = o.Protocol.Get()
 	}
-	if !IsNil(o.Racks) {
-		toSerialize["racks"] = o.Racks
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["racks"] = o.Racks
+	toSerialize["name"] = o.Name
+	toSerialize["description"] = o.Description
+	toSerialize["labels"] = o.Labels
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *ExpectedRackGroup) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"rackGroupId",
+		"siteId",
+		"topology",
+		"racks",
+		"name",
+		"description",
+		"labels",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varExpectedRackGroup := _ExpectedRackGroup{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varExpectedRackGroup)
+
+	if err != nil {
+		return err
+	}
+
+	*o = ExpectedRackGroup(varExpectedRackGroup)
+
+	return err
 }
 
 type NullableExpectedRackGroup struct {

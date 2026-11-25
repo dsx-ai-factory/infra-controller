@@ -109,6 +109,18 @@ type APIDpuNetworkConfig struct {
 	SiteGlobalVpcVni *uint32 `json:"siteGlobalVpcVni"`
 }
 
+func newAPIDpuNetworkConfig() *APIDpuNetworkConfig {
+	return &APIDpuNetworkConfig{
+		DhcpServers:            []string{},
+		TenantInterfaces:       []APIFlatInterfaceConfig{},
+		RouteServers:           []string{},
+		DeprecatedDenyPrefixes: []string{},
+		DenyPrefixes:           []string{},
+		SiteFabricPrefixes:     []string{},
+		AnycastSitePrefixes:    []string{},
+	}
+}
+
 // FromProto populates an APIDpuNetworkConfig from its protobuf form.
 func (apnnc *APIDpuNetworkConfig) FromProto(protoConfig *corev1.ManagedHostNetworkConfigResponse) {
 	if protoConfig == nil {
@@ -273,7 +285,7 @@ func (afic *APIFlatInterfaceConfig) FromProto(protoConfig *corev1.FlatInterfaceC
 
 	afic.VirtualFunctionID = protoConfig.VirtualFunctionId
 
-	afic.VpcPrefixes = protoConfig.VpcPrefixes
+	afic.VpcPrefixes = append([]string{}, protoConfig.VpcPrefixes...)
 	afic.Prefix = protoConfig.GetPrefix() //nolint:staticcheck // Preserve the scalar REST compatibility field.
 	afic.Fqdn = protoConfig.Fqdn
 
@@ -282,9 +294,9 @@ func (afic *APIFlatInterfaceConfig) FromProto(protoConfig *corev1.FlatInterfaceC
 	afic.SviIP = protoConfig.SviIp                             //nolint:staticcheck // Preserve the scalar REST compatibility field.
 	afic.TenantVrfLoopbackIP = protoConfig.TenantVrfLoopbackIp //nolint:staticcheck // Preserve optional REST compatibility presence.
 	afic.IsL2Segment = protoConfig.IsL2Segment
-	afic.VpcPeerPrefixes = protoConfig.VpcPeerPrefixes
+	afic.VpcPeerPrefixes = append([]string{}, protoConfig.VpcPeerPrefixes...)
 
-	afic.VpcPeerVnis = protoConfig.VpcPeerVnis
+	afic.VpcPeerVnis = append([]uint32{}, protoConfig.VpcPeerVnis...)
 
 	afic.Mtu = protoConfig.Mtu
 
@@ -342,8 +354,8 @@ func (arnsr *APIResolvedNetworkSecurityGroupRule) FromProto(protoRule *corev1.Re
 
 	arnsr.Rule = NewAPINetworkSecurityGroupRule(protoRule.Rule)
 
-	arnsr.SrcPrefixes = protoRule.SrcPrefixes
-	arnsr.DstPrefixes = protoRule.DstPrefixes
+	arnsr.SrcPrefixes = append([]string{}, protoRule.SrcPrefixes...)
+	arnsr.DstPrefixes = append([]string{}, protoRule.DstPrefixes...)
 }
 
 // APIDpuMachineSoftwareComponent represents a DPU Machine software component
@@ -403,7 +415,7 @@ func (admif *APIDpuMachineInterface) FromProto(protoInterface *corev1.MachineInt
 	admif.Hostname = protoInterface.Hostname
 	admif.PrimaryInterface = protoInterface.PrimaryInterface
 	admif.MacAddress = protoInterface.MacAddress
-	admif.Address = protoInterface.Address
+	admif.Address = append([]string{}, protoInterface.Address...)
 	admif.Vendor = protoInterface.Vendor
 
 	if protoInterface.Created != nil {
@@ -480,7 +492,7 @@ func NewAPIDpuMachines(protoDpuMachines []*corev1.DpuMachine, ctx APIDpuMachineP
 		}
 		apiDpuMachine := APIDpuMachine{}
 		apiDpuMachine.FromProto(protoDpuMachine, ctx)
-		apiDpuMachine.DpuNetworkConfig = cmp.Or(apiDpuMachine.DpuNetworkConfig, &APIDpuNetworkConfig{})
+		apiDpuMachine.DpuNetworkConfig = cmp.Or(apiDpuMachine.DpuNetworkConfig, newAPIDpuNetworkConfig())
 		apiDpuMachines = append(apiDpuMachines, apiDpuMachine)
 	}
 	return apiDpuMachines
@@ -515,19 +527,17 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 		apd.DMIData.FromProto(protoMachineStatus.GetDiscoveryInfo().DmiData)
 	}
 
-	if protoMachineStatus.GetInterfaces() != nil {
-		apd.Interfaces = make([]APIDpuMachineInterface, 0, len(protoMachineStatus.GetInterfaces()))
-		for _, protoInterface := range protoMachineStatus.GetInterfaces() {
-			if protoInterface != nil {
-				apdInterface := APIDpuMachineInterface{}
-				apdInterface.FromProto(protoInterface)
-				apd.Interfaces = append(apd.Interfaces, apdInterface)
-			}
+	apd.Interfaces = make([]APIDpuMachineInterface, 0, len(protoMachineStatus.GetInterfaces()))
+	for _, protoInterface := range protoMachineStatus.GetInterfaces() {
+		if protoInterface != nil {
+			apdInterface := APIDpuMachineInterface{}
+			apdInterface.FromProto(protoInterface)
+			apd.Interfaces = append(apd.Interfaces, apdInterface)
 		}
 	}
 
+	apd.SoftwareComponents = []APIDpuMachineSoftwareComponent{}
 	if protoMachine.Inventory != nil {
-		apd.SoftwareComponents = []APIDpuMachineSoftwareComponent{}
 		for _, protoComponent := range protoMachine.Inventory.Components {
 			if protoComponent == nil {
 				continue

@@ -30,17 +30,17 @@ type TaskRun struct {
 	// Human-readable name of the Task Run.
 	Name string `json:"name"`
 	// Optional free-form description.
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Type of operation this Task Run executes. Currently always `FirmwareControl`.
 	OperationType string `json:"operationType"`
 	// Operation code within the operation type (e.g. `upgrade`).
-	OperationCode *string `json:"operationCode,omitempty"`
+	OperationCode string `json:"operationCode"`
 	// Current lifecycle state of the Task Run.
 	Status string `json:"status"`
 	// Why the Task Run is paused or terminal (e.g. `PhaseGate`, `SafetyGate`). `None` when there is no qualifying reason.
 	StatusReason string `json:"statusReason"`
 	// Optional human-readable detail for the current status.
-	StatusMessage *string `json:"statusMessage,omitempty"`
+	StatusMessage string `json:"statusMessage"`
 	// Total number of phases the selected targets were divided into.
 	TotalPhases int32 `json:"totalPhases"`
 	// Timestamp when the Task Run was created.
@@ -61,13 +61,16 @@ type _TaskRun TaskRun
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTaskRun(id string, name string, operationType string, status string, statusReason string, totalPhases int32, created time.Time, updated time.Time) *TaskRun {
+func NewTaskRun(id string, name string, description string, operationType string, operationCode string, status string, statusReason string, statusMessage string, totalPhases int32, created time.Time, updated time.Time) *TaskRun {
 	this := TaskRun{}
 	this.Id = id
 	this.Name = name
+	this.Description = description
 	this.OperationType = operationType
+	this.OperationCode = operationCode
 	this.Status = status
 	this.StatusReason = statusReason
+	this.StatusMessage = statusMessage
 	this.TotalPhases = totalPhases
 	this.Created = created
 	this.Updated = updated
@@ -130,36 +133,28 @@ func (o *TaskRun) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *TaskRun) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *TaskRun) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *TaskRun) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *TaskRun) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
 // GetOperationType returns the OperationType field value
@@ -186,36 +181,28 @@ func (o *TaskRun) SetOperationType(v string) {
 	o.OperationType = v
 }
 
-// GetOperationCode returns the OperationCode field value if set, zero value otherwise.
+// GetOperationCode returns the OperationCode field value
 func (o *TaskRun) GetOperationCode() string {
-	if o == nil || IsNil(o.OperationCode) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.OperationCode
+
+	return o.OperationCode
 }
 
-// GetOperationCodeOk returns a tuple with the OperationCode field value if set, nil otherwise
+// GetOperationCodeOk returns a tuple with the OperationCode field value
 // and a boolean to check if the value has been set.
 func (o *TaskRun) GetOperationCodeOk() (*string, bool) {
-	if o == nil || IsNil(o.OperationCode) {
+	if o == nil {
 		return nil, false
 	}
-	return o.OperationCode, true
+	return &o.OperationCode, true
 }
 
-// HasOperationCode returns a boolean if a field has been set.
-func (o *TaskRun) HasOperationCode() bool {
-	if o != nil && !IsNil(o.OperationCode) {
-		return true
-	}
-
-	return false
-}
-
-// SetOperationCode gets a reference to the given string and assigns it to the OperationCode field.
+// SetOperationCode sets field value
 func (o *TaskRun) SetOperationCode(v string) {
-	o.OperationCode = &v
+	o.OperationCode = v
 }
 
 // GetStatus returns the Status field value
@@ -266,36 +253,28 @@ func (o *TaskRun) SetStatusReason(v string) {
 	o.StatusReason = v
 }
 
-// GetStatusMessage returns the StatusMessage field value if set, zero value otherwise.
+// GetStatusMessage returns the StatusMessage field value
 func (o *TaskRun) GetStatusMessage() string {
-	if o == nil || IsNil(o.StatusMessage) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.StatusMessage
+
+	return o.StatusMessage
 }
 
-// GetStatusMessageOk returns a tuple with the StatusMessage field value if set, nil otherwise
+// GetStatusMessageOk returns a tuple with the StatusMessage field value
 // and a boolean to check if the value has been set.
 func (o *TaskRun) GetStatusMessageOk() (*string, bool) {
-	if o == nil || IsNil(o.StatusMessage) {
+	if o == nil {
 		return nil, false
 	}
-	return o.StatusMessage, true
+	return &o.StatusMessage, true
 }
 
-// HasStatusMessage returns a boolean if a field has been set.
-func (o *TaskRun) HasStatusMessage() bool {
-	if o != nil && !IsNil(o.StatusMessage) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusMessage gets a reference to the given string and assigns it to the StatusMessage field.
+// SetStatusMessage sets field value
 func (o *TaskRun) SetStatusMessage(v string) {
-	o.StatusMessage = &v
+	o.StatusMessage = v
 }
 
 // GetTotalPhases returns the TotalPhases field value
@@ -500,18 +479,12 @@ func (o TaskRun) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
 	toSerialize["name"] = o.Name
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
+	toSerialize["description"] = o.Description
 	toSerialize["operationType"] = o.OperationType
-	if !IsNil(o.OperationCode) {
-		toSerialize["operationCode"] = o.OperationCode
-	}
+	toSerialize["operationCode"] = o.OperationCode
 	toSerialize["status"] = o.Status
 	toSerialize["statusReason"] = o.StatusReason
-	if !IsNil(o.StatusMessage) {
-		toSerialize["statusMessage"] = o.StatusMessage
-	}
+	toSerialize["statusMessage"] = o.StatusMessage
 	toSerialize["totalPhases"] = o.TotalPhases
 	toSerialize["created"] = o.Created
 	toSerialize["updated"] = o.Updated
@@ -534,9 +507,12 @@ func (o *TaskRun) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"id",
 		"name",
+		"description",
 		"operationType",
+		"operationCode",
 		"status",
 		"statusReason",
+		"statusMessage",
 		"totalPhases",
 		"created",
 		"updated",

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,33 +26,41 @@ var _ MappedNullable = &Task{}
 // Task A task representing an asynchronous, site-scoped operation against rack, tray, or other site infrastructure.
 type Task struct {
 	// Unique identifier of the task.
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Current state of the task.
-	Status *string `json:"status,omitempty"`
+	Status string `json:"status"`
 	// Human-readable description provided when the task was created.
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Optional status or error message describing the current state or result.
-	Message *string `json:"message,omitempty"`
+	Message string `json:"message"`
 	// Operation Rule that Flow resolved for this task — either because the caller pinned one via `ruleId` on the originating request or because Flow's default rule resolution picked it. Null if Flow has not yet recorded a resolution.
 	RuleId NullableString `json:"ruleId,omitempty"`
 	// Timestamp when the task started execution.
-	Started *time.Time `json:"started,omitempty"`
+	Started NullableTime `json:"started,omitempty"`
 	// Timestamp when the task finished (succeeded, failed or terminated).
-	Finished *time.Time `json:"finished,omitempty"`
+	Finished NullableTime `json:"finished,omitempty"`
 	// Timestamp when the task was created.
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Timestamp when the task was last updated.
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 	// Structured v1 execution report for the task. Populated on single-task `GET` and `cancel` responses, and on list responses only when `includeReport=true` is set. Omitted when the task has not yet produced a report (e.g. still queued) or when the caller did not opt in on list endpoints.  A future schema revision will be exposed as a new `TaskReportV2` schema referenced from a parallel response field; v1 consumers are not disturbed by that bump.
 	Report *TaskReportV1 `json:"report,omitempty"`
 }
+
+type _Task Task
 
 // NewTask instantiates a new Task object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTask() *Task {
+func NewTask(id string, status string, description string, message string, created time.Time, updated time.Time) *Task {
 	this := Task{}
+	this.Id = id
+	this.Status = status
+	this.Description = description
+	this.Message = message
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -62,132 +72,100 @@ func NewTaskWithDefaults() *Task {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Task) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Task) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Task) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Task) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *Task) GetStatus() string {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *Task) GetStatusOk() (*string, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *Task) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given string and assigns it to the Status field.
+// SetStatus sets field value
 func (o *Task) SetStatus(v string) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *Task) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *Task) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *Task) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *Task) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
-// GetMessage returns the Message field value if set, zero value otherwise.
+// GetMessage returns the Message field value
 func (o *Task) GetMessage() string {
-	if o == nil || IsNil(o.Message) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Message
+
+	return o.Message
 }
 
-// GetMessageOk returns a tuple with the Message field value if set, nil otherwise
+// GetMessageOk returns a tuple with the Message field value
 // and a boolean to check if the value has been set.
 func (o *Task) GetMessageOk() (*string, bool) {
-	if o == nil || IsNil(o.Message) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Message, true
+	return &o.Message, true
 }
 
-// HasMessage returns a boolean if a field has been set.
-func (o *Task) HasMessage() bool {
-	if o != nil && !IsNil(o.Message) {
-		return true
-	}
-
-	return false
-}
-
-// SetMessage gets a reference to the given string and assigns it to the Message field.
+// SetMessage sets field value
 func (o *Task) SetMessage(v string) {
-	o.Message = &v
+	o.Message = v
 }
 
 // GetRuleId returns the RuleId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -233,132 +211,138 @@ func (o *Task) UnsetRuleId() {
 	o.RuleId.Unset()
 }
 
-// GetStarted returns the Started field value if set, zero value otherwise.
+// GetStarted returns the Started field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Task) GetStarted() time.Time {
-	if o == nil || IsNil(o.Started) {
+	if o == nil || IsNil(o.Started.Get()) {
 		var ret time.Time
 		return ret
 	}
-	return *o.Started
+	return *o.Started.Get()
 }
 
 // GetStartedOk returns a tuple with the Started field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Task) GetStartedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Started) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Started, true
+	return o.Started.Get(), o.Started.IsSet()
 }
 
 // HasStarted returns a boolean if a field has been set.
 func (o *Task) HasStarted() bool {
-	if o != nil && !IsNil(o.Started) {
+	if o != nil && o.Started.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetStarted gets a reference to the given time.Time and assigns it to the Started field.
+// SetStarted gets a reference to the given NullableTime and assigns it to the Started field.
 func (o *Task) SetStarted(v time.Time) {
-	o.Started = &v
+	o.Started.Set(&v)
 }
 
-// GetFinished returns the Finished field value if set, zero value otherwise.
+// SetStartedNil sets the value for Started to be an explicit nil
+func (o *Task) SetStartedNil() {
+	o.Started.Set(nil)
+}
+
+// UnsetStarted ensures that no value is present for Started, not even an explicit nil
+func (o *Task) UnsetStarted() {
+	o.Started.Unset()
+}
+
+// GetFinished returns the Finished field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Task) GetFinished() time.Time {
-	if o == nil || IsNil(o.Finished) {
+	if o == nil || IsNil(o.Finished.Get()) {
 		var ret time.Time
 		return ret
 	}
-	return *o.Finished
+	return *o.Finished.Get()
 }
 
 // GetFinishedOk returns a tuple with the Finished field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Task) GetFinishedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Finished) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Finished, true
+	return o.Finished.Get(), o.Finished.IsSet()
 }
 
 // HasFinished returns a boolean if a field has been set.
 func (o *Task) HasFinished() bool {
-	if o != nil && !IsNil(o.Finished) {
+	if o != nil && o.Finished.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetFinished gets a reference to the given time.Time and assigns it to the Finished field.
+// SetFinished gets a reference to the given NullableTime and assigns it to the Finished field.
 func (o *Task) SetFinished(v time.Time) {
-	o.Finished = &v
+	o.Finished.Set(&v)
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// SetFinishedNil sets the value for Finished to be an explicit nil
+func (o *Task) SetFinishedNil() {
+	o.Finished.Set(nil)
+}
+
+// UnsetFinished ensures that no value is present for Finished, not even an explicit nil
+func (o *Task) UnsetFinished() {
+	o.Finished.Unset()
+}
+
+// GetCreated returns the Created field value
 func (o *Task) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *Task) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *Task) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *Task) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *Task) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *Task) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *Task) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *Task) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 // GetReport returns the Report field value if set, zero value otherwise.
@@ -403,37 +387,66 @@ func (o Task) MarshalJSON() ([]byte, error) {
 
 func (o Task) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
-	if !IsNil(o.Message) {
-		toSerialize["message"] = o.Message
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["status"] = o.Status
+	toSerialize["description"] = o.Description
+	toSerialize["message"] = o.Message
 	if o.RuleId.IsSet() {
 		toSerialize["ruleId"] = o.RuleId.Get()
 	}
-	if !IsNil(o.Started) {
-		toSerialize["started"] = o.Started
+	if o.Started.IsSet() {
+		toSerialize["started"] = o.Started.Get()
 	}
-	if !IsNil(o.Finished) {
-		toSerialize["finished"] = o.Finished
+	if o.Finished.IsSet() {
+		toSerialize["finished"] = o.Finished.Get()
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	if !IsNil(o.Report) {
 		toSerialize["report"] = o.Report
 	}
 	return toSerialize, nil
+}
+
+func (o *Task) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"status",
+		"description",
+		"message",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTask := _Task{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTask)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Task(varTask)
+
+	return err
 }
 
 type NullableTask struct {

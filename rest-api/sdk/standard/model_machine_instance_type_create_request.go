@@ -22,7 +22,7 @@ import (
 // checks if the MachineInstanceTypeCreateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &MachineInstanceTypeCreateRequest{}
 
-// MachineInstanceTypeCreateRequest Associates one or more Machines with an Instance Type.  Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
+// MachineInstanceTypeCreateRequest Associates one or more Machines with an Instance Type.  Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields (including count, cores and threads) require exact equality; omitted optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
 type MachineInstanceTypeCreateRequest struct {
 	// ID of the Machine
 	MachineIds []string `json:"machineIds"`

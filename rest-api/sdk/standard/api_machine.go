@@ -4276,7 +4276,7 @@ Atomically update the Cartesian product of the selected rails and planes. Supply
 of rail, allRails, or railRange and exactly one of plane, allPlanes, or planeRange.
 Ranges are inclusive and ascending. All selected interfaces must be declared on the Machine;
 an undeclared selection rejects the complete update. Unselected interfaces are unchanged.
-maintenanceMode true disables links; false enables them. An omitted or null reference preserves
+maintenanceMode true disables links; false enables them. An omitted reference preserves
 the saved reference; an empty string clears it.
 
 For Infrastructure Providers: Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` suffix.

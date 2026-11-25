@@ -280,10 +280,18 @@ func TestAPIReplaceAllExpectedRacksRequest_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			desc: "ok when site is valid and list is empty",
+			desc: "error when list is nil",
 			obj: APIReplaceAllExpectedRacksRequest{
 				SiteID:        validSiteID,
 				ExpectedRacks: nil,
+			},
+			expectErr: true,
+		},
+		{
+			desc: "ok when site is valid and list is empty",
+			obj: APIReplaceAllExpectedRacksRequest{
+				SiteID:        validSiteID,
+				ExpectedRacks: []*APIExpectedRackCreateRequest{},
 			},
 			expectErr: false,
 		},

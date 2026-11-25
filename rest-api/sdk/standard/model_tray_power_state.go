@@ -25,11 +25,11 @@ var _ MappedNullable = &TrayPowerState{}
 // TrayPowerState Power information for one tray, using external inventory identifiers. Readable by MAC before a managed component ID exists; unavailable IDs are null without an internal UUID or MAC fallback.
 type TrayPowerState struct {
 	// External inventory component ID, matching the tray's ID. Null until the inventory member has a managed Core identity or when the service or proxy does not supply the ID.
-	Id NullableString `json:"id"`
+	Id NullableString `json:"id,omitempty"`
 	// Tray type; `Unknown` is reserved for an unrecognized service value.
 	Type string `json:"type"`
 	// External inventory ID of the tray's assigned rack, including a retained soft-deleted rack. Null without rack assignment, when its external identity cannot be read, or when the service or proxy does not supply the ID.
-	RackId     NullableString   `json:"rackId"`
+	RackId     NullableString   `json:"rackId,omitempty"`
 	Actual     PowerObservation `json:"actual"`
 	Desired    PowerPolicy      `json:"desired"`
 	Operations PowerOperations  `json:"operations"`
@@ -41,11 +41,9 @@ type _TrayPowerState TrayPowerState
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTrayPowerState(id NullableString, type_ string, rackId NullableString, actual PowerObservation, desired PowerPolicy, operations PowerOperations) *TrayPowerState {
+func NewTrayPowerState(type_ string, actual PowerObservation, desired PowerPolicy, operations PowerOperations) *TrayPowerState {
 	this := TrayPowerState{}
-	this.Id = id
 	this.Type = type_
-	this.RackId = rackId
 	this.Actual = actual
 	this.Desired = desired
 	this.Operations = operations
@@ -60,18 +58,16 @@ func NewTrayPowerStateWithDefaults() *TrayPowerState {
 	return &this
 }
 
-// GetId returns the Id field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetId returns the Id field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *TrayPowerState) GetId() string {
-	if o == nil || o.Id.Get() == nil {
+	if o == nil || IsNil(o.Id.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Id.Get()
 }
 
-// GetIdOk returns a tuple with the Id field value
+// GetIdOk returns a tuple with the Id field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *TrayPowerState) GetIdOk() (*string, bool) {
@@ -81,9 +77,28 @@ func (o *TrayPowerState) GetIdOk() (*string, bool) {
 	return o.Id.Get(), o.Id.IsSet()
 }
 
-// SetId sets field value
+// HasId returns a boolean if a field has been set.
+func (o *TrayPowerState) HasId() bool {
+	if o != nil && o.Id.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetId gets a reference to the given NullableString and assigns it to the Id field.
 func (o *TrayPowerState) SetId(v string) {
 	o.Id.Set(&v)
+}
+
+// SetIdNil sets the value for Id to be an explicit nil
+func (o *TrayPowerState) SetIdNil() {
+	o.Id.Set(nil)
+}
+
+// UnsetId ensures that no value is present for Id, not even an explicit nil
+func (o *TrayPowerState) UnsetId() {
+	o.Id.Unset()
 }
 
 // GetType returns the Type field value
@@ -110,18 +125,16 @@ func (o *TrayPowerState) SetType(v string) {
 	o.Type = v
 }
 
-// GetRackId returns the RackId field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetRackId returns the RackId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *TrayPowerState) GetRackId() string {
-	if o == nil || o.RackId.Get() == nil {
+	if o == nil || IsNil(o.RackId.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.RackId.Get()
 }
 
-// GetRackIdOk returns a tuple with the RackId field value
+// GetRackIdOk returns a tuple with the RackId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *TrayPowerState) GetRackIdOk() (*string, bool) {
@@ -131,9 +144,28 @@ func (o *TrayPowerState) GetRackIdOk() (*string, bool) {
 	return o.RackId.Get(), o.RackId.IsSet()
 }
 
-// SetRackId sets field value
+// HasRackId returns a boolean if a field has been set.
+func (o *TrayPowerState) HasRackId() bool {
+	if o != nil && o.RackId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRackId gets a reference to the given NullableString and assigns it to the RackId field.
 func (o *TrayPowerState) SetRackId(v string) {
 	o.RackId.Set(&v)
+}
+
+// SetRackIdNil sets the value for RackId to be an explicit nil
+func (o *TrayPowerState) SetRackIdNil() {
+	o.RackId.Set(nil)
+}
+
+// UnsetRackId ensures that no value is present for RackId, not even an explicit nil
+func (o *TrayPowerState) UnsetRackId() {
+	o.RackId.Unset()
 }
 
 // GetActual returns the Actual field value
@@ -218,9 +250,13 @@ func (o TrayPowerState) MarshalJSON() ([]byte, error) {
 
 func (o TrayPowerState) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["id"] = o.Id.Get()
+	if o.Id.IsSet() {
+		toSerialize["id"] = o.Id.Get()
+	}
 	toSerialize["type"] = o.Type
-	toSerialize["rackId"] = o.RackId.Get()
+	if o.RackId.IsSet() {
+		toSerialize["rackId"] = o.RackId.Get()
+	}
 	toSerialize["actual"] = o.Actual
 	toSerialize["desired"] = o.Desired
 	toSerialize["operations"] = o.Operations
@@ -232,9 +268,7 @@ func (o *TrayPowerState) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"id",
 		"type",
-		"rackId",
 		"actual",
 		"desired",
 		"operations",
@@ -248,13 +282,8 @@ func (o *TrayPowerState) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"id":     {},
-		"rackId": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

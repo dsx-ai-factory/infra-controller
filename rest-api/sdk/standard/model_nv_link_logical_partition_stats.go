@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the NVLinkLogicalPartitionStats type satisfies the MappedNullable interface at compile time
@@ -23,17 +25,21 @@ var _ MappedNullable = &NVLinkLogicalPartitionStats{}
 // NVLinkLogicalPartitionStats GPU and Instance counts for an NVLink Logical Partition
 type NVLinkLogicalPartitionStats struct {
 	// Total number of GPUs associated with the NVLink Logical Partition
-	TotalGpus *int32 `json:"totalGpus,omitempty"`
+	TotalGpus int32 `json:"totalGpus"`
 	// Total number of distinct Instances associated with the NVLink Logical Partition
-	TotalDistinctInstances *int32 `json:"totalDistinctInstances,omitempty"`
+	TotalDistinctInstances int32 `json:"totalDistinctInstances"`
 }
+
+type _NVLinkLogicalPartitionStats NVLinkLogicalPartitionStats
 
 // NewNVLinkLogicalPartitionStats instantiates a new NVLinkLogicalPartitionStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNVLinkLogicalPartitionStats() *NVLinkLogicalPartitionStats {
+func NewNVLinkLogicalPartitionStats(totalGpus int32, totalDistinctInstances int32) *NVLinkLogicalPartitionStats {
 	this := NVLinkLogicalPartitionStats{}
+	this.TotalGpus = totalGpus
+	this.TotalDistinctInstances = totalDistinctInstances
 	return &this
 }
 
@@ -45,68 +51,52 @@ func NewNVLinkLogicalPartitionStatsWithDefaults() *NVLinkLogicalPartitionStats {
 	return &this
 }
 
-// GetTotalGpus returns the TotalGpus field value if set, zero value otherwise.
+// GetTotalGpus returns the TotalGpus field value
 func (o *NVLinkLogicalPartitionStats) GetTotalGpus() int32 {
-	if o == nil || IsNil(o.TotalGpus) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.TotalGpus
+
+	return o.TotalGpus
 }
 
-// GetTotalGpusOk returns a tuple with the TotalGpus field value if set, nil otherwise
+// GetTotalGpusOk returns a tuple with the TotalGpus field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkLogicalPartitionStats) GetTotalGpusOk() (*int32, bool) {
-	if o == nil || IsNil(o.TotalGpus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalGpus, true
+	return &o.TotalGpus, true
 }
 
-// HasTotalGpus returns a boolean if a field has been set.
-func (o *NVLinkLogicalPartitionStats) HasTotalGpus() bool {
-	if o != nil && !IsNil(o.TotalGpus) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalGpus gets a reference to the given int32 and assigns it to the TotalGpus field.
+// SetTotalGpus sets field value
 func (o *NVLinkLogicalPartitionStats) SetTotalGpus(v int32) {
-	o.TotalGpus = &v
+	o.TotalGpus = v
 }
 
-// GetTotalDistinctInstances returns the TotalDistinctInstances field value if set, zero value otherwise.
+// GetTotalDistinctInstances returns the TotalDistinctInstances field value
 func (o *NVLinkLogicalPartitionStats) GetTotalDistinctInstances() int32 {
-	if o == nil || IsNil(o.TotalDistinctInstances) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.TotalDistinctInstances
+
+	return o.TotalDistinctInstances
 }
 
-// GetTotalDistinctInstancesOk returns a tuple with the TotalDistinctInstances field value if set, nil otherwise
+// GetTotalDistinctInstancesOk returns a tuple with the TotalDistinctInstances field value
 // and a boolean to check if the value has been set.
 func (o *NVLinkLogicalPartitionStats) GetTotalDistinctInstancesOk() (*int32, bool) {
-	if o == nil || IsNil(o.TotalDistinctInstances) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalDistinctInstances, true
+	return &o.TotalDistinctInstances, true
 }
 
-// HasTotalDistinctInstances returns a boolean if a field has been set.
-func (o *NVLinkLogicalPartitionStats) HasTotalDistinctInstances() bool {
-	if o != nil && !IsNil(o.TotalDistinctInstances) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalDistinctInstances gets a reference to the given int32 and assigns it to the TotalDistinctInstances field.
+// SetTotalDistinctInstances sets field value
 func (o *NVLinkLogicalPartitionStats) SetTotalDistinctInstances(v int32) {
-	o.TotalDistinctInstances = &v
+	o.TotalDistinctInstances = v
 }
 
 func (o NVLinkLogicalPartitionStats) MarshalJSON() ([]byte, error) {
@@ -119,13 +109,46 @@ func (o NVLinkLogicalPartitionStats) MarshalJSON() ([]byte, error) {
 
 func (o NVLinkLogicalPartitionStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.TotalGpus) {
-		toSerialize["totalGpus"] = o.TotalGpus
-	}
-	if !IsNil(o.TotalDistinctInstances) {
-		toSerialize["totalDistinctInstances"] = o.TotalDistinctInstances
-	}
+	toSerialize["totalGpus"] = o.TotalGpus
+	toSerialize["totalDistinctInstances"] = o.TotalDistinctInstances
 	return toSerialize, nil
+}
+
+func (o *NVLinkLogicalPartitionStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"totalGpus",
+		"totalDistinctInstances",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varNVLinkLogicalPartitionStats := _NVLinkLogicalPartitionStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varNVLinkLogicalPartitionStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = NVLinkLogicalPartitionStats(varNVLinkLogicalPartitionStats)
+
+	return err
 }
 
 type NullableNVLinkLogicalPartitionStats struct {

@@ -554,6 +554,7 @@ func (c *APIHostFirmwareComponent) FromProto(proto *corev1.HostFirmwareComponent
 	if proto.PreingestUpgradeWhenBelow != nil {
 		c.PreingestUpgradeWhenBelow = proto.PreingestUpgradeWhenBelow
 	}
+	c.Firmware = make([]APIHostFirmwareVersionConfig, 0, len(proto.GetFirmware()))
 	for _, firmware := range proto.GetFirmware() {
 		if firmware == nil {
 			continue
@@ -577,6 +578,7 @@ func (v *APIHostFirmwareVersionConfig) FromProto(proto *corev1.HostFirmwareVersi
 		v.PreingestionExclusiveConfig = proto.PreingestionExclusiveConfig
 	}
 	v.PowerDrainsNeeded = proto.PowerDrainsNeeded
+	v.Artifacts = make([]APIHostFirmwareArtifact, 0, len(proto.GetArtifacts()))
 	for _, artifact := range proto.GetArtifacts() {
 		if artifact == nil {
 			continue

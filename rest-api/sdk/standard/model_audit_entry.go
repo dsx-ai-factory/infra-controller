@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,42 +26,57 @@ var _ MappedNullable = &AuditEntry{}
 // AuditEntry Describes Audit Log Entry
 type AuditEntry struct {
 	// Unique identifier
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// API endpoint
-	Endpoint *string `json:"endpoint,omitempty"`
+	Endpoint string `json:"endpoint"`
 	// Query parameters from the request URL, keyed by parameter name. Each value contains all values supplied for that parameter.
-	QueryParams map[string][]string `json:"queryParams,omitempty"`
+	QueryParams map[string][]string `json:"queryParams"`
 	// HTTP method
-	Method *string         `json:"method,omitempty"`
-	Body   *AuditEntryBody `json:"body,omitempty"`
+	Method string         `json:"method"`
+	Body   AuditEntryBody `json:"body"`
 	// HTTP response status code
-	StatusCode *int32 `json:"statusCode,omitempty"`
+	StatusCode int32 `json:"statusCode"`
 	// HTTP response status message
-	StatusMessage *string `json:"statusMessage,omitempty"`
+	StatusMessage string `json:"statusMessage"`
 	// Client IP address
-	ClientIP *string `json:"clientIP,omitempty"`
+	ClientIP string `json:"clientIP"`
 	// User ID that executed the API call
 	UserID NullableString `json:"userID,omitempty"`
 	// User that executed the API call
-	User *User `json:"user,omitempty"`
+	User NullableUser `json:"user,omitempty"`
 	// Organization name
-	OrgName *string `json:"orgName,omitempty"`
+	OrgName string `json:"orgName"`
 	// Extra data in JSON format
-	ExtraData map[string]interface{} `json:"extraData,omitempty"`
+	ExtraData map[string]interface{} `json:"extraData"`
 	// API execution time
-	Timestamp *time.Time `json:"timestamp,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 	// API execution duration in milliseconds
-	DurationMs *int64 `json:"durationMs,omitempty"`
+	DurationMs int64 `json:"durationMs"`
 	// API version
-	ApiVersion *string `json:"apiVersion,omitempty"`
+	ApiVersion string `json:"apiVersion"`
 }
+
+type _AuditEntry AuditEntry
 
 // NewAuditEntry instantiates a new AuditEntry object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewAuditEntry() *AuditEntry {
+func NewAuditEntry(id string, endpoint string, queryParams map[string][]string, method string, body AuditEntryBody, statusCode int32, statusMessage string, clientIP string, orgName string, extraData map[string]interface{}, timestamp time.Time, durationMs int64, apiVersion string) *AuditEntry {
 	this := AuditEntry{}
+	this.Id = id
+	this.Endpoint = endpoint
+	this.QueryParams = queryParams
+	this.Method = method
+	this.Body = body
+	this.StatusCode = statusCode
+	this.StatusMessage = statusMessage
+	this.ClientIP = clientIP
+	this.OrgName = orgName
+	this.ExtraData = extraData
+	this.Timestamp = timestamp
+	this.DurationMs = durationMs
+	this.ApiVersion = apiVersion
 	return &this
 }
 
@@ -71,260 +88,196 @@ func NewAuditEntryWithDefaults() *AuditEntry {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *AuditEntry) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *AuditEntry) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *AuditEntry) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetEndpoint returns the Endpoint field value if set, zero value otherwise.
+// GetEndpoint returns the Endpoint field value
 func (o *AuditEntry) GetEndpoint() string {
-	if o == nil || IsNil(o.Endpoint) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Endpoint
+
+	return o.Endpoint
 }
 
-// GetEndpointOk returns a tuple with the Endpoint field value if set, nil otherwise
+// GetEndpointOk returns a tuple with the Endpoint field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetEndpointOk() (*string, bool) {
-	if o == nil || IsNil(o.Endpoint) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Endpoint, true
+	return &o.Endpoint, true
 }
 
-// HasEndpoint returns a boolean if a field has been set.
-func (o *AuditEntry) HasEndpoint() bool {
-	if o != nil && !IsNil(o.Endpoint) {
-		return true
-	}
-
-	return false
-}
-
-// SetEndpoint gets a reference to the given string and assigns it to the Endpoint field.
+// SetEndpoint sets field value
 func (o *AuditEntry) SetEndpoint(v string) {
-	o.Endpoint = &v
+	o.Endpoint = v
 }
 
-// GetQueryParams returns the QueryParams field value if set, zero value otherwise.
+// GetQueryParams returns the QueryParams field value
 func (o *AuditEntry) GetQueryParams() map[string][]string {
-	if o == nil || IsNil(o.QueryParams) {
+	if o == nil {
 		var ret map[string][]string
 		return ret
 	}
+
 	return o.QueryParams
 }
 
-// GetQueryParamsOk returns a tuple with the QueryParams field value if set, an empty map otherwise
+// GetQueryParamsOk returns a tuple with the QueryParams field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetQueryParamsOk() (map[string][]string, bool) {
-	if o == nil || IsNil(o.QueryParams) {
+	if o == nil {
 		return map[string][]string{}, false
 	}
 	return o.QueryParams, true
 }
 
-// HasQueryParams returns a boolean if a field has been set.
-func (o *AuditEntry) HasQueryParams() bool {
-	if o != nil && !IsNil(o.QueryParams) {
-		return true
-	}
-
-	return false
-}
-
-// SetQueryParams gets a reference to the given map[string][]string and assigns it to the QueryParams field.
+// SetQueryParams sets field value
 func (o *AuditEntry) SetQueryParams(v map[string][]string) {
 	o.QueryParams = v
 }
 
-// GetMethod returns the Method field value if set, zero value otherwise.
+// GetMethod returns the Method field value
 func (o *AuditEntry) GetMethod() string {
-	if o == nil || IsNil(o.Method) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Method
+
+	return o.Method
 }
 
-// GetMethodOk returns a tuple with the Method field value if set, nil otherwise
+// GetMethodOk returns a tuple with the Method field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetMethodOk() (*string, bool) {
-	if o == nil || IsNil(o.Method) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Method, true
+	return &o.Method, true
 }
 
-// HasMethod returns a boolean if a field has been set.
-func (o *AuditEntry) HasMethod() bool {
-	if o != nil && !IsNil(o.Method) {
-		return true
-	}
-
-	return false
-}
-
-// SetMethod gets a reference to the given string and assigns it to the Method field.
+// SetMethod sets field value
 func (o *AuditEntry) SetMethod(v string) {
-	o.Method = &v
+	o.Method = v
 }
 
-// GetBody returns the Body field value if set, zero value otherwise.
+// GetBody returns the Body field value
 func (o *AuditEntry) GetBody() AuditEntryBody {
-	if o == nil || IsNil(o.Body) {
+	if o == nil {
 		var ret AuditEntryBody
 		return ret
 	}
-	return *o.Body
+
+	return o.Body
 }
 
-// GetBodyOk returns a tuple with the Body field value if set, nil otherwise
+// GetBodyOk returns a tuple with the Body field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetBodyOk() (*AuditEntryBody, bool) {
-	if o == nil || IsNil(o.Body) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Body, true
+	return &o.Body, true
 }
 
-// HasBody returns a boolean if a field has been set.
-func (o *AuditEntry) HasBody() bool {
-	if o != nil && !IsNil(o.Body) {
-		return true
-	}
-
-	return false
-}
-
-// SetBody gets a reference to the given AuditEntryBody and assigns it to the Body field.
+// SetBody sets field value
 func (o *AuditEntry) SetBody(v AuditEntryBody) {
-	o.Body = &v
+	o.Body = v
 }
 
-// GetStatusCode returns the StatusCode field value if set, zero value otherwise.
+// GetStatusCode returns the StatusCode field value
 func (o *AuditEntry) GetStatusCode() int32 {
-	if o == nil || IsNil(o.StatusCode) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.StatusCode
+
+	return o.StatusCode
 }
 
-// GetStatusCodeOk returns a tuple with the StatusCode field value if set, nil otherwise
+// GetStatusCodeOk returns a tuple with the StatusCode field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetStatusCodeOk() (*int32, bool) {
-	if o == nil || IsNil(o.StatusCode) {
+	if o == nil {
 		return nil, false
 	}
-	return o.StatusCode, true
+	return &o.StatusCode, true
 }
 
-// HasStatusCode returns a boolean if a field has been set.
-func (o *AuditEntry) HasStatusCode() bool {
-	if o != nil && !IsNil(o.StatusCode) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusCode gets a reference to the given int32 and assigns it to the StatusCode field.
+// SetStatusCode sets field value
 func (o *AuditEntry) SetStatusCode(v int32) {
-	o.StatusCode = &v
+	o.StatusCode = v
 }
 
-// GetStatusMessage returns the StatusMessage field value if set, zero value otherwise.
+// GetStatusMessage returns the StatusMessage field value
 func (o *AuditEntry) GetStatusMessage() string {
-	if o == nil || IsNil(o.StatusMessage) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.StatusMessage
+
+	return o.StatusMessage
 }
 
-// GetStatusMessageOk returns a tuple with the StatusMessage field value if set, nil otherwise
+// GetStatusMessageOk returns a tuple with the StatusMessage field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetStatusMessageOk() (*string, bool) {
-	if o == nil || IsNil(o.StatusMessage) {
+	if o == nil {
 		return nil, false
 	}
-	return o.StatusMessage, true
+	return &o.StatusMessage, true
 }
 
-// HasStatusMessage returns a boolean if a field has been set.
-func (o *AuditEntry) HasStatusMessage() bool {
-	if o != nil && !IsNil(o.StatusMessage) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusMessage gets a reference to the given string and assigns it to the StatusMessage field.
+// SetStatusMessage sets field value
 func (o *AuditEntry) SetStatusMessage(v string) {
-	o.StatusMessage = &v
+	o.StatusMessage = v
 }
 
-// GetClientIP returns the ClientIP field value if set, zero value otherwise.
+// GetClientIP returns the ClientIP field value
 func (o *AuditEntry) GetClientIP() string {
-	if o == nil || IsNil(o.ClientIP) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ClientIP
+
+	return o.ClientIP
 }
 
-// GetClientIPOk returns a tuple with the ClientIP field value if set, nil otherwise
+// GetClientIPOk returns a tuple with the ClientIP field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetClientIPOk() (*string, bool) {
-	if o == nil || IsNil(o.ClientIP) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ClientIP, true
+	return &o.ClientIP, true
 }
 
-// HasClientIP returns a boolean if a field has been set.
-func (o *AuditEntry) HasClientIP() bool {
-	if o != nil && !IsNil(o.ClientIP) {
-		return true
-	}
-
-	return false
-}
-
-// SetClientIP gets a reference to the given string and assigns it to the ClientIP field.
+// SetClientIP sets field value
 func (o *AuditEntry) SetClientIP(v string) {
-	o.ClientIP = &v
+	o.ClientIP = v
 }
 
 // GetUserID returns the UserID field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -370,196 +323,167 @@ func (o *AuditEntry) UnsetUserID() {
 	o.UserID.Unset()
 }
 
-// GetUser returns the User field value if set, zero value otherwise.
+// GetUser returns the User field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *AuditEntry) GetUser() User {
-	if o == nil || IsNil(o.User) {
+	if o == nil || IsNil(o.User.Get()) {
 		var ret User
 		return ret
 	}
-	return *o.User
+	return *o.User.Get()
 }
 
 // GetUserOk returns a tuple with the User field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *AuditEntry) GetUserOk() (*User, bool) {
-	if o == nil || IsNil(o.User) {
+	if o == nil {
 		return nil, false
 	}
-	return o.User, true
+	return o.User.Get(), o.User.IsSet()
 }
 
 // HasUser returns a boolean if a field has been set.
 func (o *AuditEntry) HasUser() bool {
-	if o != nil && !IsNil(o.User) {
+	if o != nil && o.User.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetUser gets a reference to the given User and assigns it to the User field.
+// SetUser gets a reference to the given NullableUser and assigns it to the User field.
 func (o *AuditEntry) SetUser(v User) {
-	o.User = &v
+	o.User.Set(&v)
 }
 
-// GetOrgName returns the OrgName field value if set, zero value otherwise.
+// SetUserNil sets the value for User to be an explicit nil
+func (o *AuditEntry) SetUserNil() {
+	o.User.Set(nil)
+}
+
+// UnsetUser ensures that no value is present for User, not even an explicit nil
+func (o *AuditEntry) UnsetUser() {
+	o.User.Unset()
+}
+
+// GetOrgName returns the OrgName field value
 func (o *AuditEntry) GetOrgName() string {
-	if o == nil || IsNil(o.OrgName) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.OrgName
+
+	return o.OrgName
 }
 
-// GetOrgNameOk returns a tuple with the OrgName field value if set, nil otherwise
+// GetOrgNameOk returns a tuple with the OrgName field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetOrgNameOk() (*string, bool) {
-	if o == nil || IsNil(o.OrgName) {
+	if o == nil {
 		return nil, false
 	}
-	return o.OrgName, true
+	return &o.OrgName, true
 }
 
-// HasOrgName returns a boolean if a field has been set.
-func (o *AuditEntry) HasOrgName() bool {
-	if o != nil && !IsNil(o.OrgName) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrgName gets a reference to the given string and assigns it to the OrgName field.
+// SetOrgName sets field value
 func (o *AuditEntry) SetOrgName(v string) {
-	o.OrgName = &v
+	o.OrgName = v
 }
 
-// GetExtraData returns the ExtraData field value if set, zero value otherwise.
+// GetExtraData returns the ExtraData field value
 func (o *AuditEntry) GetExtraData() map[string]interface{} {
-	if o == nil || IsNil(o.ExtraData) {
+	if o == nil {
 		var ret map[string]interface{}
 		return ret
 	}
+
 	return o.ExtraData
 }
 
-// GetExtraDataOk returns a tuple with the ExtraData field value if set, an empty map otherwise
+// GetExtraDataOk returns a tuple with the ExtraData field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetExtraDataOk() (map[string]interface{}, bool) {
-	if o == nil || IsNil(o.ExtraData) {
+	if o == nil {
 		return map[string]interface{}{}, false
 	}
 	return o.ExtraData, true
 }
 
-// HasExtraData returns a boolean if a field has been set.
-func (o *AuditEntry) HasExtraData() bool {
-	if o != nil && !IsNil(o.ExtraData) {
-		return true
-	}
-
-	return false
-}
-
-// SetExtraData gets a reference to the given map[string]interface{} and assigns it to the ExtraData field.
+// SetExtraData sets field value
 func (o *AuditEntry) SetExtraData(v map[string]interface{}) {
 	o.ExtraData = v
 }
 
-// GetTimestamp returns the Timestamp field value if set, zero value otherwise.
+// GetTimestamp returns the Timestamp field value
 func (o *AuditEntry) GetTimestamp() time.Time {
-	if o == nil || IsNil(o.Timestamp) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Timestamp
+
+	return o.Timestamp
 }
 
-// GetTimestampOk returns a tuple with the Timestamp field value if set, nil otherwise
+// GetTimestampOk returns a tuple with the Timestamp field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetTimestampOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Timestamp) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Timestamp, true
+	return &o.Timestamp, true
 }
 
-// HasTimestamp returns a boolean if a field has been set.
-func (o *AuditEntry) HasTimestamp() bool {
-	if o != nil && !IsNil(o.Timestamp) {
-		return true
-	}
-
-	return false
-}
-
-// SetTimestamp gets a reference to the given time.Time and assigns it to the Timestamp field.
+// SetTimestamp sets field value
 func (o *AuditEntry) SetTimestamp(v time.Time) {
-	o.Timestamp = &v
+	o.Timestamp = v
 }
 
-// GetDurationMs returns the DurationMs field value if set, zero value otherwise.
+// GetDurationMs returns the DurationMs field value
 func (o *AuditEntry) GetDurationMs() int64 {
-	if o == nil || IsNil(o.DurationMs) {
+	if o == nil {
 		var ret int64
 		return ret
 	}
-	return *o.DurationMs
+
+	return o.DurationMs
 }
 
-// GetDurationMsOk returns a tuple with the DurationMs field value if set, nil otherwise
+// GetDurationMsOk returns a tuple with the DurationMs field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetDurationMsOk() (*int64, bool) {
-	if o == nil || IsNil(o.DurationMs) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DurationMs, true
+	return &o.DurationMs, true
 }
 
-// HasDurationMs returns a boolean if a field has been set.
-func (o *AuditEntry) HasDurationMs() bool {
-	if o != nil && !IsNil(o.DurationMs) {
-		return true
-	}
-
-	return false
-}
-
-// SetDurationMs gets a reference to the given int64 and assigns it to the DurationMs field.
+// SetDurationMs sets field value
 func (o *AuditEntry) SetDurationMs(v int64) {
-	o.DurationMs = &v
+	o.DurationMs = v
 }
 
-// GetApiVersion returns the ApiVersion field value if set, zero value otherwise.
+// GetApiVersion returns the ApiVersion field value
 func (o *AuditEntry) GetApiVersion() string {
-	if o == nil || IsNil(o.ApiVersion) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ApiVersion
+
+	return o.ApiVersion
 }
 
-// GetApiVersionOk returns a tuple with the ApiVersion field value if set, nil otherwise
+// GetApiVersionOk returns a tuple with the ApiVersion field value
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetApiVersionOk() (*string, bool) {
-	if o == nil || IsNil(o.ApiVersion) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ApiVersion, true
+	return &o.ApiVersion, true
 }
 
-// HasApiVersion returns a boolean if a field has been set.
-func (o *AuditEntry) HasApiVersion() bool {
-	if o != nil && !IsNil(o.ApiVersion) {
-		return true
-	}
-
-	return false
-}
-
-// SetApiVersion gets a reference to the given string and assigns it to the ApiVersion field.
+// SetApiVersion sets field value
 func (o *AuditEntry) SetApiVersion(v string) {
-	o.ApiVersion = &v
+	o.ApiVersion = v
 }
 
 func (o AuditEntry) MarshalJSON() ([]byte, error) {
@@ -572,52 +496,74 @@ func (o AuditEntry) MarshalJSON() ([]byte, error) {
 
 func (o AuditEntry) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Endpoint) {
-		toSerialize["endpoint"] = o.Endpoint
-	}
-	if !IsNil(o.QueryParams) {
-		toSerialize["queryParams"] = o.QueryParams
-	}
-	if !IsNil(o.Method) {
-		toSerialize["method"] = o.Method
-	}
-	if !IsNil(o.Body) {
-		toSerialize["body"] = o.Body
-	}
-	if !IsNil(o.StatusCode) {
-		toSerialize["statusCode"] = o.StatusCode
-	}
-	if !IsNil(o.StatusMessage) {
-		toSerialize["statusMessage"] = o.StatusMessage
-	}
-	if !IsNil(o.ClientIP) {
-		toSerialize["clientIP"] = o.ClientIP
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["endpoint"] = o.Endpoint
+	toSerialize["queryParams"] = o.QueryParams
+	toSerialize["method"] = o.Method
+	toSerialize["body"] = o.Body
+	toSerialize["statusCode"] = o.StatusCode
+	toSerialize["statusMessage"] = o.StatusMessage
+	toSerialize["clientIP"] = o.ClientIP
 	if o.UserID.IsSet() {
 		toSerialize["userID"] = o.UserID.Get()
 	}
-	if !IsNil(o.User) {
-		toSerialize["user"] = o.User
+	if o.User.IsSet() {
+		toSerialize["user"] = o.User.Get()
 	}
-	if !IsNil(o.OrgName) {
-		toSerialize["orgName"] = o.OrgName
-	}
-	if !IsNil(o.ExtraData) {
-		toSerialize["extraData"] = o.ExtraData
-	}
-	if !IsNil(o.Timestamp) {
-		toSerialize["timestamp"] = o.Timestamp
-	}
-	if !IsNil(o.DurationMs) {
-		toSerialize["durationMs"] = o.DurationMs
-	}
-	if !IsNil(o.ApiVersion) {
-		toSerialize["apiVersion"] = o.ApiVersion
-	}
+	toSerialize["orgName"] = o.OrgName
+	toSerialize["extraData"] = o.ExtraData
+	toSerialize["timestamp"] = o.Timestamp
+	toSerialize["durationMs"] = o.DurationMs
+	toSerialize["apiVersion"] = o.ApiVersion
 	return toSerialize, nil
+}
+
+func (o *AuditEntry) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"endpoint",
+		"queryParams",
+		"method",
+		"body",
+		"statusCode",
+		"statusMessage",
+		"clientIP",
+		"orgName",
+		"extraData",
+		"timestamp",
+		"durationMs",
+		"apiVersion",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varAuditEntry := _AuditEntry{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varAuditEntry)
+
+	if err != nil {
+		return err
+	}
+
+	*o = AuditEntry(varAuditEntry)
+
+	return err
 }
 
 type NullableAuditEntry struct {

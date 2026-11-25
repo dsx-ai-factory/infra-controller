@@ -19,7 +19,7 @@ import (
 	"gopkg.in/validator.v2"
 )
 
-// DpuExtensionServiceUpdateRequestData - Replacement deployment spec using the create request's format. Omission or null leaves the existing configuration unchanged.
+// DpuExtensionServiceUpdateRequestData - Replacement deployment spec using the create request's format. Omission leaves the existing configuration unchanged.
 type DpuExtensionServiceUpdateRequestData struct {
 	DpuExtensionServiceDpfHelmChartData *DpuExtensionServiceDpfHelmChartData
 	String                              *string
@@ -42,11 +42,6 @@ func StringAsDpuExtensionServiceUpdateRequestData(v *string) DpuExtensionService
 // Unmarshal JSON data into one of the pointers in the struct
 func (dst *DpuExtensionServiceUpdateRequestData) UnmarshalJSON(data []byte) error {
 	var err error
-	// this object is nullable so check if the payload is null or empty string
-	if string(data) == "" || string(data) == "{}" {
-		return nil
-	}
-
 	match := 0
 	// try to unmarshal data into DpuExtensionServiceDpfHelmChartData
 	err = newStrictDecoder(data).Decode(&dst.DpuExtensionServiceDpfHelmChartData)

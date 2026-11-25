@@ -36,25 +36,25 @@ type DpuMachineSummary struct {
 	// Version of the DPU agent running on the DPU
 	DpuAgentVersion string `json:"dpuAgentVersion"`
 	// BMC (Baseboard Management Controller) information for the DPU
-	BmcInfo NullableMachineBMCInfo `json:"bmcInfo"`
+	BmcInfo NullableMachineBMCInfo `json:"bmcInfo,omitempty"`
 	// DMI (Desktop Management Interface) data reported for the DPU
-	DmiData NullableMachineDMIData `json:"dmiData"`
+	DmiData NullableMachineDMIData `json:"dmiData,omitempty"`
 	// Interfaces reported on the DPU
 	Interfaces []DpuMachineInterface `json:"interfaces"`
 	// Software components reported on the DPU
 	SoftwareComponents []DpuMachineSoftwareComponent `json:"softwareComponents"`
 	// Health information for the DPU
-	Health NullableMachineHealth `json:"health"`
+	Health NullableMachineHealth `json:"health,omitempty"`
 	// Labels associated with the DPU
 	Labels map[string]string `json:"labels"`
 	// Lifecycle state of the DPU
 	State string `json:"state"`
 	// Network configuration fields exposed by the REST API, or null when not requested or unavailable
-	DpuNetworkConfig NullableDpuNetworkConfig `json:"dpuNetworkConfig"`
+	DpuNetworkConfig NullableDpuNetworkConfig `json:"dpuNetworkConfig,omitempty"`
 	// Last reboot timestamp
-	LastRebooted NullableTime `json:"lastRebooted"`
+	LastRebooted NullableTime `json:"lastRebooted,omitempty"`
 	// Physical placement of the DPU Machine within its Rack, when known
-	PlacementInRack NullablePlacementInRack `json:"placementInRack"`
+	PlacementInRack NullablePlacementInRack `json:"placementInRack,omitempty"`
 	// LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.
 	LldpNeighbors []MachineLldpNeighbor `json:"lldpNeighbors"`
 }
@@ -65,23 +65,17 @@ type _DpuMachineSummary DpuMachineSummary
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuMachineSummary(id string, infrastructureProviderId string, siteId string, hostMachineId string, dpuAgentVersion string, bmcInfo NullableMachineBMCInfo, dmiData NullableMachineDMIData, interfaces []DpuMachineInterface, softwareComponents []DpuMachineSoftwareComponent, health NullableMachineHealth, labels map[string]string, state string, dpuNetworkConfig NullableDpuNetworkConfig, lastRebooted NullableTime, placementInRack NullablePlacementInRack, lldpNeighbors []MachineLldpNeighbor) *DpuMachineSummary {
+func NewDpuMachineSummary(id string, infrastructureProviderId string, siteId string, hostMachineId string, dpuAgentVersion string, interfaces []DpuMachineInterface, softwareComponents []DpuMachineSoftwareComponent, labels map[string]string, state string, lldpNeighbors []MachineLldpNeighbor) *DpuMachineSummary {
 	this := DpuMachineSummary{}
 	this.Id = id
 	this.InfrastructureProviderId = infrastructureProviderId
 	this.SiteId = siteId
 	this.HostMachineId = hostMachineId
 	this.DpuAgentVersion = dpuAgentVersion
-	this.BmcInfo = bmcInfo
-	this.DmiData = dmiData
 	this.Interfaces = interfaces
 	this.SoftwareComponents = softwareComponents
-	this.Health = health
 	this.Labels = labels
 	this.State = state
-	this.DpuNetworkConfig = dpuNetworkConfig
-	this.LastRebooted = lastRebooted
-	this.PlacementInRack = placementInRack
 	this.LldpNeighbors = lldpNeighbors
 	return &this
 }
@@ -214,18 +208,16 @@ func (o *DpuMachineSummary) SetDpuAgentVersion(v string) {
 	o.DpuAgentVersion = v
 }
 
-// GetBmcInfo returns the BmcInfo field value
-// If the value is explicit nil, the zero value for MachineBMCInfo will be returned
+// GetBmcInfo returns the BmcInfo field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuMachineSummary) GetBmcInfo() MachineBMCInfo {
-	if o == nil || o.BmcInfo.Get() == nil {
+	if o == nil || IsNil(o.BmcInfo.Get()) {
 		var ret MachineBMCInfo
 		return ret
 	}
-
 	return *o.BmcInfo.Get()
 }
 
-// GetBmcInfoOk returns a tuple with the BmcInfo field value
+// GetBmcInfoOk returns a tuple with the BmcInfo field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetBmcInfoOk() (*MachineBMCInfo, bool) {
@@ -235,23 +227,40 @@ func (o *DpuMachineSummary) GetBmcInfoOk() (*MachineBMCInfo, bool) {
 	return o.BmcInfo.Get(), o.BmcInfo.IsSet()
 }
 
-// SetBmcInfo sets field value
+// HasBmcInfo returns a boolean if a field has been set.
+func (o *DpuMachineSummary) HasBmcInfo() bool {
+	if o != nil && o.BmcInfo.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetBmcInfo gets a reference to the given NullableMachineBMCInfo and assigns it to the BmcInfo field.
 func (o *DpuMachineSummary) SetBmcInfo(v MachineBMCInfo) {
 	o.BmcInfo.Set(&v)
 }
 
-// GetDmiData returns the DmiData field value
-// If the value is explicit nil, the zero value for MachineDMIData will be returned
+// SetBmcInfoNil sets the value for BmcInfo to be an explicit nil
+func (o *DpuMachineSummary) SetBmcInfoNil() {
+	o.BmcInfo.Set(nil)
+}
+
+// UnsetBmcInfo ensures that no value is present for BmcInfo, not even an explicit nil
+func (o *DpuMachineSummary) UnsetBmcInfo() {
+	o.BmcInfo.Unset()
+}
+
+// GetDmiData returns the DmiData field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuMachineSummary) GetDmiData() MachineDMIData {
-	if o == nil || o.DmiData.Get() == nil {
+	if o == nil || IsNil(o.DmiData.Get()) {
 		var ret MachineDMIData
 		return ret
 	}
-
 	return *o.DmiData.Get()
 }
 
-// GetDmiDataOk returns a tuple with the DmiData field value
+// GetDmiDataOk returns a tuple with the DmiData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetDmiDataOk() (*MachineDMIData, bool) {
@@ -261,13 +270,31 @@ func (o *DpuMachineSummary) GetDmiDataOk() (*MachineDMIData, bool) {
 	return o.DmiData.Get(), o.DmiData.IsSet()
 }
 
-// SetDmiData sets field value
+// HasDmiData returns a boolean if a field has been set.
+func (o *DpuMachineSummary) HasDmiData() bool {
+	if o != nil && o.DmiData.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDmiData gets a reference to the given NullableMachineDMIData and assigns it to the DmiData field.
 func (o *DpuMachineSummary) SetDmiData(v MachineDMIData) {
 	o.DmiData.Set(&v)
 }
 
+// SetDmiDataNil sets the value for DmiData to be an explicit nil
+func (o *DpuMachineSummary) SetDmiDataNil() {
+	o.DmiData.Set(nil)
+}
+
+// UnsetDmiData ensures that no value is present for DmiData, not even an explicit nil
+func (o *DpuMachineSummary) UnsetDmiData() {
+	o.DmiData.Unset()
+}
+
 // GetInterfaces returns the Interfaces field value
-// If the value is explicit nil, the zero value for []DpuMachineInterface will be returned
 func (o *DpuMachineSummary) GetInterfaces() []DpuMachineInterface {
 	if o == nil {
 		var ret []DpuMachineInterface
@@ -280,7 +307,7 @@ func (o *DpuMachineSummary) GetInterfaces() []DpuMachineInterface {
 // GetInterfacesOk returns a tuple with the Interfaces field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineSummary) GetInterfacesOk() ([]DpuMachineInterface, bool) {
-	if o == nil || IsNil(o.Interfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Interfaces, true
@@ -292,7 +319,6 @@ func (o *DpuMachineSummary) SetInterfaces(v []DpuMachineInterface) {
 }
 
 // GetSoftwareComponents returns the SoftwareComponents field value
-// If the value is explicit nil, the zero value for []DpuMachineSoftwareComponent will be returned
 func (o *DpuMachineSummary) GetSoftwareComponents() []DpuMachineSoftwareComponent {
 	if o == nil {
 		var ret []DpuMachineSoftwareComponent
@@ -305,7 +331,7 @@ func (o *DpuMachineSummary) GetSoftwareComponents() []DpuMachineSoftwareComponen
 // GetSoftwareComponentsOk returns a tuple with the SoftwareComponents field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineSummary) GetSoftwareComponentsOk() ([]DpuMachineSoftwareComponent, bool) {
-	if o == nil || IsNil(o.SoftwareComponents) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SoftwareComponents, true
@@ -316,18 +342,16 @@ func (o *DpuMachineSummary) SetSoftwareComponents(v []DpuMachineSoftwareComponen
 	o.SoftwareComponents = v
 }
 
-// GetHealth returns the Health field value
-// If the value is explicit nil, the zero value for MachineHealth will be returned
+// GetHealth returns the Health field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuMachineSummary) GetHealth() MachineHealth {
-	if o == nil || o.Health.Get() == nil {
+	if o == nil || IsNil(o.Health.Get()) {
 		var ret MachineHealth
 		return ret
 	}
-
 	return *o.Health.Get()
 }
 
-// GetHealthOk returns a tuple with the Health field value
+// GetHealthOk returns a tuple with the Health field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetHealthOk() (*MachineHealth, bool) {
@@ -337,9 +361,28 @@ func (o *DpuMachineSummary) GetHealthOk() (*MachineHealth, bool) {
 	return o.Health.Get(), o.Health.IsSet()
 }
 
-// SetHealth sets field value
+// HasHealth returns a boolean if a field has been set.
+func (o *DpuMachineSummary) HasHealth() bool {
+	if o != nil && o.Health.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetHealth gets a reference to the given NullableMachineHealth and assigns it to the Health field.
 func (o *DpuMachineSummary) SetHealth(v MachineHealth) {
 	o.Health.Set(&v)
+}
+
+// SetHealthNil sets the value for Health to be an explicit nil
+func (o *DpuMachineSummary) SetHealthNil() {
+	o.Health.Set(nil)
+}
+
+// UnsetHealth ensures that no value is present for Health, not even an explicit nil
+func (o *DpuMachineSummary) UnsetHealth() {
+	o.Health.Unset()
 }
 
 // GetLabels returns the Labels field value
@@ -390,18 +433,16 @@ func (o *DpuMachineSummary) SetState(v string) {
 	o.State = v
 }
 
-// GetDpuNetworkConfig returns the DpuNetworkConfig field value
-// If the value is explicit nil, the zero value for DpuNetworkConfig will be returned
+// GetDpuNetworkConfig returns the DpuNetworkConfig field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuMachineSummary) GetDpuNetworkConfig() DpuNetworkConfig {
-	if o == nil || o.DpuNetworkConfig.Get() == nil {
+	if o == nil || IsNil(o.DpuNetworkConfig.Get()) {
 		var ret DpuNetworkConfig
 		return ret
 	}
-
 	return *o.DpuNetworkConfig.Get()
 }
 
-// GetDpuNetworkConfigOk returns a tuple with the DpuNetworkConfig field value
+// GetDpuNetworkConfigOk returns a tuple with the DpuNetworkConfig field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetDpuNetworkConfigOk() (*DpuNetworkConfig, bool) {
@@ -411,23 +452,40 @@ func (o *DpuMachineSummary) GetDpuNetworkConfigOk() (*DpuNetworkConfig, bool) {
 	return o.DpuNetworkConfig.Get(), o.DpuNetworkConfig.IsSet()
 }
 
-// SetDpuNetworkConfig sets field value
+// HasDpuNetworkConfig returns a boolean if a field has been set.
+func (o *DpuMachineSummary) HasDpuNetworkConfig() bool {
+	if o != nil && o.DpuNetworkConfig.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDpuNetworkConfig gets a reference to the given NullableDpuNetworkConfig and assigns it to the DpuNetworkConfig field.
 func (o *DpuMachineSummary) SetDpuNetworkConfig(v DpuNetworkConfig) {
 	o.DpuNetworkConfig.Set(&v)
 }
 
-// GetLastRebooted returns the LastRebooted field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// SetDpuNetworkConfigNil sets the value for DpuNetworkConfig to be an explicit nil
+func (o *DpuMachineSummary) SetDpuNetworkConfigNil() {
+	o.DpuNetworkConfig.Set(nil)
+}
+
+// UnsetDpuNetworkConfig ensures that no value is present for DpuNetworkConfig, not even an explicit nil
+func (o *DpuMachineSummary) UnsetDpuNetworkConfig() {
+	o.DpuNetworkConfig.Unset()
+}
+
+// GetLastRebooted returns the LastRebooted field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuMachineSummary) GetLastRebooted() time.Time {
-	if o == nil || o.LastRebooted.Get() == nil {
+	if o == nil || IsNil(o.LastRebooted.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.LastRebooted.Get()
 }
 
-// GetLastRebootedOk returns a tuple with the LastRebooted field value
+// GetLastRebootedOk returns a tuple with the LastRebooted field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetLastRebootedOk() (*time.Time, bool) {
@@ -437,23 +495,40 @@ func (o *DpuMachineSummary) GetLastRebootedOk() (*time.Time, bool) {
 	return o.LastRebooted.Get(), o.LastRebooted.IsSet()
 }
 
-// SetLastRebooted sets field value
+// HasLastRebooted returns a boolean if a field has been set.
+func (o *DpuMachineSummary) HasLastRebooted() bool {
+	if o != nil && o.LastRebooted.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetLastRebooted gets a reference to the given NullableTime and assigns it to the LastRebooted field.
 func (o *DpuMachineSummary) SetLastRebooted(v time.Time) {
 	o.LastRebooted.Set(&v)
 }
 
-// GetPlacementInRack returns the PlacementInRack field value
-// If the value is explicit nil, the zero value for PlacementInRack will be returned
+// SetLastRebootedNil sets the value for LastRebooted to be an explicit nil
+func (o *DpuMachineSummary) SetLastRebootedNil() {
+	o.LastRebooted.Set(nil)
+}
+
+// UnsetLastRebooted ensures that no value is present for LastRebooted, not even an explicit nil
+func (o *DpuMachineSummary) UnsetLastRebooted() {
+	o.LastRebooted.Unset()
+}
+
+// GetPlacementInRack returns the PlacementInRack field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuMachineSummary) GetPlacementInRack() PlacementInRack {
-	if o == nil || o.PlacementInRack.Get() == nil {
+	if o == nil || IsNil(o.PlacementInRack.Get()) {
 		var ret PlacementInRack
 		return ret
 	}
-
 	return *o.PlacementInRack.Get()
 }
 
-// GetPlacementInRackOk returns a tuple with the PlacementInRack field value
+// GetPlacementInRackOk returns a tuple with the PlacementInRack field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetPlacementInRackOk() (*PlacementInRack, bool) {
@@ -463,9 +538,28 @@ func (o *DpuMachineSummary) GetPlacementInRackOk() (*PlacementInRack, bool) {
 	return o.PlacementInRack.Get(), o.PlacementInRack.IsSet()
 }
 
-// SetPlacementInRack sets field value
+// HasPlacementInRack returns a boolean if a field has been set.
+func (o *DpuMachineSummary) HasPlacementInRack() bool {
+	if o != nil && o.PlacementInRack.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetPlacementInRack gets a reference to the given NullablePlacementInRack and assigns it to the PlacementInRack field.
 func (o *DpuMachineSummary) SetPlacementInRack(v PlacementInRack) {
 	o.PlacementInRack.Set(&v)
+}
+
+// SetPlacementInRackNil sets the value for PlacementInRack to be an explicit nil
+func (o *DpuMachineSummary) SetPlacementInRackNil() {
+	o.PlacementInRack.Set(nil)
+}
+
+// UnsetPlacementInRack ensures that no value is present for PlacementInRack, not even an explicit nil
+func (o *DpuMachineSummary) UnsetPlacementInRack() {
+	o.PlacementInRack.Unset()
 }
 
 // GetLldpNeighbors returns the LldpNeighbors field value
@@ -507,16 +601,28 @@ func (o DpuMachineSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["hostMachineId"] = o.HostMachineId
 	toSerialize["dpuAgentVersion"] = o.DpuAgentVersion
-	toSerialize["bmcInfo"] = o.BmcInfo.Get()
-	toSerialize["dmiData"] = o.DmiData.Get()
+	if o.BmcInfo.IsSet() {
+		toSerialize["bmcInfo"] = o.BmcInfo.Get()
+	}
+	if o.DmiData.IsSet() {
+		toSerialize["dmiData"] = o.DmiData.Get()
+	}
 	toSerialize["interfaces"] = o.Interfaces
 	toSerialize["softwareComponents"] = o.SoftwareComponents
-	toSerialize["health"] = o.Health.Get()
+	if o.Health.IsSet() {
+		toSerialize["health"] = o.Health.Get()
+	}
 	toSerialize["labels"] = o.Labels
 	toSerialize["state"] = o.State
-	toSerialize["dpuNetworkConfig"] = o.DpuNetworkConfig.Get()
-	toSerialize["lastRebooted"] = o.LastRebooted.Get()
-	toSerialize["placementInRack"] = o.PlacementInRack.Get()
+	if o.DpuNetworkConfig.IsSet() {
+		toSerialize["dpuNetworkConfig"] = o.DpuNetworkConfig.Get()
+	}
+	if o.LastRebooted.IsSet() {
+		toSerialize["lastRebooted"] = o.LastRebooted.Get()
+	}
+	if o.PlacementInRack.IsSet() {
+		toSerialize["placementInRack"] = o.PlacementInRack.Get()
+	}
 	toSerialize["lldpNeighbors"] = o.LldpNeighbors
 	return toSerialize, nil
 }
@@ -531,16 +637,10 @@ func (o *DpuMachineSummary) UnmarshalJSON(data []byte) (err error) {
 		"siteId",
 		"hostMachineId",
 		"dpuAgentVersion",
-		"bmcInfo",
-		"dmiData",
 		"interfaces",
 		"softwareComponents",
-		"health",
 		"labels",
 		"state",
-		"dpuNetworkConfig",
-		"lastRebooted",
-		"placementInRack",
 		"lldpNeighbors",
 	}
 
@@ -552,20 +652,8 @@ func (o *DpuMachineSummary) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"bmcInfo":            {},
-		"dmiData":            {},
-		"interfaces":         {},
-		"softwareComponents": {},
-		"health":             {},
-		"labels":             {},
-		"dpuNetworkConfig":   {},
-		"lastRebooted":       {},
-		"placementInRack":    {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

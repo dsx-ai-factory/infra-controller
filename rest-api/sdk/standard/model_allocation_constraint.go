@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,17 +26,17 @@ var _ MappedNullable = &AllocationConstraint{}
 // AllocationConstraint Constraints on an Allocation that specify limits for different resource types
 type AllocationConstraint struct {
 	// ID of the Allocation Constraint
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Allocation that contains the Allocation Constraint
-	AllocationId *string `json:"allocationId,omitempty"`
+	AllocationId string `json:"allocationId"`
 	// Type of the Resource that the Allocation Constraint applies to
-	ResourceType *string `json:"resourceType,omitempty"`
+	ResourceType string `json:"resourceType"`
 	// ID of the resource that acts as the source of the Allocation. For resource type `InstanceType`, this is the ID of the Instance Type whose associated Machines are allocated to the Tenant. For resource type `IPBlock`, this is the ID of the Site-level IP Block from which a prefix is allocated to the Tenant.
-	ResourceTypeId *string `json:"resourceTypeId,omitempty"`
+	ResourceTypeId string `json:"resourceTypeId"`
 	// Type of the Allocation Constraint. `Reserved` is the only constraint type supported by current implementation.
-	ConstraintType *string `json:"constraintType,omitempty"`
+	ConstraintType string `json:"constraintType"`
 	// Value of the Allocation Constraint. For resource type: `InstanceType`, this value represents number of Machines associated with the Instance Type that is allocated to the Tenant. For resource type `IPBlock`, this value represents the prefix length of the IP Block allocated to the Tenant.
-	ConstraintValue *int32 `json:"constraintValue,omitempty"`
+	ConstraintValue int32 `json:"constraintValue"`
 	// ID of the allocated Tenant IP Block when resource type is IPBlock
 	DerivedResourceId NullableString `json:"derivedResourceId,omitempty"`
 	// Summary of the Instance Type
@@ -44,17 +46,27 @@ type AllocationConstraint struct {
 	// Deprecations active for this resource. Returned only if there are active deprecations.
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 	// Date/time when the Allocation Constraint was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Allocation Constraint was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _AllocationConstraint AllocationConstraint
 
 // NewAllocationConstraint instantiates a new AllocationConstraint object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewAllocationConstraint() *AllocationConstraint {
+func NewAllocationConstraint(id string, allocationId string, resourceType string, resourceTypeId string, constraintType string, constraintValue int32, created time.Time, updated time.Time) *AllocationConstraint {
 	this := AllocationConstraint{}
+	this.Id = id
+	this.AllocationId = allocationId
+	this.ResourceType = resourceType
+	this.ResourceTypeId = resourceTypeId
+	this.ConstraintType = constraintType
+	this.ConstraintValue = constraintValue
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -66,196 +78,148 @@ func NewAllocationConstraintWithDefaults() *AllocationConstraint {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *AllocationConstraint) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *AllocationConstraint) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetAllocationId returns the AllocationId field value if set, zero value otherwise.
+// GetAllocationId returns the AllocationId field value
 func (o *AllocationConstraint) GetAllocationId() string {
-	if o == nil || IsNil(o.AllocationId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.AllocationId
+
+	return o.AllocationId
 }
 
-// GetAllocationIdOk returns a tuple with the AllocationId field value if set, nil otherwise
+// GetAllocationIdOk returns a tuple with the AllocationId field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetAllocationIdOk() (*string, bool) {
-	if o == nil || IsNil(o.AllocationId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AllocationId, true
+	return &o.AllocationId, true
 }
 
-// HasAllocationId returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasAllocationId() bool {
-	if o != nil && !IsNil(o.AllocationId) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllocationId gets a reference to the given string and assigns it to the AllocationId field.
+// SetAllocationId sets field value
 func (o *AllocationConstraint) SetAllocationId(v string) {
-	o.AllocationId = &v
+	o.AllocationId = v
 }
 
-// GetResourceType returns the ResourceType field value if set, zero value otherwise.
+// GetResourceType returns the ResourceType field value
 func (o *AllocationConstraint) GetResourceType() string {
-	if o == nil || IsNil(o.ResourceType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ResourceType
+
+	return o.ResourceType
 }
 
-// GetResourceTypeOk returns a tuple with the ResourceType field value if set, nil otherwise
+// GetResourceTypeOk returns a tuple with the ResourceType field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetResourceTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.ResourceType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ResourceType, true
+	return &o.ResourceType, true
 }
 
-// HasResourceType returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasResourceType() bool {
-	if o != nil && !IsNil(o.ResourceType) {
-		return true
-	}
-
-	return false
-}
-
-// SetResourceType gets a reference to the given string and assigns it to the ResourceType field.
+// SetResourceType sets field value
 func (o *AllocationConstraint) SetResourceType(v string) {
-	o.ResourceType = &v
+	o.ResourceType = v
 }
 
-// GetResourceTypeId returns the ResourceTypeId field value if set, zero value otherwise.
+// GetResourceTypeId returns the ResourceTypeId field value
 func (o *AllocationConstraint) GetResourceTypeId() string {
-	if o == nil || IsNil(o.ResourceTypeId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ResourceTypeId
+
+	return o.ResourceTypeId
 }
 
-// GetResourceTypeIdOk returns a tuple with the ResourceTypeId field value if set, nil otherwise
+// GetResourceTypeIdOk returns a tuple with the ResourceTypeId field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetResourceTypeIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ResourceTypeId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ResourceTypeId, true
+	return &o.ResourceTypeId, true
 }
 
-// HasResourceTypeId returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasResourceTypeId() bool {
-	if o != nil && !IsNil(o.ResourceTypeId) {
-		return true
-	}
-
-	return false
-}
-
-// SetResourceTypeId gets a reference to the given string and assigns it to the ResourceTypeId field.
+// SetResourceTypeId sets field value
 func (o *AllocationConstraint) SetResourceTypeId(v string) {
-	o.ResourceTypeId = &v
+	o.ResourceTypeId = v
 }
 
-// GetConstraintType returns the ConstraintType field value if set, zero value otherwise.
+// GetConstraintType returns the ConstraintType field value
 func (o *AllocationConstraint) GetConstraintType() string {
-	if o == nil || IsNil(o.ConstraintType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ConstraintType
+
+	return o.ConstraintType
 }
 
-// GetConstraintTypeOk returns a tuple with the ConstraintType field value if set, nil otherwise
+// GetConstraintTypeOk returns a tuple with the ConstraintType field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetConstraintTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.ConstraintType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ConstraintType, true
+	return &o.ConstraintType, true
 }
 
-// HasConstraintType returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasConstraintType() bool {
-	if o != nil && !IsNil(o.ConstraintType) {
-		return true
-	}
-
-	return false
-}
-
-// SetConstraintType gets a reference to the given string and assigns it to the ConstraintType field.
+// SetConstraintType sets field value
 func (o *AllocationConstraint) SetConstraintType(v string) {
-	o.ConstraintType = &v
+	o.ConstraintType = v
 }
 
-// GetConstraintValue returns the ConstraintValue field value if set, zero value otherwise.
+// GetConstraintValue returns the ConstraintValue field value
 func (o *AllocationConstraint) GetConstraintValue() int32 {
-	if o == nil || IsNil(o.ConstraintValue) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.ConstraintValue
+
+	return o.ConstraintValue
 }
 
-// GetConstraintValueOk returns a tuple with the ConstraintValue field value if set, nil otherwise
+// GetConstraintValueOk returns a tuple with the ConstraintValue field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetConstraintValueOk() (*int32, bool) {
-	if o == nil || IsNil(o.ConstraintValue) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ConstraintValue, true
+	return &o.ConstraintValue, true
 }
 
-// HasConstraintValue returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasConstraintValue() bool {
-	if o != nil && !IsNil(o.ConstraintValue) {
-		return true
-	}
-
-	return false
-}
-
-// SetConstraintValue gets a reference to the given int32 and assigns it to the ConstraintValue field.
+// SetConstraintValue sets field value
 func (o *AllocationConstraint) SetConstraintValue(v int32) {
-	o.ConstraintValue = &v
+	o.ConstraintValue = v
 }
 
 // GetDerivedResourceId returns the DerivedResourceId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -397,68 +361,52 @@ func (o *AllocationConstraint) SetDeprecations(v []Deprecation) {
 	o.Deprecations = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *AllocationConstraint) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *AllocationConstraint) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *AllocationConstraint) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *AllocationConstraint) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *AllocationConstraint) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *AllocationConstraint) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o AllocationConstraint) MarshalJSON() ([]byte, error) {
@@ -471,24 +419,12 @@ func (o AllocationConstraint) MarshalJSON() ([]byte, error) {
 
 func (o AllocationConstraint) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.AllocationId) {
-		toSerialize["allocationId"] = o.AllocationId
-	}
-	if !IsNil(o.ResourceType) {
-		toSerialize["resourceType"] = o.ResourceType
-	}
-	if !IsNil(o.ResourceTypeId) {
-		toSerialize["resourceTypeId"] = o.ResourceTypeId
-	}
-	if !IsNil(o.ConstraintType) {
-		toSerialize["constraintType"] = o.ConstraintType
-	}
-	if !IsNil(o.ConstraintValue) {
-		toSerialize["constraintValue"] = o.ConstraintValue
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["allocationId"] = o.AllocationId
+	toSerialize["resourceType"] = o.ResourceType
+	toSerialize["resourceTypeId"] = o.ResourceTypeId
+	toSerialize["constraintType"] = o.ConstraintType
+	toSerialize["constraintValue"] = o.ConstraintValue
 	if o.DerivedResourceId.IsSet() {
 		toSerialize["derivedResourceId"] = o.DerivedResourceId.Get()
 	}
@@ -501,13 +437,52 @@ func (o AllocationConstraint) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *AllocationConstraint) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"allocationId",
+		"resourceType",
+		"resourceTypeId",
+		"constraintType",
+		"constraintValue",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varAllocationConstraint := _AllocationConstraint{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varAllocationConstraint)
+
+	if err != nil {
+		return err
+	}
+
+	*o = AllocationConstraint(varAllocationConstraint)
+
+	return err
 }
 
 type NullableAllocationConstraint struct {

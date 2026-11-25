@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the NetworkSecurityGroupStats type satisfies the MappedNullable interface at compile time
@@ -23,21 +25,27 @@ var _ MappedNullable = &NetworkSecurityGroupStats{}
 // NetworkSecurityGroupStats Detailed attachment statistics for a Network Security Group
 type NetworkSecurityGroupStats struct {
 	// Whether the Network Security Group is directly attached to at least one object
-	InUse *bool `json:"inUse,omitempty"`
+	InUse bool `json:"inUse"`
 	// Number of VPCs that directly attach this Network Security Group
-	DirectVpcAttachmentCount *int32 `json:"directVpcAttachmentCount,omitempty"`
+	DirectVpcAttachmentCount int32 `json:"directVpcAttachmentCount"`
 	// Number of Instances that directly attach this Network Security Group
-	DirectInstanceAttachmentCount *int32 `json:"directInstanceAttachmentCount,omitempty"`
+	DirectInstanceAttachmentCount int32 `json:"directInstanceAttachmentCount"`
 	// Total number of objects that directly attach this Network Security Group
-	TotalDirectAttachmentCount *int32 `json:"totalDirectAttachmentCount,omitempty"`
+	TotalDirectAttachmentCount int32 `json:"totalDirectAttachmentCount"`
 }
+
+type _NetworkSecurityGroupStats NetworkSecurityGroupStats
 
 // NewNetworkSecurityGroupStats instantiates a new NetworkSecurityGroupStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNetworkSecurityGroupStats() *NetworkSecurityGroupStats {
+func NewNetworkSecurityGroupStats(inUse bool, directVpcAttachmentCount int32, directInstanceAttachmentCount int32, totalDirectAttachmentCount int32) *NetworkSecurityGroupStats {
 	this := NetworkSecurityGroupStats{}
+	this.InUse = inUse
+	this.DirectVpcAttachmentCount = directVpcAttachmentCount
+	this.DirectInstanceAttachmentCount = directInstanceAttachmentCount
+	this.TotalDirectAttachmentCount = totalDirectAttachmentCount
 	return &this
 }
 
@@ -49,132 +57,100 @@ func NewNetworkSecurityGroupStatsWithDefaults() *NetworkSecurityGroupStats {
 	return &this
 }
 
-// GetInUse returns the InUse field value if set, zero value otherwise.
+// GetInUse returns the InUse field value
 func (o *NetworkSecurityGroupStats) GetInUse() bool {
-	if o == nil || IsNil(o.InUse) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.InUse
+
+	return o.InUse
 }
 
-// GetInUseOk returns a tuple with the InUse field value if set, nil otherwise
+// GetInUseOk returns a tuple with the InUse field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupStats) GetInUseOk() (*bool, bool) {
-	if o == nil || IsNil(o.InUse) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InUse, true
+	return &o.InUse, true
 }
 
-// HasInUse returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupStats) HasInUse() bool {
-	if o != nil && !IsNil(o.InUse) {
-		return true
-	}
-
-	return false
-}
-
-// SetInUse gets a reference to the given bool and assigns it to the InUse field.
+// SetInUse sets field value
 func (o *NetworkSecurityGroupStats) SetInUse(v bool) {
-	o.InUse = &v
+	o.InUse = v
 }
 
-// GetDirectVpcAttachmentCount returns the DirectVpcAttachmentCount field value if set, zero value otherwise.
+// GetDirectVpcAttachmentCount returns the DirectVpcAttachmentCount field value
 func (o *NetworkSecurityGroupStats) GetDirectVpcAttachmentCount() int32 {
-	if o == nil || IsNil(o.DirectVpcAttachmentCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.DirectVpcAttachmentCount
+
+	return o.DirectVpcAttachmentCount
 }
 
-// GetDirectVpcAttachmentCountOk returns a tuple with the DirectVpcAttachmentCount field value if set, nil otherwise
+// GetDirectVpcAttachmentCountOk returns a tuple with the DirectVpcAttachmentCount field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupStats) GetDirectVpcAttachmentCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.DirectVpcAttachmentCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DirectVpcAttachmentCount, true
+	return &o.DirectVpcAttachmentCount, true
 }
 
-// HasDirectVpcAttachmentCount returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupStats) HasDirectVpcAttachmentCount() bool {
-	if o != nil && !IsNil(o.DirectVpcAttachmentCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetDirectVpcAttachmentCount gets a reference to the given int32 and assigns it to the DirectVpcAttachmentCount field.
+// SetDirectVpcAttachmentCount sets field value
 func (o *NetworkSecurityGroupStats) SetDirectVpcAttachmentCount(v int32) {
-	o.DirectVpcAttachmentCount = &v
+	o.DirectVpcAttachmentCount = v
 }
 
-// GetDirectInstanceAttachmentCount returns the DirectInstanceAttachmentCount field value if set, zero value otherwise.
+// GetDirectInstanceAttachmentCount returns the DirectInstanceAttachmentCount field value
 func (o *NetworkSecurityGroupStats) GetDirectInstanceAttachmentCount() int32 {
-	if o == nil || IsNil(o.DirectInstanceAttachmentCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.DirectInstanceAttachmentCount
+
+	return o.DirectInstanceAttachmentCount
 }
 
-// GetDirectInstanceAttachmentCountOk returns a tuple with the DirectInstanceAttachmentCount field value if set, nil otherwise
+// GetDirectInstanceAttachmentCountOk returns a tuple with the DirectInstanceAttachmentCount field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupStats) GetDirectInstanceAttachmentCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.DirectInstanceAttachmentCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DirectInstanceAttachmentCount, true
+	return &o.DirectInstanceAttachmentCount, true
 }
 
-// HasDirectInstanceAttachmentCount returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupStats) HasDirectInstanceAttachmentCount() bool {
-	if o != nil && !IsNil(o.DirectInstanceAttachmentCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetDirectInstanceAttachmentCount gets a reference to the given int32 and assigns it to the DirectInstanceAttachmentCount field.
+// SetDirectInstanceAttachmentCount sets field value
 func (o *NetworkSecurityGroupStats) SetDirectInstanceAttachmentCount(v int32) {
-	o.DirectInstanceAttachmentCount = &v
+	o.DirectInstanceAttachmentCount = v
 }
 
-// GetTotalDirectAttachmentCount returns the TotalDirectAttachmentCount field value if set, zero value otherwise.
+// GetTotalDirectAttachmentCount returns the TotalDirectAttachmentCount field value
 func (o *NetworkSecurityGroupStats) GetTotalDirectAttachmentCount() int32 {
-	if o == nil || IsNil(o.TotalDirectAttachmentCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.TotalDirectAttachmentCount
+
+	return o.TotalDirectAttachmentCount
 }
 
-// GetTotalDirectAttachmentCountOk returns a tuple with the TotalDirectAttachmentCount field value if set, nil otherwise
+// GetTotalDirectAttachmentCountOk returns a tuple with the TotalDirectAttachmentCount field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupStats) GetTotalDirectAttachmentCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.TotalDirectAttachmentCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalDirectAttachmentCount, true
+	return &o.TotalDirectAttachmentCount, true
 }
 
-// HasTotalDirectAttachmentCount returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupStats) HasTotalDirectAttachmentCount() bool {
-	if o != nil && !IsNil(o.TotalDirectAttachmentCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalDirectAttachmentCount gets a reference to the given int32 and assigns it to the TotalDirectAttachmentCount field.
+// SetTotalDirectAttachmentCount sets field value
 func (o *NetworkSecurityGroupStats) SetTotalDirectAttachmentCount(v int32) {
-	o.TotalDirectAttachmentCount = &v
+	o.TotalDirectAttachmentCount = v
 }
 
 func (o NetworkSecurityGroupStats) MarshalJSON() ([]byte, error) {
@@ -187,19 +163,50 @@ func (o NetworkSecurityGroupStats) MarshalJSON() ([]byte, error) {
 
 func (o NetworkSecurityGroupStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.InUse) {
-		toSerialize["inUse"] = o.InUse
-	}
-	if !IsNil(o.DirectVpcAttachmentCount) {
-		toSerialize["directVpcAttachmentCount"] = o.DirectVpcAttachmentCount
-	}
-	if !IsNil(o.DirectInstanceAttachmentCount) {
-		toSerialize["directInstanceAttachmentCount"] = o.DirectInstanceAttachmentCount
-	}
-	if !IsNil(o.TotalDirectAttachmentCount) {
-		toSerialize["totalDirectAttachmentCount"] = o.TotalDirectAttachmentCount
-	}
+	toSerialize["inUse"] = o.InUse
+	toSerialize["directVpcAttachmentCount"] = o.DirectVpcAttachmentCount
+	toSerialize["directInstanceAttachmentCount"] = o.DirectInstanceAttachmentCount
+	toSerialize["totalDirectAttachmentCount"] = o.TotalDirectAttachmentCount
 	return toSerialize, nil
+}
+
+func (o *NetworkSecurityGroupStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"inUse",
+		"directVpcAttachmentCount",
+		"directInstanceAttachmentCount",
+		"totalDirectAttachmentCount",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varNetworkSecurityGroupStats := _NetworkSecurityGroupStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varNetworkSecurityGroupStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = NetworkSecurityGroupStats(varNetworkSecurityGroupStats)
+
+	return err
 }
 
 type NullableNetworkSecurityGroupStats struct {

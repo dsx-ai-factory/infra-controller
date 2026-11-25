@@ -20,10 +20,10 @@ import (
 // checks if the VpcPrefixUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &VpcPrefixUpdateRequest{}
 
-// VpcPrefixUpdateRequest Request data for updating a VPC Prefix. Omitting `name` or passing `null` preserves the stored name. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
+// VpcPrefixUpdateRequest Request data for updating a VPC Prefix. Omitting `name` preserves the stored name. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
 type VpcPrefixUpdateRequest struct {
-	// Name of the VPCPrefix. Omission or `null` preserves the stored name
-	Name NullableString `json:"name,omitempty"`
+	// Name of the VPCPrefix. Omission preserves the stored name
+	Name *string `json:"name,omitempty"`
 	// Update labels of the VPC Prefix. The supplied map replaces all stored labels; an empty object clears them, while omission preserves them
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -45,47 +45,36 @@ func NewVpcPrefixUpdateRequestWithDefaults() *VpcPrefixUpdateRequest {
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *VpcPrefixUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcPrefixUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *VpcPrefixUpdateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *VpcPrefixUpdateRequest) SetName(v string) {
-	o.Name.Set(&v)
-}
-
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *VpcPrefixUpdateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *VpcPrefixUpdateRequest) UnsetName() {
-	o.Name.Unset()
+	o.Name = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -130,8 +119,8 @@ func (o VpcPrefixUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o VpcPrefixUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

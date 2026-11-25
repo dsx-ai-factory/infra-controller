@@ -28,13 +28,13 @@ type HealthProbeAlert struct {
 	// Health probe identifier
 	Id string `json:"id"`
 	// Specific component targeted by health probe
-	Target NullableString `json:"target"`
+	Target NullableString `json:"target,omitempty"`
 	// Date/time since the alert has been in effect
-	InAlertSince NullableTime `json:"inAlertSince"`
+	InAlertSince NullableTime `json:"inAlertSince,omitempty"`
 	// Details of the failed health probe result
 	Message string `json:"message"`
 	// Information provided by Tenant, if any
-	TenantMessage NullableString `json:"tenantMessage"`
+	TenantMessage NullableString `json:"tenantMessage,omitempty"`
 	// Classifications for this alert, category or impact
 	Classifications []string `json:"classifications"`
 }
@@ -45,13 +45,10 @@ type _HealthProbeAlert HealthProbeAlert
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewHealthProbeAlert(id string, target NullableString, inAlertSince NullableTime, message string, tenantMessage NullableString, classifications []string) *HealthProbeAlert {
+func NewHealthProbeAlert(id string, message string, classifications []string) *HealthProbeAlert {
 	this := HealthProbeAlert{}
 	this.Id = id
-	this.Target = target
-	this.InAlertSince = inAlertSince
 	this.Message = message
-	this.TenantMessage = tenantMessage
 	this.Classifications = classifications
 	return &this
 }
@@ -88,18 +85,16 @@ func (o *HealthProbeAlert) SetId(v string) {
 	o.Id = v
 }
 
-// GetTarget returns the Target field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetTarget returns the Target field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *HealthProbeAlert) GetTarget() string {
-	if o == nil || o.Target.Get() == nil {
+	if o == nil || IsNil(o.Target.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Target.Get()
 }
 
-// GetTargetOk returns a tuple with the Target field value
+// GetTargetOk returns a tuple with the Target field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *HealthProbeAlert) GetTargetOk() (*string, bool) {
@@ -109,23 +104,40 @@ func (o *HealthProbeAlert) GetTargetOk() (*string, bool) {
 	return o.Target.Get(), o.Target.IsSet()
 }
 
-// SetTarget sets field value
+// HasTarget returns a boolean if a field has been set.
+func (o *HealthProbeAlert) HasTarget() bool {
+	if o != nil && o.Target.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTarget gets a reference to the given NullableString and assigns it to the Target field.
 func (o *HealthProbeAlert) SetTarget(v string) {
 	o.Target.Set(&v)
 }
 
-// GetInAlertSince returns the InAlertSince field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// SetTargetNil sets the value for Target to be an explicit nil
+func (o *HealthProbeAlert) SetTargetNil() {
+	o.Target.Set(nil)
+}
+
+// UnsetTarget ensures that no value is present for Target, not even an explicit nil
+func (o *HealthProbeAlert) UnsetTarget() {
+	o.Target.Unset()
+}
+
+// GetInAlertSince returns the InAlertSince field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *HealthProbeAlert) GetInAlertSince() time.Time {
-	if o == nil || o.InAlertSince.Get() == nil {
+	if o == nil || IsNil(o.InAlertSince.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.InAlertSince.Get()
 }
 
-// GetInAlertSinceOk returns a tuple with the InAlertSince field value
+// GetInAlertSinceOk returns a tuple with the InAlertSince field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *HealthProbeAlert) GetInAlertSinceOk() (*time.Time, bool) {
@@ -135,9 +147,28 @@ func (o *HealthProbeAlert) GetInAlertSinceOk() (*time.Time, bool) {
 	return o.InAlertSince.Get(), o.InAlertSince.IsSet()
 }
 
-// SetInAlertSince sets field value
+// HasInAlertSince returns a boolean if a field has been set.
+func (o *HealthProbeAlert) HasInAlertSince() bool {
+	if o != nil && o.InAlertSince.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetInAlertSince gets a reference to the given NullableTime and assigns it to the InAlertSince field.
 func (o *HealthProbeAlert) SetInAlertSince(v time.Time) {
 	o.InAlertSince.Set(&v)
+}
+
+// SetInAlertSinceNil sets the value for InAlertSince to be an explicit nil
+func (o *HealthProbeAlert) SetInAlertSinceNil() {
+	o.InAlertSince.Set(nil)
+}
+
+// UnsetInAlertSince ensures that no value is present for InAlertSince, not even an explicit nil
+func (o *HealthProbeAlert) UnsetInAlertSince() {
+	o.InAlertSince.Unset()
 }
 
 // GetMessage returns the Message field value
@@ -164,18 +195,16 @@ func (o *HealthProbeAlert) SetMessage(v string) {
 	o.Message = v
 }
 
-// GetTenantMessage returns the TenantMessage field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetTenantMessage returns the TenantMessage field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *HealthProbeAlert) GetTenantMessage() string {
-	if o == nil || o.TenantMessage.Get() == nil {
+	if o == nil || IsNil(o.TenantMessage.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.TenantMessage.Get()
 }
 
-// GetTenantMessageOk returns a tuple with the TenantMessage field value
+// GetTenantMessageOk returns a tuple with the TenantMessage field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *HealthProbeAlert) GetTenantMessageOk() (*string, bool) {
@@ -185,9 +214,28 @@ func (o *HealthProbeAlert) GetTenantMessageOk() (*string, bool) {
 	return o.TenantMessage.Get(), o.TenantMessage.IsSet()
 }
 
-// SetTenantMessage sets field value
+// HasTenantMessage returns a boolean if a field has been set.
+func (o *HealthProbeAlert) HasTenantMessage() bool {
+	if o != nil && o.TenantMessage.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTenantMessage gets a reference to the given NullableString and assigns it to the TenantMessage field.
 func (o *HealthProbeAlert) SetTenantMessage(v string) {
 	o.TenantMessage.Set(&v)
+}
+
+// SetTenantMessageNil sets the value for TenantMessage to be an explicit nil
+func (o *HealthProbeAlert) SetTenantMessageNil() {
+	o.TenantMessage.Set(nil)
+}
+
+// UnsetTenantMessage ensures that no value is present for TenantMessage, not even an explicit nil
+func (o *HealthProbeAlert) UnsetTenantMessage() {
+	o.TenantMessage.Unset()
 }
 
 // GetClassifications returns the Classifications field value
@@ -225,10 +273,16 @@ func (o HealthProbeAlert) MarshalJSON() ([]byte, error) {
 func (o HealthProbeAlert) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
-	toSerialize["target"] = o.Target.Get()
-	toSerialize["inAlertSince"] = o.InAlertSince.Get()
+	if o.Target.IsSet() {
+		toSerialize["target"] = o.Target.Get()
+	}
+	if o.InAlertSince.IsSet() {
+		toSerialize["inAlertSince"] = o.InAlertSince.Get()
+	}
 	toSerialize["message"] = o.Message
-	toSerialize["tenantMessage"] = o.TenantMessage.Get()
+	if o.TenantMessage.IsSet() {
+		toSerialize["tenantMessage"] = o.TenantMessage.Get()
+	}
 	toSerialize["classifications"] = o.Classifications
 	return toSerialize, nil
 }
@@ -239,10 +293,7 @@ func (o *HealthProbeAlert) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
-		"target",
-		"inAlertSince",
 		"message",
-		"tenantMessage",
 		"classifications",
 	}
 

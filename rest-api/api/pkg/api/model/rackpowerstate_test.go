@@ -343,7 +343,17 @@ func TestAPIRackPowerState_FromProto(t *testing.T) {
 			t.Cleanup(func() { _ = response.Body.Close() })
 			roundTrip, err := json.Marshal(decoded)
 			require.NoError(t, err)
-			assert.JSONEq(t, string(encoded), string(roundTrip))
+			var roundTripValue map[string]any
+			require.NoError(t, json.Unmarshal(roundTrip, &roundTripValue))
+			require.NoError(t, schema.Validate(roundTripValue))
+			for i, task := range got.Operations.Tasks {
+				if task.Targets == nil {
+					assert.False(t, decoded.Operations.Tasks[i].HasTargets())
+					assert.Nil(t, decoded.Operations.Tasks[i].Targets)
+				} else {
+					assert.True(t, decoded.Operations.Tasks[i].HasTargets())
+				}
+			}
 		})
 	}
 }
@@ -437,35 +447,39 @@ func TestRackPowerState_UnmarshalJSON(t *testing.T) {
 	require.Len(t, valid.Components, 1)
 
 	for _, tc := range []struct {
-		name   string
-		mutate func(map[string]any)
-		field  string
+		name    string
+		mutate  func(map[string]any)
+		field   string
+		wantErr bool
 	}{
-		// A nullable root identity still needs its key to advertise API support.
-		{name: "missing nullable root identity", field: "id", mutate: func(fields map[string]any) { delete(fields, "id") }},
-		// Nested read errors also require an explicit null on successful reads.
-		{name: "missing nullable nested read error", field: "tasksError", mutate: func(fields map[string]any) {
+		// Optional nullable identity and read-error keys may be omitted without failing SDK decode.
+		{name: "omitted nullable root identity", mutate: func(fields map[string]any) { delete(fields, "id") }},
+		{name: "omitted nullable nested read error", mutate: func(fields map[string]any) {
 			delete(fields["operations"].(map[string]any), "tasksError")
 		}},
-		// Renamed component models must also require an explicit action-error key.
-		{name: "missing nullable component action error", field: "actionsError", mutate: func(fields map[string]any) {
+		{name: "omitted nullable component action error", mutate: func(fields map[string]any) {
 			member := fields["components"].([]any)[0].(map[string]any)
 			delete(member["operations"].(map[string]any), "actionsError")
 		}},
 		// A present null cannot stand in for the nonnullable member array.
-		{name: "null member array", field: "components", mutate: func(fields map[string]any) { fields["components"] = nil }},
+		{name: "null member array", field: "components", wantErr: true, mutate: func(fields map[string]any) { fields["components"] = nil }},
+		{name: "missing actual summary", field: "actual", wantErr: true, mutate: func(fields map[string]any) { delete(fields, "actual") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var fields map[string]any
 			require.NoError(t, json.Unmarshal(encoded, &fields))
 			tc.mutate(fields)
-			invalid, err := json.Marshal(fields)
+			mutated, err := json.Marshal(fields)
 			require.NoError(t, err)
 			var decoded standard.RackPowerState
 
-			err = decoded.UnmarshalJSON(invalid)
+			err = decoded.UnmarshalJSON(mutated)
 
-			assert.ErrorContains(t, err, "required property "+tc.field)
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "required property "+tc.field)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }

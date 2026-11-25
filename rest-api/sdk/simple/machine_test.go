@@ -14,7 +14,7 @@ import (
 
 func TestMachineFromStandardIncludesScoutVersion(t *testing.T) {
 	version := "2.6.1"
-	apiMachine := standard.NewMachine()
+	apiMachine := standard.NewMachineWithDefaults()
 	apiMachine.SetScoutVersion(version)
 
 	tests := []struct {
@@ -29,7 +29,7 @@ func TestMachineFromStandardIncludesScoutVersion(t *testing.T) {
 		},
 		{
 			name:       "returns nil when version is unknown",
-			apiMachine: *standard.NewMachine(),
+			apiMachine: *standard.NewMachineWithDefaults(),
 			want:       nil,
 		},
 	}

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the IpBlockSummary type satisfies the MappedNullable interface at compile time
@@ -23,27 +25,36 @@ var _ MappedNullable = &IpBlockSummary{}
 // IpBlockSummary Describes a subset of core attributes of an IP block
 type IpBlockSummary struct {
 	// ID of the IP Block
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the IP Block, only lowercase characters, digits, hyphens and cannot begin/end with hyphen
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
-	Managed *bool `json:"managed,omitempty"`
+	Managed bool `json:"managed"`
 	// RoutingType of the IP Block
-	RoutingType *string `json:"routingType,omitempty"`
+	RoutingType string `json:"routingType"`
 	// Either IPv4 or IPv6 address
-	Prefix *string `json:"prefix,omitempty"`
+	Prefix string `json:"prefix"`
 	// Min: 1, Max: 32 for ipv4, 128 for ipv6
-	PrefixLength *int32 `json:"prefixLength,omitempty"`
+	PrefixLength int32 `json:"prefixLength"`
 	// Status of the IP Block
-	Status *IpBlockStatus `json:"status,omitempty"`
+	Status IpBlockStatus `json:"status"`
 }
+
+type _IpBlockSummary IpBlockSummary
 
 // NewIpBlockSummary instantiates a new IpBlockSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewIpBlockSummary() *IpBlockSummary {
+func NewIpBlockSummary(id string, name string, managed bool, routingType string, prefix string, prefixLength int32, status IpBlockStatus) *IpBlockSummary {
 	this := IpBlockSummary{}
+	this.Id = id
+	this.Name = name
+	this.Managed = managed
+	this.RoutingType = routingType
+	this.Prefix = prefix
+	this.PrefixLength = prefixLength
+	this.Status = status
 	return &this
 }
 
@@ -55,228 +66,172 @@ func NewIpBlockSummaryWithDefaults() *IpBlockSummary {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *IpBlockSummary) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockSummary) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *IpBlockSummary) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *IpBlockSummary) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *IpBlockSummary) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockSummary) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *IpBlockSummary) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *IpBlockSummary) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetManaged returns the Managed field value if set, zero value otherwise.
+// GetManaged returns the Managed field value
 func (o *IpBlockSummary) GetManaged() bool {
-	if o == nil || IsNil(o.Managed) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.Managed
+
+	return o.Managed
 }
 
-// GetManagedOk returns a tuple with the Managed field value if set, nil otherwise
+// GetManagedOk returns a tuple with the Managed field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockSummary) GetManagedOk() (*bool, bool) {
-	if o == nil || IsNil(o.Managed) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Managed, true
+	return &o.Managed, true
 }
 
-// HasManaged returns a boolean if a field has been set.
-func (o *IpBlockSummary) HasManaged() bool {
-	if o != nil && !IsNil(o.Managed) {
-		return true
-	}
-
-	return false
-}
-
-// SetManaged gets a reference to the given bool and assigns it to the Managed field.
+// SetManaged sets field value
 func (o *IpBlockSummary) SetManaged(v bool) {
-	o.Managed = &v
+	o.Managed = v
 }
 
-// GetRoutingType returns the RoutingType field value if set, zero value otherwise.
+// GetRoutingType returns the RoutingType field value
 func (o *IpBlockSummary) GetRoutingType() string {
-	if o == nil || IsNil(o.RoutingType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.RoutingType
+
+	return o.RoutingType
 }
 
-// GetRoutingTypeOk returns a tuple with the RoutingType field value if set, nil otherwise
+// GetRoutingTypeOk returns a tuple with the RoutingType field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockSummary) GetRoutingTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.RoutingType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RoutingType, true
+	return &o.RoutingType, true
 }
 
-// HasRoutingType returns a boolean if a field has been set.
-func (o *IpBlockSummary) HasRoutingType() bool {
-	if o != nil && !IsNil(o.RoutingType) {
-		return true
-	}
-
-	return false
-}
-
-// SetRoutingType gets a reference to the given string and assigns it to the RoutingType field.
+// SetRoutingType sets field value
 func (o *IpBlockSummary) SetRoutingType(v string) {
-	o.RoutingType = &v
+	o.RoutingType = v
 }
 
-// GetPrefix returns the Prefix field value if set, zero value otherwise.
+// GetPrefix returns the Prefix field value
 func (o *IpBlockSummary) GetPrefix() string {
-	if o == nil || IsNil(o.Prefix) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Prefix
+
+	return o.Prefix
 }
 
-// GetPrefixOk returns a tuple with the Prefix field value if set, nil otherwise
+// GetPrefixOk returns a tuple with the Prefix field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockSummary) GetPrefixOk() (*string, bool) {
-	if o == nil || IsNil(o.Prefix) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Prefix, true
+	return &o.Prefix, true
 }
 
-// HasPrefix returns a boolean if a field has been set.
-func (o *IpBlockSummary) HasPrefix() bool {
-	if o != nil && !IsNil(o.Prefix) {
-		return true
-	}
-
-	return false
-}
-
-// SetPrefix gets a reference to the given string and assigns it to the Prefix field.
+// SetPrefix sets field value
 func (o *IpBlockSummary) SetPrefix(v string) {
-	o.Prefix = &v
+	o.Prefix = v
 }
 
-// GetPrefixLength returns the PrefixLength field value if set, zero value otherwise.
+// GetPrefixLength returns the PrefixLength field value
 func (o *IpBlockSummary) GetPrefixLength() int32 {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.PrefixLength
+
+	return o.PrefixLength
 }
 
-// GetPrefixLengthOk returns a tuple with the PrefixLength field value if set, nil otherwise
+// GetPrefixLengthOk returns a tuple with the PrefixLength field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockSummary) GetPrefixLengthOk() (*int32, bool) {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PrefixLength, true
+	return &o.PrefixLength, true
 }
 
-// HasPrefixLength returns a boolean if a field has been set.
-func (o *IpBlockSummary) HasPrefixLength() bool {
-	if o != nil && !IsNil(o.PrefixLength) {
-		return true
-	}
-
-	return false
-}
-
-// SetPrefixLength gets a reference to the given int32 and assigns it to the PrefixLength field.
+// SetPrefixLength sets field value
 func (o *IpBlockSummary) SetPrefixLength(v int32) {
-	o.PrefixLength = &v
+	o.PrefixLength = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *IpBlockSummary) GetStatus() IpBlockStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret IpBlockStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *IpBlockSummary) GetStatusOk() (*IpBlockStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *IpBlockSummary) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given IpBlockStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *IpBlockSummary) SetStatus(v IpBlockStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 func (o IpBlockSummary) MarshalJSON() ([]byte, error) {
@@ -289,28 +244,56 @@ func (o IpBlockSummary) MarshalJSON() ([]byte, error) {
 
 func (o IpBlockSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.Managed) {
-		toSerialize["managed"] = o.Managed
-	}
-	if !IsNil(o.RoutingType) {
-		toSerialize["routingType"] = o.RoutingType
-	}
-	if !IsNil(o.Prefix) {
-		toSerialize["prefix"] = o.Prefix
-	}
-	if !IsNil(o.PrefixLength) {
-		toSerialize["prefixLength"] = o.PrefixLength
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
+	toSerialize["managed"] = o.Managed
+	toSerialize["routingType"] = o.RoutingType
+	toSerialize["prefix"] = o.Prefix
+	toSerialize["prefixLength"] = o.PrefixLength
+	toSerialize["status"] = o.Status
 	return toSerialize, nil
+}
+
+func (o *IpBlockSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"managed",
+		"routingType",
+		"prefix",
+		"prefixLength",
+		"status",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varIpBlockSummary := _IpBlockSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varIpBlockSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = IpBlockSummary(varIpBlockSummary)
+
+	return err
 }
 
 type NullableIpBlockSummary struct {

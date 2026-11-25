@@ -25,25 +25,25 @@ var _ MappedNullable = &MachineLldpNeighbor{}
 // MachineLldpNeighbor Describes an LLDP neighbor observed on one of the Machine NICs
 type MachineLldpNeighbor struct {
 	// MAC address of the Machine NIC on which the neighbor was observed
-	MacAddress *string `json:"macAddress,omitempty"`
+	MacAddress string `json:"macAddress"`
 	// Name of the Machine local interface on which the neighbor was observed
-	LocalPort *string `json:"localPort,omitempty"`
+	LocalPort string `json:"localPort"`
 	// System name advertised by the neighbor
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// System description advertised by the neighbor
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Management addresses advertised by the neighbor
-	IpAddresses []string `json:"ipAddresses,omitempty"`
+	IpAddresses []string `json:"ipAddresses"`
 	// LLDP chassis id subtype advertised by the neighbor (e.g. mac, local)
-	ChassisIdType *string `json:"chassisIdType,omitempty"`
+	ChassisIdType string `json:"chassisIdType"`
 	// LLDP chassis id value advertised by the neighbor
-	ChassisIdValue *string `json:"chassisIdValue,omitempty"`
+	ChassisIdValue string `json:"chassisIdValue"`
 	// LLDP port id subtype advertised by the neighbor (e.g. ifname, mac)
-	RemotePortType *string `json:"remotePortType,omitempty"`
+	RemotePortType string `json:"remotePortType"`
 	// LLDP port id value advertised by the neighbor
-	RemotePortValue *string `json:"remotePortValue,omitempty"`
+	RemotePortValue string `json:"remotePortValue"`
 	// LLDP-MED inventory advertised by the neighbor. Always present; null when the neighbor does not advertise one.
-	MedInventory NullableMachineLldpMedInventory `json:"medInventory"`
+	MedInventory NullableMachineLldpMedInventory `json:"medInventory,omitempty"`
 }
 
 type _MachineLldpNeighbor MachineLldpNeighbor
@@ -52,9 +52,17 @@ type _MachineLldpNeighbor MachineLldpNeighbor
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineLldpNeighbor(medInventory NullableMachineLldpMedInventory) *MachineLldpNeighbor {
+func NewMachineLldpNeighbor(macAddress string, localPort string, name string, description string, ipAddresses []string, chassisIdType string, chassisIdValue string, remotePortType string, remotePortValue string) *MachineLldpNeighbor {
 	this := MachineLldpNeighbor{}
-	this.MedInventory = medInventory
+	this.MacAddress = macAddress
+	this.LocalPort = localPort
+	this.Name = name
+	this.Description = description
+	this.IpAddresses = ipAddresses
+	this.ChassisIdType = chassisIdType
+	this.ChassisIdValue = chassisIdValue
+	this.RemotePortType = remotePortType
+	this.RemotePortValue = remotePortValue
 	return &this
 }
 
@@ -66,306 +74,232 @@ func NewMachineLldpNeighborWithDefaults() *MachineLldpNeighbor {
 	return &this
 }
 
-// GetMacAddress returns the MacAddress field value if set, zero value otherwise.
+// GetMacAddress returns the MacAddress field value
 func (o *MachineLldpNeighbor) GetMacAddress() string {
-	if o == nil || IsNil(o.MacAddress) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.MacAddress
+
+	return o.MacAddress
 }
 
-// GetMacAddressOk returns a tuple with the MacAddress field value if set, nil otherwise
+// GetMacAddressOk returns a tuple with the MacAddress field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetMacAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.MacAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MacAddress, true
+	return &o.MacAddress, true
 }
 
-// HasMacAddress returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasMacAddress() bool {
-	if o != nil && !IsNil(o.MacAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetMacAddress gets a reference to the given string and assigns it to the MacAddress field.
+// SetMacAddress sets field value
 func (o *MachineLldpNeighbor) SetMacAddress(v string) {
-	o.MacAddress = &v
+	o.MacAddress = v
 }
 
-// GetLocalPort returns the LocalPort field value if set, zero value otherwise.
+// GetLocalPort returns the LocalPort field value
 func (o *MachineLldpNeighbor) GetLocalPort() string {
-	if o == nil || IsNil(o.LocalPort) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.LocalPort
+
+	return o.LocalPort
 }
 
-// GetLocalPortOk returns a tuple with the LocalPort field value if set, nil otherwise
+// GetLocalPortOk returns a tuple with the LocalPort field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetLocalPortOk() (*string, bool) {
-	if o == nil || IsNil(o.LocalPort) {
+	if o == nil {
 		return nil, false
 	}
-	return o.LocalPort, true
+	return &o.LocalPort, true
 }
 
-// HasLocalPort returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasLocalPort() bool {
-	if o != nil && !IsNil(o.LocalPort) {
-		return true
-	}
-
-	return false
-}
-
-// SetLocalPort gets a reference to the given string and assigns it to the LocalPort field.
+// SetLocalPort sets field value
 func (o *MachineLldpNeighbor) SetLocalPort(v string) {
-	o.LocalPort = &v
+	o.LocalPort = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *MachineLldpNeighbor) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *MachineLldpNeighbor) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *MachineLldpNeighbor) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *MachineLldpNeighbor) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
-// GetIpAddresses returns the IpAddresses field value if set, zero value otherwise.
+// GetIpAddresses returns the IpAddresses field value
 func (o *MachineLldpNeighbor) GetIpAddresses() []string {
-	if o == nil || IsNil(o.IpAddresses) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.IpAddresses
 }
 
-// GetIpAddressesOk returns a tuple with the IpAddresses field value if set, nil otherwise
+// GetIpAddressesOk returns a tuple with the IpAddresses field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetIpAddressesOk() ([]string, bool) {
-	if o == nil || IsNil(o.IpAddresses) {
+	if o == nil {
 		return nil, false
 	}
 	return o.IpAddresses, true
 }
 
-// HasIpAddresses returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasIpAddresses() bool {
-	if o != nil && !IsNil(o.IpAddresses) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpAddresses gets a reference to the given []string and assigns it to the IpAddresses field.
+// SetIpAddresses sets field value
 func (o *MachineLldpNeighbor) SetIpAddresses(v []string) {
 	o.IpAddresses = v
 }
 
-// GetChassisIdType returns the ChassisIdType field value if set, zero value otherwise.
+// GetChassisIdType returns the ChassisIdType field value
 func (o *MachineLldpNeighbor) GetChassisIdType() string {
-	if o == nil || IsNil(o.ChassisIdType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ChassisIdType
+
+	return o.ChassisIdType
 }
 
-// GetChassisIdTypeOk returns a tuple with the ChassisIdType field value if set, nil otherwise
+// GetChassisIdTypeOk returns a tuple with the ChassisIdType field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetChassisIdTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.ChassisIdType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ChassisIdType, true
+	return &o.ChassisIdType, true
 }
 
-// HasChassisIdType returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasChassisIdType() bool {
-	if o != nil && !IsNil(o.ChassisIdType) {
-		return true
-	}
-
-	return false
-}
-
-// SetChassisIdType gets a reference to the given string and assigns it to the ChassisIdType field.
+// SetChassisIdType sets field value
 func (o *MachineLldpNeighbor) SetChassisIdType(v string) {
-	o.ChassisIdType = &v
+	o.ChassisIdType = v
 }
 
-// GetChassisIdValue returns the ChassisIdValue field value if set, zero value otherwise.
+// GetChassisIdValue returns the ChassisIdValue field value
 func (o *MachineLldpNeighbor) GetChassisIdValue() string {
-	if o == nil || IsNil(o.ChassisIdValue) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ChassisIdValue
+
+	return o.ChassisIdValue
 }
 
-// GetChassisIdValueOk returns a tuple with the ChassisIdValue field value if set, nil otherwise
+// GetChassisIdValueOk returns a tuple with the ChassisIdValue field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetChassisIdValueOk() (*string, bool) {
-	if o == nil || IsNil(o.ChassisIdValue) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ChassisIdValue, true
+	return &o.ChassisIdValue, true
 }
 
-// HasChassisIdValue returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasChassisIdValue() bool {
-	if o != nil && !IsNil(o.ChassisIdValue) {
-		return true
-	}
-
-	return false
-}
-
-// SetChassisIdValue gets a reference to the given string and assigns it to the ChassisIdValue field.
+// SetChassisIdValue sets field value
 func (o *MachineLldpNeighbor) SetChassisIdValue(v string) {
-	o.ChassisIdValue = &v
+	o.ChassisIdValue = v
 }
 
-// GetRemotePortType returns the RemotePortType field value if set, zero value otherwise.
+// GetRemotePortType returns the RemotePortType field value
 func (o *MachineLldpNeighbor) GetRemotePortType() string {
-	if o == nil || IsNil(o.RemotePortType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.RemotePortType
+
+	return o.RemotePortType
 }
 
-// GetRemotePortTypeOk returns a tuple with the RemotePortType field value if set, nil otherwise
+// GetRemotePortTypeOk returns a tuple with the RemotePortType field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetRemotePortTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.RemotePortType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RemotePortType, true
+	return &o.RemotePortType, true
 }
 
-// HasRemotePortType returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasRemotePortType() bool {
-	if o != nil && !IsNil(o.RemotePortType) {
-		return true
-	}
-
-	return false
-}
-
-// SetRemotePortType gets a reference to the given string and assigns it to the RemotePortType field.
+// SetRemotePortType sets field value
 func (o *MachineLldpNeighbor) SetRemotePortType(v string) {
-	o.RemotePortType = &v
+	o.RemotePortType = v
 }
 
-// GetRemotePortValue returns the RemotePortValue field value if set, zero value otherwise.
+// GetRemotePortValue returns the RemotePortValue field value
 func (o *MachineLldpNeighbor) GetRemotePortValue() string {
-	if o == nil || IsNil(o.RemotePortValue) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.RemotePortValue
+
+	return o.RemotePortValue
 }
 
-// GetRemotePortValueOk returns a tuple with the RemotePortValue field value if set, nil otherwise
+// GetRemotePortValueOk returns a tuple with the RemotePortValue field value
 // and a boolean to check if the value has been set.
 func (o *MachineLldpNeighbor) GetRemotePortValueOk() (*string, bool) {
-	if o == nil || IsNil(o.RemotePortValue) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RemotePortValue, true
+	return &o.RemotePortValue, true
 }
 
-// HasRemotePortValue returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasRemotePortValue() bool {
-	if o != nil && !IsNil(o.RemotePortValue) {
-		return true
-	}
-
-	return false
-}
-
-// SetRemotePortValue gets a reference to the given string and assigns it to the RemotePortValue field.
+// SetRemotePortValue sets field value
 func (o *MachineLldpNeighbor) SetRemotePortValue(v string) {
-	o.RemotePortValue = &v
+	o.RemotePortValue = v
 }
 
-// GetMedInventory returns the MedInventory field value
-// If the value is explicit nil, the zero value for MachineLldpMedInventory will be returned
+// GetMedInventory returns the MedInventory field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineLldpNeighbor) GetMedInventory() MachineLldpMedInventory {
-	if o == nil || o.MedInventory.Get() == nil {
+	if o == nil || IsNil(o.MedInventory.Get()) {
 		var ret MachineLldpMedInventory
 		return ret
 	}
-
 	return *o.MedInventory.Get()
 }
 
-// GetMedInventoryOk returns a tuple with the MedInventory field value
+// GetMedInventoryOk returns a tuple with the MedInventory field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineLldpNeighbor) GetMedInventoryOk() (*MachineLldpMedInventory, bool) {
@@ -375,9 +309,28 @@ func (o *MachineLldpNeighbor) GetMedInventoryOk() (*MachineLldpMedInventory, boo
 	return o.MedInventory.Get(), o.MedInventory.IsSet()
 }
 
-// SetMedInventory sets field value
+// HasMedInventory returns a boolean if a field has been set.
+func (o *MachineLldpNeighbor) HasMedInventory() bool {
+	if o != nil && o.MedInventory.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetMedInventory gets a reference to the given NullableMachineLldpMedInventory and assigns it to the MedInventory field.
 func (o *MachineLldpNeighbor) SetMedInventory(v MachineLldpMedInventory) {
 	o.MedInventory.Set(&v)
+}
+
+// SetMedInventoryNil sets the value for MedInventory to be an explicit nil
+func (o *MachineLldpNeighbor) SetMedInventoryNil() {
+	o.MedInventory.Set(nil)
+}
+
+// UnsetMedInventory ensures that no value is present for MedInventory, not even an explicit nil
+func (o *MachineLldpNeighbor) UnsetMedInventory() {
+	o.MedInventory.Unset()
 }
 
 func (o MachineLldpNeighbor) MarshalJSON() ([]byte, error) {
@@ -390,34 +343,18 @@ func (o MachineLldpNeighbor) MarshalJSON() ([]byte, error) {
 
 func (o MachineLldpNeighbor) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.MacAddress) {
-		toSerialize["macAddress"] = o.MacAddress
+	toSerialize["macAddress"] = o.MacAddress
+	toSerialize["localPort"] = o.LocalPort
+	toSerialize["name"] = o.Name
+	toSerialize["description"] = o.Description
+	toSerialize["ipAddresses"] = o.IpAddresses
+	toSerialize["chassisIdType"] = o.ChassisIdType
+	toSerialize["chassisIdValue"] = o.ChassisIdValue
+	toSerialize["remotePortType"] = o.RemotePortType
+	toSerialize["remotePortValue"] = o.RemotePortValue
+	if o.MedInventory.IsSet() {
+		toSerialize["medInventory"] = o.MedInventory.Get()
 	}
-	if !IsNil(o.LocalPort) {
-		toSerialize["localPort"] = o.LocalPort
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
-	if !IsNil(o.IpAddresses) {
-		toSerialize["ipAddresses"] = o.IpAddresses
-	}
-	if !IsNil(o.ChassisIdType) {
-		toSerialize["chassisIdType"] = o.ChassisIdType
-	}
-	if !IsNil(o.ChassisIdValue) {
-		toSerialize["chassisIdValue"] = o.ChassisIdValue
-	}
-	if !IsNil(o.RemotePortType) {
-		toSerialize["remotePortType"] = o.RemotePortType
-	}
-	if !IsNil(o.RemotePortValue) {
-		toSerialize["remotePortValue"] = o.RemotePortValue
-	}
-	toSerialize["medInventory"] = o.MedInventory.Get()
 	return toSerialize, nil
 }
 
@@ -426,7 +363,15 @@ func (o *MachineLldpNeighbor) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"medInventory",
+		"macAddress",
+		"localPort",
+		"name",
+		"description",
+		"ipAddresses",
+		"chassisIdType",
+		"chassisIdValue",
+		"remotePortType",
+		"remotePortValue",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -437,12 +382,8 @@ func (o *MachineLldpNeighbor) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"medInventory": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}
