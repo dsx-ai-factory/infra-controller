@@ -207,12 +207,14 @@ impl<'de> Deserialize<'de> for AstraConfig {
 }
 
 impl AstraConfig {
+    // With the default /11 overlay, these bit lengths give Weave /13
+    // software-plane routes and /16 rail routes.
     const fn default_underlay_ip_rail_id_bit_len() -> u8 {
-        4
+        3
     }
 
     const fn default_underlay_ip_software_plane_id_bit_len() -> u8 {
-        8
+        2
     }
 
     const fn default_underlay_rail_route_prefix_len() -> u8 {
@@ -361,7 +363,10 @@ mod tests {
                 },
                 Check {
                     scenario: "identifier sum reaches 32",
-                    input: json!({"underlay_ip_rail_id_bit_len": 24}),
+                    input: json!({
+                        "underlay_ip_rail_id_bit_len": 24,
+                        "underlay_ip_software_plane_id_bit_len": 8
+                    }),
                     expect: false,
                 },
                 Check {
