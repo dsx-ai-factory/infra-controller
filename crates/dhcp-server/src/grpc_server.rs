@@ -101,8 +101,7 @@ impl TryFrom<proto::DhcpConfig> for ModelDhcpConfig {
                 .map(|s| s.parse())
                 .collect::<Result<Vec<_>, _>>()?,
             carbide_api_url: c.carbide_api_url,
-            // shortcut: control protocol lacks this field; forward it with https://github.com/dsx-ai-factory/infra-controller/issues/9424.
-            nico_pxe_service_url: None,
+            nico_pxe_service_url: c.nico_pxe_service_url,
             carbide_ntpservers: c
                 .carbide_ntpservers
                 .iter()
@@ -1407,6 +1406,25 @@ mod tests {
             "invalid IPv6 provisioning source" {
                 Some("192.0.2.10") => Fails,
                 Some("") => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn nico_pxe_service_url_preserves_presence_and_bytes_from_control_request() {
+        scenarios!(run = |url: Option<&str>| {
+                ModelDhcpConfig::try_from(proto::DhcpConfig {
+                    nico_pxe_service_url: url.map(str::to_string),
+                    ..Default::default()
+                })
+                    .map(|config| config.nico_pxe_service_url)
+                    .map_err(drop)
+            };
+            "optional PXE service URL" {
+                None => Yields(None),
+                Some("") => Yields(Some(String::new())),
+                Some("http://PXE.example:8080/path%2F/")
+                    => Yields(Some("http://PXE.example:8080/path%2F/".to_string())),
             }
         );
     }

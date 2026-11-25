@@ -751,6 +751,22 @@ fn create_dhcp_reply_packet(
     vendor_option.push(machine_id.len() as u8);
     vendor_option.append(&mut machine_id);
 
+    if let Some(url) = config
+        .dhcp_config
+        .nico_pxe_service_url
+        .as_ref()
+        .filter(|url| !url.is_empty())
+    {
+        // iPXE cannot reassemble split option 43 payloads, so all suboptions must fit in one option.
+        if vendor_option.len() + 2 + url.len() > usize::from(u8::MAX) {
+            return Err(DhcpError::InvalidInput(
+                "PXE service URL exceeds DHCP option 43's 255-byte payload limit".to_string(),
+            ));
+        }
+        vendor_option.extend_from_slice(&[72, url.len() as u8]);
+        vendor_option.extend_from_slice(url.as_bytes());
+    }
+
     msg.opts_mut()
         .insert(DhcpOption::VendorExtensions(vendor_option));
 
@@ -811,6 +827,150 @@ fn get_mtu(circuit_id: &str, host_config: Option<&HostConfig>) -> u16 {
         .unwrap_or(1500)
 }
 mod test {
+    #[test]
+    fn nico_pxe_service_url_advertisement() {
+        use carbide_rpc_utils::dhcp::DhcpConfig;
+        use carbide_test_support::value_scenarios;
+        use rpc::carbide_tls_client::CarbideClientConfig;
+
+        use super::*;
+
+        value_scenarios!(run = |url: Option<&str>| {
+            let config = Config::new(
+                DhcpConfig {
+                    carbide_dhcp_server: Some(Ipv4Addr::new(192, 0, 2, 1)),
+                    carbide_provisioning_server_ipv4: Some(Ipv4Addr::new(192, 0, 2, 10)),
+                    nico_pxe_service_url: url.map(str::to_string),
+                    ..Default::default()
+                },
+                None,
+                67,
+                CarbideClientConfig::new(String::new(), None),
+                Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            );
+            let mut request = Message::default();
+            request.opts_mut().insert(DhcpOption::ClassIdentifier(b"HTTPClient::7::".to_vec()));
+            let reply = create_dhcp_reply_packet(
+                &DecodedPacket { packet: request },
+                "eth0",
+                DhcpRecord {
+                    machine_interface_id: Some("0fd6e9a3-06fc-4a22-ad29-aca299677b00".parse().unwrap()),
+                    address: "192.0.2.20".to_string(),
+                    prefix: "192.0.2.0/24".to_string(),
+                    fqdn: "host.example.com".to_string(),
+                    ..Default::default()
+                },
+                &config,
+                config.ipv4().unwrap().unwrap(),
+                MessageType::Discover,
+            ).unwrap();
+            let encoded = reply.to_vec().unwrap();
+            let decoded = Message::decode(&mut Decoder::new(&encoded)).unwrap();
+            let mut expected_vendor = vec![6, 4, 0, 0, 0, 8, 70, 36];
+            expected_vendor.extend_from_slice(b"0fd6e9a3-06fc-4a22-ad29-aca299677b00");
+            if let Some(url) = url.filter(|url| !url.is_empty()) {
+                expected_vendor.extend_from_slice(&[72, url.len() as u8]);
+                expected_vendor.extend_from_slice(url.as_bytes());
+            }
+            assert_eq!(decoded.opts().get(OptionCode::VendorExtensions), Some(
+                &DhcpOption::VendorExtensions(expected_vendor),
+            ));
+            assert_eq!(decoded.siaddr(), Ipv4Addr::new(192, 0, 2, 10));
+            assert_eq!(decoded.opts().get(OptionCode::BootfileName), Some(&DhcpOption::BootfileName(
+                b"http://192.0.2.10:8080/public/blobs/internal/x86_64/ipxe.efi".to_vec(),
+            )));
+        };
+            "configured URL" {
+                Some("http://PXE.example:8080/path%2F/") => (),
+            }
+            "omitted URL" {
+                None => (),
+                Some("") => (),
+            }
+        );
+    }
+
+    #[test]
+    fn nico_pxe_service_url_option_size_limit() {
+        use carbide_rpc_utils::dhcp::DhcpConfig;
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+        use carbide_uuid::machine::MachineInterfaceId;
+        use rpc::carbide_tls_client::CarbideClientConfig;
+
+        use super::*;
+
+        let machine_interface_id = Some(
+            "0fd6e9a3-06fc-4a22-ad29-aca299677b00"
+                .parse::<MachineInterfaceId>()
+                .unwrap(),
+        );
+        scenarios!(run = |(url, machine_interface_id): (String, Option<MachineInterfaceId>)| {
+            let config = Config::new(
+                DhcpConfig {
+                    carbide_dhcp_server: Some(Ipv4Addr::new(192, 0, 2, 1)),
+                    carbide_provisioning_server_ipv4: Some(Ipv4Addr::new(192, 0, 2, 10)),
+                    nico_pxe_service_url: Some(url),
+                    ..Default::default()
+                },
+                None,
+                67,
+                CarbideClientConfig::new(String::new(), None),
+                Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            );
+            let reply = create_dhcp_reply_packet(
+                &DecodedPacket { packet: Message::default() },
+                "eth0",
+                DhcpRecord {
+                    machine_interface_id,
+                    address: "192.0.2.20".to_string(),
+                    prefix: "192.0.2.0/24".to_string(),
+                    fqdn: "host.example.com".to_string(),
+                    ..Default::default()
+                },
+                &config,
+                config.ipv4().unwrap().unwrap(),
+                MessageType::Discover,
+            ).map_err(|error| assert!(matches!(error, DhcpError::InvalidInput(_))))?;
+            let encoded = reply.to_vec().unwrap();
+
+            // Inspect the encoded options because decoding can hide split option 43 payloads.
+            let mut options = &encoded[240..];
+            let mut vendor_option_count = 0;
+            while !options.is_empty() {
+                let code = options[0];
+                if code == 255 {
+                    break;
+                }
+                if code == 0 {
+                    options = &options[1..];
+                    continue;
+                }
+                let length = usize::from(options[1]);
+                if code == 43 {
+                    assert_eq!(length, 255);
+                    vendor_option_count += 1;
+                }
+                options = &options[2 + length..];
+            }
+            assert_eq!(vendor_option_count, 1);
+            Ok::<(), ()>(())
+        };
+            "with machine ID" {
+                (format!("http://{}/", "a".repeat(201)), machine_interface_id) => Yields(()),
+                (format!("http://{}/é", "a".repeat(200)), machine_interface_id) => Fails,
+            }
+            "without machine ID" {
+                (format!("http://{}/", "a".repeat(237)), None) => Yields(()),
+                (format!("http://{}/", "a".repeat(238)), None) => Fails,
+            }
+        );
+    }
+
     #[test]
     fn test_get_mtu() {
         let interface_mtu_none = crate::packet_handler::InterfaceInfo {

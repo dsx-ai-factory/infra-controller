@@ -81,6 +81,11 @@ message DhcpConfig {
     // Omission requires either an IPv4 pair or a retained identity. The saved
     // .duid takes precedence, then the live config, then this request's identity.
     optional bytes dhcpv6_server_id = 16;
+    // PXE service URL sent to hosts in DHCPv4 option 43, suboption 72.
+    // If the URL is absent or empty, only this suboption is omitted.
+    // Replies are rejected if the option 43 payload exceeds 255 bytes. This
+    // field does not change firmware filenames, service reservations, or DHCPv6.
+    optional string nico_pxe_service_url = 17;
 }
 
 // Mirrors utils::models::dhcp::InterfaceInfo.

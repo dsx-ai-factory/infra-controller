@@ -3420,6 +3420,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn nico_pxe_service_url_in_prepared_update() -> eyre::Result<()> {
+        let mut config = netconf(VpcVirtualizationType::Fnn, 32, 24, false, None, true, false);
+        let service_addresses = test_service_addresses();
+        for url in [Some("http://PXE.example:8080/path%2F/"), None] {
+            config.nico_pxe_service_url = url.map(str::to_string);
+            let prepared = prepare_dhcp_grpc_update(
+                &config,
+                &service_addresses,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )?
+            .expect("tenant topology must prepare a DHCP update");
+            assert_eq!(prepared.dhcp_config.nico_pxe_service_url.as_deref(), url);
+        }
+        Ok(())
+    }
+
     /// Builds one service-interface fixture with caller-selected attachment ID, interface ordinal,
     /// slot index, VPC ID, MAC address, link prefix, and internal UUID so DHCP conversion tests can
     /// change one contract field without rebuilding unrelated RPC data.
