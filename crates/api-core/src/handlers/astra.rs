@@ -23,7 +23,7 @@ use ::rpc::forge::{
     AstraAttachment, AstraAttachmentOvs, AstraAttachmentVf, AstraConfig, AstraConfigStatus,
     AstraMultiplaneInterface, AstraPhase,
 };
-use carbide_uuid::machine::DpuMachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
@@ -455,9 +455,34 @@ pub(super) async fn process_astra_config_status(
         }
     }
 
+    // A reported address is checked against the assignment below, so that check
+    // and its write have to be serialized with SPX config updates. Those rebind
+    // partitions and advance the instance's SPX config version while holding
+    // only the Instance lock: `update_instance_spx_config` takes the host lock
+    // only when partial multiplane is enabled, so the host lock alone would let
+    // a reassignment commit between the check and the write.
+    //
+    // Lock the Instance before the Machine, the order power changes, IB updates,
+    // and SPX config updates already establish. Only a report carrying an
+    // address consults the assignment, so every other report skips this lock
+    // rather than contending with tenancy writers for nothing.
+    let host_machine_id = MachineId::from(snapshot.host_snapshot.id);
+    let instance = if reported_host_addresses.is_empty() {
+        None
+    } else {
+        match db::instance::find_id_by_machine_id(txn.as_mut(), &host_machine_id).await? {
+            Some(instance_id) => {
+                db::instance::find_by_id_for_update(txn.as_mut(), instance_id).await?;
+                // Re-read under the lock: the row may have changed while we waited.
+                db::instance::find_by_id(txn.as_mut(), instance_id).await?
+            }
+            None => None,
+        }
+    };
+
     // Astra and SVPC share `spx_status_observation`. Read after taking the
     // host lock so a report committed while we waited is preserved.
-    db::machine::lock_by_id_for_update(&mut txn, &snapshot.host_snapshot.id.into()).await?;
+    db::machine::lock_by_id_for_update(&mut txn, &host_machine_id).await?;
     let machine =
         db::machine::find_one(txn.as_mut(), &snapshot.host_snapshot.id, Default::default())
             .await?
@@ -477,17 +502,13 @@ pub(super) async fn process_astra_config_status(
     // card carries one and `try_update_controller_state` clears it when that
     // tenancy ends.
     //
-    // Read the assignment under the host lock: the address must be checked
-    // against the tenancy the card holds now, not the one the pre-lock snapshot
-    // saw. A report that names a different revision or partition was produced
-    // for a configuration this card has since left, and its address would
-    // otherwise overwrite the current tenancy's. Reports also repeat an
-    // unchanged address every iteration, so write only what the row lacks.
+    // The address is checked against the assignment locked above, not the one
+    // the pre-lock snapshot saw. A report naming a different revision or
+    // partition was produced for a configuration this card has since left, and
+    // its address would otherwise overwrite the current tenancy's. Reports also
+    // repeat an unchanged address every iteration, so write only what the row
+    // lacks.
     if !reported_host_addresses.is_empty() {
-        let instance =
-            db::instance::find_by_machine_id(txn.as_mut(), &snapshot.host_snapshot.id.into())
-                .await?;
-
         for interface in dpa_interfaces.iter().filter(|interface| {
             interface.interface_type == DpaInterfaceType::Astra
                 && matches!(
