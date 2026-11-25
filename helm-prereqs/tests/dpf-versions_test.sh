@@ -175,19 +175,19 @@ sleep() { echo $(( $(cat "${WORK}/clock") + $1 )) > "${WORK}/clock"; }
 date() { cat "${WORK}/clock"; }
 # name ; operator image tag ; status.version|status.targetVersion per read (the
 # last repeats) ; reads until the wait returns (0 means it times out) ; text of
-# the failure report
+# the failure report ; text that the failure report must not have
 cases=(
     "upgrade finishes after the operator records its target;v30.0.0;v26.8.0|v26.8.0 v26.8.0|v30.0.0 v30.0.0|v30.0.0;3;"
     "tag without a release waits for the recorded target;custom-image;v26.8.0|v30.0.0 v30.0.0|v30.0.0;2;"
     "operator does not finish;v30.0.0;v26.8.0|v30.0.0;0;${precheck_message}"
     "image tag ahead of the build TAG;v30.1.0;v30.0.0|v30.0.0;0;built with TAG=v30.0.0"
-    "prerelease of the release in the tag does not pass;v30.0.0;v30.0.0-rc.4|v30.0.0-rc.4;0;built with TAG=v30.0.0-rc.4"
+    "prerelease of the release in the tag does not pass;v30.0.0;v30.0.0-rc.4|v30.0.0-rc.4;0;Use an operator image built with a plain release TAG, such as TAG=v30.0.0,;Resolve what is reported above"
     "prerelease tag accepts the same prerelease;v30.0.0-rc.4;v30.0.0-rc.4|v30.0.0-rc.4;1;"
     "prerelease above the release in the tag passes;v30.0.0;v30.0.1-rc.1|v30.0.1-rc.1;1;"
     "release with a leading zero and a digit above 7;v0.1.8;v0.1.8|v0.1.8;1;"
 )
 for row in "${cases[@]}"; do
-    IFS=';' read -r name tag FAKE_PAIRS want_reads want_report <<< "${row}"
+    IFS=';' read -r name tag FAKE_PAIRS want_reads want_report want_absent <<< "${row}"
     : > "${WORK}/reads"
     echo 0 > "${WORK}/clock"
     wait_seconds=600
@@ -199,6 +199,8 @@ for row in "${cases[@]}"; do
         last_pair="${FAKE_PAIRS##* }"
         [[ "${status}" -ne 0 && "${output}" == *"status.version is '${last_pair%|*}', status.targetVersion is '${last_pair#*|}'"*"${want_report}"* ]] \
             || fail "${name}: want a failure that prints both status values and '${want_report}', got exit ${status}: ${output}"
+        [[ -z "${want_absent}" || "${output}" != *"${want_absent}"* ]] \
+            || fail "${name}: the failure report must not print '${want_absent}': ${output}"
     else
         [[ "${status}" -eq 0 && "${reads}" -eq "${want_reads}" ]] \
             || fail "${name}: want success after ${want_reads} reads, got exit ${status} after ${reads}: ${output}"

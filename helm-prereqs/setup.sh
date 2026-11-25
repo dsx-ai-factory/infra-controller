@@ -1740,6 +1740,13 @@ _wait_for_dpf_operator_version() {
     echo "Error: the DPFOperatorConfig does not report the operator from image tag $2: status.version is '${_version:-<unset>}', status.targetVersion is '${_target:-<unset>}'." >&2
     if [[ -n "${_version}" && "${_version}" == "${_target}" ]]; then
         # Only the version floor from the image tag holds back an equal pair.
+        if [[ "$(_dpf_release_key "${_version}")" == "${_floor}" ]]; then
+            echo "  ${_version} is the release in image tag $2 with a suffix that the tag does not carry, and the operator has recorded no other target." >&2
+            echo "  NICo Core does not start on a prerelease of the DPF release that it requires." >&2
+            echo "  The operator reports the TAG it was built with. Use an operator image built with a plain release TAG, such as TAG=${_version%%-*}, then run setup.sh again." >&2
+            echo "  This stop does not need clean.sh, which removes the whole installation." >&2
+            return 1
+        fi
         echo "  ${_version} is older than the release in image tag $2, and the operator has recorded no other target." >&2
         echo "  The operator reports the TAG it was built with. For an image built with TAG=${_version}, use an image tag that does not start with a later release." >&2
     fi
