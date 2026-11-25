@@ -80,6 +80,17 @@ func (bcih BatchCreateInstanceHandler) buildBatchInstanceCreateRequestOsConfig(c
 			return nil, nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate OperatingSystem data", err)
 		}
 
+		if apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet {
+			return &corev1.InstanceOperatingSystemConfig{
+				RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
+				PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
+				Variant: &corev1.InstanceOperatingSystemConfig_DhcpOptionSet{
+					DhcpOptionSet: &corev1.DhcpOptionSetBoot{},
+				},
+				UserData: apiRequest.UserData,
+			}, nil, nil
+		}
+
 		return &corev1.InstanceOperatingSystemConfig{
 			RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
 			PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
@@ -959,6 +970,16 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			Msg("validated Network Security Group")
 	}
 
+	// Validate DHCP Option Set if specified (shared across all instances)
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, bcih.dbSession, *apiRequest.DhcpOptionSetID, site.ID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
+	}
+
 	// Validate and load SSH key groups (shared across all instances)
 	sshKeyGroups := []cdbm.SSHKeyGroup{}
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(bcih.dbSession)
@@ -1469,10 +1490,12 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				OperatingSystemID:        osID,
 				IpxeScript:               apiRequest.IpxeScript,
 				AlwaysBootWithCustomIpxe: *apiRequest.AlwaysBootWithCustomIpxe,
+				BootFromDhcpOptionSet:    apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet,
 				PhoneHomeEnabled:         *apiRequest.PhoneHomeEnabled,
 				UserData:                 apiRequest.UserData,
 				AutoNetwork:              apiRequest.AutoNetwork,
 				NetworkSecurityGroupID:   apiRequest.NetworkSecurityGroupID,
+				DhcpOptionSetID:          dhcpOptionSetID,
 				Labels:                   apiRequest.Labels,
 				InstanceTypeID:           &apiInstanceTypeID,
 				IsUpdatePending:          false,
@@ -1903,6 +1926,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				},
 				Config: &corev1.InstanceConfig{
 					NetworkSecurityGroupId: instance.NetworkSecurityGroupID,
+					DhcpOptionSetId:        util.GetUUIDPtrToStrPtr(instance.DhcpOptionSetID),
 					PowerProfile:           instance.PowerProfile,
 					Tenant: &corev1.TenantConfig{
 						TenantOrganizationId: tenant.Org,

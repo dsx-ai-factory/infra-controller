@@ -40,12 +40,16 @@ type InstanceUpdateRequest struct {
 	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
 	// ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	// ID of the DHCP Option Set to attach to the Instance. Must belong to the same Site and Tenant as the Instance. An empty string detaches the current DHCP Option Set; omission or `null` keeps it.
+	DhcpOptionSetId NullableString `json:"dhcpOptionSetId,omitempty"`
 	// Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current profile; an empty string clears it when DPS power management is disabled.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Any user-data to be sent to the booting OS.  For example, cloud-init data. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
 	UserData NullableString `json:"userData,omitempty"`
 	// Whether the custom iPXE data should be used for every boot.
 	AlwaysBootWithCustomIpxe NullableBool `json:"alwaysBootWithCustomIpxe,omitempty"`
+	// Whether the Instance boots from the boot URL of its DHCP Option Set, or of its VPC's DHCP Option Set when the Instance's set has no boot URL. True cannot be specified with `operatingSystemId` or `ipxeScript`, and then `alwaysBootWithCustomIpxe` is set to true and cannot be false. Specifying `operatingSystemId` or `ipxeScript` switches it off, which also sets `alwaysBootWithCustomIpxe` to false unless the request specifies it. Omission or `null` keeps the current value.
+	BootFromDhcpOptionSet NullableBool `json:"bootFromDhcpOptionSet,omitempty"`
 	// Indicates whether the Phone Home service should be enabled or disabled for the Instance
 	PhoneHomeEnabled NullableBool `json:"phoneHomeEnabled,omitempty"`
 	// Update labels of the Instance. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.
@@ -459,6 +463,49 @@ func (o *InstanceUpdateRequest) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
 }
 
+// GetDhcpOptionSetId returns the DhcpOptionSetId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *InstanceUpdateRequest) GetDhcpOptionSetId() string {
+	if o == nil || IsNil(o.DhcpOptionSetId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DhcpOptionSetId.Get()
+}
+
+// GetDhcpOptionSetIdOk returns a tuple with the DhcpOptionSetId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *InstanceUpdateRequest) GetDhcpOptionSetIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DhcpOptionSetId.Get(), o.DhcpOptionSetId.IsSet()
+}
+
+// HasDhcpOptionSetId returns a boolean if a field has been set.
+func (o *InstanceUpdateRequest) HasDhcpOptionSetId() bool {
+	if o != nil && o.DhcpOptionSetId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDhcpOptionSetId gets a reference to the given NullableString and assigns it to the DhcpOptionSetId field.
+func (o *InstanceUpdateRequest) SetDhcpOptionSetId(v string) {
+	o.DhcpOptionSetId.Set(&v)
+}
+
+// SetDhcpOptionSetIdNil sets the value for DhcpOptionSetId to be an explicit nil
+func (o *InstanceUpdateRequest) SetDhcpOptionSetIdNil() {
+	o.DhcpOptionSetId.Set(nil)
+}
+
+// UnsetDhcpOptionSetId ensures that no value is present for DhcpOptionSetId, not even an explicit nil
+func (o *InstanceUpdateRequest) UnsetDhcpOptionSetId() {
+	o.DhcpOptionSetId.Unset()
+}
+
 // GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceUpdateRequest) GetPowerProfile() string {
 	if o == nil || IsNil(o.PowerProfile.Get()) {
@@ -586,6 +633,49 @@ func (o *InstanceUpdateRequest) SetAlwaysBootWithCustomIpxeNil() {
 // UnsetAlwaysBootWithCustomIpxe ensures that no value is present for AlwaysBootWithCustomIpxe, not even an explicit nil
 func (o *InstanceUpdateRequest) UnsetAlwaysBootWithCustomIpxe() {
 	o.AlwaysBootWithCustomIpxe.Unset()
+}
+
+// GetBootFromDhcpOptionSet returns the BootFromDhcpOptionSet field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *InstanceUpdateRequest) GetBootFromDhcpOptionSet() bool {
+	if o == nil || IsNil(o.BootFromDhcpOptionSet.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.BootFromDhcpOptionSet.Get()
+}
+
+// GetBootFromDhcpOptionSetOk returns a tuple with the BootFromDhcpOptionSet field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *InstanceUpdateRequest) GetBootFromDhcpOptionSetOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.BootFromDhcpOptionSet.Get(), o.BootFromDhcpOptionSet.IsSet()
+}
+
+// HasBootFromDhcpOptionSet returns a boolean if a field has been set.
+func (o *InstanceUpdateRequest) HasBootFromDhcpOptionSet() bool {
+	if o != nil && o.BootFromDhcpOptionSet.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetBootFromDhcpOptionSet gets a reference to the given NullableBool and assigns it to the BootFromDhcpOptionSet field.
+func (o *InstanceUpdateRequest) SetBootFromDhcpOptionSet(v bool) {
+	o.BootFromDhcpOptionSet.Set(&v)
+}
+
+// SetBootFromDhcpOptionSetNil sets the value for BootFromDhcpOptionSet to be an explicit nil
+func (o *InstanceUpdateRequest) SetBootFromDhcpOptionSetNil() {
+	o.BootFromDhcpOptionSet.Set(nil)
+}
+
+// UnsetBootFromDhcpOptionSet ensures that no value is present for BootFromDhcpOptionSet, not even an explicit nil
+func (o *InstanceUpdateRequest) UnsetBootFromDhcpOptionSet() {
+	o.BootFromDhcpOptionSet.Unset()
 }
 
 // GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -935,6 +1025,9 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
 	}
+	if o.DhcpOptionSetId.IsSet() {
+		toSerialize["dhcpOptionSetId"] = o.DhcpOptionSetId.Get()
+	}
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()
 	}
@@ -943,6 +1036,9 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.AlwaysBootWithCustomIpxe.IsSet() {
 		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe.Get()
+	}
+	if o.BootFromDhcpOptionSet.IsSet() {
+		toSerialize["bootFromDhcpOptionSet"] = o.BootFromDhcpOptionSet.Get()
 	}
 	if o.PhoneHomeEnabled.IsSet() {
 		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled.Get()

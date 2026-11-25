@@ -235,6 +235,17 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 			return nil, nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate OperatingSystem data", err)
 		}
 
+		if apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet {
+			return &corev1.InstanceOperatingSystemConfig{
+				RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
+				PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
+				Variant: &corev1.InstanceOperatingSystemConfig_DhcpOptionSet{
+					DhcpOptionSet: &corev1.DhcpOptionSetBoot{},
+				},
+				UserData: apiRequest.UserData,
+			}, nil, nil
+		}
+
 		return &corev1.InstanceOperatingSystemConfig{
 			RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe, // Set by the earlier call to ValidateAndSetOperatingSystemData
 			PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,         // Set by the earlier call to ValidateAndSetOperatingSystemData
@@ -1051,6 +1062,15 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	}
 	// End validating Network Security Group
 
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, cih.dbSession, *apiRequest.DhcpOptionSetID, site.ID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
+	}
+
 	// Begin validating SSH Key Group
 	sshKeyGroupIDs := []uuid.UUID{}
 	for _, skgStrID := range apiRequest.SSHKeyGroupIDs {
@@ -1727,10 +1747,12 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			OperatingSystemID:        osID,
 			IpxeScript:               apiRequest.IpxeScript,
 			AlwaysBootWithCustomIpxe: *apiRequest.AlwaysBootWithCustomIpxe,
+			BootFromDhcpOptionSet:    apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet,
 			PhoneHomeEnabled:         *apiRequest.PhoneHomeEnabled,
 			UserData:                 apiRequest.UserData,
 			AutoNetwork:              apiRequest.AutoNetwork,
 			NetworkSecurityGroupID:   apiRequest.NetworkSecurityGroupID,
+			DhcpOptionSetID:          dhcpOptionSetID,
 			Labels:                   apiRequest.Labels,
 			IsUpdatePending:          false,
 			Status:                   cdbm.InstanceStatusPending,
@@ -2068,6 +2090,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			},
 			Config: &corev1.InstanceConfig{
 				NetworkSecurityGroupId: instance.NetworkSecurityGroupID,
+				DhcpOptionSetId:        util.GetUUIDPtrToStrPtr(instance.DhcpOptionSetID),
 				PowerProfile:           instance.PowerProfile,
 				Tenant: &corev1.TenantConfig{
 					TenantOrganizationId: tenant.Org,
@@ -2442,6 +2465,33 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 	var osID *uuid.UUID
 
 	ctx := c.Request().Context()
+
+	// The Instance boots from its DHCP Option Set's boot URL, so it has no OS or iPXE script.
+	if apiRequest.BootsFromDhcpOptionSet(instance) {
+		if err := apiRequest.ValidateAndSetOperatingSystemData(uih.cfg, instance, nil); err != nil {
+			logger.Error().Err(err).Msg("failed to validate OperatingSystem")
+			return nil, nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate OperatingSystem data", err)
+		}
+
+		userData := instance.UserData
+		if apiRequest.UserData != nil {
+			userData = apiRequest.UserData
+		}
+
+		phoneHomeEnabled := instance.PhoneHomeEnabled
+		if apiRequest.PhoneHomeEnabled != nil {
+			phoneHomeEnabled = *apiRequest.PhoneHomeEnabled
+		}
+
+		return &corev1.InstanceOperatingSystemConfig{
+			RunProvisioningInstructionsOnEveryBoot: true,
+			PhoneHomeEnabled:                       phoneHomeEnabled,
+			Variant: &corev1.InstanceOperatingSystemConfig_DhcpOptionSet{
+				DhcpOptionSet: &corev1.DhcpOptionSetBoot{},
+			},
+			UserData: userData,
+		}, nil, nil
+	}
 
 	// The OS is being cleared.
 	if apiRequest.OperatingSystemID != nil && *apiRequest.OperatingSystemID == "" {
@@ -2884,6 +2934,16 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		nsgID = cutil.GetPtr(nsg.ID)
+	}
+
+	// If a DHCP Option Set was requested, validate it. An empty ID detaches it.
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil && *apiRequest.DhcpOptionSetID != "" {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, uih.dbSession, *apiRequest.DhcpOptionSetID, site.ID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
 	}
 
 	// Validate Interfaces if present
@@ -3702,7 +3762,9 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					OperatingSystemID:        osID,
 					IpxeScript:               apiRequest.IpxeScript,
 					AlwaysBootWithCustomIpxe: apiRequest.AlwaysBootWithCustomIpxe,
+					BootFromDhcpOptionSet:    apiRequest.BootFromDhcpOptionSet,
 					NetworkSecurityGroupID:   nsgID,
+					DhcpOptionSetID:          dhcpOptionSetID,
 					PhoneHomeEnabled:         apiRequest.PhoneHomeEnabled,
 					Status:                   instanceStatusConfiguring,
 					UserData:                 apiRequest.UserData,
@@ -3725,6 +3787,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			shouldClear = true
 		}
 
+		// An Instance switching to boot from its DHCP Option Set no longer uses its OS or iPXE script.
+		if apiRequest.BootFromDhcpOptionSet != nil && *apiRequest.BootFromDhcpOptionSet && !instance.BootFromDhcpOptionSet {
+			clearInput.OperatingSystemID = true
+			clearInput.IpxeScript = true
+			shouldClear = true
+		}
+
 		// If this request is attempting to clear the NSG for the instance, set it.
 		if apiRequest.NetworkSecurityGroupID != nil {
 			if *apiRequest.NetworkSecurityGroupID == "" {
@@ -3734,6 +3803,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			// We should always clear details for any NSG change so that users don't see stale
 			// status.
 			clearInput.NetworkSecurityGroupPropagationDetails = true
+			shouldClear = true
+		}
+
+		if apiRequest.DhcpOptionSetID != nil && *apiRequest.DhcpOptionSetID == "" {
+			clearInput.DhcpOptionSetID = true
 			shouldClear = true
 		}
 
@@ -4596,6 +4670,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			},
 			Config: &corev1.InstanceConfig{
 				NetworkSecurityGroupId: ui.NetworkSecurityGroupID,
+				DhcpOptionSetId:        util.GetUUIDPtrToStrPtr(ui.DhcpOptionSetID),
 				PowerProfile:           ui.PowerProfile,
 				Tenant: &corev1.TenantConfig{
 					TenantOrganizationId: tenant.Org,

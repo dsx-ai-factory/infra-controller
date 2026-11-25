@@ -49,6 +49,8 @@ type Instance struct {
 	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
 	// ID of the attached Network Security Group, if any
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	// ID of the attached DHCP Option Set, if any
+	DhcpOptionSetId NullableString `json:"dhcpOptionSetId,omitempty"`
 	// External power provisioning profile associated with the Instance.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
@@ -61,6 +63,8 @@ type Instance struct {
 	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// Indicates whether the Instance should always execute custom iPXE script when rebooting
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe,omitempty"`
+	// Indicates whether the Instance boots from the boot URL of its or its VPC's DHCP Option Set
+	BootFromDhcpOptionSet *bool `json:"bootFromDhcpOptionSet,omitempty"`
 	// Indicates whether the Phone Home service should be enabled or disabled for the Instance
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
 	// UserData is inherited from Operating System or specified by user if allowed
@@ -560,6 +564,49 @@ func (o *Instance) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
 }
 
+// GetDhcpOptionSetId returns the DhcpOptionSetId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *Instance) GetDhcpOptionSetId() string {
+	if o == nil || IsNil(o.DhcpOptionSetId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DhcpOptionSetId.Get()
+}
+
+// GetDhcpOptionSetIdOk returns a tuple with the DhcpOptionSetId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Instance) GetDhcpOptionSetIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DhcpOptionSetId.Get(), o.DhcpOptionSetId.IsSet()
+}
+
+// HasDhcpOptionSetId returns a boolean if a field has been set.
+func (o *Instance) HasDhcpOptionSetId() bool {
+	if o != nil && o.DhcpOptionSetId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDhcpOptionSetId gets a reference to the given NullableString and assigns it to the DhcpOptionSetId field.
+func (o *Instance) SetDhcpOptionSetId(v string) {
+	o.DhcpOptionSetId.Set(&v)
+}
+
+// SetDhcpOptionSetIdNil sets the value for DhcpOptionSetId to be an explicit nil
+func (o *Instance) SetDhcpOptionSetIdNil() {
+	o.DhcpOptionSetId.Set(nil)
+}
+
+// UnsetDhcpOptionSetId ensures that no value is present for DhcpOptionSetId, not even an explicit nil
+func (o *Instance) UnsetDhcpOptionSetId() {
+	o.DhcpOptionSetId.Unset()
+}
+
 // GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Instance) GetPowerProfile() string {
 	if o == nil || IsNil(o.PowerProfile.Get()) {
@@ -777,6 +824,38 @@ func (o *Instance) HasAlwaysBootWithCustomIpxe() bool {
 // SetAlwaysBootWithCustomIpxe gets a reference to the given bool and assigns it to the AlwaysBootWithCustomIpxe field.
 func (o *Instance) SetAlwaysBootWithCustomIpxe(v bool) {
 	o.AlwaysBootWithCustomIpxe = &v
+}
+
+// GetBootFromDhcpOptionSet returns the BootFromDhcpOptionSet field value if set, zero value otherwise.
+func (o *Instance) GetBootFromDhcpOptionSet() bool {
+	if o == nil || IsNil(o.BootFromDhcpOptionSet) {
+		var ret bool
+		return ret
+	}
+	return *o.BootFromDhcpOptionSet
+}
+
+// GetBootFromDhcpOptionSetOk returns a tuple with the BootFromDhcpOptionSet field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Instance) GetBootFromDhcpOptionSetOk() (*bool, bool) {
+	if o == nil || IsNil(o.BootFromDhcpOptionSet) {
+		return nil, false
+	}
+	return o.BootFromDhcpOptionSet, true
+}
+
+// HasBootFromDhcpOptionSet returns a boolean if a field has been set.
+func (o *Instance) HasBootFromDhcpOptionSet() bool {
+	if o != nil && !IsNil(o.BootFromDhcpOptionSet) {
+		return true
+	}
+
+	return false
+}
+
+// SetBootFromDhcpOptionSet gets a reference to the given bool and assigns it to the BootFromDhcpOptionSet field.
+func (o *Instance) SetBootFromDhcpOptionSet(v bool) {
+	o.BootFromDhcpOptionSet = &v
 }
 
 // GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
@@ -1466,6 +1545,9 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
 	}
+	if o.DhcpOptionSetId.IsSet() {
+		toSerialize["dhcpOptionSetId"] = o.DhcpOptionSetId.Get()
+	}
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()
 	}
@@ -1481,6 +1563,9 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.AlwaysBootWithCustomIpxe) {
 		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe
+	}
+	if !IsNil(o.BootFromDhcpOptionSet) {
+		toSerialize["bootFromDhcpOptionSet"] = o.BootFromDhcpOptionSet
 	}
 	if !IsNil(o.PhoneHomeEnabled) {
 		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled

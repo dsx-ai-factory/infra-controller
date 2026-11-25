@@ -227,6 +227,16 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	// If a DHCP Option Set was requested, validate it.
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, cvh.dbSession, *apiRequest.DhcpOptionSetID, site.ID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
+	}
+
 	siteConfig := &cdbm.SiteConfig{}
 	if site.Config != nil {
 		siteConfig = site.Config
@@ -401,6 +411,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 			Org:                       org,
 			InfrastructureProviderID:  site.InfrastructureProviderID,
 			NetworkSecurityGroupID:    apiRequest.NetworkSecurityGroupID,
+			DhcpOptionSetID:           dhcpOptionSetID,
 			TenantID:                  tenant.ID,
 			SiteID:                    site.ID,
 			NetworkVirtualizationType: networkVirtualizationType,
@@ -756,6 +767,16 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 		nsgID = cutil.GetPtr(nsg.ID)
 	}
 
+	// If a DHCP Option Set was requested, validate it. An empty ID detaches it.
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil && *apiRequest.DhcpOptionSetID != "" {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, uvh.dbSession, *apiRequest.DhcpOptionSetID, vpc.SiteID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
+	}
+
 	// Labels support
 	var labels map[string]string
 	if apiRequest.Labels != nil {
@@ -912,6 +933,7 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 			Description:             apiRequest.Description,
 			Labels:                  labels,
 			NetworkSecurityGroupID:  nsgID,
+			DhcpOptionSetID:         dhcpOptionSetID,
 			RoutingProfileOverrides: apiRequest.RoutingProfileOverrides.ToDB(),
 			PowerResourceGroup:      apiRequest.PowerResourceGroup,
 		}
@@ -940,6 +962,11 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 			// We should always clear details for any NSG change so that users don't see stale
 			// status.
 			clearInput.NetworkSecurityGroupPropagationDetails = true
+			shouldClear = true
+		}
+
+		if apiRequest.DhcpOptionSetID != nil && *apiRequest.DhcpOptionSetID == "" {
+			clearInput.DhcpOptionSetID = true
 			shouldClear = true
 		}
 

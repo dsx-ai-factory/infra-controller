@@ -299,6 +299,8 @@ type APIVpcCreateRequest struct {
 	// NetworkSecurityGroupID is the ID if a desired
 	// NSG to attach to the VPC
 	NetworkSecurityGroupID *string `json:"networkSecurityGroupId"`
+	// DhcpOptionSetID is the ID of a DHCP Option Set to attach to the VPC
+	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// NVLinkLogicalPartitionID is the ID of the NVLinkLogicalPartition
 	NVLinkLogicalPartitionID *string `json:"nvLinkLogicalPartitionId"`
 	// Vni is an optional, explicitly requested VPC VNI.
@@ -345,6 +347,10 @@ func (ascr APIVpcCreateRequest) Validate() error {
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&ascr.ID,
 			validation.When(ascr.ID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
+		validation.Field(&ascr.DhcpOptionSetID,
+			validation.When(ascr.DhcpOptionSetID != nil,
+				validation.Required.Error(validationErrorValueRequired),
+				validationis.UUID.Error(validationErrorInvalidUUID))),
 	)
 
 	if err != nil {
@@ -421,6 +427,7 @@ func (ascr APIVpcCreateRequest) ToProto(vpc *cdbm.Vpc) *corev1.VpcCreationReques
 		RoutingProfileOverrides:         ascr.RoutingProfileOverrides.ToDB().ToProto(),
 		PowerResourceGroup:              config.PowerResourceGroup,
 		NetworkSecurityGroupId:          config.NetworkSecurityGroupId,
+		DhcpOptionSetId:                 config.DhcpOptionSetId,
 		Vni:                             vni,
 		Metadata:                        vpcProto.Metadata,
 		DefaultNvlinkLogicalPartitionId: config.DefaultNvlinkLogicalPartitionId,
@@ -438,6 +445,8 @@ type APIVpcUpdateRequest struct {
 	// NetworkSecurityGroupID is the ID if a desired
 	// NSG to attach to the VPC
 	NetworkSecurityGroupID *string `json:"networkSecurityGroupId"`
+	// DhcpOptionSetID is the ID of a DHCP Option Set to attach to the VPC. An empty string detaches it.
+	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// NVLinkLogicalPartitionID is the ID of the NVLinkLogicalPartition
 	NVLinkLogicalPartitionID *string `json:"nvLinkLogicalPartitionId"`
 	// RoutingProfileOverrides replaces the VPC's current inline routing-profile definition when present.
@@ -457,6 +466,8 @@ func (asur APIVpcUpdateRequest) Validate() error {
 			validation.When(asur.Description != nil, validation.Length(0, 1024).Error(validationErrorDescriptionStringLength)),
 		),
 		validation.Field(&asur.RoutingProfileOverrides),
+		validation.Field(&asur.DhcpOptionSetID,
+			validation.When(asur.DhcpOptionSetID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
 	)
 
 	if err != nil {
@@ -488,6 +499,7 @@ func (asur APIVpcUpdateRequest) ToProto(vpc *cdbm.Vpc) *corev1.VpcUpdateRequest 
 	return &corev1.VpcUpdateRequest{
 		Id:                              vpcProto.Id,
 		NetworkSecurityGroupId:          config.NetworkSecurityGroupId,
+		DhcpOptionSetId:                 config.DhcpOptionSetId,
 		DefaultNvlinkLogicalPartitionId: config.DefaultNvlinkLogicalPartitionId,
 		RoutingProfileOverrides:         asur.RoutingProfileOverrides.ToDB().ToProto(),
 		PowerResourceGroup:              asur.PowerResourceGroup,
@@ -569,6 +581,8 @@ type APIVpc struct {
 	NetworkSecurityGroup *APINetworkSecurityGroupSummary `json:"networkSecurityGroup,omitempty"`
 	// NetworkSecurityGroupPropagationDetails is the propagation details for the attched NSG, if any
 	NetworkSecurityGroupPropagationDetails *APINetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails"`
+	// DhcpOptionSetID is the ID of the attached DHCP Option Set, if any
+	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// RoutingProfile is the applied routing profile for the VPC, when known.
 	RoutingProfile *string `json:"routingProfile"`
 	// PowerResourceGroup is the external power provisioning resource group associated with the VPC.
@@ -608,6 +622,7 @@ func NewAPIVpc(dbVpc cdbm.Vpc, dbsds []cdbm.StatusDetail, includeEffectiveRoutin
 		Status:                                 dbVpc.Status,
 		NetworkSecurityGroupID:                 dbVpc.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: NewAPINetworkSecurityGroupPropagationDetails(dbVpc.NetworkSecurityGroupPropagationDetails),
+		DhcpOptionSetID:                        util.GetUUIDPtrToStrPtr(dbVpc.DhcpOptionSetID),
 		SlaacEnabled:                           dbVpc.SlaacEnabled,
 		PowerResourceGroup:                     dbVpc.PowerResourceGroup,
 		Created:                                dbVpc.Created,

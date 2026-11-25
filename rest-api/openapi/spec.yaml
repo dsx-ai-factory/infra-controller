@@ -18228,7 +18228,7 @@ paths:
           description: Another DHCP Option Set with the same name exists for the Tenant on the Site, or another request is changing this DHCP Option Set
           $ref: '#/components/responses/ConflictError'
         '412':
-          description: The DHCP Option Set was changed on the Site since REST last stored its version
+          description: The DHCP Option Set was changed on the Site since REST last stored its version; retry after the next inventory update
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: Describes an error response for 500 Internal Server Error
@@ -23768,6 +23768,12 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group attached to the VPC
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the DHCP Option Set attached to the VPC
         networkSecurityGroupPropagationDetails:
           oneOf:
             - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
@@ -24012,6 +24018,12 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group to attach to the VPC
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the DHCP Option Set to attach to the VPC. Must belong to the same Site and Tenant as the VPC. Hosts in the VPC use it unless their Instance has its own DHCP Option Set.
         vni:
           type:
             - integer
@@ -24056,6 +24068,11 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group to attach to the VPC
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          description: ID of the DHCP Option Set to attach to the VPC. Must belong to the same Site and Tenant as the VPC. An empty string detaches the current DHCP Option Set; omission or `null` keeps it.
         nvLinkLogicalPartitionId:
           type:
             - string
@@ -26906,6 +26923,12 @@ components:
             - string
             - 'null'
           description: 'ID of the attached Network Security Group, if any'
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: 'ID of the attached DHCP Option Set, if any'
         powerProfile:
           type:
             - string
@@ -26933,6 +26956,9 @@ components:
         alwaysBootWithCustomIpxe:
           type: boolean
           description: Indicates whether the Instance should always execute custom iPXE script when rebooting
+        bootFromDhcpOptionSet:
+          type: boolean
+          description: Indicates whether the Instance boots from the boot URL of its or its VPC's DHCP Option Set
         phoneHomeEnabled:
           type: boolean
           description: Indicates whether the Phone Home service should be enabled or disabled for the Instance
@@ -27234,7 +27260,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: Must be specified if iPXE Script field is empty
+          description: Must be specified if iPXE Script field is empty, unless `bootFromDhcpOptionSet` is true
         powerProfile:
           type:
             - string
@@ -27246,14 +27272,23 @@ components:
             - string
             - 'null'
           description: ID of the desired Network Security Group to attach to the Instance. Instance-level policy takes precedence over VPC-level policy on every Interface, including Interfaces attached to another Tenant's VPC.
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the DHCP Option Set to attach to the Instance. Must belong to the same Site and Tenant as the Instance. It overrides the VPC's DHCP Option Set per value; each value it leaves unset falls back to the VPC's.
         ipxeScript:
           type:
             - string
             - 'null'
-          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified'
+          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified, unless `bootFromDhcpOptionSet` is true'
         alwaysBootWithCustomIpxe:
           type: boolean
           description: 'When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instance. OS must be of iPXE type.'
+        bootFromDhcpOptionSet:
+          type: boolean
+          description: When set to true, the Instance boots from the boot URL of its DHCP Option Set, or of its VPC's DHCP Option Set when the Instance's set has no boot URL. Cannot be specified with `operatingSystemId` or `ipxeScript`. Every boot uses the boot URL, so `alwaysBootWithCustomIpxe` defaults to true and cannot be false.
         phoneHomeEnabled:
           type: boolean
           description: 'When set to true, the Instance will be enabled with the Phone Home service.'
@@ -27412,7 +27447,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: Must be specified if iPXE Script field is empty
+          description: Must be specified if iPXE Script field is empty, unless `bootFromDhcpOptionSet` is true
         powerProfile:
           type:
             - string
@@ -27425,14 +27460,23 @@ components:
             - 'null'
           format: uuid
           description: ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of a DHCP Option Set to attach to all Instances. Must belong to the same Site and Tenant as the Instances. It overrides the VPC's DHCP Option Set per value; each value it leaves unset falls back to the VPC's.
         ipxeScript:
           type:
             - string
             - 'null'
-          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified'
+          description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified, unless `bootFromDhcpOptionSet` is true'
         alwaysBootWithCustomIpxe:
           type: boolean
           description: 'When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instances. OS must be of iPXE type.'
+        bootFromDhcpOptionSet:
+          type: boolean
+          description: When set to true, the Instances boot from the boot URL of their DHCP Option Set, or of their VPC's DHCP Option Set when the Instances' set has no boot URL. Cannot be specified with `operatingSystemId` or `ipxeScript`. Every boot uses the boot URL, so `alwaysBootWithCustomIpxe` defaults to true and cannot be false.
         phoneHomeEnabled:
           type: boolean
           description: 'When set to true, the Instances will be enabled with the Phone Home service.'
@@ -27613,6 +27657,11 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          description: ID of the DHCP Option Set to attach to the Instance. Must belong to the same Site and Tenant as the Instance. An empty string detaches the current DHCP Option Set; omission or `null` keeps it.
         powerProfile:
           type:
             - string
@@ -27628,6 +27677,11 @@ components:
             - boolean
             - 'null'
           description: Whether the custom iPXE data should be used for every boot.
+        bootFromDhcpOptionSet:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the Instance boots from the boot URL of its DHCP Option Set, or of its VPC's DHCP Option Set when the Instance's set has no boot URL. True cannot be specified with `operatingSystemId` or `ipxeScript`, and then `alwaysBootWithCustomIpxe` is set to true and cannot be false. Specifying `operatingSystemId` or `ipxeScript` switches it off, which also sets `alwaysBootWithCustomIpxe` to false unless the request specifies it. Omission or `null` keeps the current value.
         phoneHomeEnabled:
           type:
             - boolean
@@ -36575,9 +36629,10 @@ components:
     DhcpOptionSetStatus:
       title: DhcpOptionSetStatus
       type: string
-      description: Status values for DHCP Option Set objects
+      description: Status values for DHCP Option Set objects. `Error` means the DHCP Option Set is missing on the Site.
       enum:
         - Ready
+        - Error
     DhcpOptionSetCreateRequest:
       type: object
       examples:

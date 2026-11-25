@@ -18,17 +18,20 @@ import (
 	"fmt"
 )
 
-// DhcpOptionSetStatus Status values for DHCP Option Set objects
+// DhcpOptionSetStatus Status values for DHCP Option Set objects. `Error` means the DHCP Option Set
+// is missing on the Site.
 type DhcpOptionSetStatus string
 
 // List of DhcpOptionSetStatus
 const (
 	DHCPOPTIONSETSTATUS_READY DhcpOptionSetStatus = "Ready"
+	DHCPOPTIONSETSTATUS_ERROR DhcpOptionSetStatus = "Error"
 )
 
 // All allowed values of DhcpOptionSetStatus enum
 var AllowedDhcpOptionSetStatusEnumValues = []DhcpOptionSetStatus{
 	"Ready",
+	"Error",
 }
 
 func (v *DhcpOptionSetStatus) UnmarshalJSON(src []byte) error {

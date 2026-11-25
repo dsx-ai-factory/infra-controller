@@ -145,6 +145,7 @@ type Workflow struct {
 	NVLinkLogicalPartitionState *MgrState
 	VpcPeeringState             *MgrState
 	SpectrumXPartitionState     *MgrState
+	DhcpOptionSetState          *MgrState
 	TenantIdentityState         *MgrState
 }
 
@@ -182,6 +183,7 @@ func NewWorkflowInstance() *Workflow {
 		NVLinkLogicalPartitionState: &MgrState{},
 		VpcPeeringState:             &MgrState{},
 		SpectrumXPartitionState:     &MgrState{},
+		DhcpOptionSetState:          &MgrState{},
 		TenantIdentityState:         &MgrState{},
 	}
 }

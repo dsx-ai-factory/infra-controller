@@ -284,6 +284,12 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("SpectrumXPartition: failed to register inventory publisher")
 	}
 
+	// Inventory only: DhcpOptionSet CRUD goes through the generic Core gRPC proxy.
+	err = ManagerAccess.API.DhcpOptionSet.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("DhcpOptionSet: failed to register inventory publisher")
+	}
+
 	logRegistrationError("Subnet subscriber", ManagerAccess.API.Subnet.RegisterSubscriber())
 	_ = ManagerAccess.API.Subnet.RegisterPublisher()
 

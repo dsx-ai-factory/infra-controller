@@ -42,16 +42,20 @@ type BatchInstanceCreateRequest struct {
 	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
 	// User data applied to all instances. Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
 	UserData NullableString `json:"userData,omitempty"`
-	// Must be specified if iPXE Script field is empty
+	// Must be specified if iPXE Script field is empty, unless `bootFromDhcpOptionSet` is true
 	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
 	// Power profile to apply to every Instance in the batch. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
-	// Override iPXE script specified in OS, must be specified if Operating System is not specified
+	// ID of a DHCP Option Set to attach to all Instances. Must belong to the same Site and Tenant as the Instances. It overrides the VPC's DHCP Option Set per value; each value it leaves unset falls back to the VPC's.
+	DhcpOptionSetId NullableString `json:"dhcpOptionSetId,omitempty"`
+	// Override iPXE script specified in OS, must be specified if Operating System is not specified, unless `bootFromDhcpOptionSet` is true
 	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instances. OS must be of iPXE type.
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe,omitempty"`
+	// When set to true, the Instances boot from the boot URL of their DHCP Option Set, or of their VPC's DHCP Option Set when the Instances' set has no boot URL. Cannot be specified with `operatingSystemId` or `ipxeScript`. Every boot uses the boot URL, so `alwaysBootWithCustomIpxe` defaults to true and cannot be false.
+	BootFromDhcpOptionSet *bool `json:"bootFromDhcpOptionSet,omitempty"`
 	// When set to true, the Instances will be enabled with the Phone Home service.
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
 	// Key-value objects to be applied to all instances (shared across all instances)
@@ -501,6 +505,49 @@ func (o *BatchInstanceCreateRequest) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
 }
 
+// GetDhcpOptionSetId returns the DhcpOptionSetId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchInstanceCreateRequest) GetDhcpOptionSetId() string {
+	if o == nil || IsNil(o.DhcpOptionSetId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DhcpOptionSetId.Get()
+}
+
+// GetDhcpOptionSetIdOk returns a tuple with the DhcpOptionSetId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchInstanceCreateRequest) GetDhcpOptionSetIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DhcpOptionSetId.Get(), o.DhcpOptionSetId.IsSet()
+}
+
+// HasDhcpOptionSetId returns a boolean if a field has been set.
+func (o *BatchInstanceCreateRequest) HasDhcpOptionSetId() bool {
+	if o != nil && o.DhcpOptionSetId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDhcpOptionSetId gets a reference to the given NullableString and assigns it to the DhcpOptionSetId field.
+func (o *BatchInstanceCreateRequest) SetDhcpOptionSetId(v string) {
+	o.DhcpOptionSetId.Set(&v)
+}
+
+// SetDhcpOptionSetIdNil sets the value for DhcpOptionSetId to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetDhcpOptionSetIdNil() {
+	o.DhcpOptionSetId.Set(nil)
+}
+
+// UnsetDhcpOptionSetId ensures that no value is present for DhcpOptionSetId, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetDhcpOptionSetId() {
+	o.DhcpOptionSetId.Unset()
+}
+
 // GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetIpxeScript() string {
 	if o == nil || IsNil(o.IpxeScript.Get()) {
@@ -574,6 +621,38 @@ func (o *BatchInstanceCreateRequest) HasAlwaysBootWithCustomIpxe() bool {
 // SetAlwaysBootWithCustomIpxe gets a reference to the given bool and assigns it to the AlwaysBootWithCustomIpxe field.
 func (o *BatchInstanceCreateRequest) SetAlwaysBootWithCustomIpxe(v bool) {
 	o.AlwaysBootWithCustomIpxe = &v
+}
+
+// GetBootFromDhcpOptionSet returns the BootFromDhcpOptionSet field value if set, zero value otherwise.
+func (o *BatchInstanceCreateRequest) GetBootFromDhcpOptionSet() bool {
+	if o == nil || IsNil(o.BootFromDhcpOptionSet) {
+		var ret bool
+		return ret
+	}
+	return *o.BootFromDhcpOptionSet
+}
+
+// GetBootFromDhcpOptionSetOk returns a tuple with the BootFromDhcpOptionSet field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchInstanceCreateRequest) GetBootFromDhcpOptionSetOk() (*bool, bool) {
+	if o == nil || IsNil(o.BootFromDhcpOptionSet) {
+		return nil, false
+	}
+	return o.BootFromDhcpOptionSet, true
+}
+
+// HasBootFromDhcpOptionSet returns a boolean if a field has been set.
+func (o *BatchInstanceCreateRequest) HasBootFromDhcpOptionSet() bool {
+	if o != nil && !IsNil(o.BootFromDhcpOptionSet) {
+		return true
+	}
+
+	return false
+}
+
+// SetBootFromDhcpOptionSet gets a reference to the given bool and assigns it to the BootFromDhcpOptionSet field.
+func (o *BatchInstanceCreateRequest) SetBootFromDhcpOptionSet(v bool) {
+	o.BootFromDhcpOptionSet = &v
 }
 
 // GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
@@ -932,11 +1011,17 @@ func (o BatchInstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
 	}
+	if o.DhcpOptionSetId.IsSet() {
+		toSerialize["dhcpOptionSetId"] = o.DhcpOptionSetId.Get()
+	}
 	if o.IpxeScript.IsSet() {
 		toSerialize["ipxeScript"] = o.IpxeScript.Get()
 	}
 	if !IsNil(o.AlwaysBootWithCustomIpxe) {
 		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe
+	}
+	if !IsNil(o.BootFromDhcpOptionSet) {
+		toSerialize["bootFromDhcpOptionSet"] = o.BootFromDhcpOptionSet
 	}
 	if !IsNil(o.PhoneHomeEnabled) {
 		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled

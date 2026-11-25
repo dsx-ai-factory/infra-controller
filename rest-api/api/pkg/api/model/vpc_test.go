@@ -990,12 +990,14 @@ func TestAPIVpcUpdateRequest_ToProto(t *testing.T) {
 	empty := ""
 	nvllpID := uuid.New()
 
-	t.Run("populates id, metadata, and NSG from the merged-into-DB vpc", func(t *testing.T) {
+	t.Run("populates id, metadata, NSG, and DHCP Option Set from the merged-into-DB vpc", func(t *testing.T) {
+		dhcpOptionSetID := uuid.New()
 		vpc := &cdbm.Vpc{
 			ID:                     id,
 			Name:                   "vpc-a",
 			Description:            &desc,
 			NetworkSecurityGroupID: &nsg,
+			DhcpOptionSetID:        &dhcpOptionSetID,
 			Labels:                 map[string]string{"env": "prod"},
 		}
 		got := APIVpcUpdateRequest{}.ToProto(vpc)
@@ -1004,6 +1006,8 @@ func TestAPIVpcUpdateRequest_ToProto(t *testing.T) {
 		assert.Equal(t, id.String(), got.Id.Value)
 		require.NotNil(t, got.NetworkSecurityGroupId)
 		assert.Equal(t, "nsg-1", *got.NetworkSecurityGroupId)
+		require.NotNil(t, got.DhcpOptionSetId)
+		assert.Equal(t, dhcpOptionSetID.String(), *got.DhcpOptionSetId)
 		require.NotNil(t, got.Metadata)
 		assert.Equal(t, "vpc-a", got.Metadata.Name)
 		assert.Equal(t, "primary", got.Metadata.Description)

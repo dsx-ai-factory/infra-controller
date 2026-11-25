@@ -56,6 +56,20 @@ message SiteConfigInventory {
   SiteAgentBuildInfo site_agent_build_info = 2;
 }
 
+// DhcpOptionSetInventory - inventory info for all DHCP Option Sets on Site, collected periodically
+message DhcpOptionSetInventory {
+  // List of DhcpOptionSets
+  repeated forge.DhcpOptionSet dhcp_option_sets = 1;
+  // Reported timestamp of inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
 // DpuExtensionServiceInventory - inventory of all DPU Extension Services on Site, collected periodically
 message DpuExtensionServiceInventory {
   // Status of Inventory

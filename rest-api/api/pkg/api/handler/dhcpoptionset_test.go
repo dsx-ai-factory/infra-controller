@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -520,6 +521,39 @@ func TestDeleteDhcpOptionSetHandler_Handle(t *testing.T) {
 
 			_, err := cdbm.NewDhcpOptionSetDAO(fx.dbSession).GetByID(context.Background(), nil, dos.ID, nil)
 			assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		})
+	}
+}
+
+func TestGetDhcpOptionSetIDForAttachment(t *testing.T) {
+	fx := newDhcpOptionSetFixture(t)
+	dos := testBuildDhcpOptionSet(t, fx, "attach-set", fx.tenant)
+	otherTenantDos := testBuildDhcpOptionSet(t, fx, "other-tenant-set", fx.otherTenant)
+
+	tests := []struct {
+		name        string
+		requestedID string
+		siteID      uuid.UUID
+		wantCode    int
+	}{
+		{name: "returns the set on the same Site and Tenant", requestedID: dos.ID.String(), siteID: fx.site.ID},
+		{name: "rejects an invalid ID", requestedID: "not-a-uuid", siteID: fx.site.ID, wantCode: http.StatusBadRequest},
+		{name: "rejects an unknown set", requestedID: uuid.NewString(), siteID: fx.site.ID, wantCode: http.StatusBadRequest},
+		{name: "rejects a set on another Site", requestedID: dos.ID.String(), siteID: uuid.New(), wantCode: http.StatusForbidden},
+		{name: "rejects another Tenant's set", requestedID: otherTenantDos.ID.String(), siteID: fx.site.ID, wantCode: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, apiErr := getDhcpOptionSetIDForAttachment(context.Background(), zerolog.Nop(), fx.dbSession, tt.requestedID, tt.siteID, fx.tenant.ID)
+			if tt.wantCode != 0 {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.wantCode, apiErr.Code)
+				assert.Nil(t, id)
+				return
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, id)
+			assert.Equal(t, dos.ID, *id)
 		})
 	}
 }

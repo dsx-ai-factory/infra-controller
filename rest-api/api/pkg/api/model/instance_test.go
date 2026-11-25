@@ -676,6 +676,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 		SecondaryVpcIDs                []string
 		OperatingSystemID              *string
 		IpxeScript                     *string
+		BootFromDhcpOptionSet          *bool
 		UserData                       *string
 		Interfaces                     []APIInterfaceCreateOrUpdateRequest
 		InfiniBandInterfaces           []APIInfiniBandInterfaceCreateOrUpdateRequest
@@ -1365,6 +1366,17 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 			wantErr:          true,
 			wantErrorMessage: "userData: " + validationErrorUserDataLength,
 		},
+		{
+			name: "test valid Instance create request booting from DHCP Option Set without Operating System or iPXE script",
+			fields: fields{
+				Name:                  "test-name",
+				TenantID:              uuid.NewString(),
+				InstanceTypeID:        uuid.NewString(),
+				VpcID:                 uuid.NewString(),
+				BootFromDhcpOptionSet: cutil.GetPtr(true),
+				Interfaces:            []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1377,6 +1389,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 				SecondaryVpcIDs:                tt.fields.SecondaryVpcIDs,
 				OperatingSystemID:              tt.fields.OperatingSystemID,
 				IpxeScript:                     tt.fields.IpxeScript,
+				BootFromDhcpOptionSet:          tt.fields.BootFromDhcpOptionSet,
 				UserData:                       tt.fields.UserData,
 				Interfaces:                     tt.fields.Interfaces,
 				InfiniBandInterfaces:           tt.fields.InfiniBandInterfaces,
@@ -1778,6 +1791,7 @@ func TestAPIInstanceCreateRequest_ValidateAndSetOperatingSystemData(t *testing.T
 		UserData                 *string
 		PhoneHomeEnabled         *bool
 		AlwaysBootWithCustomIpxe *bool
+		BootFromDhcpOptionSet    *bool
 	}
 
 	os := &cdbm.OperatingSystem{
@@ -1846,15 +1860,30 @@ phone_home:
 	}
 
 	tests := []struct {
-		name                     string
-		fields                   fields
-		cfg                      *config.Config
-		os                       *cdbm.OperatingSystem
-		wantUserData             *string
-		userDataSearches         []string
-		userDataNegativeSearches []string
-		wantErr                  bool
+		name                         string
+		fields                       fields
+		cfg                          *config.Config
+		os                           *cdbm.OperatingSystem
+		wantUserData                 *string
+		userDataSearches             []string
+		userDataNegativeSearches     []string
+		wantAlwaysBootWithCustomIpxe *bool
+		wantErr                      bool
 	}{
+		{
+			// Core rejects booting from a DHCP Option Set unless every boot runs the provisioning instructions.
+			name: "os nil, booting from DHCP Option Set without iPXE script, expect alwaysBootWithCustomIpxe defaulted to true",
+			fields: fields{
+				Name:                  "test-name",
+				TenantID:              uuid.NewString(),
+				InstanceTypeID:        uuid.NewString(),
+				VpcID:                 uuid.NewString(),
+				UserData:              cutil.GetPtr(util.TestCommonCloudInit),
+				BootFromDhcpOptionSet: cutil.GetPtr(true),
+			},
+			cfg:                          cfg1,
+			wantAlwaysBootWithCustomIpxe: cutil.GetPtr(true),
+		},
 		{
 			name: "ipxe os selected, os has user-data, no override allowed, user-data specified, should fail",
 			fields: fields{
@@ -2224,6 +2253,7 @@ phone_home:
 				UserData:                 tt.fields.UserData,
 				PhoneHomeEnabled:         tt.fields.PhoneHomeEnabled,
 				AlwaysBootWithCustomIpxe: tt.fields.AlwaysBootWithCustomIpxe,
+				BootFromDhcpOptionSet:    tt.fields.BootFromDhcpOptionSet,
 			}
 
 			err := icr.ValidateAndSetOperatingSystemData(cfg1, tt.os)
@@ -2234,6 +2264,10 @@ phone_home:
 
 			if err != nil {
 				return
+			}
+
+			if tt.wantAlwaysBootWithCustomIpxe != nil {
+				assert.Equal(t, tt.wantAlwaysBootWithCustomIpxe, icr.AlwaysBootWithCustomIpxe)
 			}
 
 			if tt.wantUserData != nil {
@@ -3983,6 +4017,110 @@ func TestValidateSpectrumXAttachments(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateBootFromDhcpOptionSet(t *testing.T) {
+	tests := []struct {
+		name                     string
+		operatingSystemID        *string
+		ipxeScript               *string
+		alwaysBootWithCustomIpxe *bool
+		wantErrorMessage         string
+	}{
+		{name: "accepts no Operating System or iPXE script"},
+		{name: "accepts alwaysBootWithCustomIpxe set to true", alwaysBootWithCustomIpxe: cutil.GetPtr(true)},
+		{name: "rejects an Operating System", operatingSystemID: cutil.GetPtr(uuid.NewString()), wantErrorMessage: "bootFromDhcpOptionSet: cannot be specified with `operatingSystemId` or `ipxeScript`"},
+		{name: "rejects an iPXE script", ipxeScript: cutil.GetPtr("#!ipxe"), wantErrorMessage: "bootFromDhcpOptionSet: cannot be specified with `operatingSystemId` or `ipxeScript`"},
+		{name: "rejects alwaysBootWithCustomIpxe set to false", alwaysBootWithCustomIpxe: cutil.GetPtr(false), wantErrorMessage: "alwaysBootWithCustomIpxe: cannot be false when `bootFromDhcpOptionSet` is true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBootFromDhcpOptionSet(tt.operatingSystemID, tt.ipxeScript, tt.alwaysBootWithCustomIpxe)
+			if tt.wantErrorMessage == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrorMessage)
+		})
+	}
+}
+
+func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData_BootFromDhcpOptionSet(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.SetSitePhoneHomeUrl("http://localhost/local")
+
+	dhcpBootInstance := &cdbm.Instance{
+		ID:                       uuid.New(),
+		AlwaysBootWithCustomIpxe: true,
+		BootFromDhcpOptionSet:    true,
+		UserData:                 cutil.GetPtr(util.TestCommonCloudInit),
+	}
+	ipxeInstance := &cdbm.Instance{
+		ID:         uuid.New(),
+		IpxeScript: cutil.GetPtr("#!ipxe"),
+		UserData:   cutil.GetPtr(util.TestCommonCloudInit),
+	}
+
+	tests := []struct {
+		name                         string
+		request                      *APIInstanceUpdateRequest
+		instance                     *cdbm.Instance
+		wantBoots                    bool
+		wantBootFromDhcpOptionSet    *bool
+		wantAlwaysBootWithCustomIpxe *bool
+		wantErr                      bool
+	}{
+		{
+			// An unrelated update must keep the boot choice without rewriting the boot columns or user-data.
+			name:      "keeps booting from the DHCP Option Set on an unrelated update",
+			request:   &APIInstanceUpdateRequest{Name: cutil.GetPtr("new-name")},
+			instance:  dhcpBootInstance,
+			wantBoots: true,
+		},
+		{
+			name:                         "an iPXE script switches it off and resets alwaysBootWithCustomIpxe",
+			request:                      &APIInstanceUpdateRequest{IpxeScript: cutil.GetPtr("#!ipxe")},
+			instance:                     dhcpBootInstance,
+			wantBootFromDhcpOptionSet:    cutil.GetPtr(false),
+			wantAlwaysBootWithCustomIpxe: cutil.GetPtr(false),
+		},
+		{
+			name:                         "switching it on sets alwaysBootWithCustomIpxe",
+			request:                      &APIInstanceUpdateRequest{BootFromDhcpOptionSet: cutil.GetPtr(true)},
+			instance:                     ipxeInstance,
+			wantBoots:                    true,
+			wantBootFromDhcpOptionSet:    cutil.GetPtr(true),
+			wantAlwaysBootWithCustomIpxe: cutil.GetPtr(true),
+		},
+		{
+			name:      "rejects alwaysBootWithCustomIpxe set to false while booting from the DHCP Option Set",
+			request:   &APIInstanceUpdateRequest{AlwaysBootWithCustomIpxe: cutil.GetPtr(false)},
+			instance:  dhcpBootInstance,
+			wantBoots: true,
+			wantErr:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			iur := tt.request
+			assert.Equal(t, tt.wantBoots, iur.BootsFromDhcpOptionSet(tt.instance))
+
+			err := iur.ValidateAndSetOperatingSystemData(cfg, tt.instance, nil)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBootFromDhcpOptionSet, iur.BootFromDhcpOptionSet)
+			if tt.wantAlwaysBootWithCustomIpxe != nil {
+				assert.Equal(t, tt.wantAlwaysBootWithCustomIpxe, iur.AlwaysBootWithCustomIpxe)
+			} else {
+				assert.Nil(t, iur.AlwaysBootWithCustomIpxe)
+				assert.Nil(t, iur.UserData)
 			}
 		})
 	}

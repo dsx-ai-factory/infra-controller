@@ -313,8 +313,15 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		}
 
 		var reportedPowerProfile *string
+		var reportedDhcpOptionSetID *uuid.UUID
 		if controllerInstance.Config != nil {
 			reportedPowerProfile = controllerInstance.Config.PowerProfile
+			if controllerInstance.Config.DhcpOptionSetId != nil {
+				id, perr := uuid.Parse(*controllerInstance.Config.DhcpOptionSetId)
+				if perr == nil {
+					reportedDhcpOptionSetID = &id
+				}
+			}
 		}
 
 		// NOTE:  When adding new properties, make sure to explicitly check for changes between
@@ -326,6 +333,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			isUpdatePending != nil ||
 			tpmEkCertificateUpdated != nil ||
 			!util.PtrsEqual(instance.PowerProfile, reportedPowerProfile) ||
+			(reportedDhcpOptionSetID != nil && !util.PtrsEqual(instance.DhcpOptionSetID, reportedDhcpOptionSetID)) ||
 			!instance.NetworkSecurityGroupPropagationDetails.Equal(sitePropagationStatus)
 
 		if needsUpdate {
@@ -362,6 +370,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				InstanceID: instance.ID,
 				InstanceUpdateCommonInput: cdbm.InstanceUpdateCommonInput{
 					NetworkSecurityGroupID:                 controllerInstance.Config.NetworkSecurityGroupId,
+					DhcpOptionSetID:                        reportedDhcpOptionSetID,
 					NetworkSecurityGroupPropagationDetails: sitePropagationStatus,
 					ControllerInstanceID:                   controllerInstanceID,
 					IsUpdatePending:                        isUpdatePending,
@@ -1882,6 +1891,7 @@ func (mi ManageInstance) UpdateInstanceMetadata(ctx context.Context, siteID uuid
 			Infiniband:           controllerInstance.GetConfig().GetInfiniband(),
 			Nvlink:               controllerInstance.GetConfig().GetNvlink(),
 			DpuExtensionServices: controllerInstance.GetConfig().GetDpuExtensionServices(),
+			DhcpOptionSetId:      controllerInstance.GetConfig().DhcpOptionSetId,
 		},
 	}
 

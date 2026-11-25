@@ -152,6 +152,7 @@ type Instance struct {
 	NetworkSecurityGroupID                 *string                                 `bun:"network_security_group_id"`
 	NetworkSecurityGroup                   *NetworkSecurityGroup                   `bun:"rel:belongs-to,join:network_security_group_id=id"`
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails `bun:"network_security_group_propagation_details,type:jsonb"`
+	DhcpOptionSetID                        *uuid.UUID                              `bun:"dhcp_option_set_id,type:uuid"`
 	InstanceTypeID                         *uuid.UUID                              `bun:"instance_type_id,type:uuid"`
 	InstanceType                           *InstanceType                           `bun:"rel:belongs-to,join:instance_type_id=id"`
 	VpcID                                  uuid.UUID                               `bun:"vpc_id,type:uuid,notnull"`
@@ -164,6 +165,7 @@ type Instance struct {
 	OperatingSystem                        *OperatingSystem                        `bun:"rel:belongs-to,join:operating_system_id=id"`
 	IpxeScript                             *string                                 `bun:"ipxe_script"`
 	AlwaysBootWithCustomIpxe               bool                                    `bun:"always_boot_with_custom_ipxe,notnull"`
+	BootFromDhcpOptionSet                  bool                                    `bun:"boot_from_dhcp_option_set,notnull"`
 	PhoneHomeEnabled                       bool                                    `bun:"phone_home_enabled,notnull"`
 	UserData                               *string                                 `bun:"user_data"`
 	AutoNetwork                            bool                                    `bun:"auto_network,notnull"`
@@ -298,6 +300,7 @@ type InstanceCreateInput struct {
 	InstanceTypeID                         *uuid.UUID
 	NetworkSecurityGroupID                 *string
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
+	DhcpOptionSetID                        *uuid.UUID
 	VpcID                                  uuid.UUID
 	MachineID                              *string
 	ControllerInstanceID                   *uuid.UUID
@@ -305,6 +308,7 @@ type InstanceCreateInput struct {
 	OperatingSystemID                      *uuid.UUID
 	IpxeScript                             *string
 	AlwaysBootWithCustomIpxe               bool
+	BootFromDhcpOptionSet                  bool
 	PhoneHomeEnabled                       bool
 	UserData                               *string
 	AutoNetwork                            bool
@@ -333,6 +337,7 @@ type InstanceUpdateCommonInput struct {
 	InstanceTypeID                         *uuid.UUID
 	NetworkSecurityGroupID                 *string
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
+	DhcpOptionSetID                        *uuid.UUID
 	VpcID                                  *uuid.UUID
 	MachineID                              *string
 	ControllerInstanceID                   *uuid.UUID
@@ -340,6 +345,7 @@ type InstanceUpdateCommonInput struct {
 	OperatingSystemID                      *uuid.UUID
 	IpxeScript                             *string
 	AlwaysBootWithCustomIpxe               *bool
+	BootFromDhcpOptionSet                  *bool
 	PhoneHomeEnabled                       *bool
 	UserData                               *string
 	AutoNetwork                            *bool
@@ -379,6 +385,7 @@ type InstanceClearInput struct {
 	ControllerInstanceID                   bool
 	NetworkSecurityGroupID                 bool
 	NetworkSecurityGroupPropagationDetails bool
+	DhcpOptionSetID                        bool
 	Hostname                               bool
 	OperatingSystemID                      bool
 	IpxeScript                             bool
@@ -822,6 +829,10 @@ func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceCl
 		i.NetworkSecurityGroupID = nil
 		updatedFields = append(updatedFields, "network_security_group_id")
 	}
+	if input.DhcpOptionSetID {
+		i.DhcpOptionSetID = nil
+		updatedFields = append(updatedFields, "dhcp_option_set_id")
+	}
 	if input.NetworkSecurityGroupPropagationDetails {
 		i.NetworkSecurityGroupPropagationDetails = nil
 		updatedFields = append(updatedFields, "network_security_group_propagation_details")
@@ -903,6 +914,7 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 			InstanceTypeID:                         input.InstanceTypeID,
 			NetworkSecurityGroupID:                 input.NetworkSecurityGroupID,
 			NetworkSecurityGroupPropagationDetails: input.NetworkSecurityGroupPropagationDetails,
+			DhcpOptionSetID:                        input.DhcpOptionSetID,
 			VpcID:                                  input.VpcID,
 			MachineID:                              input.MachineID,
 			ControllerInstanceID:                   input.ControllerInstanceID,
@@ -910,6 +922,7 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 			OperatingSystemID:                      input.OperatingSystemID,
 			IpxeScript:                             input.IpxeScript,
 			AlwaysBootWithCustomIpxe:               input.AlwaysBootWithCustomIpxe,
+			BootFromDhcpOptionSet:                  input.BootFromDhcpOptionSet,
 			PhoneHomeEnabled:                       input.PhoneHomeEnabled,
 			UserData:                               input.UserData,
 			AutoNetwork:                            input.AutoNetwork,
@@ -1046,6 +1059,11 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 		columns = append(columns, "network_security_group_id")
 		trace("network_security_group_id", *c.NetworkSecurityGroupID)
 	}
+	if c.DhcpOptionSetID != nil {
+		proto.DhcpOptionSetID = c.DhcpOptionSetID
+		columns = append(columns, "dhcp_option_set_id")
+		trace("dhcp_option_set_id", c.DhcpOptionSetID.String())
+	}
 	if c.VpcID != nil {
 		proto.VpcID = *c.VpcID
 		columns = append(columns, "vpc_id")
@@ -1080,6 +1098,11 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 		proto.AlwaysBootWithCustomIpxe = *c.AlwaysBootWithCustomIpxe
 		columns = append(columns, "always_boot_with_custom_ipxe")
 		trace("always_boot_with_custom_ipxe", strconv.FormatBool(*c.AlwaysBootWithCustomIpxe))
+	}
+	if c.BootFromDhcpOptionSet != nil {
+		proto.BootFromDhcpOptionSet = *c.BootFromDhcpOptionSet
+		columns = append(columns, "boot_from_dhcp_option_set")
+		trace("boot_from_dhcp_option_set", fmt.Sprintf("%t", *c.BootFromDhcpOptionSet))
 	}
 	if c.PhoneHomeEnabled != nil {
 		proto.PhoneHomeEnabled = *c.PhoneHomeEnabled
