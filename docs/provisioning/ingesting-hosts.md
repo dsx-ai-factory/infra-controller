@@ -310,7 +310,7 @@ audit checks the primary-system serial and SKU before the built-in chassis FRU
 rules. Within a rule, matching chassis and their assembly members are tried
 in report order. Missing or whitespace-only serials are skipped. The first
 usable serial is trimmed and compared case-sensitively with the declared
-ExpectedMachine serial. A site rule's choice is authoritative even when
+Expected Machine serial. A site rule's choice is authoritative even when
 another field matches the expected value.
 
 If no site rule yields a serial, the audit accepts the primary system's
