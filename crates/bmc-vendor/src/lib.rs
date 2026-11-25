@@ -22,16 +22,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Hash,
-    Eq,
-    PartialEq,
-    clap::ValueEnum,
-    clap::Parser,
-    Serialize,
+    Clone, Copy, Debug, Default, Hash, Eq, PartialEq, clap::ValueEnum, clap::Parser, Serialize,
 )]
 pub enum BMCVendor {
     Lenovo,

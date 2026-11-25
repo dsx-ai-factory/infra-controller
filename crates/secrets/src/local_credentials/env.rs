@@ -190,16 +190,8 @@ mod tests {
                 vendor: bmc_vendor::BMCVendor::Dell,
             },
         };
-        let user_env = env_name(&[
-            "HOST_REDFISH_FACTORY_DEFAULT_BY_VENDOR",
-            "DELL",
-            "USERNAME",
-        ]);
-        let pass_env = env_name(&[
-            "HOST_REDFISH_FACTORY_DEFAULT_BY_VENDOR",
-            "DELL",
-            "PASSWORD",
-        ]);
+        let user_env = env_name(&["HOST_REDFISH_FACTORY_DEFAULT_BY_VENDOR", "DELL", "USERNAME"]);
+        let pass_env = env_name(&["HOST_REDFISH_FACTORY_DEFAULT_BY_VENDOR", "DELL", "PASSWORD"]);
 
         // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
         // but it cannot prove Unix process-wide exclusion from unmarked environment
