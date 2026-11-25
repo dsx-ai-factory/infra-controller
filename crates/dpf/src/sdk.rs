@@ -315,22 +315,19 @@ where
 
         let ready = match provider.get_bmc_password().await {
             Ok(password) => {
-                create_shared_bmc_secret(&*repo, &namespace, &password).await?;
+                write_bmc_secret(&*repo, &namespace, &password).await?;
                 true
             }
             Err(error) if self.bmc_secret_retry_interval.is_some() => {
                 if error.is_local_bmc_password_source_unavailable() {
                     return Err(error);
                 }
-                let exists = shared_bmc_secret_exists(&*repo, &namespace).await;
-                if !exists {
-                    tracing::warn!(
-                        %error,
-                        secret = SECRET_NAME,
-                        "BMC password unavailable; waiting to create the shared DPF Secret"
-                    );
-                }
-                exists
+                tracing::warn!(
+                    %error,
+                    secret = SECRET_NAME,
+                    "BMC password unavailable; waiting to create the shared DPF Secret"
+                );
+                false
             }
             Err(error) => return Err(error),
         };
@@ -396,7 +393,7 @@ where
     }
 }
 
-async fn create_shared_bmc_secret<R: K8sConfigRepository>(
+async fn write_bmc_secret<R: K8sConfigRepository>(
     repo: &R,
     namespace: &str,
     password: &str,
@@ -404,25 +401,6 @@ async fn create_shared_bmc_secret<R: K8sConfigRepository>(
     let mut data = BTreeMap::new();
     data.insert("password".to_string(), password.as_bytes().to_vec());
     K8sConfigRepository::create_secret_if_absent(repo, SECRET_NAME, namespace, data).await
-}
-
-async fn shared_bmc_secret_exists(repo: &impl K8sConfigRepository, namespace: &str) -> bool {
-    match tokio::time::timeout(
-        DPF_MANAGEMENT_REQUEST_TIMEOUT,
-        repo.get_secret(SECRET_NAME, namespace),
-    )
-    .await
-    {
-        Ok(Ok(secret)) => secret.is_some(),
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "Could not check for the shared DPF BMC Secret");
-            false
-        }
-        Err(_) => {
-            tracing::warn!("Timed out checking for the shared DPF BMC Secret");
-            false
-        }
-    }
 }
 
 // separate function to drop the 'a lifetime from the builder
@@ -449,8 +427,7 @@ where
             .is_some()
         {
             let result = match provider.get_bmc_password().await {
-                Ok(password) => create_shared_bmc_secret(&*repo, &namespace, &password).await,
-                Err(_) if shared_bmc_secret_exists(&*repo, &namespace).await => Ok(()),
+                Ok(password) => write_bmc_secret(&*repo, &namespace, &password).await,
                 Err(error) => Err(error),
             };
             match result {
