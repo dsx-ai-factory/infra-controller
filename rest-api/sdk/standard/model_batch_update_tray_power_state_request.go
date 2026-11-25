@@ -24,6 +24,7 @@ var _ MappedNullable = &BatchUpdateTrayPowerStateRequest{}
 
 // BatchUpdateTrayPowerStateRequest Request body for batch tray power control operations
 type BatchUpdateTrayPowerStateRequest struct {
+	ExecutionMode *ExecutionMode `json:"executionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Filter that selects Trays whose power state should be updated
@@ -44,6 +45,8 @@ type _BatchUpdateTrayPowerStateRequest BatchUpdateTrayPowerStateRequest
 // will change when the set of required properties is changed
 func NewBatchUpdateTrayPowerStateRequest(siteId string, state string) *BatchUpdateTrayPowerStateRequest {
 	this := BatchUpdateTrayPowerStateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	this.SiteId = siteId
 	this.State = state
 	var overrideReadinessCheck bool = false
@@ -56,9 +59,43 @@ func NewBatchUpdateTrayPowerStateRequest(siteId string, state string) *BatchUpda
 // but it doesn't guarantee that properties required by API are set
 func NewBatchUpdateTrayPowerStateRequestWithDefaults() *BatchUpdateTrayPowerStateRequest {
 	this := BatchUpdateTrayPowerStateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetExecutionMode returns the ExecutionMode field value if set, zero value otherwise.
+func (o *BatchUpdateTrayPowerStateRequest) GetExecutionMode() ExecutionMode {
+	if o == nil || IsNil(o.ExecutionMode) {
+		var ret ExecutionMode
+		return ret
+	}
+	return *o.ExecutionMode
+}
+
+// GetExecutionModeOk returns a tuple with the ExecutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchUpdateTrayPowerStateRequest) GetExecutionModeOk() (*ExecutionMode, bool) {
+	if o == nil || IsNil(o.ExecutionMode) {
+		return nil, false
+	}
+	return o.ExecutionMode, true
+}
+
+// HasExecutionMode returns a boolean if a field has been set.
+func (o *BatchUpdateTrayPowerStateRequest) HasExecutionMode() bool {
+	if o != nil && !IsNil(o.ExecutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetExecutionMode gets a reference to the given ExecutionMode and assigns it to the ExecutionMode field.
+func (o *BatchUpdateTrayPowerStateRequest) SetExecutionMode(v ExecutionMode) {
+	o.ExecutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -215,6 +252,9 @@ func (o BatchUpdateTrayPowerStateRequest) MarshalJSON() ([]byte, error) {
 
 func (o BatchUpdateTrayPowerStateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.ExecutionMode) {
+		toSerialize["executionMode"] = o.ExecutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Filter) {
 		toSerialize["filter"] = o.Filter

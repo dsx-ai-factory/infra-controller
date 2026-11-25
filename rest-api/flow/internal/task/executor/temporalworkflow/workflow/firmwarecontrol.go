@@ -95,6 +95,7 @@ func firmwareControl(
 		typeToTargets,
 		operationInfo,
 		reqInfo.RuleDefinition,
+		reqInfo.TargetResolution,
 	)
 
 	return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, report)

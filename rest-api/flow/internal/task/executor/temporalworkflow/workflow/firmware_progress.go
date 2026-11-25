@@ -79,7 +79,7 @@ func withFirmwareProgressReporter(
 	step operationrules.SequenceStep,
 	target common.Target,
 ) workflow.Context {
-	if !stepReportsFirmwareProgress(step) || !firmwareReportCountersEnabled(ctx) {
+	if ctx.Value(isolatedActionContextKey{}) == true || !stepReportsFirmwareProgress(step) || !firmwareReportCountersEnabled(ctx) {
 		return ctx
 	}
 

@@ -2089,7 +2089,12 @@ func ExecutePowerControlWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
+	executionMode *string,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+	if executionMode != nil && *executionMode == cam.ExecutionModeBestEffort {
+		workflowID += "-best-effort"
+	}
+
 	var fullMethod string
 	var flowRequest proto.Message
 	ruleUUID := GetFlowUUIDPtr(ruleID)
@@ -2102,6 +2107,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power on %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			ExecutionMode:          cam.ExecutionModeToProto(executionMode),
 		}
 	case cam.PowerControlStateOff:
 		fullMethod = flowv1.Flow_PowerOffRack_FullMethodName
@@ -2110,6 +2116,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power off %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			ExecutionMode:          cam.ExecutionModeToProto(executionMode),
 		}
 	case cam.PowerControlStateCycle:
 		fullMethod = flowv1.Flow_PowerResetRack_FullMethodName
@@ -2118,6 +2125,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			ExecutionMode:          cam.ExecutionModeToProto(executionMode),
 		}
 	case cam.PowerControlStateForceOff:
 		fullMethod = flowv1.Flow_PowerOffRack_FullMethodName
@@ -2127,6 +2135,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API force power off %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			ExecutionMode:          cam.ExecutionModeToProto(executionMode),
 		}
 	case cam.PowerControlStateForceCycle:
 		fullMethod = flowv1.Flow_PowerResetRack_FullMethodName
@@ -2136,6 +2145,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API force power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			ExecutionMode:          cam.ExecutionModeToProto(executionMode),
 		}
 	case cam.PowerControlStateACCycle:
 		fullMethod = flowv1.Flow_ACPowerCycleRack_FullMethodName
@@ -2144,6 +2154,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API AC power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			ExecutionMode:          cam.ExecutionModeToProto(executionMode),
 		}
 	default:
 		return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)
@@ -2178,12 +2189,18 @@ func ExecuteBringUpRackWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
+	executionMode *string,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+	if executionMode != nil && *executionMode == cam.ExecutionModeBestEffort {
+		workflowID += "-best-effort"
+	}
+
 	flowRequest := &flowv1.BringUpRackRequest{
 		TargetSpec:             targetSpec,
 		Description:            description,
 		RuleId:                 GetFlowUUIDPtr(ruleID),
 		OverrideReadinessCheck: overrideReadinessCheck,
+		ExecutionMode:          cam.ExecutionModeToProto(executionMode),
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse
@@ -2227,7 +2244,12 @@ func ExecuteFirmwareUpdateWorkflow(
 	overrideVersionCheck bool,
 	workflowID string,
 	entityName string,
+	executionMode *string,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+	if executionMode != nil && *executionMode == cam.ExecutionModeBestEffort {
+		workflowID += "-best-effort"
+	}
+
 	flowRequest := &flowv1.UpgradeFirmwareRequest{
 		TargetSpec:                targetSpec,
 		TargetVersion:             version,
@@ -2237,6 +2259,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		OverrideReadinessCheck:    overrideReadinessCheck,
 		OverrideVersionCheck:      overrideVersionCheck,
 		AuthenticationData:        authenticationData,
+		ExecutionMode:             cam.ExecutionModeToProto(executionMode),
 		DeviceCredentialOverrides: deviceCredentialOverrides,
 	}
 	if overrideVersionCheck {

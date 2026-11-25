@@ -91,6 +91,8 @@ type Request struct {
 	Operation   Wrapper
 	TargetSpec  TargetSpec // Exactly one of racks, NVLink domains, or components
 	Description string
+	// ExecutionMode defaults to Strict; BestEffort isolates target failures.
+	ExecutionMode taskcommon.ExecutionMode
 
 	// ConflictStrategy controls how the task behaves when a conflict is
 	// detected. Default (ConflictStrategyReject) rejects on conflict.
@@ -139,6 +141,10 @@ func (r *Request) HasIdempotencyKey() bool {
 func (r *Request) Validate() error {
 	if r == nil {
 		return fmt.Errorf("request is nil")
+	}
+
+	if !r.ExecutionMode.Valid() {
+		return fmt.Errorf("invalid execution_mode %q", r.ExecutionMode)
 	}
 
 	switch r.ConflictStrategy {

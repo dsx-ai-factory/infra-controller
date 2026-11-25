@@ -4,6 +4,9 @@
 package workflow
 
 import (
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
+	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -97,4 +100,26 @@ func TestFirmwareProgressAccumulator_Update(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWithFirmwareProgressReporter(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterWorkflowWithOptions(func(ctx workflow.Context) (bool, error) {
+		step := operationrules.SequenceStep{Stage: 1, MainOperation: operationrules.ActionConfig{Name: operationrules.ActionFirmwareControl}}
+		target := common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"X"}}
+		normal := withFirmwareProgressReporter(ctx, step, target)
+		enabled := normal.Value(firmwareProgressContextKey{}) != nil
+		isolated := withFirmwareProgressReporter(workflow.WithValue(ctx, isolatedActionContextKey{}, true), step, target)
+		return enabled && isolated.Value(firmwareProgressContextKey{}) == nil, nil
+	}, workflow.RegisterOptions{Name: "testFirmwareReporterChild"})
+	env.ExecuteWorkflow(func(ctx workflow.Context) (bool, error) {
+		var suppressed bool
+		err := workflow.ExecuteChildWorkflow(ctx, "testFirmwareReporterChild").Get(ctx, &suppressed)
+		return suppressed, err
+	})
+	require.NoError(t, env.GetWorkflowError())
+	var suppressed bool
+	require.NoError(t, env.GetWorkflowResult(&suppressed))
+	require.True(t, suppressed, "normal children report progress; isolated children suppress it")
 }

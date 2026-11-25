@@ -21,8 +21,8 @@ import (
 // TaskReportV1Status Per-stage and per-step execution status.  - `pending`   — workflow has not yet
 // reached this stage/step. - `running`   — execution is in progress. - `completed` — execution
 // finished successfully. - `failed`    — execution finished with an error; see `error`. - `skipped`
-// — the rule lists this component type but the task targets no components of that type, so the
-// workflow will not invoke it.
+// — no targets of this type were selected, or all were excluded by an earlier BestEffort failure or
+// unknown outcome. No actions run and step timestamps are absent.
 type TaskReportV1Status string
 
 // List of TaskReportV1Status

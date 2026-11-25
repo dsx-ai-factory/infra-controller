@@ -532,8 +532,7 @@ func (h UpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		identity.RuleID,
 		request.OverrideReadinessCheck,
 		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck),
-		"NVLink Domain",
-	)
+		"NVLink Domain", request.ExecutionMode)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -652,8 +651,7 @@ func (h BatchUpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		identity.RuleID,
 		request.OverrideReadinessCheck,
 		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck),
-		"NVLink Domains",
-	)
+		"NVLink Domains", request.ExecutionMode)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -787,8 +785,7 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		request.OverrideReadinessCheck,
 		request.OverrideVersionCheck,
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
-		"NVLink Domain",
-	)
+		"NVLink Domain", request.ExecutionMode)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -915,8 +912,7 @@ func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		request.OverrideReadinessCheck,
 		request.OverrideVersionCheck,
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
-		"NVLink Domains",
-	)
+		"NVLink Domains", request.ExecutionMode)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}

@@ -24,6 +24,7 @@ var _ MappedNullable = &BringUpRackRequest{}
 
 // BringUpRackRequest Request body for single-rack bring up operations
 type BringUpRackRequest struct {
+	ExecutionMode *ExecutionMode `json:"executionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Optional description for the bring up operation
@@ -42,6 +43,8 @@ type _BringUpRackRequest BringUpRackRequest
 // will change when the set of required properties is changed
 func NewBringUpRackRequest(siteId string) *BringUpRackRequest {
 	this := BringUpRackRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	this.SiteId = siteId
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
@@ -53,9 +56,43 @@ func NewBringUpRackRequest(siteId string) *BringUpRackRequest {
 // but it doesn't guarantee that properties required by API are set
 func NewBringUpRackRequestWithDefaults() *BringUpRackRequest {
 	this := BringUpRackRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetExecutionMode returns the ExecutionMode field value if set, zero value otherwise.
+func (o *BringUpRackRequest) GetExecutionMode() ExecutionMode {
+	if o == nil || IsNil(o.ExecutionMode) {
+		var ret ExecutionMode
+		return ret
+	}
+	return *o.ExecutionMode
+}
+
+// GetExecutionModeOk returns a tuple with the ExecutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BringUpRackRequest) GetExecutionModeOk() (*ExecutionMode, bool) {
+	if o == nil || IsNil(o.ExecutionMode) {
+		return nil, false
+	}
+	return o.ExecutionMode, true
+}
+
+// HasExecutionMode returns a boolean if a field has been set.
+func (o *BringUpRackRequest) HasExecutionMode() bool {
+	if o != nil && !IsNil(o.ExecutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetExecutionMode gets a reference to the given ExecutionMode and assigns it to the ExecutionMode field.
+func (o *BringUpRackRequest) SetExecutionMode(v ExecutionMode) {
+	o.ExecutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -188,6 +225,9 @@ func (o BringUpRackRequest) MarshalJSON() ([]byte, error) {
 
 func (o BringUpRackRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.ExecutionMode) {
+		toSerialize["executionMode"] = o.ExecutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Description) {
 		toSerialize["description"] = o.Description

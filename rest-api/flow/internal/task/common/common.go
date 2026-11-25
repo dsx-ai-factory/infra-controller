@@ -105,9 +105,24 @@ type OperationRuleListOptions struct {
 	IsDefault     *bool
 }
 
+// BatchDispatchState distinguishes work not yet attempted from work whose
+// external acceptance may already have happened.
+type BatchDispatchState string
+
+const (
+	BatchDispatchReady   BatchDispatchState = "ready"
+	BatchDispatchStarted BatchDispatchState = "started"
+)
+
 // TaskAttributes holds flexible task metadata stored as a single jsonb
 // column. New fields can be added here without requiring a DB migration.
 type TaskAttributes struct {
+	// BatchDispatch is absent on non-batch tasks. Started work is never
+	// automatically replayed solely because its execution handle is missing.
+	BatchDispatch BatchDispatchState `json:"batch_dispatch,omitempty"`
+	// TargetResolution is absent on tasks created before explicit resolution modes.
+	TargetResolution *TargetResolution `json:"target_resolution,omitempty"`
+
 	// TraceID correlates execution attempts, including after queueing or restart.
 	TraceID string `json:"trace_id,omitempty"`
 	// ComponentsByType maps each targeted component type to its UUIDs.
