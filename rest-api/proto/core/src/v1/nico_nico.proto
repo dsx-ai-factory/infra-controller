@@ -5825,6 +5825,10 @@ message ManagedHostNetworkConfigResponse {
   // explicitly configured zero remains present.
   optional uint32 dhcpv6_server_preference = 25;
 
+  // Optional site-wide PXE service URL for the agent's DHCP configuration.
+  // Omission supplies no URL. Preserve configured strings, including empty values.
+  optional string nico_pxe_service_url = 26;
+
   // Enable nico DHCP on HBN.
   // Deprecated: It is always enabled now.
   bool enable_dhcp = 100;

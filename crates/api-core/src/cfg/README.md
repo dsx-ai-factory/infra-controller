@@ -136,6 +136,7 @@ compatibility parsing does not restore their former behavior.
 | `x86_pxe_boot_url_override` | `Option<String>` | — | `machines` | Override PXE boot URL for x86 machines. |
 | `arm_pxe_boot_url_override` | `Option<String>` | — | `machines` | Override PXE boot URL for ARM machines. |
 | `pxe_public_base_url` | `String` | `http://carbide-pxe.forge:8080` | `machines` | Canonical PXE base URL. |
+| `nico_pxe_service_url` | `Option<String>` | — | `machines` | Optional site-wide PXE service URL sent unchanged to DPU agents. Omission supplies no URL; empty strings remain present. Restart nico-api after changing it. Leave unset until [DPU DHCP delivery and advertisement](https://github.com/dsx-ai-factory/infra-controller/issues/9424) are supported. |
 | `set_http_boot_uri_for_vendors` | `Vec<BMCVendor>` | `[]` | `machines` | Vendors for which the state controller pins the UEFI HTTP boot URL on the BMC via Redfish `HttpBootUri`. Empty = all machines rely on nico-dhcp option 67 for the URL. |
 | `compute_allocation_enforcement` | `ComputeAllocationEnforcement` | `WarnOnly` | `machines` | Controls enforcement of compute allocations on new instance requests. |
 | `supernic_firmware_profiles` | nested `HashMap` | `{}` | `machines` | SuperNIC firmware profiles keyed by `part_number` then `PSID`. |
