@@ -15,6 +15,7 @@ NVOS password rotation is a site-wide, asynchronous operation. NICo publishes on
 - **Serialization:** A published target cannot be canceled. Keep routine rotations serialized: wait for `Complete=true` before publishing another target.
 - **Bootstrap credentials:** Expected-switch credentials provide bootstrap authentication. They do not replace credentials associated with a confirmed rotation version.
 - **Password storage:** The rotation command reports the target version, not the generated password. NICo keeps generated passwords in its configured credential store.
+- **Initial ingestion:** A published NVOS target enables password bootstrap before mTLS removal and certificate configuration. Without a target, ingestion retains its existing sequence and does not bootstrap expired passwords. Publishing a target starts site-wide rotation, not a per-switch recovery. Refer to [Bootstrap NVOS credentials](../architecture/state_machines/switch_configure_certificate.md#bootstrap-nvos-credentials-before-configuration-writes) for factory-account and NVUE trust requirements.
 
 ## Prerequisites
 
@@ -37,6 +38,7 @@ RPC availability alone does not establish compatibility. Each RMS instance must 
 - Support job-status lookup.
 - Safely repeat the same active-to-target transition.
 - Recognize that a switch already using the target password is converged.
+- Support the SSH recovery path described in [Bootstrap NVOS credentials](../architecture/state_machines/switch_configure_certificate.md#bootstrap-nvos-credentials-before-configuration-writes) when initial ingestion relies on factory-account forced-expiry recovery.
 
 `nvos_password_rotation_enabled` remains in the configuration schema for compatibility with existing site configurations. The optional boolean accepts `true` or `false` and defaults to `false` when omitted. NICo serializes the setting, but the configured value does not control RMS password-rotation support.
 

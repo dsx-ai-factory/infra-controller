@@ -356,6 +356,8 @@ impl std::fmt::Display for ConfigureCertificateState {
 /// Sub-state for SwitchControllerState::Configuring
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfiguringState {
+    /// Establish managed NVOS credentials before configuration writes.
+    BootstrapNvosPassword,
     /// Initial ingestion only: reset stale mTLS bindings before installing
     /// certificates. Variants are additive, so states persisted before this
     /// variant existed still deserialize.
@@ -1112,6 +1114,19 @@ mod tests {
         assert_eq!(serialized, r#"{"state":"ready"}"#);
         assert_eq!(
             serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
+            state
+        );
+    }
+
+    #[test]
+    fn bootstrap_password_state_roundtrips() {
+        let state = SwitchControllerState::Configuring {
+            config_state: ConfiguringState::BootstrapNvosPassword,
+        };
+        let json = r#"{"state":"configuring","config_state":"BootstrapNvosPassword"}"#;
+        assert_eq!(serde_json::to_string(&state).unwrap(), json);
+        assert_eq!(
+            serde_json::from_str::<SwitchControllerState>(json).unwrap(),
             state
         );
     }

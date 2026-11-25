@@ -35,7 +35,7 @@ use crate::certificate::{
 use crate::context::SwitchStateHandlerContextObjects;
 use crate::nvos_password_rotation::{
     NvosPasswordRotationOutcome, expected_nvos_credential_pair, read_nvos_site_credentials,
-    reconcile_nvos_password_rotation,
+    reconcile_nvos_password_bootstrap, reconcile_nvos_password_rotation,
 };
 
 /// Result of resolving the current per-switch NVOS credential.
@@ -62,6 +62,9 @@ pub async fn handle_configuring(
     };
 
     match config_state {
+        ConfiguringState::BootstrapNvosPassword => {
+            handle_bootstrap_nvos_password(switch_id, state, ctx).await
+        }
         ConfiguringState::DisableMtls { disable_mtls } => {
             handle_disable_mtls(switch_id, state, ctx, disable_mtls).await
         }
@@ -71,6 +74,37 @@ pub async fn handle_configuring(
         ConfiguringState::RotateOsPassword => {
             handle_rotate_os_password(switch_id, state, ctx).await
         }
+    }
+}
+
+async fn handle_bootstrap_nvos_password(
+    switch_id: &SwitchId,
+    state: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    if state.rack_id.is_none() {
+        return Ok(StateHandlerOutcome::transition(disable_mtls_start()));
+    }
+
+    match reconcile_nvos_password_bootstrap(switch_id, state, ctx).await? {
+        NvosPasswordRotationOutcome::UpToDate => {
+            Ok(StateHandlerOutcome::transition(disable_mtls_start()))
+        }
+        NvosPasswordRotationOutcome::Waiting(reason) => Ok(StateHandlerOutcome::wait(reason)),
+        NvosPasswordRotationOutcome::CredentialError(cause) => Ok(StateHandlerOutcome::wait(
+            format!("waiting for valid NVOS admin credentials: {cause}"),
+        )),
+        NvosPasswordRotationOutcome::Failed(cause) => Ok(StateHandlerOutcome::transition(
+            SwitchControllerState::Error { cause },
+        )),
+    }
+}
+
+fn disable_mtls_start() -> SwitchControllerState {
+    SwitchControllerState::Configuring {
+        config_state: ConfiguringState::DisableMtls {
+            disable_mtls: DisableMtlsState::Start,
+        },
     }
 }
 
@@ -84,7 +118,8 @@ async fn handle_rotate_os_password(
             SwitchControllerState::FetchInfo,
         )),
         NvosPasswordRotationOutcome::Waiting(reason) => Ok(StateHandlerOutcome::wait(reason)),
-        NvosPasswordRotationOutcome::CredentialError(cause) => Ok(StateHandlerOutcome::transition(
+        NvosPasswordRotationOutcome::CredentialError(cause)
+        | NvosPasswordRotationOutcome::Failed(cause) => Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Error { cause },
         )),
     }

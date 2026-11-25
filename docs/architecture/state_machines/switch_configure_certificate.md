@@ -7,8 +7,9 @@ Service (RMS)** asynchronously and polls job status until completion.
 
 ## Goals
 
-- Install or rotate the switch NVOS certificate as part of initial switch
-  bring-up, before NVOS admin credentials are stored (`RotateOsPassword`).
+- When an NVOS target is published, bootstrap credentials before configuration
+  writes, then install or rotate the switch NVOS certificate during initial
+  switch bring-up.
 - Reset existing mTLS bindings before installing certificates during initial
   bring-up, so stale client-CA trust cannot block installation.
 - Keep RMS-specific protobuf and job semantics behind the CM `NvSwitchManager`
@@ -17,17 +18,19 @@ Service (RMS)** asynchronously and polls job status until completion.
 
 ## Placement in the Switch FSM
 
-`DisableMtls` and `ConfigureCertificate` are sub-states of
-`SwitchControllerState::Configuring`, before `RotateOsPassword`, `FetchInfo`,
-and `Validating`. Initial ingestion enters `DisableMtls` first; maintenance
-`ReconfigureCertificate` does not run it.
+`BootstrapNvosPassword`, `DisableMtls`, and `ConfigureCertificate` are sub-states
+of `SwitchControllerState::Configuring`, before `RotateOsPassword`, `FetchInfo`,
+and `Validating`. Initial ingestion enters `BootstrapNvosPassword` first;
+maintenance `ReconfigureCertificate` does not run bootstrap or disable mTLS.
 
 ```mermaid
 stateDiagram-v2
 direction TB
 
 state Configuring {
-    [*] --> DisableMtls
+    [*] --> BootstrapNvosPassword
+    BootstrapNvosPassword --> BootstrapNvosPassword : waiting for credentials, job, or credential persistence
+    BootstrapNvosPassword --> DisableMtls : credentials ready or bootstrap skipped
     state DisableMtls {
         [*] --> DisableStart
         DisableStart --> DisableWaitForComplete : job submitted
@@ -47,14 +50,16 @@ state Configuring {
 
 FetchInfo --> Validating : slot and tray lookup complete
 
+BootstrapNvosPassword --> Error : password job Failed
 DisableMtls --> Error : job Failed, outcome unknown, or unobservable
 ConfigureCertificate --> Error : job Failed
 ```
 
 `DisableStart` and `DisableWaitForComplete` are the `Start` and
-`WaitForComplete { job_id }` values of `DisableMtlsState`. Persisted states from
-before `DisableMtls` existed deserialize unchanged; a switch already in
-`ConfigureCertificate` continues there without running the disable step.
+`WaitForComplete { job_id }` values of `DisableMtlsState`. Existing persisted
+states deserialize unchanged. A switch already in `DisableMtls` or
+`ConfigureCertificate` resumes there without running bootstrap; switches in
+`Error` still require an explicit recovery or re-ingestion.
 
 In `Start` and `WaitForComplete` of both `DisableMtls` and
 `ConfigureCertificate`, a generic CM or transport error returns
@@ -66,6 +71,49 @@ also moves to `Error` on an unknown submission outcome, because a retry could
 submit the operation twice. The condition tables for
 [`DisableMtls`](#sub-states-disablemtlsstate) and
 [`ConfigureCertificate`](#sub-states-configurecertificatestate) list each case.
+
+### Bootstrap NVOS credentials before configuration writes
+
+`BootstrapNvosPassword` reuses the durable NVOS password reconciler when a
+managed NVOS target is published. NICo submits the password update through CM,
+polls its job, then writes and reads back the new per-switch credential before
+entering `DisableMtls(Start)`. Already-confirmed credentials at the target
+revision advance without a password update.
+
+RMS handles forced-expiry recovery over SSH only for the factory `admin` account
+with factory password `admin`. The recovery validates a fresh SSH login with the
+new password. This flow requires an RMS build that implements that SSH recovery
+path; password-update RPC availability alone does not establish support. Other
+password updates require working NVUE authentication and TLS/mTLS trust. Bootstrap does not repair self-signed server certificates or
+stale mTLS trust for non-factory credentials. A terminal password-job failure
+moves bootstrap to `Error`, preserving existing mTLS bindings and the staged
+credential/job record for investigation. It does not retry that failed job or
+fall through to configuration writes. Routine password rotation retains its
+existing retry policy.
+
+Malformed or inconsistent credential data waits in bootstrap so operators can correct
+it without resetting controller state. Before a job is staged, correcting the
+expected-switch credential pair lets reconciliation resume. After staging, NICo
+preserves the captured per-switch credential to handle partial device changes;
+if that credential is lost, restore it in the credential store. Changing an
+expected-switch bootstrap pair does not replace a staged operation's credential.
+Pending jobs, transient poll errors, and incomplete credential persistence also
+wait. Missing (`NotFound`) or `Unknown` job statuses retain the existing retry
+behavior against the staged target.
+
+Bootstrap skips when the switch has no rack, CM is unavailable, the backend does
+not support password rotation, or no NVOS target is published. Sites without a
+target retain their existing ingestion behavior; this skip does not establish
+that an expired password is usable. To enable managed password bootstrap, follow
+[Start the rotation](../../operations/nvos-password-rotation.md#start-the-rotation).
+Publishing a target is a site-wide rotation, not a per-switch recovery request.
+If both credential sources are absent, the reconciler also skips bootstrap;
+`DisableMtls(Start)` then waits for imported credentials before any device write.
+
+The later `RotateOsPassword` pass remains in place to converge any target
+published during certificate configuration; Ready-state password rotation is
+unchanged. The staged target, attempt, and job ID persist across controller
+restarts.
 
 ### Disable mTLS before certificate installation
 
@@ -290,8 +338,9 @@ The mTLS-disable path uses the last two RPCs:
 
 ### Disable mTLS (RMS backend)
 
-Initial ingestion enters `DisableMtls(Start)` from `Initializing` once an NVOS
-interface is associated. One state-controller iteration runs `Start`; later
+Initial ingestion enters `BootstrapNvosPassword` from `Initializing` once an
+NVOS interface is associated. After bootstrap completes or skips, one
+state-controller iteration runs `DisableMtls(Start)`; later
 iterations run `WaitForComplete` until the RMS job tree reaches a terminal
 state. The skip conditions in the
 [`DisableMtls` condition table](#sub-states-disablemtlsstate) apply before
@@ -509,12 +558,18 @@ single-switch, single-job certificate operation.
 | CM facade | `crates/component-manager/src/component_manager.rs` |
 | CM trait | `crates/component-manager/src/nv_switch_manager.rs` |
 | RMS backend | `crates/component-manager/src/rms.rs` |
-| Tests | `crates/api-core/src/tests/switch_state_controller/` |
+| Tests | `crates/switch-controller/tests/integration/` |
 
 ## Testing
 
 Integration tests cover:
 
+- Initial ingestion enters password bootstrap before mTLS writes
+- Confirmed target credentials skip bootstrap password updates
+- Missing targets and unsupported backends preserve existing ingestion behavior
+- Malformed credentials wait and resume after correction
+- Failed bootstrap jobs stop without retries or mTLS writes
+- Password completion persists effective credentials before advancing to mTLS disable
 - Skip when `rack_id` or component manager is absent → `RotateOsPassword`
 - `Start` → `WaitForComplete` with mock CM
 - `WaitForComplete` → `RotateOsPassword` on success
@@ -522,8 +577,8 @@ Integration tests cover:
 - `ConfigureCertificate` (completed or skipped) → `RotateOsPassword` → `FetchInfo` → `Validating`
 - Maintenance `ReconfigureCertificate` success and failure paths
 
-Run with `DATABASE_URL` set (sqlx test harness), filter:
-`cargo test -p carbide-api-core configure_certificate`.
+Run with `DATABASE_URL` set (sqlx test harness):
+`cargo test -p carbide-switch-controller --lib --test integration`.
 
 ## Future work
 
