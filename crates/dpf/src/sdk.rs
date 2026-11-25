@@ -67,6 +67,7 @@ use crate::crds::dpuserviceconfigurations_generated::{
     DpuServiceConfigurationServiceConfigurationConfigPortsPortsProtocol,
     DpuServiceConfigurationServiceConfigurationConfigPortsServiceType,
     DpuServiceConfigurationServiceConfigurationHelmChart,
+    DpuServiceConfigurationServiceConfigurationMetadata,
     DpuServiceConfigurationServiceConfigurationServiceDaemonSet,
     DpuServiceConfigurationServiceConfigurationServiceDaemonSetUpdateStrategy,
     DpuServiceConfigurationServiceConfigurationServiceDaemonSetUpdateStrategyRollingUpdate,
@@ -1060,7 +1061,15 @@ pub fn build_service_configuration(
         config_ports: config_ports_crd,
         deploy_in_cluster: None,
         helm_chart: helm_chart_config,
-        metadata: None,
+        metadata: svc
+            .critical
+            .then(|| DpuServiceConfigurationServiceConfigurationMetadata {
+                annotations: None,
+                labels: Some(BTreeMap::from([(
+                    "svc.dpu.nvidia.com/critical".to_string(),
+                    String::new(),
+                )])),
+            }),
         service_daemon_set: Some(service_daemon_set),
     });
 

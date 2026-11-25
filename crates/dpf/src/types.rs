@@ -381,6 +381,8 @@ pub enum ServiceConfigPortProtocol {
 pub struct ServiceDefinition {
     /// Service name (e.g. "dts").
     pub name: String,
+    /// Whether DPF includes this service's pods in critical-service readiness. Defaults to false.
+    pub critical: bool,
     /// Whether upgrades wait for DPF's NodeEffect gate. Defaults to true when omitted.
     pub apply_node_effect: Option<bool>,
     /// Helm chart repository URL.
