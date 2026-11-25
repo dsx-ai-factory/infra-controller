@@ -33,10 +33,13 @@ guide explains each step.
    `nico-api.dpf.rbacCreate: true` in the simulation values renders a Role in
    that namespace, and `[dpf] enabled = true` makes nico-api expect the CRDs
    at startup. nico-api also reads `status.version` of the
-   `DPFOperatorConfig` named `dpfoperatorconfig` at startup and exits when it
-   is missing. The running simulator creates that object and writes the
-   version. A nico-api that starts before the simulator restarts until the
-   version is there, and `setup.sh` fails after waiting 600 seconds for it.
+   `DPFOperatorConfig` named `dpfoperatorconfig` at startup. It exits when the
+   version is missing or lower than the one in
+   `helm-prereqs/dpf-versions.toml`. The running simulator creates that object
+   and writes the version of the revision it was built from, so build the
+   simulator from the same revision as Core. A nico-api that starts before the
+   simulator restarts until the version is there, and `setup.sh` fails after
+   waiting 600 seconds for it.
    The Makefile default `IMG=dpf-sim-controller:dev` is a local name that no
    cluster can pull, so pass the image explicitly:
 

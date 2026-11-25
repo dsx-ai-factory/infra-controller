@@ -59,8 +59,10 @@ protocol gateway. To replicate it on a fresh site:
    [dpf-sim-controller quick start](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/k8s/dpf-sim-controller/README.md#quick-start-against-a-machine-a-tron-cluster)
    give the `make deploy` command and the namespace it creates. The running
    simulator also creates the `DPFOperatorConfig` whose `status.version`
-   nico-api reads at startup. Until that version exists nico-api exits with
-   `failed to initialize DPF SDK`, so keep this order.
+   nico-api reads at startup. Until that version exists, or when an older
+   simulator image reports a version below `helm-prereqs/dpf-versions.toml`,
+   nico-api exits with `failed to initialize DPF SDK`. Keep this order and
+   build the simulator from the same revision as Core.
 1. Check the rack profile. nico-api derives an expected rack's profile id from
    the expected rack group that declares it: the group topology in upper case,
    an underscore, the compute vendor in upper case, and the suffix
@@ -148,7 +150,7 @@ export NICO_REST_IMAGE_TAG=<rest-tag>       # NICo REST image tag from the same 
 export REGISTRY_PULL_SECRET=<registry-key>  # registry password or API key, unset for a public or preloaded registry
 export REGISTRY_PULL_USERNAME='$oauthtoken'  # registry user for the pull Secrets, $oauthtoken for NGC
 export MAT_IMAGE_TAG=<mat-tag>              # machine-a-tron and mat-k8s-controller image tag
-export DPF_SIM_IMAGE_TAG=<dpf-sim-tag>      # dpf-sim-controller image tag
+export DPF_SIM_IMAGE_TAG=<dpf-sim-tag>      # dpf-sim-controller image tag, built from the same revision as Core
 ```
 
 `setup.sh` creates the `imagepullsecret` Secret that the Core values reference

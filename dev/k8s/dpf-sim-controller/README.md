@@ -67,7 +67,7 @@ Sourced from `crates/dpf/src/sdk.rs` and `crates/machine-controller/src/dpf.rs`:
 | DPUNode CR name | `node-{dpf_id}` (`dpf_id` = host BMC MAC, `:`→`-`) | NICo creates |
 | DPUDevice CR name | `device-{device_id}` | NICo creates |
 | DPU CR name | `node-{dpf_id}-device-{device_id}` | **operator/simulator creates** |
-| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v26.4.0` | **sim creates** it, keeps the version, and removes any `Ready` condition. NICo reads the version once at startup |
+| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v30.0.0` | **sim creates** it, keeps the version, and removes any `Ready` condition. NICo reads the version once at startup |
 | machine link label | `carbide.nvidia.com/dpu-machine-id` (copy DPUDevice→DPU) | must propagate |
 | device marker | `carbide.nvidia.com/controlled.device=true` | on DPUDevice |
 | host BMC IP label | `carbide.nvidia.com/host-bmc-ip`: IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens | on device+node |
@@ -122,12 +122,13 @@ installs the real operator, which you must **not** run here. The operator and
 the simulator would both drive `DPU.status.phase` and the `DPFOperatorConfig`
 status and fight.
 
-The only coupling is version consistency: the simulator's Go types are pinned to
+The only coupling is version consistency. The simulator's Go types are pinned to
 doca-platform **v26.4.0** (`go.mod`), so the applied CRDs must accept v26.4.0
-objects. The CRDs in `crates/dpf/crds/` are newer than those types, and the
-simulator relies only on fields both have. It handles `DPFOperatorConfig` as
-unstructured data, because the shipped CRD requires `spec.deploymentMode` and
-the v26.4.0 types do not have it.
+objects. The CRDs in `crates/dpf/crds/` are v30.0.0, and the simulator relies
+only on fields both have. It handles `DPFOperatorConfig` as unstructured data,
+because the shipped CRD requires `spec.deploymentMode` and the v26.4.0 types do
+not have it. The version the simulator reports does not follow this pin. Refer
+to [The operator config NICo reads at startup](#the-operator-config-nico-reads-at-startup).
 
 ## The operator config NICo reads at startup
 
@@ -143,9 +144,11 @@ version. A simulated site has neither, so the simulator provides both:
   `crates/dpf/crds/` requires: `deploymentMode: zero-trust` and the Redfish
   install interface that mode needs. Nothing reads that spec on a simulated
   site.
-- It keeps `status.version` at `v26.4.0`, the release the simulator
-  reproduces. NICo treats versions from 26.8.0 as supporting per-DPU BMC
-  credential Secrets, and the simulator reads only the shared Secret.
+- It keeps `status.version` at `v30.0.0`, the version in
+  `helm-prereqs/dpf-versions.toml`. nico-api exits at startup when the
+  reported version is lower, so build the simulator from the same revision as
+  nico-api. `helm-prereqs/tests/doca-platform-pin_test.sh` fails when the two
+  differ.
 - It checks when it starts and every 30 seconds after that, so a deleted
   object comes back. A failed check is logged and retried, and the DPU walk
   continues meanwhile.
