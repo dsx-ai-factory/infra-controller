@@ -1691,7 +1691,8 @@ _dpf_release_key() {
 # status.version when its components are deployed. carbide-api reads
 # status.version once at startup. Until an upgraded operator has recorded its
 # target, both fields hold the previous version, so a version older than the
-# release in the operator image tag does not end the wait.
+# release in the operator image tag does not end the wait. Each read has a
+# request timeout, so a hung API request cannot hold the wait past its limit.
 #   $1 timeout in seconds   $2 operator image tag
 _wait_for_dpf_operator_version() {
     local _deadline=$(( $(date +%s) + $1 )) _floor _have _status _version="" _target=""
@@ -1701,6 +1702,7 @@ _wait_for_dpf_operator_version() {
         || echo "  Image tag $2 does not start with a release, so this wait cannot tell a pending operator upgrade from the previous version."
     while true; do
         _status="$(kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
+            --request-timeout=20s \
             -o jsonpath='{.status.version}|{.status.targetVersion}' 2>/dev/null || true)"
         IFS='|' read -r _version _target <<< "${_status}"
         _have="$(_dpf_release_key "${_version}")"
@@ -1720,6 +1722,7 @@ _wait_for_dpf_operator_version() {
     fi
     echo "  Conditions that are not True:" >&2
     kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
+        --request-timeout=20s \
         -o jsonpath='{range .status.conditions[?(@.status!="True")]}{.type}: {.status}/{.reason}{"\n"}{.message}{"\n"}{end}' \
         | sed 's/^/    /' >&2 || true
     echo "  Resolve what is reported above, then run setup.sh again." >&2
