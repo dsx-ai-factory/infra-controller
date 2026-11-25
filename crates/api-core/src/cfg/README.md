@@ -1967,11 +1967,11 @@ DPF version requirements are embedded from
 at build time and cannot be overridden in site configuration. With DPF enabled,
 startup reads `DPFOperatorConfig.status.version` once and rejects versions below
 `version` before SDK initialization writes Kubernetes resources. Newer versions
-are accepted. Comparison
-uses semantic version precedence, ignores build metadata, and treats prereleases
-as older than their corresponding final release. A missing, unreadable, invalid,
-or timed-out installed version fails startup. Disabled DPF skips the lookup.
-Changing the manifest requires rebuilding and restarting NICo; it does not upgrade DPF.
+are accepted. Comparison uses semantic version precedence, ignores build
+metadata, and treats prereleases as older than their corresponding final
+release. A missing, unreadable, invalid, or timed-out installed version fails
+startup. Disabled DPF skips the lookup. Changing the manifest requires
+rebuilding and restarting NICo. It does not upgrade DPF.
 
 ### `DpfDeploymentConfig`
 
