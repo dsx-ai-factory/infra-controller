@@ -91,7 +91,6 @@ use librms::RackManagerClientPool;
 use model::attestation::spdm::VerifierImpl;
 use model::expected_machine::ExpectedMachine;
 use model::ib::DEFAULT_IB_FABRIC_NAME;
-use model::machine::HostHealthConfig;
 use model::network_segment::NetworkDefinition;
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
@@ -119,6 +118,7 @@ use crate::cfg::file::{
 use crate::cfg::load::all_configuration_files;
 use crate::cfg::resource_pool::ResourcePoolBackendConfig;
 use crate::dpa::handler::start_svpc_handler;
+use crate::dpu_service_sync_metrics::DpuServiceSyncHoldMonitor;
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::listener::ApiListenMode;
 use crate::logging::log_limiter::LogLimiter;
@@ -623,6 +623,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     )
     .await?;
 
+    // Pass only enabled fabrics and explicitly selected auth modes into the runtime manager.
     let ib_fabric_manager_impl = ib::create_ib_fabric_manager(
         credential_manager.clone(),
         ib::IBFabricManagerConfig {
@@ -632,6 +633,17 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
                     .iter()
                     .map(|(fabric_id, fabric_definition)| {
                         (fabric_id.clone(), fabric_definition.endpoints.clone())
+                    })
+                    .collect()
+            } else {
+                Default::default()
+            },
+            auth_modes: if ib_config.enabled {
+                carbide_config
+                    .ib_fabrics
+                    .iter()
+                    .filter_map(|(fabric_id, fabric_definition)| {
+                        fabric_definition.auth.map(|auth| (fabric_id.clone(), auth))
                     })
                     .collect()
             } else {
@@ -2265,6 +2277,13 @@ async fn initialize_and_start_controllers<'a>(
         })
         .transpose()?;
 
+    // The machine state controller and the DPU service sync hold monitor must
+    // judge whether a host is past its SLA the same way, so both get these.
+    let machine_host_health = carbide_config.host_health;
+    let machine_sla_config = model::machine::slas::MachineSlaConfig::new(
+        carbide_config.machine_state_controller.failure_retry_time,
+    );
+
     // handles need to be stored in a variable
     // If they are assigned to _ then the destructor will be immediately called
     StateController::<MachineStateControllerIO>::builder()
@@ -2362,24 +2381,8 @@ async fn initialize_and_start_controllers<'a>(
                 .build(),
         ))
         .io(Arc::new(MachineStateControllerIO {
-            host_health: HostHealthConfig {
-                hardware_health_reports: carbide_config.host_health.hardware_health_reports,
-                dpu_agent_version_staleness_threshold: carbide_config
-                    .host_health
-                    .dpu_agent_version_staleness_threshold,
-                prevent_allocations_on_stale_dpu_agent_version: carbide_config
-                    .host_health
-                    .prevent_allocations_on_stale_dpu_agent_version,
-                prevent_allocations_on_scout_heartbeat_timeout: carbide_config
-                    .host_health
-                    .prevent_allocations_on_scout_heartbeat_timeout,
-                suppress_external_alerting_on_scout_heartbeat_timeout: carbide_config
-                    .host_health
-                    .suppress_external_alerting_on_scout_heartbeat_timeout,
-            },
-            sla_config: model::machine::slas::MachineSlaConfig::new(
-                carbide_config.machine_state_controller.failure_retry_time,
-            ),
+            host_health: machine_host_health,
+            sla_config: machine_sla_config.clone(),
         }))
         .state_change_emitter(state_change_emitter)
         .build_and_spawn(join_set, cancel_token.clone())
@@ -2847,6 +2850,16 @@ async fn initialize_and_start_controllers<'a>(
         carbide_config.measured_boot_collector.clone(),
         meter.clone(),
         api_service.instrumentation.clone(),
+    )
+    .start(join_set, cancel_token.clone())?;
+
+    // Started with or without DPF: a site that has none never records a hold,
+    // and reports zero rather than no series.
+    DpuServiceSyncHoldMonitor::new(
+        db_pool.clone(),
+        &meter,
+        machine_host_health,
+        machine_sla_config,
     )
     .start(join_set, cancel_token.clone())?;
 

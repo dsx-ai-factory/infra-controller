@@ -283,6 +283,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_host_reprovision_retries_total</td><td>counter</td><td>Number of times a failed host firmware upgrade was retried during host reprovisioning</td></tr>
 <tr><td>carbide_hosts_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_hosts_by_sku_count</td><td>gauge</td><td>Number of hosts by SKU and device type (&#39;unknown&#39; for hosts without SKU)</td></tr>
+<tr><td>carbide_hosts_dpu_service_sync_oldest_pending_age_seconds</td><td>gauge</td><td>Age in seconds of the oldest outstanding DPUService rollout hold, measured from when the hold was first requested, by whether the host is past the SLA of its current state (above_sla) and whether an instance is allocated on it (in_use); 0 when no hold is outstanding</td></tr>
+<tr><td>carbide_hosts_dpu_service_sync_pending_count</td><td>gauge</td><td>Number of hosts whose DPUService rollout hold is still outstanding, by whether the host is past the SLA of its current state (above_sla) and whether an instance is allocated on it (in_use)</td></tr>
 <tr><td>carbide_hosts_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_hosts_health_status_count</td><td>gauge</td><td>Number of managed hosts in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_hosts_in_use_count</td><td>gauge</td><td>Number of hosts actively used by tenants as instances in the NICo deployment</td></tr>

@@ -12,7 +12,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func TestManageIBPartitionInventory_DiscoverInfiniBandPartitionInventory(t *testing.T) {
@@ -120,153 +122,69 @@ func TestManageIBPartitionInventory_DiscoverInfiniBandPartitionInventory(t *test
 	}
 }
 
-func TestManageIBPartition_CreateIBPartitionOnSite(t *testing.T) {
-	mockCoreGrpcClient := cClient.NewMockCoreGrpcClient()
+func TestManageInfiniBandPartition_CreateInfiniBandPartitionOnSite(t *testing.T) {
+	coreClient := cClient.NewCoreGrpcAtomicClient(&cClient.CoreGrpcClientConfig{})
+	coreClient.SwapClient(cClient.NewMockCoreGrpcClient())
+	manager := NewManageInfiniBandPartition(coreClient)
 
-	coreGrpcAtomicClient := cClient.NewCoreGrpcAtomicClient(&cClient.CoreGrpcClientConfig{})
-	coreGrpcAtomicClient.SwapClient(mockCoreGrpcClient)
+	id := &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"}
+	config := &corev1.IBPartitionConfig{TenantOrganizationId: "best_org_ever"}
+	metadata := &corev1.Metadata{Name: "best_ibpartition_ever"}
 
-	name := "best_ibpartition_ever"
-	org := "best_org_ever"
+	// Older workflow payloads carry the name only in config.
+	var legacyRequest corev1.IBPartitionCreationRequest
+	err := protojson.Unmarshal([]byte(`{
+		"id": {"value": "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		"config": {"name": "legacy-partition", "tenantOrganizationId": "best_org_ever"}
+	}`), &legacyRequest)
+	require.NoError(t, err)
 
-	type fields struct {
-		coreGrpcAtomicClient *cClient.CoreGrpcAtomicClient
-	}
-	type args struct {
-		ctx     context.Context
-		request *corev1.IBPartitionCreationRequest
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		wantErr bool
+		request *corev1.IBPartitionCreationRequest
+		wantErr string
 	}{
 		{
-			name: "test create ibpartition success",
-			fields: fields{
-				coreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
-			args: args{
-				ctx: context.Background(),
-				request: &corev1.IBPartitionCreationRequest{
-					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &corev1.IBPartitionConfig{
-						Name:                 name,
-						TenantOrganizationId: org,
-					},
-				},
-			},
-			wantErr: false,
+			name:    "metadata name",
+			request: &corev1.IBPartitionCreationRequest{Id: id, Config: config, Metadata: metadata},
 		},
 		{
-			name: "test create ibpartition fail on missing name",
-			fields: fields{
-				coreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
-			args: args{
-				ctx: context.Background(),
-				request: &corev1.IBPartitionCreationRequest{
-					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &corev1.IBPartitionConfig{
-						Name:                 "",
-						TenantOrganizationId: org,
-					},
-				},
-			},
-			wantErr: true,
+			name:    "legacy config name",
+			request: &legacyRequest,
 		},
 		{
-			name: "test create ibpartition fail on missing org",
-			fields: fields{
-				coreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
-			args: args{
-				ctx: context.Background(),
-				request: &corev1.IBPartitionCreationRequest{
-					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &corev1.IBPartitionConfig{
-						Name:                 name,
-						TenantOrganizationId: "",
-					},
-				},
-			},
-			wantErr: true,
+			name:    "missing name",
+			request: &corev1.IBPartitionCreationRequest{Id: id, Config: config},
+			wantErr: "without Name",
 		},
 		{
-			name: "test create ibpartition fail on missing id",
-			fields: fields{
-				coreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
-			args: args{
-				ctx: context.Background(),
-				request: &corev1.IBPartitionCreationRequest{
-					Id: nil,
-					Config: &corev1.IBPartitionConfig{
-						Name:                 name,
-						TenantOrganizationId: org,
-					},
-				},
-			},
-			wantErr: true,
+			name:    "missing organization",
+			request: &corev1.IBPartitionCreationRequest{Id: id, Config: &corev1.IBPartitionConfig{}, Metadata: metadata},
+			wantErr: "without TenantOrganizationId",
 		},
 		{
-			name: "test create ibpartition fail on missing request",
-			fields: fields{
-				coreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
-			args: args{
-				ctx:     context.Background(),
-				request: nil,
-			},
-			wantErr: true,
+			name:    "missing config",
+			request: &corev1.IBPartitionCreationRequest{Id: id, Metadata: metadata},
+			wantErr: "without Config",
 		},
 		{
-			name: "test create ibpartition success with Metadata only (no deprecated Config)",
-			fields: fields{
-				coreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
-			args: args{
-				ctx: context.Background(),
-				request: &corev1.IBPartitionCreationRequest{
-					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &corev1.IBPartitionConfig{
-						TenantOrganizationId: org,
-					},
-					Metadata: &corev1.Metadata{
-						Name: name,
-					},
-				},
-			},
-			wantErr: false,
+			name:    "missing ID",
+			request: &corev1.IBPartitionCreationRequest{Config: config, Metadata: metadata},
+			wantErr: "without ID",
 		},
 		{
-			name: "test create ibpartition success with deprecated Config only (backward compatibility)",
-			fields: fields{
-				coreGrpcAtomicClient: coreGrpcAtomicClient,
-			},
-			args: args{
-				ctx: context.Background(),
-				request: &corev1.IBPartitionCreationRequest{
-					Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-					Config: &corev1.IBPartitionConfig{
-						Name:                 name,
-						TenantOrganizationId: org,
-					},
-				},
-			},
-			wantErr: false,
+			name:    "missing request",
+			wantErr: "empty create InfiniBand Partition request",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mm := NewManageInfiniBandPartition(tt.fields.coreGrpcAtomicClient)
-			err := mm.CreateInfiniBandPartitionOnSite(tt.args.ctx, tt.args.request)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
+			err := manager.CreateInfiniBandPartitionOnSite(context.Background(), tt.request)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
 			}
+			require.NoError(t, err)
 		})
 	}
 }

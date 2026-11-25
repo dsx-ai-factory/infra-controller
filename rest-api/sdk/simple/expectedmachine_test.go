@@ -157,10 +157,38 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		assert.Contains(t, body, "labels")
 		assert.Equal(t, &retain, body["retainBmcCredentials"])
 	})
+
+	ignore := "Ignore"
+	inherit := "Inherit"
+	dpuPolicyTests := []struct {
+		name   string
+		policy *string
+	}{
+		{name: "explicit DPU policy is forwarded", policy: &ignore},
+		{name: "Inherit is forwarded to reset the DPU policy", policy: &inherit},
+		{name: "omitted DPU policy stays absent"},
+	}
+	for _, tt := range dpuPolicyTests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiReq := toStandardExpectedMachineUpdateRequest(ExpectedMachineUpdateRequest{DpuPolicy: tt.policy})
+
+			body, err := json.Marshal(apiReq)
+			require.NoError(t, err)
+			if tt.policy == nil {
+				assert.False(t, apiReq.DpuPolicy.IsSet())
+				assert.NotContains(t, string(body), "dpuPolicy")
+				return
+			}
+			require.True(t, apiReq.DpuPolicy.IsSet())
+			assert.Equal(t, *tt.policy, *apiReq.DpuPolicy.Get())
+			assert.Contains(t, string(body), `"dpuPolicy":"`+*tt.policy+`"`)
+		})
+	}
 }
 
 func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
 	retain := true
+	ignore := "Ignore"
 	tests := []struct {
 		name     string
 		request  ExpectedMachineCreateRequest
@@ -170,6 +198,11 @@ func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
 			name:     "BMC credential retention is forwarded",
 			request:  ExpectedMachineCreateRequest{RetainBmcCredentials: &retain},
 			wantBody: map[string]any{"retainBmcCredentials": &retain},
+		},
+		{
+			name:     "DPU policy is forwarded",
+			request:  ExpectedMachineCreateRequest{DpuPolicy: &ignore},
+			wantBody: map[string]any{"dpuPolicy": &ignore},
 		},
 	}
 	for _, tt := range tests {
@@ -185,6 +218,7 @@ func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
 
 func TestExpectedMachineFromStandard(t *testing.T) {
 	retain := true
+	ignore := "Ignore"
 	tests := []struct {
 		name     string
 		response standard.ExpectedMachine
@@ -195,11 +229,17 @@ func TestExpectedMachineFromStandard(t *testing.T) {
 			response: standard.ExpectedMachine{RetainBmcCredentials: &retain},
 			want:     ExpectedMachine{RetainBmcCredentials: true},
 		},
+		{
+			name:     "DPU policy is read",
+			response: standard.ExpectedMachine{DpuPolicy: &ignore},
+			want:     ExpectedMachine{DpuPolicy: ignore},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := expectedMachineFromStandard(tt.response)
 			assert.Equal(t, tt.want.RetainBmcCredentials, got.RetainBmcCredentials)
+			assert.Equal(t, tt.want.DpuPolicy, got.DpuPolicy)
 		})
 	}
 }

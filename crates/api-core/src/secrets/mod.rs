@@ -28,8 +28,8 @@
 //! Reads keep two behaviors the rest of the system learned from the Vault
 //! reader: the newest journal entry wins (ordered by the database-assigned
 //! `seq`), and an entry whose password is empty reads as no credential at
-//! all -- several delete flows "delete" by writing an empty-password
-//! tombstone.
+//! all -- the site-wide BMC root delete flow "deletes" by writing an
+//! empty-password tombstone.
 
 use std::sync::Arc;
 
@@ -384,10 +384,9 @@ impl CredentialReader for PostgresCredentialManager {
         let entry = self.decrypt_row(row).await?;
 
         timer.succeed();
-        // An empty password reads as no credential at all, exactly like the
-        // Vault reader: the UFM and site-wide BMC delete flows "delete" by
-        // writing an empty-password tombstone, and their consumers depend
-        // on getting None back.
+        // An empty password reads as no credential at all. The site-wide BMC
+        // delete flow "deletes" by writing an empty-password tombstone, and
+        // its consumers depend on getting None back.
         match entry.credentials {
             Credentials::UsernamePassword { ref password, .. } if password.is_empty() => Ok(None),
             credentials => Ok(Some(credentials)),

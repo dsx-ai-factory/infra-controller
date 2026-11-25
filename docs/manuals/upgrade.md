@@ -446,7 +446,7 @@ A UFM password that names a certificate directory is no longer supported and is
 now sent to UFM as a token, so UFM rejects it. Before upgrading, replace that
 credential in one of these ways:
 
-- Set a valid UFM bearer token.
+- Set a valid UFM token.
 - Use the default SPIFFE client certificate: give the fabric an empty password
   in a source that returns it. That is Vault, or the environment or file source
   with `ufm_source` set to `"local_first"` or `"local"`. UFM must trust that
@@ -455,8 +455,25 @@ credential in one of these ways:
 
 Do not clear the password in Postgres. Postgres reads an empty password as no
 credential, so UFM client creation fails and the fabric monitor cannot load the
-fabric. See
-[UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
+fabric.
+
+Consider these compatibility details:
+
+- Set `auth` only after Core runs a version that supports it; an earlier version
+  rejects the unknown setting and fails to start.
+- After upgrading, a site that stores credentials in Postgres and wants the
+  client certificate sets `auth = "client_certificate"`.
+- `credential delete-ufm` now removes the UFM credential from the configured
+  writer backend. It no longer stores an empty password, so on Vault it no
+  longer switches UFM to the client certificate. An empty password already
+  stored keeps selecting the client certificate while `auth` is not set. To use
+  the client certificate, set `auth = "client_certificate"`.
+- On a site that stores credentials in Vault, `credential delete-ufm` needs the
+  updated Vault policy from helm-prereqs. Until it is applied, the command fails
+  with a permission error.
+- Setting `auth` takes effect when Core restarts.
+
+See [UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
 
 ### Upgrades That Introduce Asynchronous Peering Deletion
 
