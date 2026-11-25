@@ -1717,8 +1717,9 @@ _dpf_version_at_floor() {
 # status.version when its components are deployed. carbide-api reads
 # status.version once at startup. Until an upgraded operator has recorded its
 # target, both fields hold the previous version, so a version older than the
-# release in the operator image tag does not end the wait. Each read has a
-# request timeout, so a hung API request cannot hold the wait past its limit.
+# release in the operator image tag, or a prerelease of that release that the
+# tag does not carry, does not end the wait. Each read has a request timeout,
+# so a hung API request cannot hold the wait past its limit.
 #   $1 timeout in seconds   $2 operator image tag
 _wait_for_dpf_operator_version() {
     local _deadline=$(( $(date +%s) + $1 )) _floor _status _version="" _target=""

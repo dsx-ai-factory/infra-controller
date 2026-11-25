@@ -1729,7 +1729,9 @@ before Core after 10 minutes when it does not. A reported prerelease of that
 release, such as `v30.0.0-rc.4` for the tag `v30.0.0`, does not end the wait
 unless the tag carries the same prerelease. Setting the tag to that prerelease
 ends the wait, but it does not change the minimum that NICo checks at startup.
-Use an operator image built with a plain release `TAG` instead. An image tag
+Use an operator image built with a plain release `TAG` instead. Push it under
+an image tag that the cluster has not run, so that the rerun replaces the
+running operator pod, and set `NICO_DPF_IMAGE_TAG` to that tag. An image tag
 that starts with a later release than the build `TAG` fails this wait, so start
 a custom tag with the plain build `TAG`, for example `v30.0.0-site1`. With a
 tag that does not start with a release, such as `latest`, preflight does not
@@ -1809,8 +1811,8 @@ With the default image tag, or another tag on the v30.0 release line, preflight
 reports any other version as an error. Do not pass `--ignore-preflight-errors`
 for this error. The same check reports a warning when preflight cannot read
 the installed version, when the `DPFOperatorConfig` has no `status.version`,
-and when `status.version` is a prerelease of the version in the image tag, such
-as `v30.0.0-rc.6` for the tag `v30.0.0`.
+and when `status.version` is a prerelease of the image tag, such as
+`v30.0.0-rc.4` for the tag `v30.0.0`.
 Refer to [DPF Upgrade Source](../docs/manuals/upgrade.md#dpf-upgrade-source).
 
 ## DPU compatibility DNS (`.forge` zone) — REQUIRED for DPU bring-up

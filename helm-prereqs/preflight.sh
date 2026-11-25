@@ -50,8 +50,8 @@
 #                                operator this run installs upgrades from
 #                                (warning: the installed version cannot be read,
 #                                the DPFOperatorConfig has no status.version, or
-#                                status.version is a prerelease of the target
-#                                release)
+#                                status.version is a prerelease of the operator
+#                                image tag)
 #   5. Node resources:           at least 3 schedulable (Ready + untainted) nodes
 #   6. MetalLB BGPPeer nodes:    hostnames in config exist in the cluster
 #   7. Per-node checks:          kernel params (sysctl) and DNS on every node
@@ -576,9 +576,10 @@ _dpf_installed_version() {
 
 # Records an error when the installed DPF operator is on a release line that
 # the operator this run installs ($1, its image tag) does not upgrade from.
-# Warns when the DPFOperatorConfig reports no status.version, or a prerelease
-# of the target release, which nico-api treats as below it. A tag on another
-# release line, or without a release, is left to that operator's own validation.
+# Warns when the installed version cannot be read, when the DPFOperatorConfig
+# reports no status.version, or when it reports a prerelease of $1, which
+# nico-api treats as below it. A tag on another release line, or without a
+# release, is left to that operator's own validation.
 _check_dpf_upgrade_source() {
     local _target="$1" _state _installed
     [[ "${_target#v}" == "${_DPF_PINNED_LINE}."* ]] || return 0
