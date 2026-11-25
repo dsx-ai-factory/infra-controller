@@ -1077,6 +1077,56 @@ async fn find_by_machine_id_for_update_locks_non_bmc_interfaces_in_id_order(
     Ok(())
 }
 
+/// Site Explorer calls `set_boot_interface_id` for every host NIC on every
+/// pass, inside one transaction, and the id is almost always the one the row
+/// already holds. An unchanged id must not write or lock the row.
+#[crate::sqlx_test]
+async fn set_boot_interface_id_leaves_unchanged_row_unlocked(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const BOOT_INTERFACE_ID: &str = "NIC.Slot.1-1";
+
+    let segment_id = create_test_segment(&pool, "boot-id-lock-segment").await?;
+    let mac: MacAddress = "7A:7B:7C:7D:7E:51".parse()?;
+    let interface_id = MachineInterfaceId::new();
+
+    let mut setup_txn = pool.txn_begin().await?;
+    sqlx::query(
+        "INSERT INTO machine_interfaces
+            (id, segment_id, mac_address, primary_interface, hostname, boot_interface_id)
+         VALUES ($1, $2, $3, false, 'boot-lock', $4)",
+    )
+    .bind(interface_id)
+    .bind(segment_id)
+    .bind(mac)
+    .bind(BOOT_INTERFACE_ID)
+    .execute(setup_txn.as_mut())
+    .await?;
+    setup_txn.commit().await?;
+
+    let mut explorer_txn = pool.txn_begin().await?;
+    // Same id as the stored row: the update must not lock it.
+    set_boot_interface_id(mac, BOOT_INTERFACE_ID, explorer_txn.as_mut()).await?;
+
+    let mut dpu_report_txn = pool.txn_begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '100ms'")
+        .execute(dpu_report_txn.as_mut())
+        .await?;
+    // The DPU report on the same row must not wait.
+    update_last_dhcp(dpu_report_txn.as_mut(), interface_id, None).await?;
+    dpu_report_txn.commit().await?;
+
+    let last_dhcp: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT last_dhcp FROM machine_interfaces WHERE id = $1")
+            .bind(interface_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(last_dhcp.is_some(), "the DPU report stamp must be stored");
+
+    explorer_txn.rollback().await?;
+    Ok(())
+}
+
 /// A MAC identifies one physical interface even when stale or transitional
 /// rows represent it on more than one segment. Site Explorer learns one
 /// vendor-native Redfish id for that interface, so `set_boot_interface_id`
