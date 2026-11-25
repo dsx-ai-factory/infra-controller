@@ -142,9 +142,11 @@ no alerts.
 Raised when NMX-C reports a GPU in the host's NVLink inventory as `Degraded`,
 `NoNvlink`, or `DegradedBw`. The NVLink partition monitor writes a `Merge` report
 under the source `nvlink-partition-monitor`. Its alerts carry
-[`PreventAllocations`](health_alert_classifications.md#preventallocations),
-blocking normal tenant allocation while they remain in aggregate host health.
-Targeted allocation with `allow_unhealthy_machine` can bypass this health check.
+[`Hardware`](health_alert_classifications.md#hardware) only, so they appear in
+aggregate host health and in the host's health metrics but do not block
+allocation on this release. Later releases raise the same alert with
+`PreventAllocations`, and on upgrade their monitor restores that classification
+on any alert still stored.
 A host-level `Replace` health report takes precedence over the monitor's merge
 report. The monitor only updates its merge entry; it leaves replace overrides
 unchanged, including one with the same source name.
@@ -176,10 +178,9 @@ can therefore reflect an earlier fault rather than a
 current unhealthy observation. The stored report is rewritten only when the set
 of affected GPUs or their classifications changes, so an alert's `message` label
 may lag a GPU that moves between unhealthy states until the set next changes.
-If the stored copy of an alert loses `PreventAllocations` (for example, through
-a manual edit of this source's report), the monitor restores it on the next pass
-for as long as the alert is retained, including while NMX-C reports that GPU
-`Unknown` or omits it.
+A retained alert keeps its stored classifications while NMX-C reports that GPU
+`Unknown` or omits it; the monitor rebuilds an alert only on an explicit
+unhealthy observation.
 
 The monitor removes its merge report once every affected GPU's alert has
 cleared. Replacing a GPU with a different UID does not clear the old GPU's

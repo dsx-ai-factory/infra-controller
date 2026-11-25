@@ -54,8 +54,8 @@ pub struct NvlPartitionMonitorMetrics {
     /// Chassis-level NMX-C connectivity failures that caused null nvlink status observations
     pub num_nmx_c_unreachable_chassis: HashMap<ChassisNmxCUnreachableReason, usize>,
     /// `NvlinkUnhealthy` health-report writes that failed this pass and are retried on
-    /// the next one, by the kind of write. The only signal that a machine's allocation
-    /// block was not applied or cleared.
+    /// the next one, by the kind of write. The only signal that a machine's alert was
+    /// not applied or cleared.
     pub num_unhealthy_alert_write_failures: HashMap<NvlinkUnhealthyAlertWrite, usize>,
 }
 
@@ -171,8 +171,8 @@ impl Display for NvlPartitionMonitorMetrics {
     }
 }
 
-/// Which `NvlinkUnhealthy` health-report write failed: setting the allocation
-/// block or clearing it.
+/// Which `NvlinkUnhealthy` health-report write failed: setting the alert or
+/// clearing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NvlinkUnhealthyAlertWrite {
     Set,

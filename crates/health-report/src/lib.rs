@@ -530,7 +530,8 @@ impl HealthProbeAlert {
 
     /// Creates a NvlinkUnhealthy alert for one GPU. `target` is the NMX-C GPU UID, so each
     /// affected GPU is tracked individually and stays in the report until NMX-C reports that
-    /// GPU `Healthy` again. Carries `prevent_allocations`.
+    /// GPU `Healthy` again. Carries `hardware` only: on this release the alert is a signal, not
+    /// an allocation gate.
     pub fn nvlink_unhealthy(gpu_id: String, health: &str) -> Self {
         Self {
             id: HealthProbeId::nvlink_unhealthy(),
@@ -544,7 +545,7 @@ impl HealthProbeAlert {
                  fabric manager and has not been confirmed recovered"
                     .to_string(),
             ),
-            classifications: vec![HealthAlertClassification::prevent_allocations()],
+            classifications: vec![HealthAlertClassification::hardware()],
         }
     }
 
@@ -1582,7 +1583,7 @@ mod tests {
         assert!(alert.tenant_message.is_some());
         assert_eq!(
             alert.classifications,
-            vec![HealthAlertClassification::prevent_allocations()]
+            vec![HealthAlertClassification::hardware()]
         );
     }
 }

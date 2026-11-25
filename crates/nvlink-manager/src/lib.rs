@@ -1812,8 +1812,8 @@ impl NvlPartitionMonitor {
 
     /// Correlates NMX-C per-GPU health for a domain with the locally known NVLink GPUs for
     /// each machine, and sets/clears a `NvlinkUnhealthy` health alert per machine. The alert
-    /// carries `prevent_allocations`, so an affected machine cannot be allocated until its
-    /// GPUs recover.
+    /// carries `hardware` only, so it surfaces in host health and metrics without gating
+    /// allocation; it stays until the affected GPUs recover.
     ///
     /// Best-effort: failures are logged and never block partition reconciliation, matching the
     /// handling of the `GetGpuInfoList` call itself.
@@ -1858,12 +1858,11 @@ impl NvlPartitionMonitor {
             let (write, result) = if !alerts.is_empty() {
                 let mut report = nvlink_unhealthy_report(alerts);
                 report.update_in_alert_since(existing);
-                // Skip the write when the affected GPUs and their blocking classifications
-                // are unchanged. Comparing keys rather than full alerts means a link
-                // oscillating between degraded states (which only changes the message label)
-                // does not rewrite the row every pass; the label catches up the next time the
-                // key set changes. A stored copy with `prevent_allocations` stripped has a
-                // different key, so it is rewritten and the block restored.
+                // Skip the write when the affected GPUs and their classifications are
+                // unchanged. Comparing keys rather than full alerts means a link oscillating
+                // between degraded states (which only changes the message label) does not
+                // rewrite the row every pass; the label catches up the next time the key set
+                // changes.
                 if existing.is_some_and(|prev| {
                     nvlink_alert_keys(&prev.alerts) == nvlink_alert_keys(&report.alerts)
                 }) {
@@ -1874,7 +1873,7 @@ impl NvlPartitionMonitor {
                     %domain_uuid,
                     affected_gpu_count = report.alerts.len(),
                     total_gpu_count = gpus.len(),
-                    "NVLink GPU(s) unhealthy - setting PreventAllocations alert"
+                    "NVLink GPU(s) unhealthy - setting NvlinkUnhealthy alert"
                 );
                 (
                     NvlinkUnhealthyAlertWrite::Set,
@@ -1895,7 +1894,7 @@ impl NvlPartitionMonitor {
             };
 
             // The pass still reports success; this counter is the only signal that the
-            // allocation block was not applied or cleared. The write is retried next pass.
+            // alert was not applied or cleared. The write is retried next pass.
             if let Err(error) = result {
                 tracing::warn!(
                     %machine_id,
@@ -2989,31 +2988,18 @@ fn classify_gpu_health(h: i32) -> GpuHealthState {
 /// Each alert's `target` is the GPU UID, so previously flagged GPUs are known structurally. A
 /// flagged GPU stays until NMX-C reports *that GPU* `Healthy`. NMX-C represents a GPU under
 /// rediscovery as UID 0 with `Unknown` health, so it does not match its stored GUID; treating
-/// "absent" as recovered would let one healthy sibling clear `prevent_allocations` before the
-/// fault is gone. GPUs that were never flagged and are `Unknown` or absent are ignored, so a
-/// swapped-in GPU awaiting discovery does not pin the machine out of the pool.
+/// "absent" as recovered would let one healthy sibling clear the alert before the fault is
+/// gone. GPUs that were never flagged and are `Unknown` or absent are ignored, so a swapped-in
+/// GPU awaiting discovery does not raise an alert. Retained alerts keep their stored
+/// classifications.
 fn next_nvlink_unhealthy_alerts(
     previous: &[health_report::HealthProbeAlert],
     gpus: &[NvLinkGpu],
     health_by_guid: &HashMap<u64, i32>,
 ) -> Vec<health_report::HealthProbeAlert> {
-    let prevent_allocations = health_report::HealthAlertClassification::prevent_allocations();
     let mut alerts: BTreeMap<String, health_report::HealthProbeAlert> = previous
         .iter()
-        .filter_map(|alert| {
-            let guid = alert.target.clone()?;
-            let mut alert = alert.clone();
-            // The API lets a caller replace this source's report with the same probe/target
-            // but `prevent_allocations` stripped. A retained alert must still block, including
-            // while the GPU is `Unknown` or absent, so restore it here rather than only on the
-            // next explicit unhealthy observation. Other classifications are left as stored.
-            if alert.id == health_report::HealthProbeId::nvlink_unhealthy()
-                && !alert.classifications.contains(&prevent_allocations)
-            {
-                alert.classifications.push(prevent_allocations.clone());
-            }
-            Some((guid, alert))
-        })
+        .filter_map(|alert| Some((alert.target.clone()?, alert.clone())))
         .collect();
 
     for gpu in gpus {
@@ -3118,11 +3104,13 @@ mod gpu_health_tests {
         );
     }
 
+    /// A retained alert is kept as stored, classifications included: the monitor only
+    /// rebuilds an alert on an explicit unhealthy observation.
     #[test]
-    fn retained_alert_restores_prevent_allocations_while_gpu_is_unknown_or_absent() {
+    fn retained_alert_keeps_stored_classifications_while_gpu_is_unknown_or_absent() {
         let mut stripped = flagged(1);
         stripped.classifications.clear();
-        let prevent_allocations = health_report::HealthAlertClassification::prevent_allocations();
+        let hardware = health_report::HealthAlertClassification::hardware();
 
         value_scenarios!(
             run = |health: Vec<(u64, i32)>| {
@@ -3137,24 +3125,28 @@ mod gpu_health_tests {
                     .map(|alert| {
                         (
                             alert.target.clone(),
-                            alert.classifications.contains(&prevent_allocations),
+                            alert.classifications.contains(&hardware),
                         )
                     })
                     .collect::<Vec<_>>()
             };
 
             "retained while Unknown" {
-                vec![(1, NmxGpuHealthUnknown as i32)] => vec![(Some("1".to_string()), true)],
+                vec![(1, NmxGpuHealthUnknown as i32)] => vec![(Some("1".to_string()), false)],
             }
 
             "retained while absent" {
-                vec![(2, NmxGpuHealthHealthy as i32)] => vec![(Some("1".to_string()), true)],
+                vec![(2, NmxGpuHealthHealthy as i32)] => vec![(Some("1".to_string()), false)],
+            }
+
+            "rebuilt on an unhealthy observation" {
+                vec![(1, NmxGpuHealthDegraded as i32)] => vec![(Some("1".to_string()), true)],
             }
         );
     }
 
     #[test]
-    fn alert_keys_ignore_message_but_track_blocking_classifications() {
+    fn alert_keys_ignore_message_but_track_classifications() {
         let blocking = flagged(1);
 
         // Same GPU, different NMX-C label: same key, so oscillation does not rewrite.
@@ -3165,8 +3157,8 @@ mod gpu_health_tests {
             nvlink_alert_keys(std::slice::from_ref(&relabeled))
         );
 
-        // Same GPU with prevent_allocations stripped (as the API allows): different key, so
-        // the monitor rewrites and restores the block.
+        // Same GPU with its classifications cleared (as the API allows): different key, so
+        // a changed classification set is written rather than deduplicated away.
         let mut stripped = blocking.clone();
         stripped.classifications.clear();
         assert_ne!(
@@ -3289,12 +3281,10 @@ fn aggregate_compute_node_health(
     counts
 }
 
-/// What a `NvlinkUnhealthy` report asserts, per alert: probe id, GPU UID target, and the
-/// classifications that gate allocation. Message labels are deliberately excluded so a link
-/// oscillating between degraded states does not rewrite the row every pass. Classifications
-/// are deliberately included: the API lets a caller replace this source's merge report with
-/// the same probe/target but empty classifications, and identity-only comparison would then
-/// skip restoring `prevent_allocations` on an alert the monitor still asserts.
+/// What a `NvlinkUnhealthy` report asserts, per alert: probe id, GPU UID target, and
+/// classifications. Message labels are deliberately excluded so a link oscillating between
+/// degraded states does not rewrite the row every pass. Classifications are included so a
+/// change to them is written rather than deduplicated away.
 fn nvlink_alert_keys(
     alerts: &[health_report::HealthProbeAlert],
 ) -> BTreeSet<(
@@ -3315,7 +3305,7 @@ fn nvlink_alert_keys(
 }
 
 /// Builds the merge report this monitor writes for a machine with unhealthy NVLink GPUs: one
-/// `prevent_allocations` alert per affected GPU, as computed by
+/// `hardware` alert per affected GPU, as computed by
 /// [`next_nvlink_unhealthy_alerts`].
 fn nvlink_unhealthy_report(
     alerts: Vec<health_report::HealthProbeAlert>,
@@ -3933,9 +3923,9 @@ mod nvlink_unhealthy_persistence_tests {
     }
 
     /// Persistence contract for `record_nvlink_unhealthy_alerts`, which the pure helpers cannot
-    /// prove: an unhealthy GPU writes a `prevent_allocations` merge report under this monitor's
-    /// source that the aggregate health gate sees, and recovery removes exactly that source,
-    /// leaving other sources untouched.
+    /// prove: an unhealthy GPU writes a `hardware` merge report under this monitor's source
+    /// that aggregate host health reflects without blocking allocation, and recovery removes
+    /// exactly that source, leaving other sources untouched.
     #[sqlx_test]
     async fn monitor_pass_persists_then_clears_nvlink_unhealthy_report(
         pool: sqlx::PgPool,
@@ -3967,6 +3957,12 @@ mod nvlink_unhealthy_persistence_tests {
             Ok(snapshots.remove(id).expect("seeded machine loads"))
         }
 
+        let has_hardware_alert = |snapshot: &ManagedHostStateSnapshot| {
+            snapshot
+                .aggregate_health
+                .find_alert_by_classification(&health_report::HealthAlertClassification::hardware())
+                .is_some()
+        };
         let blocks_allocation = |snapshot: &ManagedHostStateSnapshot| {
             snapshot
                 .aggregate_health
@@ -4026,8 +4022,8 @@ mod nvlink_unhealthy_persistence_tests {
 
         let before = load(&pool, &id).await?;
         assert!(
-            !blocks_allocation(&before),
-            "seeded machine starts allocatable"
+            !has_hardware_alert(&before),
+            "seeded machine starts without a hardware alert"
         );
         let machine_nvlink_info = HashMap::from([(id, before.host_snapshot.nvlink_info.clone())]);
 
@@ -4064,8 +4060,12 @@ mod nvlink_unhealthy_persistence_tests {
             "unrelated source survives the set"
         );
         assert!(
-            blocks_allocation(&after_set),
-            "aggregate health blocks allocation"
+            has_hardware_alert(&after_set),
+            "aggregate health carries the hardware alert"
+        );
+        assert!(
+            !blocks_allocation(&after_set),
+            "the alert does not block allocation"
         );
 
         // Pass 2: the same GPU reports healthy.
@@ -4097,8 +4097,8 @@ mod nvlink_unhealthy_persistence_tests {
             "unrelated source survives the clear"
         );
         assert!(
-            !blocks_allocation(&after_clear),
-            "machine is allocatable again"
+            !has_hardware_alert(&after_clear),
+            "hardware alert is gone after recovery"
         );
 
         join_set.shutdown().await;

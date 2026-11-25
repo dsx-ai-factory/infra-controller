@@ -123,10 +123,10 @@ Each reconciliation pass does the following:
    partition list and GPU membership on that endpoint's chassis or domain.
 1. Updates the per-host
    [`NvlinkUnhealthy`](../architecture/health/health_probe_ids.md#nvlinkunhealthy)
-   health report when the GPU-health query succeeds. Its `PreventAllocations`
-   alerts block normal allocation while they remain in aggregate host health.
-   See the linked probe contract for recovery, hardware replacement, manual
-   removal, and allocation exceptions.
+   health report when the GPU-health query succeeds. Its `Hardware` alerts
+   surface in aggregate host health without blocking allocation. See the
+   linked probe contract for recovery, hardware replacement, and manual
+   removal.
 1. Raises or clears the per-rack
    [`NmxcUnreachable`](../architecture/health/health_probe_ids.md#nmxcunreachable)
    health report. A rack whose NMX-C could not be used for
