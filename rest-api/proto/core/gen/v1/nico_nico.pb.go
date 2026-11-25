@@ -46198,6 +46198,7 @@ type MachineValidationHeartbeatRequest struct {
 	//	*MachineValidationHeartbeatRequest_RunItemId
 	//	*MachineValidationHeartbeatRequest_AttemptId
 	//	*MachineValidationHeartbeatRequest_TestId
+	//	*MachineValidationHeartbeatRequest_PluginLaunchTestId
 	Target        isMachineValidationHeartbeatRequest_Target `protobuf_oneof:"target"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -46274,6 +46275,15 @@ func (x *MachineValidationHeartbeatRequest) GetTestId() string {
 	return ""
 }
 
+func (x *MachineValidationHeartbeatRequest) GetPluginLaunchTestId() string {
+	if x != nil {
+		if x, ok := x.Target.(*MachineValidationHeartbeatRequest_PluginLaunchTestId); ok {
+			return x.PluginLaunchTestId
+		}
+	}
+	return ""
+}
+
 type isMachineValidationHeartbeatRequest_Target interface {
 	isMachineValidationHeartbeatRequest_Target()
 }
@@ -46290,17 +46300,31 @@ type MachineValidationHeartbeatRequest_TestId struct {
 	TestId string `protobuf:"bytes,4,opt,name=test_id,json=testId,proto3,oneof"`
 }
 
+type MachineValidationHeartbeatRequest_PluginLaunchTestId struct {
+	// Authorize a new plugin launch for this test's active immutable run item.
+	// Does not record liveness or stop an already running container. Callers
+	// must require plugin_launch_authorized in the response, including when
+	// talking to older servers that do not understand this target.
+	PluginLaunchTestId string `protobuf:"bytes,5,opt,name=plugin_launch_test_id,json=pluginLaunchTestId,proto3,oneof"`
+}
+
 func (*MachineValidationHeartbeatRequest_RunItemId) isMachineValidationHeartbeatRequest_Target() {}
 
 func (*MachineValidationHeartbeatRequest_AttemptId) isMachineValidationHeartbeatRequest_Target() {}
 
 func (*MachineValidationHeartbeatRequest_TestId) isMachineValidationHeartbeatRequest_Target() {}
 
+func (*MachineValidationHeartbeatRequest_PluginLaunchTestId) isMachineValidationHeartbeatRequest_Target() {
+}
+
 type MachineValidationHeartbeatResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Accepted bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	// Explicit acknowledgement of an accepted plugin_launch_test_id request.
+	// False for ordinary heartbeats and responses from older servers.
+	PluginLaunchAuthorized bool `protobuf:"varint,2,opt,name=plugin_launch_authorized,json=pluginLaunchAuthorized,proto3" json:"plugin_launch_authorized,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *MachineValidationHeartbeatResponse) Reset() {
@@ -46336,6 +46360,13 @@ func (*MachineValidationHeartbeatResponse) Descriptor() ([]byte, []int) {
 func (x *MachineValidationHeartbeatResponse) GetAccepted() bool {
 	if x != nil {
 		return x.Accepted
+	}
+	return false
+}
+
+func (x *MachineValidationHeartbeatResponse) GetPluginLaunchAuthorized() bool {
+	if x != nil {
+		return x.PluginLaunchAuthorized
 	}
 	return false
 }
@@ -47266,17 +47297,26 @@ func (x *MachineValidationTest) GetFullHostApproved() bool {
 // A generic OCI plugin. The image is an immutable digest-pinned reference and
 // entrypoint arguments are passed directly to the container runtime.
 type MachineValidationPlugin struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Image      string                 `protobuf:"bytes,1,opt,name=image,proto3" json:"image,omitempty"`
-	Entrypoint []string               `protobuf:"bytes,2,rep,name=entrypoint,proto3" json:"entrypoint,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Image string                 `protobuf:"bytes,1,opt,name=image,proto3" json:"image,omitempty"`
+	// Command vector invoked without a shell. The standard contract appends it
+	// to the image ENTRYPOINT (or uses it as the command when ENTRYPOINT is empty).
+	// DSXHealthValidation overrides the executable with the first element and
+	// passes the remaining elements as arguments.
+	Entrypoint []string `protobuf:"bytes,2,rep,name=entrypoint,proto3" json:"entrypoint,omitempty"`
 	// JSON object of non-secret site-defined values included in input.json.
 	ParametersJson string `protobuf:"bytes,3,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
 	Privileged     bool   `protobuf:"varint,4,opt,name=privileged,proto3" json:"privileged,omitempty"`
 	HostAccessFull bool   `protobuf:"varint,5,opt,name=host_access_full,json=hostAccessFull,proto3" json:"host_access_full,omitempty"`
 	// Plugin implementation type. `container` is the currently supported type.
-	Type          string `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Type string `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`
+	// Optional contract adapter for this immutable container revision.
+	// Omission uses the standard NICo input.json/result.json contract.
+	// DSXHealthValidation prepares HealthValidation inputs and interprets only
+	// overall_severity in its JSON stdout. Unknown or empty names are rejected.
+	ContainerPluginAdapter *string `protobuf:"bytes,7,opt,name=container_plugin_adapter,json=containerPluginAdapter,proto3,oneof" json:"container_plugin_adapter,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *MachineValidationPlugin) Reset() {
@@ -47347,6 +47387,13 @@ func (x *MachineValidationPlugin) GetHostAccessFull() bool {
 func (x *MachineValidationPlugin) GetType() string {
 	if x != nil {
 		return x.Type
+	}
+	return ""
+}
+
+func (x *MachineValidationPlugin) GetContainerPluginAdapter() string {
+	if x != nil && x.ContainerPluginAdapter != nil {
+		return *x.ContainerPluginAdapter
 	}
 	return ""
 }
@@ -87307,16 +87354,18 @@ const file_nico_nico_proto_rawDesc = "" +
 	"_exit_codeB\x19\n" +
 	"\x17_failure_classificationB\x11\n" +
 	"\x0f_stdout_summaryB\x11\n" +
-	"\x0f_stderr_summary\"\xe9\x01\n" +
+	"\x0f_stderr_summary\"\x9e\x02\n" +
 	"!MachineValidationHeartbeatRequest\x12@\n" +
 	"\rvalidation_id\x18\x01 \x01(\v2\x1b.common.MachineValidationIdR\fvalidationId\x12.\n" +
 	"\vrun_item_id\x18\x02 \x01(\v2\f.common.UUIDH\x00R\trunItemId\x12-\n" +
 	"\n" +
 	"attempt_id\x18\x03 \x01(\v2\f.common.UUIDH\x00R\tattemptId\x12\x19\n" +
-	"\atest_id\x18\x04 \x01(\tH\x00R\x06testIdB\b\n" +
-	"\x06target\"@\n" +
+	"\atest_id\x18\x04 \x01(\tH\x00R\x06testId\x123\n" +
+	"\x15plugin_launch_test_id\x18\x05 \x01(\tH\x00R\x12pluginLaunchTestIdB\b\n" +
+	"\x06target\"z\n" +
 	"\"MachineValidationHeartbeatResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\"D\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x128\n" +
+	"\x18plugin_launch_authorized\x18\x02 \x01(\bR\x16pluginLaunchAuthorized\"D\n" +
 	"\x1aIsBmcInManagedHostResponse\x12&\n" +
 	"\x0fin_managed_host\x18\x01 \x01(\bR\rinManagedHost\"s\n" +
 	"\x12BmcDriverSelection\x12!\n" +
@@ -87485,7 +87534,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
 	"\b_timeoutB\x14\n" +
 	"\x12_extra_output_fileB\t\n" +
-	"\a_plugin\"\xd6\x01\n" +
+	"\a_plugin\"\xb2\x02\n" +
 	"\x17MachineValidationPlugin\x12\x14\n" +
 	"\x05image\x18\x01 \x01(\tR\x05image\x12\x1e\n" +
 	"\n" +
@@ -87496,7 +87545,9 @@ const file_nico_nico_proto_rawDesc = "" +
 	"privileged\x18\x04 \x01(\bR\n" +
 	"privileged\x12(\n" +
 	"\x10host_access_full\x18\x05 \x01(\bR\x0ehostAccessFull\x12\x12\n" +
-	"\x04type\x18\x06 \x01(\tR\x04type\"a\n" +
+	"\x04type\x18\x06 \x01(\tR\x04type\x12=\n" +
+	"\x18container_plugin_adapter\x18\a \x01(\tH\x00R\x16containerPluginAdapter\x88\x01\x01B\x1b\n" +
+	"\x19_container_plugin_adapter\"a\n" +
 	",MachineValidationTestFullHostApprovalRequest\x12\x17\n" +
 	"\atest_id\x18\x01 \x01(\tR\x06testId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\"I\n" +
@@ -96248,11 +96299,13 @@ func file_nico_nico_proto_init() {
 		(*MachineValidationHeartbeatRequest_RunItemId)(nil),
 		(*MachineValidationHeartbeatRequest_AttemptId)(nil),
 		(*MachineValidationHeartbeatRequest_TestId)(nil),
+		(*MachineValidationHeartbeatRequest_PluginLaunchTestId)(nil),
 	}
 	file_nico_nico_proto_msgTypes[587].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[589].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[591].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[596].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[597].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[606].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[607].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[608].OneofWrappers = []any{}

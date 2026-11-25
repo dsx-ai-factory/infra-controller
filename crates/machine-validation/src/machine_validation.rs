@@ -392,11 +392,29 @@ fn plugin_execution_spec(
     } else {
         PluginPrivilege::Isolated
     };
+    if !plugin.r#type.is_empty() && plugin.r#type != "container" {
+        return Err(format!("unsupported plugin type {:?}", plugin.r#type));
+    }
+    machine_validation_adapters::resolve(plugin.container_plugin_adapter.as_deref())?;
     Ok(PluginRuntimeSpec {
+        container_plugin_adapter: plugin.container_plugin_adapter.clone(),
         image: plugin.image.clone(),
         entrypoint: plugin.entrypoint.clone(),
         privilege,
     })
+}
+
+fn require_plugin_launch_authorization(
+    response: rpc::forge::MachineValidationHeartbeatResponse,
+) -> Result<(), String> {
+    // Older APIs may treat an unknown authorization target as a run heartbeat.
+    // Their accepted=true response must never grant launch permission.
+    if !response.accepted || !response.plugin_launch_authorized {
+        return Err(
+            "plugin launch authorization was rejected or unsupported by the API".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn parse_plugin_parameters(parameters_json: &str) -> Result<Value, String> {
@@ -563,13 +581,45 @@ impl MachineValidation {
         validation_id: MachineValidationId,
         test_id: Option<String>,
     ) -> Result<bool, MachineValidationError> {
+        Ok(self
+            .machine_validation_progress(
+                validation_id,
+                test_id.map(rpc::forge::machine_validation_heartbeat_request::Target::TestId),
+            )
+            .await?
+            .accepted)
+    }
+
+    async fn authorize_plugin_launch(
+        self,
+        validation_id: MachineValidationId,
+        test_id: String,
+    ) -> Result<(), String> {
+        let response = self
+            .machine_validation_progress(
+                validation_id,
+                Some(
+                    rpc::forge::machine_validation_heartbeat_request::Target::PluginLaunchTestId(
+                        test_id,
+                    ),
+                ),
+            )
+            .await
+            .map_err(|error| format!("plugin launch authorization failed: {error}"))?;
+        require_plugin_launch_authorization(response)
+    }
+
+    async fn machine_validation_progress(
+        self,
+        validation_id: MachineValidationId,
+        target: Option<rpc::forge::machine_validation_heartbeat_request::Target>,
+    ) -> Result<rpc::forge::MachineValidationHeartbeatResponse, MachineValidationError> {
         let mut client = self.create_forge_client().await?;
         let response = client
             .heartbeat_machine_validation_run(tonic::Request::new(
                 rpc::forge::MachineValidationHeartbeatRequest {
                     validation_id: Some(validation_id),
-                    target: test_id
-                        .map(rpc::forge::machine_validation_heartbeat_request::Target::TestId),
+                    target,
                 },
             ))
             .await
@@ -580,7 +630,7 @@ impl MachineValidation {
                 )
             })?
             .into_inner();
-        Ok(response.accepted)
+        Ok(response)
     }
 
     fn spawn_machine_validation_heartbeat(
@@ -1257,6 +1307,17 @@ impl MachineValidation {
                                 execution_timeout,
                                 Path::new(&self.options.plugin_contract_dir),
                                 log_sender,
+                                async {
+                                    if spec.container_plugin_adapter.is_some() {
+                                        self.clone()
+                                            .authorize_plugin_launch(
+                                                validation_id,
+                                                test.test_id.clone(),
+                                            )
+                                            .await?;
+                                    }
+                                    Ok(())
+                                },
                             )
                             .await;
                             if let Some(task_guard) = &mut log_task_guard {
@@ -1918,6 +1979,7 @@ mod tests {
             version: "1.2.3".to_owned(),
             plugin: Some(rpc::forge::MachineValidationPlugin {
                 r#type: "container".to_owned(),
+                container_plugin_adapter: None,
                 image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 entrypoint: vec!["/plugin/entrypoint".to_owned(), "--check".to_owned()],
                 parameters_json: r#"{"expectedGpuCount":8}"#.to_owned(),
@@ -1945,6 +2007,48 @@ mod tests {
         let privileged = plugin_test(true, false, false);
         let runtime = plugin_execution_spec(&privileged).expect("privileged plugin");
         assert_eq!(runtime.privilege, PluginPrivilege::Privileged);
+    }
+
+    #[test]
+    fn plugin_launch_requires_an_explicit_authorization_acknowledgement() {
+        // An older server can accept a run heartbeat after ignoring the new target.
+        // Its default-valued authorization field must fail closed.
+        assert!(
+            require_plugin_launch_authorization(rpc::forge::MachineValidationHeartbeatResponse {
+                accepted: true,
+                ..Default::default()
+            })
+            .is_err()
+        );
+        assert!(
+            require_plugin_launch_authorization(rpc::forge::MachineValidationHeartbeatResponse {
+                accepted: false,
+                plugin_launch_authorized: true,
+            })
+            .is_err()
+        );
+        assert!(
+            require_plugin_launch_authorization(rpc::forge::MachineValidationHeartbeatResponse {
+                accepted: true,
+                plugin_launch_authorized: true,
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn immutable_adapter_selection_reaches_runtime_and_unknown_names_fail_closed() {
+        let mut test = plugin_test(false, false, false);
+        test.plugin.as_mut().unwrap().container_plugin_adapter =
+            Some("DSXHealthValidation".to_owned());
+        let spec = plugin_execution_spec(&test).unwrap();
+        assert_eq!(
+            spec.container_plugin_adapter.as_deref(),
+            Some("DSXHealthValidation")
+        );
+        assert_eq!(spec.privilege, PluginPrivilege::Isolated);
+        test.plugin.as_mut().unwrap().container_plugin_adapter = Some("unknown".to_owned());
+        assert!(plugin_execution_spec(&test).is_err());
     }
 
     #[test]

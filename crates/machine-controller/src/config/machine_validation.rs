@@ -77,6 +77,19 @@ pub struct MachineValidationConfig {
     /// plugin registrations; legacy tests are unaffected.
     #[serde(default = "MachineValidationConfig::default_allowed_plugin_types")]
     pub allowed_plugin_types: Vec<String>,
+    /// Approved named container adapters and their declared GPU/root/read-only
+    /// dependency access. Empty by default; the standard contract needs no entry.
+    #[serde(default)]
+    pub allowed_container_plugin_adapters: Vec<String>,
+    /// Allows approved adapters to share the host network namespace.
+    #[serde(default)]
+    pub allow_plugin_host_network: bool,
+    /// Allows approved adapters to share the host PID namespace.
+    #[serde(default)]
+    pub allow_plugin_host_pid: bool,
+    /// Allows approved adapters to connect to explicitly mounted host Unix sockets.
+    #[serde(default)]
+    pub allow_plugin_host_sockets: bool,
     /// Allows plugin registration with the privileged container profile.
     #[serde(default)]
     pub allow_privileged_plugins: bool,
@@ -184,6 +197,38 @@ pub struct MachineValidationTestConfig {
 }
 
 impl MachineValidationConfig {
+    /// Check an adapter's static namespace and socket requirements against site
+    /// approval. Existing privileged/full-host policies are checked separately.
+    pub fn validate_plugin_runtime_requirements(
+        &self,
+        requirements: machine_validation_adapters::RuntimeRequirements,
+    ) -> Result<(), String> {
+        for (requested, approved, setting) in [
+            (
+                requirements.host_network,
+                self.allow_plugin_host_network,
+                "allow_plugin_host_network",
+            ),
+            (
+                requirements.host_pid,
+                self.allow_plugin_host_pid,
+                "allow_plugin_host_pid",
+            ),
+            (
+                requirements.host_sockets,
+                self.allow_plugin_host_sockets,
+                "allow_plugin_host_sockets",
+            ),
+        ] {
+            if requested && !approved {
+                return Err(format!(
+                    "container plugin adapter requires {setting} = true in site policy"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Minimum allowed stale timeout.
     ///
     /// Scout sends machine validation heartbeats every 30 seconds. Keep the timeout above three
@@ -216,6 +261,10 @@ impl MachineValidationConfig {
                 "machine validation allowed_plugin_types contains unsupported type {plugin_type:?}"
             ));
         }
+        for adapter in &self.allowed_container_plugin_adapters {
+            let adapter = machine_validation_adapters::resolve(Some(adapter))?;
+            self.validate_plugin_runtime_requirements(adapter.requirements())?;
+        }
         self.attempt_logs.validate()
     }
 }
@@ -230,6 +279,10 @@ impl Default for MachineValidationConfig {
             tests: Vec::new(),
             approved_plugin_registries: Vec::new(),
             allowed_plugin_types: Self::default_allowed_plugin_types(),
+            allowed_container_plugin_adapters: Vec::new(),
+            allow_plugin_host_network: false,
+            allow_plugin_host_pid: false,
+            allow_plugin_host_sockets: false,
             allow_privileged_plugins: false,
             allow_full_host_plugins: false,
             attempt_logs: MachineValidationAttemptLogConfig::default(),
@@ -240,6 +293,38 @@ impl Default for MachineValidationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_adapter_access_requires_explicit_site_configuration() {
+        assert!(
+            MachineValidationConfig::default()
+                .allowed_container_plugin_adapters
+                .is_empty()
+        );
+        for (network, pid, sockets, denied_setting) in [
+            (false, false, false, Some("allow_plugin_host_network")),
+            (true, false, false, Some("allow_plugin_host_pid")),
+            (true, true, false, Some("allow_plugin_host_sockets")),
+            (true, true, true, None),
+        ] {
+            let config = MachineValidationConfig {
+                allowed_container_plugin_adapters: vec!["DSXHealthValidation".to_owned()],
+                allow_plugin_host_network: network,
+                allow_plugin_host_pid: pid,
+                allow_plugin_host_sockets: sockets,
+                ..Default::default()
+            };
+            match denied_setting {
+                Some(setting) => assert!(config.validate().unwrap_err().contains(setting)),
+                None => config.validate().unwrap(),
+            }
+        }
+        let config = MachineValidationConfig {
+            allowed_container_plugin_adapters: vec!["unknown".to_owned()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn attempt_log_policy_rejects_invalid_limits() {

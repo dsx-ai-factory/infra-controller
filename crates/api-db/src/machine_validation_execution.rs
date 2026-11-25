@@ -23,8 +23,8 @@ use carbide_uuid::machine_validation::{
 use chrono::{DateTime, Utc};
 use model::machine_validation::{
     MachineValidationAttempt, MachineValidationAttemptLogChunk, MachineValidationAttemptLogStream,
-    MachineValidationAttemptState, MachineValidationResult, MachineValidationRunItem,
-    MachineValidationRunItemState, MachineValidationTest,
+    MachineValidationAttemptState, MachineValidationPlugin, MachineValidationResult,
+    MachineValidationRunItem, MachineValidationRunItemState, MachineValidationTest,
 };
 use sqlx::PgConnection;
 
@@ -83,6 +83,47 @@ pub struct ValidationAttempt {
     pub ended_at: Option<DateTime<Utc>>,
     /// Persisted exit code, if recorded.
     pub exit_code: Option<i32>,
+}
+
+/// Immutable plugin settings for one active run item authorized before launch.
+pub struct PluginLaunchSnapshot {
+    /// Container configuration frozen in the run plan.
+    pub plugin: MachineValidationPlugin,
+    /// Full-host approval frozen in the run plan.
+    pub full_host_approved: bool,
+}
+
+/// Read only the targeted plugin and its latest active attempt. Missing,
+/// terminal, or non-plugin targets return None without changing liveness.
+pub async fn find_active_plugin_launch_snapshot(
+    txn: impl DbReader<'_>,
+    run_id: &MachineValidationId,
+    test_id: &str,
+) -> DatabaseResult<Option<PluginLaunchSnapshot>> {
+    const QUERY: &str = "
+        SELECT item.plugin, item.plugin_full_host_approved
+        FROM machine_validation_run_items item
+        JOIN machine_validation run ON run.id = item.run_id
+        JOIN LATERAL (
+            SELECT state FROM machine_validation_attempts
+            WHERE run_item_id = item.id
+            ORDER BY attempt_number DESC LIMIT 1
+        ) attempt ON attempt.state IN ('Pending', 'Running')
+        WHERE item.run_id = $1 AND item.test_id = $2
+          AND item.plugin IS NOT NULL AND item.state IN ('Pending', 'Running')
+          AND run.end_time IS NULL AND run.state IN ('Started', 'InProgress')";
+    let row = sqlx::query_as::<_, (sqlx::types::Json<MachineValidationPlugin>, bool)>(QUERY)
+        .bind(run_id)
+        .bind(test_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(QUERY, error))?;
+    Ok(
+        row.map(|(plugin, full_host_approved)| PluginLaunchSnapshot {
+            plugin: plugin.0,
+            full_host_approved,
+        }),
+    )
 }
 
 /// Returns every attempt for every item in the run, in unspecified order.
