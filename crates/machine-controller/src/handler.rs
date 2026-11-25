@@ -6804,7 +6804,7 @@ async fn discovery_boot_after_power_cycle_outcome(
         return Ok(Some(StateHandlerOutcome::wait(status)));
     }
 
-    handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
+    handler_host_power_control(state, ctx, SystemPowerControl::ForceRestart).await?;
     Ok(Some(StateHandlerOutcome::transition(
         ManagedHostState::Assigned {
             instance_state: InstanceState::BootingWithDiscoveryImage {
