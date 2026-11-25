@@ -138,4 +138,59 @@ for row in "${cases[@]}"; do
 done
 unset -f kubectl
 
+# ---------------------------------------------------------------------------
+# setup.sh: the wait for the operator version before Core.
+# ---------------------------------------------------------------------------
+extract_functions "${SCRIPT_DIR}/setup.sh" _dpf_release_key _wait_for_dpf_operator_version
+
+precheck_message="stub pre-upgrade validation message"
+# Answers the reads of _wait_for_dpf_operator_version: the status pair of each
+# read in turn (the last one repeats), then the condition for the failure report.
+# shellcheck disable=SC2329 # Called by _wait_for_dpf_operator_version.
+kubectl() {
+    local _pairs _read
+    case "$*" in
+        *'{.status.version}|{.status.targetVersion}'*)
+            echo read >> "${WORK}/reads"
+            read -r -a _pairs <<< "${FAKE_PAIRS}"
+            _read=$(( $(wc -l < "${WORK}/reads") ))
+            (( _read <= ${#_pairs[@]} )) || _read=${#_pairs[@]}
+            printf '%s' "${_pairs[_read - 1]}"
+            ;;
+        *PreUpgradeValidationReady*) printf 'False/Failed\n%s\n' "${precheck_message}" ;;
+        *) return 1 ;;
+    esac
+}
+# A clock that only sleep advances, so a wait that never returns ends at once.
+# shellcheck disable=SC2329 # Called by _wait_for_dpf_operator_version.
+sleep() { echo $(( $(cat "${WORK}/clock") + $1 )) > "${WORK}/clock"; }
+# shellcheck disable=SC2329 # Called by _wait_for_dpf_operator_version.
+date() { cat "${WORK}/clock"; }
+# name ; operator image tag ; status.version|status.targetVersion per read (the
+# last repeats) ; reads until the wait returns (0 means it times out)
+cases=(
+    "upgrade finishes after the operator records its target;v30.0.0;v26.8.0|v26.8.0 v26.8.0|v30.0.0 v30.0.0|v30.0.0;3"
+    "tag without a version takes the reported pair;custom-image;v30.0.0|v30.0.0;1"
+    "operator does not finish;v30.0.0;v26.8.0|v30.0.0;0"
+)
+for row in "${cases[@]}"; do
+    IFS=';' read -r name tag FAKE_PAIRS want_reads <<< "${row}"
+    : > "${WORK}/reads"
+    echo 0 > "${WORK}/clock"
+    wait_seconds=600
+    [[ "${want_reads}" != 0 ]] || wait_seconds=0
+    status=0
+    output="$(_wait_for_dpf_operator_version "${wait_seconds}" "${tag}" 2>&1)" || status=$?
+    reads=$(( $(wc -l < "${WORK}/reads") ))
+    if [[ "${want_reads}" == 0 ]]; then
+        last_pair="${FAKE_PAIRS##* }"
+        [[ "${status}" -ne 0 && "${output}" == *"status.version is '${last_pair%|*}', status.targetVersion is '${last_pair#*|}'"*"${precheck_message}"* ]] \
+            || fail "${name}: want a failure that prints both status values and the PreUpgradeValidationReady message, got exit ${status}: ${output}"
+    else
+        [[ "${status}" -eq 0 && "${reads}" -eq "${want_reads}" ]] \
+            || fail "${name}: want success after ${want_reads} reads, got exit ${status} after ${reads}: ${output}"
+    fi
+done
+unset -f kubectl sleep date
+
 echo "DPF version selection tests passed"

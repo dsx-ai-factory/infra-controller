@@ -1672,6 +1672,47 @@ _warn_dpf_source_mismatch() {
     fi
 }
 
+# Prints a number that orders the MAJOR.MINOR.PATCH release at the start of
+# version $1, or nothing when $1 does not start with one.
+_dpf_release_key() {
+    local _re='^v?([0-9]+)\.([0-9]+)\.([0-9]+)'
+    [[ "$1" =~ ${_re} ]] || return 0
+    printf '%d%05d%05d\n' "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" "$((10#${BASH_REMATCH[3]}))"
+}
+
+# Waits until the DPFOperatorConfig reports the version its operator deploys.
+# The operator records status.targetVersion when it starts and sets
+# status.version when its components are deployed. carbide-api reads
+# status.version once at startup. Until an upgraded operator has recorded its
+# target, both fields hold the previous version, so a version older than the
+# release in the operator image tag does not end the wait.
+#   $1 timeout in seconds   $2 operator image tag
+_wait_for_dpf_operator_version() {
+    local _deadline=$(( $(date +%s) + $1 )) _floor _have _status _version="" _target=""
+    _floor="$(_dpf_release_key "$2")"
+    echo "Waiting up to ${1}s for the DPF operator to report its version..."
+    while true; do
+        _status="$(kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
+            -o jsonpath='{.status.version}|{.status.targetVersion}' 2>/dev/null || true)"
+        IFS='|' read -r _version _target <<< "${_status}"
+        _have="$(_dpf_release_key "${_version}")"
+        if [[ -n "${_version}" && "${_version}" == "${_target}" ]] \
+            && { [[ -z "${_floor}" || -z "${_have}" ]] || (( _have >= _floor )); }; then
+            echo "DPF operator version: ${_version}"
+            return 0
+        fi
+        (( $(date +%s) < _deadline )) || break
+        sleep 10
+    done
+    echo "Error: the DPFOperatorConfig does not report the operator from image tag $2: status.version is '${_version:-<unset>}', status.targetVersion is '${_target:-<unset>}'." >&2
+    echo "  PreUpgradeValidationReady condition:" >&2
+    kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
+        -o jsonpath='{range .status.conditions[?(@.type=="PreUpgradeValidationReady")]}{.status}/{.reason}{"\n"}{.message}{"\n"}{end}' 2>/dev/null \
+        | sed 's/^/    /' >&2 || true
+    echo "  Resolve what the condition reports, then run setup.sh again." >&2
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # 5b. DPF (DOCA Platform Framework) — optional DPU provisioning stack.
 #     Needs StorageClass (1), MetalLB (1c), cert-manager (2). Must complete
@@ -1909,7 +1950,11 @@ if "${INSTALL_DPF}"; then
         echo "  Ensure ${NICO_DPF_DPU_CLUSTER_VIP} is routable from the DPUs by other means."
     fi
 
-    # 5b.7 Readiness — WARN only. Kamaji TenantControlPlane bring-up can take
+    # 5b.7 Operator version. Core must not deploy before the operator reports
+    #      the version it installed.
+    _wait_for_dpf_operator_version 600 "${NICO_DPF_IMAGE_TAG}"
+
+    # 5b.8 Readiness — WARN only. Kamaji TenantControlPlane bring-up can take
     #      minutes and depends on VIP routability that this script can't verify.
     echo "Waiting up to 300s for the DPU cluster control plane (non-fatal)..."
     _dpf_deadline=$(( $(date +%s) + 300 ))
@@ -1923,7 +1968,7 @@ if "${INSTALL_DPF}"; then
         sleep 10
     done
 
-    # 5b.8 Core is deployed with [dpf] enabled after these prerequisites exist.
+    # 5b.9 Core is deployed with [dpf] enabled after these prerequisites exist.
     #      carbide-api can initialize DPF without the site-wide BMC root and its
     #      refresh task writes bmc-shared-password after the credential appears.
     echo "DPF stack installed (Core will start with carbide-api DPF enabled in phase 6)"
