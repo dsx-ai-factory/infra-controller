@@ -1402,7 +1402,7 @@ async fn initialize_dpf_resources(
             CarbideDPFLabeler::new(carbide_config.dpf.deployments.bf3.node_label_key.clone())
                 .with_deployment_type_labels(deployment_type_labels),
         )
-        .with_bmc_password_refresh_interval(std::time::Duration::from_secs(60))
+        .with_bmc_secret_retry_interval(std::time::Duration::from_secs(60))
         .with_join_set(join_set)
         .build_without_resources()
         .await

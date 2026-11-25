@@ -50,15 +50,15 @@ pub struct AstraRoutePrefixes {
     pub software_plane_route_prefix_len: u8,
 }
 
-/// Async provider for BMC passwords used to create and refresh the K8s BMC
+/// Async provider for the initial password used to create the shared K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
 /// a vault or credential manager). Return
 /// [`crate::DpfError::BmcPasswordSourceUnavailable`] when the configured source
 /// cannot supply the credential. Return
 /// [`crate::DpfError::LocalBmcPasswordSourceUnavailable`] for an authoritative
 /// local version 0 miss so the SDK can reject source-policy activation before
-/// startup. After a value has been published, source-unavailable and ordinary
-/// transient lookup failures retain the last published value and are retried.
+/// startup. When startup retries are enabled, lookup errors can be retried
+/// in the background until the shared Secret is published.
 #[async_trait::async_trait]
 pub trait BmcPasswordProvider: Send + Sync {
     async fn get_bmc_password(&self) -> Result<String, crate::DpfError>;

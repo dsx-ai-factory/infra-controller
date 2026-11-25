@@ -639,13 +639,13 @@ impl K8sConfigRepository for InitializationMock {
     ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError> {
         Ok(self.secrets.get(&ns_key(ns, name)).map(|r| r.clone()))
     }
-    async fn apply_secret(
+    async fn create_secret_if_absent(
         &self,
         name: &str,
         ns: &str,
         data: BTreeMap<String, Vec<u8>>,
     ) -> Result<(), DpfError> {
-        self.secrets.insert(ns_key(ns, name), data);
+        self.secrets.entry(ns_key(ns, name)).or_insert(data);
         Ok(())
     }
 }
