@@ -1686,6 +1686,30 @@ _dpf_release_key() {
     printf '%d%05d%05d\n' "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" "$((10#${BASH_REMATCH[3]}))"
 }
 
+# Prints the prerelease of the version at the start of $1 (the part between the
+# release and any build metadata), or nothing when it has none.
+_dpf_prerelease() {
+    local _re='^v?[0-9]+\.[0-9]+\.[0-9]+-([0-9A-Za-z.-]+)'
+    [[ "$1" =~ ${_re} ]] || return 0
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# Whether reported version $1 is at or above the release at the start of image
+# tag $2 by semver precedence: a prerelease of that release is below it, as in
+# nico-api's startup check, unless $2 carries the same prerelease. Holds when
+# either side does not start with a release.
+_dpf_version_at_floor() {
+    local _have _floor
+    _have="$(_dpf_release_key "$1")"
+    _floor="$(_dpf_release_key "$2")"
+    [[ -n "${_have}" && -n "${_floor}" ]] || return 0
+    if (( 10#${_have} != 10#${_floor} )); then
+        (( 10#${_have} > 10#${_floor} ))
+        return
+    fi
+    [[ -z "$(_dpf_prerelease "$1")" || "$(_dpf_prerelease "$1")" == "$(_dpf_prerelease "$2")" ]]
+}
+
 # Waits until the DPFOperatorConfig reports the version its operator deploys.
 # The operator records status.targetVersion when it starts and sets
 # status.version when its components are deployed. carbide-api reads
@@ -1695,7 +1719,7 @@ _dpf_release_key() {
 # request timeout, so a hung API request cannot hold the wait past its limit.
 #   $1 timeout in seconds   $2 operator image tag
 _wait_for_dpf_operator_version() {
-    local _deadline=$(( $(date +%s) + $1 )) _floor _have _status _version="" _target=""
+    local _deadline=$(( $(date +%s) + $1 )) _floor _status _version="" _target=""
     _floor="$(_dpf_release_key "$2")"
     echo "Waiting up to ${1}s for the DPF operator to report its version..."
     [[ -n "${_floor}" ]] \
@@ -1705,9 +1729,8 @@ _wait_for_dpf_operator_version() {
             --request-timeout=20s \
             -o jsonpath='{.status.version}|{.status.targetVersion}' 2>/dev/null || true)"
         IFS='|' read -r _version _target <<< "${_status}"
-        _have="$(_dpf_release_key "${_version}")"
         if [[ -n "${_version}" && "${_version}" == "${_target}" ]] \
-            && { [[ -z "${_floor}" || -z "${_have}" ]] || (( 10#${_have} >= 10#${_floor} )); }; then
+            && _dpf_version_at_floor "${_version}" "$2"; then
             echo "DPF operator version: ${_version}"
             return 0
         fi
@@ -1716,7 +1739,7 @@ _wait_for_dpf_operator_version() {
     done
     echo "Error: the DPFOperatorConfig does not report the operator from image tag $2: status.version is '${_version:-<unset>}', status.targetVersion is '${_target:-<unset>}'." >&2
     if [[ -n "${_version}" && "${_version}" == "${_target}" ]]; then
-        # Only the release in the image tag holds back an equal pair.
+        # Only the version floor from the image tag holds back an equal pair.
         echo "  ${_version} is older than the release in image tag $2, and the operator has recorded no other target." >&2
         echo "  The operator reports the TAG it was built with. For an image built with TAG=${_version}, use an image tag that does not start with a later release." >&2
     fi

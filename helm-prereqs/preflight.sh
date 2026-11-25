@@ -557,30 +557,42 @@ _resolve_dpf_target_tag() {
     return 0
 }
 
-# Prints status.version of the DPFOperatorConfig, or nothing when the CRD, the
-# object, or the field is absent. Fails when the cluster cannot be read.
+# Prints "<name>:<status.version>" of the DPFOperatorConfig (the version part
+# may be empty), or nothing when the CRD or the object is absent. Fails when
+# the cluster cannot be read.
 _dpf_installed_version() {
     local _crd
     _crd="$(kubectl get crd dpfoperatorconfigs.operator.dpu.nvidia.com \
         --ignore-not-found -o name 2>/dev/null)" || return 1
     [[ -n "${_crd}" ]] || return 0
     kubectl get dpfoperatorconfigs.operator.dpu.nvidia.com dpfoperatorconfig \
-        -n dpf-operator-system --ignore-not-found -o jsonpath='{.status.version}' 2>/dev/null
+        -n dpf-operator-system --ignore-not-found \
+        -o jsonpath='{.metadata.name}:{.status.version}' 2>/dev/null
 }
 
 # Records an error when the installed DPF operator is on a release line that
 # the operator this run installs ($1, its image tag) does not upgrade from.
-# A tag on another release line, or without a release, is left to that
-# operator's own validation.
+# Warns when the DPFOperatorConfig reports no status.version, or a prerelease
+# of the target release, which nico-api treats as below it. A tag on another
+# release line, or without a release, is left to that operator's own validation.
 _check_dpf_upgrade_source() {
-    local _target="$1" _installed
+    local _target="$1" _state _installed
     [[ "${_target#v}" == "${_DPF_PINNED_LINE}."* ]] || return 0
-    if ! _installed="$(_dpf_installed_version)"; then
+    if ! _state="$(_dpf_installed_version)"; then
         WARNINGS+=("Could not read DPFOperatorConfig dpf-operator-system/dpfoperatorconfig to check the installed DPF version - the ${_target} operator upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
         return 0
     fi
+    [[ -n "${_state}" ]] || return 0
+    _installed="${_state#*:}"
+    if [[ -z "${_installed}" ]]; then
+        WARNINGS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig has no status.version, so the installed DPF version cannot be checked - the ${_target} operator upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
+        return 0
+    fi
     case "${_installed#v}" in
-        "" | "${_DPF_PINNED_LINE}."* | "${_DPF_UPGRADE_SOURCE_LINE}."*) return 0 ;;
+        "${_target#v}-"*)
+            WARNINGS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig reports DPF ${_installed} (status.version), a prerelease of ${_target} - nico-api treats a prerelease as below ${_target} by semver precedence and does not start on it, so the ${_target} operator must finish its upgrade first (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
+            return 0 ;;
+        "${_DPF_PINNED_LINE}."* | "${_DPF_UPGRADE_SOURCE_LINE}."*) return 0 ;;
     esac
     ERRORS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig reports DPF ${_installed} (status.version). The ${_target} operator that setup.sh installs upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x. A DPF older than v${_DPF_UPGRADE_SOURCE_LINE}.x would stay at its version and nico-api would not start - in that case upgrade DPF to v${_DPF_UPGRADE_SOURCE_LINE}.x first (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
     return 0
