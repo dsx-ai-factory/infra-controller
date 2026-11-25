@@ -22,8 +22,7 @@ Replace all fields of an existing expected rack group
 
 While the group has NVLink domain declarations, its racks field must
 remain unchanged. Topology, protocol, and metadata updates are still
-allowed. Delete its declarations with nvlink-domain delete before
-changing racks.
+allowed. Pending domain deletions still block changes to racks.
 
 ## OPTIONS
 
@@ -71,9 +70,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 

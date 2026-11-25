@@ -49,7 +49,7 @@ pub(crate) async fn create(
         .try_into()
         .map_err(CarbideError::from)?;
     let mut txn = api.txn_begin().await?;
-    domains::create(&mut txn, &domain)
+    domains::lifecycle::create(&mut txn, &domain)
         .await
         .map_err(CarbideError::from)?;
     txn.commit().await?;

@@ -701,13 +701,16 @@ service Forge {
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
   // Administrator-managed NVLink domain inventory
-  // Declare immutable membership by rack index, slot index, and component type.
+  // Declare immutable membership and initialize the Domain controller in Created.
   // This does not configure hardware, resolve positions against RackGroup members,
   // or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
   // Positions already claimed by another domain return ALREADY_EXISTS.
   rpc CreateNvLinkDomain(CreateNvLinkDomainRequest) returns (NvLinkDomain);
-  // Delete an unadopted declaration and release its positions; no hardware operations occur.
-  // Controller-owned domains are marked for asynchronous deletion and retain their positions.
+  // Declarations without controller state are removed immediately. In Created or Discovering,
+  // the controller removes the domain and releases its positions on reconciliation.
+  // From Maintenance onward, deletion enters Deleting and positions stay reserved pending teardown.
+  // Until removal, the declaration blocks changes to its group's racks, deletion of its group,
+  // and site-wide ExpectedRackGroup replacement or erase.
   // Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
   rpc DeleteNvLinkDomain(NvLinkDomainRequest) returns (google.protobuf.Empty);
   rpc GetNvLinkDomain(NvLinkDomainRequest) returns (NvLinkDomain);

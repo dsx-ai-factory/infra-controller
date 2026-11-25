@@ -19,10 +19,9 @@ nico-admin-cli nvlink-domain [-h|--help]
 Administrator-owned NVLink domain declarations
 
 A domain is an administrator-managed group of compute and switch trays
-within a RackGroup. No NVLink management state machine consumes these
-declarations yet. NVLink management is planned to move from rack-based
-to domain-based state machines, which will use these declarations to
-define domains.
+within a RackGroup. New declarations enter Created. On reconciliation,
+the domain controller moves them to Discovering and looks up their
+declared trays in inventory.
 
 ## OPTIONS
 
@@ -36,7 +35,7 @@ Print help (see a summary with '-h')
 |---|---|
 | [`create`](./nvlink-domain-create.md) | Create immutable domain membership without configuring hardware |
 | [`show`](./nvlink-domain-show.md) | Show one declaration or list declarations in UUID order |
-| [`delete`](./nvlink-domain-delete.md) | Delete a declaration and release its members without changing hardware |
+| [`delete`](./nvlink-domain-delete.md) | Request deletion of a domain; its positions remain reserved until cleanup |
 
 ---
 

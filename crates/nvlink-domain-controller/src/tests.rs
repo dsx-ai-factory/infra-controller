@@ -21,7 +21,7 @@ use crate::{
 };
 
 #[carbide_macros::sqlx_test]
-async fn controller_persists_wait_and_deletion_without_releasing_positions(pool: sqlx::PgPool) {
+async fn controller_releases_positions_during_discovery(pool: sqlx::PgPool) {
     sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, racks) VALUES ('group', 'topology', '[{\"rack_id\":\"rack-a\",\"members\":[]}]')")
         .execute(&pool).await.unwrap();
     let domain = NvLinkDomain {
@@ -89,42 +89,19 @@ async fn controller_persists_wait_and_deletion_without_releasing_positions(pool:
     nvlink_domain::delete(&mut txn, domain.id).await.unwrap();
     txn.commit().await.unwrap();
     controller.run_single_iteration().await;
-    let deleted = lifecycle::find_snapshot(&pool, domain.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(deleted.controller_state.value, NvLinkDomainState::Deleting);
-    assert!(deleted.deleted.is_some());
-    assert_eq!(deleted.domain.members, domain.members);
+    assert!(
+        lifecycle::find_snapshot(&pool, domain.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let replacement = NvLinkDomain {
+        id: Uuid::new_v4(),
+        ..domain
+    };
     let mut txn = pool.txn_begin().await.unwrap();
-    let history = db::state_history::for_object(
-        &mut txn,
-        db::state_history::StateHistoryTableId::NvLinkDomain,
-        &domain.id,
-    )
-    .await
-    .unwrap();
-    txn.rollback().await.unwrap();
-    assert_eq!(history.len(), 3);
-    assert_ne!(
-        deleted.controller_state.version,
-        initial.controller_state.version
-    );
-    let history_states: Vec<_> = history.iter().map(|record| record.state.as_str()).collect();
-    assert!(history_states[0].contains("created"));
-    assert!(history_states[1].contains("discovering"));
-    assert!(history_states[2].contains("deleting"));
-
-    controller.run_single_iteration().await;
-    let repeated = lifecycle::find_snapshot(&pool, domain.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        repeated.controller_state.version,
-        deleted.controller_state.version
-    );
-    assert_eq!(repeated.domain.members, domain.members);
+    lifecycle::create(&mut txn, &replacement).await.unwrap();
+    txn.commit().await.unwrap();
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
 }
@@ -303,6 +280,17 @@ async fn discovery_resumes_and_gates_only_declared_members(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(deleted.controller_state.value, NvLinkDomainState::Deleting);
     assert_eq!(deleted.domain.members, domain.members);
+    controller.run_single_iteration().await;
+    let retained = lifecycle::find_snapshot(&pool, domain.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.controller_state.value, NvLinkDomainState::Deleting);
+    assert_eq!(
+        retained.controller_state.version,
+        deleted.controller_state.version
+    );
+    assert_eq!(retained.domain.members, domain.members);
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
 }

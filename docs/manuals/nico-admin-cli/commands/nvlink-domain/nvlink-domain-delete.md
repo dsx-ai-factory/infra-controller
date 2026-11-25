@@ -4,8 +4,8 @@
 
 ## NAME
 
-nico-admin-cli-nvlink-domain-delete - Delete a declaration and release
-its members without changing hardware
+nico-admin-cli-nvlink-domain-delete - Request deletion of a domain; its
+positions remain reserved until cleanup
 
 ## SYNOPSIS
 
@@ -15,7 +15,16 @@ nico-admin-cli nvlink-domain delete [-h|--help] <ID>
 
 ## DESCRIPTION
 
-Delete a declaration and release its members without changing hardware
+Request deletion of a domain; its positions remain reserved until
+cleanup
+
+Legacy declarations without controller state are removed immediately. In
+Created or Discovering, the controller removes the domain and releases
+its positions on reconciliation. From Maintenance onward, the domain
+enters Deleting and retains its positions pending hardware teardown
+([issue #7819](https://github.com/dsx-ai-factory/infra-controller/issues/7819)). Use
+nvlink-domain show `<ID>` to check for removal: NOT_FOUND means the
+declaration is gone.
 
 ## OPTIONS
 

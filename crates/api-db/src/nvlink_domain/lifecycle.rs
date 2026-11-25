@@ -35,7 +35,6 @@ struct ControllerRow {
 
 /// Create a controller-owned Domain and initial history in the caller's transaction.
 /// The caller must roll back the entire transaction on failure.
-/// Lifecycle callers are introduced by the ingestion work in https://github.com/dsx-ai-factory/infra-controller/issues/7426.
 pub async fn create(txn: &mut PgConnection, domain: &NvLinkDomain) -> DatabaseResult<()> {
     super::create(txn, domain).await?;
     let version = ConfigVersion::initial();
@@ -178,6 +177,20 @@ pub async fn update_controller_state_outcome(
         });
     }
     Ok(())
+}
+
+/// Release positions only after deletion is requested and hardware work is known not to have started.
+pub async fn delete_pre_hardware(txn: &mut PgConnection, id: Uuid) -> DatabaseResult<bool> {
+    let query = "DELETE FROM nvlink_domains WHERE id=$1 AND deleted IS NOT NULL
+        AND controller_state IN ($2, $3)";
+    let result = sqlx::query(query)
+        .bind(id)
+        .bind(Json(NvLinkDomainState::Created))
+        .bind(Json(NvLinkDomainState::Discovering))
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(result.rows_affected() == 1)
 }
 
 #[cfg(test)]

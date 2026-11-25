@@ -33,6 +33,9 @@ impl NvLinkDomainStateHandler {
         ctx: &mut StateHandlerContext<'_, NvLinkDomainStateHandlerContext>,
     ) -> Result<StateHandlerOutcome<NvLinkDomainState>, StateHandlerError> {
         if state.deleted.is_some() && !matches!(controller_state, NvLinkDomainState::Deleting) {
+            if db::nvlink_domain::lifecycle::delete_pre_hardware(txn, state.domain.id).await? {
+                return Ok(StateHandlerOutcome::deleted());
+            }
             return Ok(StateHandlerOutcome::transition(NvLinkDomainState::Deleting));
         }
         match controller_state {

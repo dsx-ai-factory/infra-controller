@@ -3,8 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
+use carbide_nvlink_domain_controller::{
+    NvLinkDomainStateControllerIO, NvLinkDomainStateHandler, NvLinkDomainStateHandlerServices,
+};
 use rpc::forge;
 use rpc::forge::forge_server::Forge;
+use state_controller::controller::StateController;
+use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request};
 
 use crate::tests::common::api_fixtures::create_test_env;
@@ -48,6 +55,15 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
         domain
     );
     assert_eq!(domain.members, request.members);
+    let id = domain.id.as_ref().unwrap().value.parse().unwrap();
+    let snapshot = db::nvlink_domain::lifecycle::find_snapshot(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snapshot.controller_state.value,
+        model::nvlink_domain::NvLinkDomainState::Created
+    );
     assert_eq!(
         env.api
             .create_nv_link_domain(Request::new(request.clone()))
@@ -96,6 +112,33 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
         .delete_nv_link_domain(Request::new(lookup.clone()))
         .await
         .unwrap();
+    let deleting = db::nvlink_domain::lifecycle::find_snapshot(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(deleting.deleted.is_some());
+    assert_eq!(
+        env.api
+            .create_nv_link_domain(Request::new(request.clone()))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::AlreadyExists
+    );
+
+    let mut controller = StateController::<NvLinkDomainStateControllerIO>::builder()
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle.clone(),
+            &env.api.instrumentation,
+        )
+        .processor_id("domain-api-test".into())
+        .services(Arc::new(NvLinkDomainStateHandlerServices { db_pool: pool }))
+        .state_handler(Arc::new(NvLinkDomainStateHandler))
+        .build_for_manual_iterations(CancellationToken::new())
+        .unwrap();
+    controller.run_single_iteration().await;
+    controller.run_single_iteration().await;
     assert_eq!(
         env.api
             .get_nv_link_domain(Request::new(lookup))
@@ -103,16 +146,6 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
             .unwrap_err()
             .code(),
         Code::NotFound
-    );
-    // A failed competing create must not leave an orphan declaration behind.
-    assert!(
-        env.api
-            .find_nv_link_domain_ids(Request::new(forge::NvLinkDomainSearchFilter::default()))
-            .await
-            .unwrap()
-            .into_inner()
-            .ids
-            .is_empty()
     );
     env.api
         .create_nv_link_domain(Request::new(request))

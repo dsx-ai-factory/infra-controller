@@ -223,9 +223,8 @@ pub(crate) enum CliCommand {
     /// Administrator-owned NVLink domain declarations
     ///
     /// A domain is an administrator-managed group of compute and switch trays within a RackGroup.
-    /// No NVLink management state machine consumes these declarations yet.
-    /// NVLink management is planned to move from rack-based
-    /// to domain-based state machines, which will use these declarations to define domains.
+    /// New declarations enter Created. On reconciliation, the domain controller moves them
+    /// to Discovering and looks up their declared trays in inventory.
     #[clap(about = "Administrator-owned NVLink domain declarations", subcommand)]
     NvlinkDomain(crate::nvlink_domain::Cmd),
     #[clap(about = "Expected switch handling", subcommand, visible_alias = "ew")]
