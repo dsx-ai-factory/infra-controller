@@ -94,15 +94,21 @@ for row in "${cases[@]}"; do
     fi
 done
 
-# Answers the two reads of _dpf_installed_version. Without the CRD the API
-# server has no such resource, so a read of the object fails.
+# Answers the two reads of _dpf_installed_version by their arguments: a missing
+# CRD or object is an error without --ignore-not-found, and the object name is
+# printed only when the jsonpath asks for it. Without the CRD the API server
+# has no such resource, so a read of the object fails.
 # shellcheck disable=SC2329 # Called by _dpf_installed_version.
 kubectl() {
     case "${FAKE_CRD}:$1 $2" in
         "present:get crd" | "no-object:get crd") echo "customresourcedefinition.apiextensions.k8s.io/dpfoperatorconfigs.operator.dpu.nvidia.com" ;;
-        "present:get dpfoperatorconfigs.operator.dpu.nvidia.com") printf 'dpfoperatorconfig:%s' "${FAKE_VERSION}" ;;
-        "no-object:get dpfoperatorconfigs.operator.dpu.nvidia.com") ;;
-        "absent:get crd") ;;
+        "present:get dpfoperatorconfigs.operator.dpu.nvidia.com")
+            [[ "$*" != *"jsonpath={.metadata.name}:"* ]] || printf 'dpfoperatorconfig:'
+            printf '%s' "${FAKE_VERSION}"
+            ;;
+        "no-object:get dpfoperatorconfigs.operator.dpu.nvidia.com" | "absent:get crd")
+            [[ " $* " == *" --ignore-not-found "* ]]
+            ;;
         *) return 1 ;;
     esac
 }
@@ -115,7 +121,8 @@ cases=(
     "fresh cluster without the DPF CRD|${pinned_release}|absent||none"
     "DPF CRD without a DPFOperatorConfig|${pinned_release}|no-object||none"
     "previous release line|${pinned_release}|present|${source_release}|none"
-    "prerelease on the pinned line|${pinned_release}|present|${pinned_release}-rc.6|a prerelease of ${pinned_release}"
+    "prerelease of the target release|${pinned_release}|present|${pinned_release}-rc.6|a prerelease of ${pinned_release}"
+    "prerelease of another release on the pinned line|${pinned_release}|present|v${_DPF_PINNED_LINE}.1-rc.1|none"
     "empty status.version|${pinned_release}|present||has no status.version"
     "older release line|${pinned_release}|present|v26.4.0|error"
     "tag on another release line is not checked|${source_release}|present|v26.4.0|none"
@@ -183,6 +190,7 @@ cases=(
     "image tag ahead of the build TAG;v30.1.0;v30.0.0|v30.0.0;0;built with TAG=v30.0.0"
     "prerelease of the release in the tag does not pass;v30.0.0;v30.0.0-rc.4|v30.0.0-rc.4;0;Use an operator image built with a plain release TAG, such as TAG=v30.0.0,;Resolve what is reported above"
     "prerelease tag accepts the same prerelease;v30.0.0-rc.4;v30.0.0-rc.4|v30.0.0-rc.4;1;"
+    "upgrade between prereleases waits for the new one;v30.0.0-rc.5;v30.0.0-rc.4|v30.0.0-rc.4 v30.0.0-rc.4|v30.0.0-rc.5 v30.0.0-rc.5|v30.0.0-rc.5;3;"
     "prerelease above the release in the tag passes;v30.0.0;v30.0.1-rc.1|v30.0.1-rc.1;1;"
     "release with a leading zero and a digit above 7;v0.1.8;v0.1.8|v0.1.8;1;"
 )
