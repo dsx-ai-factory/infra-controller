@@ -46198,6 +46198,7 @@ type MachineValidationHeartbeatRequest struct {
 	//	*MachineValidationHeartbeatRequest_RunItemId
 	//	*MachineValidationHeartbeatRequest_AttemptId
 	//	*MachineValidationHeartbeatRequest_TestId
+	//	*MachineValidationHeartbeatRequest_PluginLaunchTestId
 	Target        isMachineValidationHeartbeatRequest_Target `protobuf_oneof:"target"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -46274,6 +46275,15 @@ func (x *MachineValidationHeartbeatRequest) GetTestId() string {
 	return ""
 }
 
+func (x *MachineValidationHeartbeatRequest) GetPluginLaunchTestId() string {
+	if x != nil {
+		if x, ok := x.Target.(*MachineValidationHeartbeatRequest_PluginLaunchTestId); ok {
+			return x.PluginLaunchTestId
+		}
+	}
+	return ""
+}
+
 type isMachineValidationHeartbeatRequest_Target interface {
 	isMachineValidationHeartbeatRequest_Target()
 }
@@ -46290,17 +46300,31 @@ type MachineValidationHeartbeatRequest_TestId struct {
 	TestId string `protobuf:"bytes,4,opt,name=test_id,json=testId,proto3,oneof"`
 }
 
+type MachineValidationHeartbeatRequest_PluginLaunchTestId struct {
+	// Authorize a new plugin launch for this test's active immutable run item.
+	// Does not record liveness or stop an already running container. Callers
+	// must require plugin_launch_authorized in the response, including when
+	// talking to older servers that do not understand this target.
+	PluginLaunchTestId string `protobuf:"bytes,5,opt,name=plugin_launch_test_id,json=pluginLaunchTestId,proto3,oneof"`
+}
+
 func (*MachineValidationHeartbeatRequest_RunItemId) isMachineValidationHeartbeatRequest_Target() {}
 
 func (*MachineValidationHeartbeatRequest_AttemptId) isMachineValidationHeartbeatRequest_Target() {}
 
 func (*MachineValidationHeartbeatRequest_TestId) isMachineValidationHeartbeatRequest_Target() {}
 
+func (*MachineValidationHeartbeatRequest_PluginLaunchTestId) isMachineValidationHeartbeatRequest_Target() {
+}
+
 type MachineValidationHeartbeatResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Accepted bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	// Explicit acknowledgement of an accepted plugin_launch_test_id request.
+	// False for ordinary heartbeats and responses from older servers.
+	PluginLaunchAuthorized bool `protobuf:"varint,2,opt,name=plugin_launch_authorized,json=pluginLaunchAuthorized,proto3" json:"plugin_launch_authorized,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *MachineValidationHeartbeatResponse) Reset() {
@@ -46336,6 +46360,13 @@ func (*MachineValidationHeartbeatResponse) Descriptor() ([]byte, []int) {
 func (x *MachineValidationHeartbeatResponse) GetAccepted() bool {
 	if x != nil {
 		return x.Accepted
+	}
+	return false
+}
+
+func (x *MachineValidationHeartbeatResponse) GetPluginLaunchAuthorized() bool {
+	if x != nil {
+		return x.PluginLaunchAuthorized
 	}
 	return false
 }
@@ -87305,16 +87336,18 @@ const file_nico_nico_proto_rawDesc = "" +
 	"_exit_codeB\x19\n" +
 	"\x17_failure_classificationB\x11\n" +
 	"\x0f_stdout_summaryB\x11\n" +
-	"\x0f_stderr_summary\"\xe9\x01\n" +
+	"\x0f_stderr_summary\"\x9e\x02\n" +
 	"!MachineValidationHeartbeatRequest\x12@\n" +
 	"\rvalidation_id\x18\x01 \x01(\v2\x1b.common.MachineValidationIdR\fvalidationId\x12.\n" +
 	"\vrun_item_id\x18\x02 \x01(\v2\f.common.UUIDH\x00R\trunItemId\x12-\n" +
 	"\n" +
 	"attempt_id\x18\x03 \x01(\v2\f.common.UUIDH\x00R\tattemptId\x12\x19\n" +
-	"\atest_id\x18\x04 \x01(\tH\x00R\x06testIdB\b\n" +
-	"\x06target\"@\n" +
+	"\atest_id\x18\x04 \x01(\tH\x00R\x06testId\x123\n" +
+	"\x15plugin_launch_test_id\x18\x05 \x01(\tH\x00R\x12pluginLaunchTestIdB\b\n" +
+	"\x06target\"z\n" +
 	"\"MachineValidationHeartbeatResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\"D\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x128\n" +
+	"\x18plugin_launch_authorized\x18\x02 \x01(\bR\x16pluginLaunchAuthorized\"D\n" +
 	"\x1aIsBmcInManagedHostResponse\x12&\n" +
 	"\x0fin_managed_host\x18\x01 \x01(\bR\rinManagedHost\"s\n" +
 	"\x12BmcDriverSelection\x12!\n" +
@@ -96244,6 +96277,7 @@ func file_nico_nico_proto_init() {
 		(*MachineValidationHeartbeatRequest_RunItemId)(nil),
 		(*MachineValidationHeartbeatRequest_AttemptId)(nil),
 		(*MachineValidationHeartbeatRequest_TestId)(nil),
+		(*MachineValidationHeartbeatRequest_PluginLaunchTestId)(nil),
 	}
 	file_nico_nico_proto_msgTypes[587].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[589].OneofWrappers = []any{}

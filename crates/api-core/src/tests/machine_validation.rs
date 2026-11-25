@@ -1358,13 +1358,26 @@ async fn named_adapter_launch_authorization_rechecks_persisted_policy(
             target: Some(target),
         })
     };
+    let authorization = || request(Target::PluginLaunchTestId("adapter-test".to_owned()));
+    let allowed = api
+        .heartbeat_machine_validation_run(authorization())
+        .await?
+        .into_inner();
+    assert!(allowed.accepted && allowed.plugin_launch_authorized);
+    let pending =
+        db::machine_validation_execution::find_attempt_by_id(&env.pool, &attempt_id).await?;
+    assert_eq!(pending.state.to_string(), "Pending");
+    assert!(
+        pending.last_heartbeat_at.is_none(),
+        "authorization must not record liveness"
+    );
     assert!(
         api.heartbeat_machine_validation_run(request(Target::TestId("adapter-test".to_owned())))
             .await?
             .into_inner()
             .accepted
     );
-    let original =
+    let mut original =
         db::machine_validation_execution::find_attempt_by_id(&env.pool, &attempt_id).await?;
     assert!(original.last_heartbeat_at.is_some());
     for (setting, target) in [
@@ -1383,7 +1396,7 @@ async fn named_adapter_launch_authorization_rechecks_persisted_policy(
             _ => unreachable!(),
         }
         let error = api
-            .heartbeat_machine_validation_run(request(target))
+            .heartbeat_machine_validation_run(authorization())
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{setting}");
@@ -1394,7 +1407,35 @@ async fn named_adapter_launch_authorization_rechecks_persisted_policy(
             attempt.last_heartbeat_at, original.last_heartbeat_at,
             "{setting}"
         );
+        let heartbeat = api
+            .heartbeat_machine_validation_run(request(target))
+            .await?
+            .into_inner();
+        assert!(
+            heartbeat.accepted,
+            "revocation must not suppress liveness: {setting}"
+        );
+        assert!(!heartbeat.plugin_launch_authorized);
+        let alive =
+            db::machine_validation_execution::find_attempt_by_id(&env.pool, &attempt_id).await?;
+        assert!(
+            alive.last_heartbeat_at > original.last_heartbeat_at,
+            "liveness must advance after revocation: {setting}"
+        );
+        assert_eq!(alive.state.to_string(), "Running");
+        original = alive;
     }
+    // Even an approved adapter cannot launch a completed attempt.
+    Arc::make_mut(&mut api.runtime_config).machine_validation_config = approved;
+    sqlx::query("UPDATE machine_validation_attempts SET state = 'Failed' WHERE id = $1")
+        .bind(attempt_id)
+        .execute(&env.pool)
+        .await?;
+    let completed = api
+        .heartbeat_machine_validation_run(authorization())
+        .await?
+        .into_inner();
+    assert!(!completed.accepted && !completed.plugin_launch_authorized);
     Ok(())
 }
 

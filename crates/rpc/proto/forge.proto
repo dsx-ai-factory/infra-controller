@@ -8840,11 +8840,19 @@ message MachineValidationHeartbeatRequest {
     common.UUID run_item_id = 2;
     common.UUID attempt_id = 3;
     string test_id = 4;
+    // Authorize a new plugin launch for this test's active immutable run item.
+    // Does not record liveness or stop an already running container. Callers
+    // must require plugin_launch_authorized in the response, including when
+    // talking to older servers that do not understand this target.
+    string plugin_launch_test_id = 5;
   }
 }
 
 message MachineValidationHeartbeatResponse {
   bool accepted = 1;
+  // Explicit acknowledgement of an accepted plugin_launch_test_id request.
+  // False for ordinary heartbeats and responses from older servers.
+  bool plugin_launch_authorized = 2;
 }
 
 message IsBmcInManagedHostResponse {

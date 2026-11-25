@@ -912,26 +912,21 @@ pub(crate) async fn heartbeat_machine_validation_run(
         Some(rpc::machine_validation_heartbeat_request::Target::TestId(value)) => {
             test_id = Some(value);
         }
-        None => {}
-    }
-
-    let mut txn = api.txn_begin().await?;
-    if test_id.is_some() || run_item_id.is_some() || attempt_id.is_some() {
-        let items =
-            db::machine_validation_execution::find_run_items_by_run_id(&mut txn, validation_id)
-                .await?;
-        for item in items.iter().filter(|item| {
-            test_id.as_deref() == Some(item.test_id.as_str())
-                || run_item_id == Some(item.id)
-                || (attempt_id.is_some() && item.current_attempt_id == attempt_id)
-        }) {
-            // Use the immutable execution snapshot, not a newer catalog revision.
-            // Named adapters reauthorize through this heartbeat immediately before launch.
-            if let Some(plugin) = &item.plugin
-                && plugin.container_plugin_adapter.is_some()
-            {
+        Some(rpc::machine_validation_heartbeat_request::Target::PluginLaunchTestId(value)) => {
+            let snapshot = db::machine_validation_execution::find_active_plugin_launch_snapshot(
+                &mut api.db_reader(),
+                validation_id,
+                &value,
+            )
+            .await?;
+            let accepted = if let Some(snapshot) = snapshot {
+                if snapshot.plugin.host_access_full && !snapshot.full_host_approved {
+                    return Err(Status::failed_precondition(
+                        "plugin full-host access is not approved for this revision",
+                    ));
+                }
                 validate_machine_validation_plugin(
-                    &plugin.clone().into(),
+                    &snapshot.plugin.into(),
                     &api.runtime_config.machine_validation_config,
                 )
                 .map_err(|error| {
@@ -939,9 +934,19 @@ pub(crate) async fn heartbeat_machine_validation_run(
                         "plugin launch denied by current site policy: {error}"
                     ))
                 })?;
-            }
+                true
+            } else {
+                false
+            };
+            return Ok(Response::new(rpc::MachineValidationHeartbeatResponse {
+                accepted,
+                plugin_launch_authorized: accepted,
+            }));
         }
+        None => {}
     }
+
+    let mut txn = api.txn_begin().await?;
     let heartbeat = db::machine_validation_execution::record_heartbeat(
         &mut txn,
         validation_id,
@@ -963,7 +968,10 @@ pub(crate) async fn heartbeat_machine_validation_run(
     };
 
     Ok(tonic::Response::new(
-        rpc::MachineValidationHeartbeatResponse { accepted },
+        rpc::MachineValidationHeartbeatResponse {
+            accepted,
+            plugin_launch_authorized: false,
+        },
     ))
 }
 

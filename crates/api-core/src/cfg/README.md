@@ -2091,7 +2091,7 @@ be propagated there by DPF.
 | `tests` | `Vec<MachineValidationTestConfig>` | `[]` | Per-test enable/disable overrides. |
 | `approved_plugin_registries` | `Vec<String>` | `[]` | Registries allowed for Machine Validation plugin images. Empty denies plugin registration; legacy tests are unaffected. |
 | `allowed_plugin_types` | `Vec<String>` | `["container"]` | Plugin execution types allowed for the site. Empty denies plugin registration; the only accepted value is `container`. |
-| `allowed_container_plugin_adapters` | `Vec<String>` | `[]` | Named container adapters approved for registration, enablement, and pre-launch authorization. Empty denies named adapters; omission of an adapter retains the standard NICo contract. |
+| `allowed_container_plugin_adapters` | `Vec<String>` | `[]` | Named container adapters approved for registration, enablement, and launch authorization. Empty denies named adapters; omission retains the standard NICo contract. `DSXHealthValidation` requires all three `allow_plugin_host_*` settings, including socket approval without GPU-count overrides. Remove it from this list before disabling any required setting. Revocation blocks new launches; running attempts retain liveness reporting. |
 | `allow_plugin_host_network` | `bool` | `false` | Allows approved adapters to share the host network namespace. |
 | `allow_plugin_host_pid` | `bool` | `false` | Allows approved adapters to share the host PID namespace. |
 | `allow_plugin_host_sockets` | `bool` | `false` | Allows approved adapters to connect to explicitly mounted host Unix sockets. Read-only socket mounts still permit protocol requests. |
