@@ -122,12 +122,12 @@ installs the real operator, which you must **not** run here. The operator and
 the simulator would both drive `DPU.status.phase` and the `DPFOperatorConfig`
 status and fight.
 
-The only coupling is version consistency: the simulator's Go types are pinned to
-doca-platform **v26.4.0** (`go.mod`), so the applied CRDs must accept v26.4.0
-objects. The CRDs in `crates/dpf/crds/` are newer than those types, and the
-simulator relies only on fields both have. It handles `DPFOperatorConfig` as
-unstructured data, because the shipped CRD requires `spec.deploymentMode` and
-the v26.4.0 types do not have it.
+The simulator's Go types stay pinned to doca-platform **v26.4.0** (`go.mod`),
+the release it reproduces. This simulator is an exception to the matching-release
+guidance above: its CRDs must accept v26.4.0 objects, but can come from a newer
+release. The newer CRDs in `crates/dpf/crds/` share the fields the simulator
+uses. It handles `DPFOperatorConfig` as unstructured data because the shipped
+CRD requires `spec.deploymentMode`, which the v26.4.0 types do not provide.
 
 ## The operator config NICo reads at startup
 
