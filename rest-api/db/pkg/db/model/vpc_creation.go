@@ -89,7 +89,6 @@ func (vpc *Vpc) matchesCreation(reported *corev1.Vpc) bool {
 		savedConfig.GetSlaacEnabled() != reportedConfig.GetSlaacEnabled() ||
 		savedConfig.GetNetworkSecurityGroupId() != reportedConfig.GetNetworkSecurityGroupId() ||
 		savedConfig.GetPowerResourceGroup() != reportedConfig.GetPowerResourceGroup() ||
-		reportedConfig.GetDhcpOptionSetId() != "" ||
 		(savedConfig.Vni == nil) != (reportedConfig.Vni == nil) || savedConfig.GetVni() != reportedConfig.GetVni() ||
 		(savedConfig.RoutingProfileType != nil && savedConfig.GetRoutingProfileType() != reportedConfig.GetRoutingProfileType()) {
 		return false

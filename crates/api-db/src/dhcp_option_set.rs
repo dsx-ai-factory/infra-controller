@@ -153,18 +153,6 @@ pub async fn update(
         })
 }
 
-/// Returns whether any live instance or VPC uses the DhcpOptionSet.
-pub async fn is_in_use(conn: impl DbReader<'_>, id: &DhcpOptionSetId) -> DatabaseResult<bool> {
-    let query =
-        "SELECT EXISTS (SELECT 1 FROM instances WHERE dhcp_option_set_id = $1 AND deleted IS NULL)
-            OR EXISTS (SELECT 1 FROM vpcs WHERE dhcp_option_set_id = $1 AND deleted IS NULL)";
-    sqlx::query_scalar(query)
-        .bind(id)
-        .fetch_one(conn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
-}
-
 /// Deletes a DhcpOptionSet owned by the given tenant.
 pub async fn delete(
     txn: &mut PgConnection,

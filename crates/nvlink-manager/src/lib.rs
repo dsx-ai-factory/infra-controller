@@ -6203,7 +6203,6 @@ mod machine_group_tests {
                     network: Default::default(),
                     infiniband: Default::default(),
                     network_security_group_id: None,
-                    dhcp_option_set_id: None,
                     extension_services: Default::default(),
                     nvlink: InstanceNvLinkConfig {
                         gpu_configs: vec![InstanceNvLinkGpuConfig {

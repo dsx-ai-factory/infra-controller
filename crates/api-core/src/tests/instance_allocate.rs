@@ -689,7 +689,6 @@ async fn test_allocate_instance_rejects_interface_anycast_prefix_outside_vpc_pro
                 network: Some(network_config),
                 infiniband: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -739,7 +738,6 @@ async fn test_zero_dpu_instance_allocation_rejects_explicit_interfaces(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -882,7 +880,6 @@ async fn test_zero_dpu_instance_allocation_auto(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -1240,7 +1237,6 @@ async fn test_zero_dpu_auto_update_rejects_host_inband_segment_bound_to_differen
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -1352,7 +1348,6 @@ async fn test_zero_dpu_instance_allocation_rejects_missing_auto(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1413,7 +1408,6 @@ async fn test_zero_dpu_instance_allocation_rejects_missing_vpc_id(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1478,7 +1472,6 @@ async fn test_zero_dpu_instance_allocation_rejects_non_flat_vpc_id(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1620,7 +1613,6 @@ async fn test_reject_single_dpu_instance_allocation_no_network_config(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1694,7 +1686,6 @@ async fn test_reject_single_dpu_instance_allocation_host_inband_network_config(
                     auto_config: None,
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 infiniband: None,
                 nvlink: None,
@@ -1834,7 +1825,6 @@ async fn test_reject_zero_dpu_instance_allocation_multiple_vpcs(
             instance_type_id: None,
             config: Some(forge::InstanceConfig {
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 tenant: Some(forge::TenantConfig {
                     tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
                     hostname: None,
@@ -1939,7 +1929,6 @@ async fn test_single_dpu_instance_allocation(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -2066,7 +2055,6 @@ async fn test_reject_zero_dpu_instance_with_tenant_network_segment(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -2142,7 +2130,6 @@ async fn test_reject_zero_dpu_instance_with_extension_services(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -2209,7 +2196,6 @@ async fn test_instance_allocation_rejects_auto_with_explicit_interfaces(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,
@@ -2288,7 +2274,6 @@ async fn test_instance_allocation_rejects_auto_on_dpu_host(
                     tenant_keyset_ids: vec![],
                 }),
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 os: Some(forge::InstanceOperatingSystemConfig {
                     phone_home_enabled: false,
                     run_provisioning_instructions_on_every_boot: false,

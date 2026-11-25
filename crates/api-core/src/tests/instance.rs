@@ -412,7 +412,6 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         )),
         infiniband: None,
         network_security_group_id: None,
-        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -2108,7 +2107,6 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
-        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -5666,7 +5664,6 @@ async fn test_batch_allocate_instances_rolls_back_earlier_service_vpc_allocation
                 network: Some(single_interface_network_config(host_segment)),
                 infiniband: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id.clone(),
@@ -8597,7 +8594,6 @@ async fn test_allocate_and_update_network_config_instance(
                     infiniband: None,
                     nvlink: None,
                     network_security_group_id: None,
-                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     spxconfig: None,
                     power_profile: None,
@@ -8729,7 +8725,6 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
                     nvlink: None,
                     spxconfig: None,
                     network_security_group_id: None,
-                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     power_profile: None,
                 }),
@@ -9747,7 +9742,6 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),

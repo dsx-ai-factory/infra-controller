@@ -76,13 +76,7 @@ pub(super) async fn detach(args: Args, api_client: &ApiClient) -> CarbideCliResu
         // VPC details we just grabbed and only clear
         // the NSG ID field.
         let _vpc = api_client
-            .update_vpc_config(
-                v,
-                vpc.version,
-                vpc.metadata,
-                None,
-                vpc.config.and_then(|config| config.dhcp_option_set_id),
-            )
+            .update_vpc_config(v, vpc.version, vpc.metadata, None)
             .await?;
 
         println!("Network security group successfully detached from VPC {v}");

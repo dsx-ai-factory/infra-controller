@@ -106,8 +106,6 @@ func TestVpc_matchesCreation(t *testing.T) {
 			v.Metadata.Labels[0].Value = nil
 		}},
 		{name: "metadata from another creation conflicts", change: func(v *corev1.Vpc) { v.Metadata.Name = "another" }},
-		// REST never requested a DHCP option set, so this is a different configuration.
-		{name: "unrequested DHCP option set conflicts", change: func(v *corev1.Vpc) { v.Config.DhcpOptionSetId = cutil.GetPtr("another-dhcp-set") }},
 		{name: "another power group conflicts", change: func(v *corev1.Vpc) { v.Config.PowerResourceGroup = cutil.GetPtr("another-group") }},
 		{name: "supplied VNI cannot be omitted", change: func(v *corev1.Vpc) { v.Config.Vni = nil }},
 		{name: "omitted VNI cannot adopt a supplied request", omitVni: true, change: func(v *corev1.Vpc) { v.Config.Vni = cutil.GetPtr(uint32(50001)) }},

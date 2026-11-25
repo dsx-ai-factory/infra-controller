@@ -168,7 +168,6 @@ async fn test_create_instance_duplicate_keyset_ids(_: PgPoolOptions, options: Pg
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
-        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -230,7 +229,6 @@ async fn test_create_instance_keyset_ids_max(_: PgPoolOptions, options: PgConnec
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
-        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -293,7 +291,6 @@ async fn test_allocate_instance_with_invalid_os_image(
             machine_id: Some(mh.host.id.try_into().unwrap()),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 tenant: Some(default_tenant_config()),
                 os: Some(os_config),
                 network: Some(single_interface_network_config(segment_id)),
@@ -360,7 +357,6 @@ async fn test_allocate_instance_with_invalid_ib_partition(
             machine_id: Some(mh.host.id.try_into().unwrap()),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
-                dhcp_option_set_id: None,
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
                 network: Some(single_interface_network_config(segment_id)),
@@ -526,7 +522,6 @@ async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
                     }),
                     infiniband: None,
                     network_security_group_id: None,
-                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
