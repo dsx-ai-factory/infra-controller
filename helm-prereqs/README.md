@@ -1669,6 +1669,8 @@ before its exit handler ran.
 Teardown is part of `clean.sh` (step 1b); `health-check.sh` gains a DPF
 section automatically when the stack is present.
 
+With `--skip-dpf`, setup preserves an explicit `[dpf]` table in the Core site or custom base configuration. Otherwise it renders `enabled = false` for Core, which defaults DPF on. This rendering requires Python 3.11 or later, or the `tomli` package, in the Python environment that provides PyYAML. If the site file is disabled, supply a custom base configuration with `[dpf].enabled = false`.
+
 ### DPF images and registries
 
 A DPF-enabled site pulls from three image/chart sources with different defaults:

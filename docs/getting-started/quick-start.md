@@ -823,7 +823,7 @@ Prepare an `expected_machines.json` with the BMC MAC address, factory default cr
 ```
 
 <Note>
-**DPF is the per-host default.** With no `dpf_enabled` field, each host is DPF-provisioned (the field defaults to `true`). Add `"dpf_enabled": false` to keep a host on the deprecated iPXE path. DPF-based provisioning also requires `[dpf].enabled = true` in the site config, which `setup.sh` sets by default (unless `--skip-dpf`). Refer to [DPF Setup](../manuals/dpf.md).
+**DPF is the per-host default.** With no `dpf_enabled` field, each host is DPF-provisioned (the field defaults to `true`). Add `"dpf_enabled": false` to keep a host on the deprecated iPXE path. The site-wide `[dpf].enabled` setting also defaults to `true`. With `--skip-dpf`, setup renders it as `false` unless the supplied Core configuration already defines a `[dpf]` table; this rendering needs Python 3.11 or later, or `tomli`. Refer to [DPF Setup](../manuals/dpf.md).
 </Note>
 
 Upload the manifest:
