@@ -29,9 +29,9 @@
 #   1. Environment variables:    presence and format
 #   2. Required tools:           helm, helmfile, kubectl, jq, ssh-keygen
 #                                Core VIP validation and the DPF CoreDNS
-#                                default also need python3 + PyYAML;
-#                                the default DPF image tag and --skip-vault
-#                                also a TOML parser (3.11 tomllib or tomli)
+#                                default also need python3 + PyYAML.
+#                                The default DPF image tag and --skip-vault
+#                                also need a TOML parser (3.11 tomllib or tomli)
 #   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
 #   3b. Site values completeness: no placeholder or empty required value
 #   3c. Core values (--skip-vault): nothing in them makes nico-api need a Vault
@@ -537,7 +537,7 @@ _space_separated() {
 # Release line of the DPF operator in dpf-versions.toml, and the only other
 # line that operator upgrades from (LastReleasedDPFGAVersion in
 # NVIDIA/doca-platform internal/release/version.go). Update both with
-# dpf-versions.toml.
+# dpf-versions.toml. tests/dpf-versions_test.sh checks only the first.
 _DPF_PINNED_LINE="30.0"
 _DPF_UPGRADE_SOURCE_LINE="26.8"
 
@@ -570,7 +570,8 @@ _dpf_installed_version() {
 
 # Records an error when the installed DPF operator is on a release line that
 # the operator this run installs ($1, its image tag) does not upgrade from.
-# A tag on another release line is left to that operator's own validation.
+# A tag on another release line, or without a release, is left to that
+# operator's own validation.
 _check_dpf_upgrade_source() {
     local _target="$1" _installed
     [[ "${_target#v}" == "${_DPF_PINNED_LINE}."* ]] || return 0
@@ -581,7 +582,7 @@ _check_dpf_upgrade_source() {
     case "${_installed#v}" in
         "" | "${_DPF_PINNED_LINE}."* | "${_DPF_UPGRADE_SOURCE_LINE}."*) return 0 ;;
     esac
-    ERRORS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig reports DPF ${_installed} (status.version). The ${_target} operator that setup.sh installs upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x, so DPF would stay at ${_installed} and nico-api would not start - upgrade DPF to v${_DPF_UPGRADE_SOURCE_LINE}.x first (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
+    ERRORS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig reports DPF ${_installed} (status.version). The ${_target} operator that setup.sh installs upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x. A DPF older than v${_DPF_UPGRADE_SOURCE_LINE}.x would stay at its version and nico-api would not start - in that case upgrade DPF to v${_DPF_UPGRADE_SOURCE_LINE}.x first (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
     return 0
 }
 

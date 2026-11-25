@@ -149,7 +149,7 @@ releases:
   # ---------------------------------------------------------------------------
   # DPF prerequisites — Argo CD, Kamaji, maintenance-operator, NFD.
   # Installed by setup.sh phase 5b unless --skip-dpf (per-release
-  # sync; nothing here installs on a normal run). Kamaji follows
+  # sync, nothing here installs on a normal run). Kamaji follows
   # NVIDIA/doca-platform deploy/helmfiles/prereqs.yaml at v30.0.0. Argo CD,
   # maintenance-operator, and NFD keep the versions that file lists for
   # v26.8.0. At v30.0.0 it lists 10.2.2, 0.4.0, and 0.19.0.
