@@ -48,19 +48,24 @@ machineCertificates:
   ## twice this value so admission does not drop issuance before its cleanup.
   requestTimeoutSecs: 120
 
-## Legacy name aliases — opt-in ExternalName Services so binaries that
+## Legacy name aliases — ExternalName Services enabled by default so binaries that
 ## hardcode the pre-rename hostnames (e.g. `carbide-api.forge-system.svc.
 ## cluster.local:1079`) continue to resolve to this chart's nico-api
 ## Service. Both the modern and legacy names resolve simultaneously; they
 ## share the same pods. Disable when running an all-modern fleet.
 ##
 ## Each entry creates:
-##   - the alias namespace, only if `createNamespace: true`. Opt in only
-##     when nothing else owns the target namespace: a second renderer makes
-##     GitOps controllers fight over ownership, and disabling it later can
-##     prune the whole namespace.
+##   - the alias namespace, only if `createNamespace: true` (default false).
+##     Opt in only for a new namespace that no other release or GitOps
+##     application manages, to avoid competing ownership and namespace pruning.
 ##   - an ExternalName Service `<name>.<namespace>` that CNAMEs to
 ##     `nico-api.<this-namespace>.svc.cluster.local`.
+##
+## With createNamespace false, the namespace must exist before applying Services.
+## helm-prereqs/setup.sh creates missing alias namespaces after Core deployment
+## is accepted, without Helm ownership metadata. Direct Helm/GitOps installs
+## must prepare them separately. Enabling createNamespace later does not
+## automatically adopt a setup-created namespace and can fail Helm ownership checks.
 ##
 ## Clients running in-cluster against the legacy hostname should set
 ## `dnsConfig.options: [{name: ndots, value: "2"}]` on their pod so the
@@ -79,7 +84,7 @@ legacyAlias:
   aliases:
     - name: carbide-api
       namespace: forge-system
-      # Off by default: helm-prereqs already owns this namespace (see note above).
+      # Keep false for an existing namespace, including one created by setup.sh.
       createNamespace: false
 
 replicas: 1

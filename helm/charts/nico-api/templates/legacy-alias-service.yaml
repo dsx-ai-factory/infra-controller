@@ -1,5 +1,5 @@
 {{/*
-Legacy name aliases — opt-in ExternalName Services that make the legacy
+Legacy name aliases — ExternalName Services enabled by default that make the legacy
 "carbide-api.forge-system.svc.cluster.local" hostname (and any other
 configured alias) resolve to this chart's nico-api Service.
 
@@ -13,9 +13,13 @@ work simultaneously, pointing at the same pods.
 Notes:
 - Cross-namespace lookups: the alias is an ExternalName Service in
   `<alias.namespace>` that CNAMEs to nico-api.<this-ns>.svc.cluster.local.
-- The alias namespace is created with `helm.sh/resource-policy: keep` so
-  uninstalling nico-api does not delete the namespace if other resources
-  live there.
+- Namespace creation requires `createNamespace: true` (default false). Only
+  opt in for a new namespace with no other release or GitOps owner. The
+  rendered Namespace carries Helm keep and Argo CD Prune=false annotations.
+- Otherwise the namespace must already exist. setup.sh creates missing alias
+  namespaces after Core deployment is accepted, without Helm ownership metadata;
+  direct Helm/GitOps installs must prepare them separately. A later opt-in does
+  not automatically adopt a setup-created namespace and can fail ownership checks.
 - Clients running in-cluster against the legacy hostname will still hit
   the resolver's ndots-based search expansion. To avoid an initial
   NXDOMAIN round trip, set `dnsConfig.options: [{name: ndots, value: "2"}]`
