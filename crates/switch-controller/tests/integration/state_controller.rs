@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,7 @@ use component_manager::nv_switch_manager::{
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
 use db::{TransactionVending as _, rack as db_rack, switch as db_switch};
 use librms::protos::rack_manager::SwitchService;
+use model::allocation_type::AllocationType;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::rack::{RackConfig, RackErrorRecoveryPolicy, RackState};
@@ -293,17 +295,72 @@ async fn force_delete_switch_clears_associated_mac_state(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = ControllerEnv::new(pool.clone()).await;
-    let switch_id = new_switch(&env, None, None).await?;
+    let cases = [
+        (new_switch(&env, None, None).await?, false, "2001:db8::10"),
+        (new_switch(&env, None, None).await?, true, "2001:db8::11"),
+    ];
+    let unrelated_address: IpAddr = "192.0.2.100".parse()?;
+    let mut txn = pool.txn_begin().await?;
+    db::explored_endpoints::insert(unrelated_address, &Default::default(), false, &mut txn).await?;
+    txn.commit().await?;
 
-    env.api
-        .admin_force_delete_switch(Request::new(AdminForceDeleteSwitchRequest {
-            switch_id: Some(switch_id),
-            delete_interfaces: true,
-            delete_bmc_suppressions: true,
-        }))
+    for (switch_id, delete_interfaces, ipv6_address) in cases {
+        let mut txn = pool.txn_begin().await?;
+        let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+            .await?
+            .expect("switch exists");
+        let bmc_mac = switch.bmc_mac_address.expect("switch has a BMC MAC");
+        let interface = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac)
+            .await?
+            .pop()
+            .expect("switch has a BMC interface");
+        let addresses = [interface.addresses[0], ipv6_address.parse()?];
+        db::machine_interface_address::insert(
+            txn.as_mut(),
+            interface.id,
+            addresses[1],
+            AllocationType::Dhcp,
+        )
         .await?;
+        for address in addresses {
+            db::explored_endpoints::insert(address, &Default::default(), false, &mut txn).await?;
+        }
+        txn.commit().await?;
 
-    assert!(db_switch::find_by_id(&pool, &switch_id).await?.is_none());
+        let response = env
+            .api
+            .admin_force_delete_switch(Request::new(AdminForceDeleteSwitchRequest {
+                switch_id: Some(switch_id),
+                delete_interfaces,
+                delete_bmc_suppressions: true,
+            }))
+            .await?
+            .into_inner();
+
+        assert!(db_switch::find_by_id(&pool, &switch_id).await?.is_none());
+        assert_eq!(
+            response.interfaces_deleted,
+            if delete_interfaces { 2 } else { 0 }
+        );
+        assert!(
+            db::explored_endpoints::find_by_ips(&pool, addresses.to_vec())
+                .await?
+                .is_empty(),
+            "all BMC aliases must be removed with delete_interfaces={delete_interfaces}"
+        );
+        assert_eq!(
+            db::machine_interface::find_by_ip(&pool, addresses[0])
+                .await?
+                .is_none(),
+            delete_interfaces,
+        );
+        assert_eq!(
+            db::explored_endpoints::find_by_ips(&pool, vec![unrelated_address])
+                .await?
+                .len(),
+            1,
+        );
+    }
 
     Ok(())
 }

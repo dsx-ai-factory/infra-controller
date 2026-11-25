@@ -15,8 +15,13 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
+
 use carbide_test_harness::prelude::*;
+use carbide_uuid::machine::MachineInterfaceId;
+use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::power_shelf::PowerShelfId;
+use model::allocation_type::AllocationType;
 use rpc::forge::{AdminForceDeletePowerShelfRequest, PowerShelfDeletionRequest, PowerShelfQuery};
 use tonic::Code;
 
@@ -143,6 +148,95 @@ async fn test_force_delete_power_shelf_success(
             .any(|record| record.state == r#""retained-before-force-delete""#),
         "Power shelf state history should be retained",
     );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_force_delete_power_shelf_clears_explored_endpoints(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let unrelated_address: IpAddr = "192.0.2.100".parse()?;
+    let mut txn = env.db_txn().await;
+    let segment_id: NetworkSegmentId = sqlx::query_scalar(
+        "INSERT INTO network_segments (name, version, network_segment_type)
+         VALUES ('power-shelf-force-delete', 'V1-T0', 'underlay') RETURNING id",
+    )
+    .fetch_one(txn.as_mut())
+    .await?;
+    db::explored_endpoints::insert(unrelated_address, &Default::default(), false, &mut txn).await?;
+    txn.commit().await?;
+
+    for (delete_interfaces, mac, ipv4_address, ipv6_address) in [
+        (false, "02:00:00:00:0a:01", "192.0.2.10", "2001:db8::10"),
+        (true, "02:00:00:00:0a:02", "192.0.2.11", "2001:db8::11"),
+    ] {
+        let power_shelf_id =
+            create_custom_power_shelf(&env, "Endpoint cleanup", None, None).await?;
+        let mut txn = env.db_txn().await;
+        let interface_id: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces
+                 (power_shelf_id, association_type, segment_id, mac_address,
+                  primary_interface, hostname, interface_type)
+             VALUES ($1, 'PowerShelf', $2, $3::macaddr, false, 'pmc', 'Bmc')
+             RETURNING id",
+        )
+        .bind(power_shelf_id)
+        .bind(segment_id)
+        .bind(mac)
+        .fetch_one(txn.as_mut())
+        .await?;
+        let addresses: [IpAddr; 2] = [ipv4_address.parse()?, ipv6_address.parse()?];
+        for address in addresses {
+            db::machine_interface_address::insert(
+                txn.as_mut(),
+                interface_id,
+                address,
+                AllocationType::Dhcp,
+            )
+            .await?;
+            db::explored_endpoints::insert(address, &Default::default(), false, &mut txn).await?;
+        }
+        txn.commit().await?;
+
+        let response = env
+            .api()
+            .admin_force_delete_power_shelf(tonic::Request::new(
+                AdminForceDeletePowerShelfRequest {
+                    power_shelf_id: Some(power_shelf_id),
+                    delete_interfaces,
+                    delete_bmc_suppressions: false,
+                },
+            ))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.interfaces_deleted, u32::from(delete_interfaces));
+        assert!(
+            db::power_shelf::find_by_id(&pool, &power_shelf_id)
+                .await?
+                .is_none()
+        );
+        assert!(
+            db::explored_endpoints::find_by_ips(&pool, addresses.to_vec())
+                .await?
+                .is_empty(),
+            "all PMC aliases must be removed with delete_interfaces={delete_interfaces}"
+        );
+        assert_eq!(
+            db::machine_interface::find_by_ip(&pool, addresses[0])
+                .await?
+                .is_none(),
+            delete_interfaces,
+        );
+        assert_eq!(
+            db::explored_endpoints::find_by_ips(&pool, vec![unrelated_address])
+                .await?
+                .len(),
+            1,
+        );
+    }
 
     Ok(())
 }

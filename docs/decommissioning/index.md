@@ -86,6 +86,11 @@ Use these commands when you are removing decommissioned hardware from a
 site. They remove records associated with the device:
 interfaces, suppressions, and retained boot entries where those exist.
 
+Switch and power-shelf force deletion also removes the explored endpoints for
+all addresses on their associated BMC interfaces, including IPv4 and IPv6.
+This cleanup runs even without `--delete-interfaces`, so rediscovery starts
+pre-ingestion again instead of reusing a completed exploration record.
+
 Host:
 
 ```bash

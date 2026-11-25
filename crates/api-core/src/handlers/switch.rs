@@ -28,6 +28,7 @@ use health_report::HealthReportApplyMode;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
+use model::machine_interface::InterfaceType;
 use model::metadata::Metadata;
 use model::site_explorer::EndpointExplorationReport;
 use model::switch::{Switch, SwitchControllerState};
@@ -501,7 +502,7 @@ pub(crate) async fn delete_switch(
     Ok(Response::new(rpc::SwitchDeletionResult {}))
 }
 
-/// Force deletes a switch and optionally its associated interfaces from the database.
+/// Force deletes a switch and its explored BMC endpoints, optionally deleting its interfaces.
 /// Unlike `delete_switch` (soft delete), this immediately hard-deletes the switch
 /// while retaining its state history.
 pub(crate) async fn admin_force_delete_switch(
@@ -540,15 +541,26 @@ pub(crate) async fn admin_force_delete_switch(
         Vec::new()
     };
 
+    let interfaces = db::machine_interface::find_by(
+        &mut txn,
+        ObjectColumnFilter::One(db::machine_interface::SwitchIdColumn, &switch_id),
+    )
+    .await
+    .map_err(CarbideError::from)?;
+    let bmc_addresses = interfaces
+        .iter()
+        .filter(|interface| interface.interface_type == InterfaceType::Bmc)
+        .flat_map(|interface| interface.addresses.iter().copied())
+        .collect::<Vec<_>>();
+    db::explored_endpoints::delete_many(&mut txn, &bmc_addresses)
+        .await
+        .map_err(CarbideError::from)?;
+
     // Optionally delete associated machine interfaces.
     let mut interfaces_deleted: u32 = 0;
     if request.delete_interfaces {
         let mut interface_ids: HashSet<MachineInterfaceId> =
-            db::machine_interface::find_ids_by_switch_id(&mut txn, &switch_id)
-                .await
-                .map_err(CarbideError::from)?
-                .into_iter()
-                .collect();
+            interfaces.iter().map(|interface| interface.id).collect();
         for &mac in &macs {
             for interface in db::machine_interface::find_by_mac_address(&mut txn, mac)
                 .await
