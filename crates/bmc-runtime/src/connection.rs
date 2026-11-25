@@ -23,7 +23,9 @@ use bmc_platform::{
     AuthError, ChassisIdentity, IpmiOps, PlatformError, PlatformIdentity, ServiceRootIdentity,
 };
 use carbide_ipmi::IPMITool;
-use carbide_redfish::nv_redfish::{NvRedfishClientPool, NvRedfishConnection, RedfishBmc};
+use carbide_redfish::nv_redfish::{
+    NvRedfishClientPool, NvRedfishConnection, RedfishBmc, ServiceRoot,
+};
 use carbide_secrets::credentials::{CredentialReader, Credentials};
 use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use model::site_explorer::EndpointExplorationReport;
@@ -363,6 +365,19 @@ impl DriverConnector {
         ))
     }
 
+    /// Reads and returns the service root of the BMC at `address` with no
+    /// credentials on the direct pool: a readiness probe that spends no login
+    /// attempt, so it works against a BMC still on its factory password.
+    pub async fn anonymous_service_root(
+        &self,
+        address: SocketAddr,
+    ) -> Result<Arc<ServiceRoot>, PlatformError> {
+        self.direct_pool
+            .anonymous_service_root(address)
+            .await
+            .map_err(PlatformError::from_redfish)
+    }
+
     /// Connects to an unexplored BMC at `access` with explicit `credentials`
     /// (for pre-exploration paths such as initial factory takeover). Selects
     /// drivers from the live `ServiceRoot`, falling back to `Chassis`
@@ -467,6 +482,7 @@ const fn is_auth_error(error: &PlatformError) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
 
     use arc_swap::ArcSwap;
@@ -769,6 +785,30 @@ mod tests {
             &bmc_drivers::CapabilitySelection::Driver(bmc_drivers::Driver::LenovoXccAccounts)
         );
         assert!(bmc.authenticated_only_as("operator", "secret"));
+    }
+
+    /// The readiness probe reads the service root without credentials, so it
+    /// spends no login attempt, and reports an address that does not answer as
+    /// unreachable.
+    #[tokio::test]
+    async fn service_root_probe_is_anonymous() {
+        let bmc = ExploredMock::serve();
+        let connector = connector(direct_pool(), &stored_root());
+        let address = SocketAddr::from(([127, 0, 0, 1], bmc.access.port.unwrap()));
+
+        connector
+            .anonymous_service_root(address)
+            .await
+            .expect("reads the service root");
+        assert!(bmc.authorizations.lock().unwrap().is_empty());
+
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unanswered = silent.local_addr().unwrap();
+        drop(silent);
+        assert_eq!(
+            connector.anonymous_service_root(unanswered).await.err(),
+            Some(PlatformError::Unreachable)
+        );
     }
 
     /// Without an exploration report, a power shelf (whose `ServiceRoot` omits

@@ -19,16 +19,19 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bmc_platform::PlatformError;
 use bmc_runtime::{DriverConnector, ExploredConnectError};
 use carbide_redfish::libredfish::{
-    BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
+    DirectRedfishPool, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
 };
 use carbide_secrets::credentials::Credentials;
 use carbide_utils::redfish::BmcAccessInfo;
+use libredfish::model::service_root::RedfishVendor;
 use model::site_explorer::EndpointExplorationReport;
 
 use crate::BackendBmc;
-use crate::accounts::{BackendAccountBmc, LibredfishAccounts};
+use crate::accounts::{BackendAccountBmc, LibredfishAccounts, client_creation_error};
+use crate::convert::platform_error;
 
 /// Connects to BMCs with their stored credentials on the configured backend.
 #[derive(Clone)]
@@ -55,18 +58,18 @@ impl BmcConnector {
     }
 
     /// The drivers when the site configured them, otherwise libredfish using
-    /// `routed` for stored-credential traffic and the sealed direct pool
-    /// `direct` for explicit credentials that must bypass `nico-bmc-proxy`.
+    /// `routed` for stored-credential traffic and `direct` for explicit
+    /// credentials that must bypass `nico-bmc-proxy`.
     pub fn new_with_direct(
         routed: Arc<dyn RedfishClientPool>,
-        direct: Arc<dyn BmcCredentialOps>,
+        direct: DirectRedfishPool,
         drivers: Option<Arc<DriverConnector>>,
     ) -> Self {
         match drivers {
             Some(drivers) => Self::Drivers(drivers),
             None => Self::LibredfishSplit {
                 routed,
-                direct: direct as Arc<dyn RedfishClientPool>,
+                direct: direct.pool(),
             },
         }
     }
@@ -140,8 +143,9 @@ impl BmcConnector {
     }
 
     /// Connects to an explored BMC at `access` with explicit `credentials` for
-    /// account operations, always bypassing `nico-bmc-proxy` and selecting
-    /// drivers from `report`.
+    /// account operations through the direct pool, selecting drivers from
+    /// `report`. Libredfish uses the pool this connector was given: `direct`
+    /// for [`Self::new_with_direct`], or the only pool otherwise.
     pub async fn connect_with_credentials(
         &self,
         access: &BmcAccessInfo,
@@ -163,8 +167,9 @@ impl BmcConnector {
     }
 
     /// Connects to an unexplored BMC at `access` with explicit `credentials`
-    /// for pre-exploration account operations (such as initial factory
-    /// takeover), always bypassing `nico-bmc-proxy`.
+    /// to change its password, through the same pool as
+    /// [`Self::connect_with_credentials`]. The drivers are selected from its
+    /// live service root.
     pub async fn connect_unexplored_with_credentials(
         &self,
         access: &BmcAccessInfo,
@@ -181,6 +186,32 @@ impl BmcConnector {
                 .await
                 .map(|bmc| BackendAccountBmc::Drivers(Box::new(bmc)))
                 .map_err(BmcConnectError::Drivers),
+        }
+    }
+
+    /// Reads the service root of the BMC at `address` with no credentials,
+    /// through the same pool as [`Self::connect_with_credentials`]: a
+    /// readiness probe that spends no login attempt, so it works against a BMC
+    /// still on its factory password.
+    pub async fn anonymous_service_root(&self, address: SocketAddr) -> Result<(), PlatformError> {
+        match self {
+            Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
+                let client = pool
+                    .create_client(
+                        &address.ip().to_string(),
+                        Some(address.port()),
+                        RedfishAuth::Anonymous,
+                        Some(RedfishVendor::Unknown),
+                    )
+                    .await
+                    .map_err(client_creation_error)?;
+                client
+                    .get_service_root()
+                    .await
+                    .map(drop)
+                    .map_err(platform_error)
+            }
+            Self::Drivers(drivers) => drivers.anonymous_service_root(address).await.map(drop),
         }
     }
 

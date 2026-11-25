@@ -14,12 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+mod host_serial;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use carbide_hw_identification::bluefield_bmc::{self, is_dpu_product_chassis_id};
+use carbide_hw_identification::host_serial::is_compute_tray_assembly;
 use carbide_network::BaseMac;
 use carbide_utils::arch::CpuArchitecture;
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -1234,7 +1238,7 @@ impl EndpointExplorationReport {
 
     /// Return `true` if the explored endpoint is a DPU
     pub fn is_dpu(&self) -> bool {
-        self.identify_dpu().is_some()
+        self.primary_system().is_some_and(is_bluefield_system)
     }
 
     /// Return `true` if the explored endpoint is a PowerShelf.
@@ -1265,27 +1269,17 @@ impl EndpointExplorationReport {
     /// Return `DpuModel` if the explored endpoint is a DPU.
     /// Return `Unknown` if no DPU generation is recognized or recognized generations conflict.
     pub fn identify_dpu(&self) -> Option<DpuModel> {
-        if !self
-            .systems
-            .first()
-            .map(is_bluefield_system)
-            .unwrap_or(false)
-        {
-            return None;
-        }
-
-        let mut models = self
-            .chassis
-            .iter()
-            .filter(|chassis| is_dpu_product_chassis_id(&chassis.id))
-            .filter_map(chassis_model)
-            .map(DpuModel::from)
-            .filter(|model| *model != DpuModel::Unknown);
-        let model = models.next().unwrap_or(DpuModel::Unknown);
-        Some(if models.all(|other| other == model) {
-            model
-        } else {
-            DpuModel::Unknown
+        self.is_dpu().then(|| {
+            bluefield_bmc::identify_generation(
+                self.service_root
+                    .as_ref()
+                    .and_then(|root| root.product.as_deref()),
+                self.chassis
+                    .iter()
+                    .filter_map(|chassis| Some((chassis.id.as_str(), chassis.model.as_deref()?))),
+            )
+            .map(DpuModel::from_generation)
+            .unwrap_or(DpuModel::Unknown)
         })
     }
 
@@ -1397,7 +1391,7 @@ impl EndpointExplorationReport {
     /// enough data for generation is available
     pub fn generate_power_shelf_id(&mut self) -> ModelResult<Option<&PowerShelfId>> {
         let chassis = self.chassis.first().unwrap();
-        let serial_number = chassis.serial_number.as_deref().unwrap_or_default();
+        let serial_number = chassis.inventory_serial_number().unwrap_or_default();
         let manufacturer = chassis.manufacturer.as_deref().unwrap_or_default();
         let model = chassis.model.as_deref().unwrap_or_default();
 
@@ -1430,7 +1424,7 @@ impl EndpointExplorationReport {
     /// chassis selection fall through to a subsystem that reports a real serial.
     fn is_switch_chassis_valid(chassis: &Chassis) -> bool {
         matches!(
-            chassis.serial_number.as_deref().map(str::trim),
+            chassis.inventory_serial_number(),
             Some(serial) if !serial.is_empty() && serial != "NA"
         )
     }
@@ -1465,7 +1459,7 @@ impl EndpointExplorationReport {
             HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
         ))?;
 
-        let serial_number = chassis.serial_number.as_deref();
+        let serial_number = chassis.inventory_serial_number();
         let manufacturer = chassis.manufacturer.as_deref().unwrap_or("NVIDIA");
         let model = "Switch";
 
@@ -1993,14 +1987,14 @@ where
 }
 
 impl ComputerSystem {
-    pub fn check_serial_number(&self, expected_serial_number: &String) -> bool {
+    pub fn check_serial_number(&self, expected_serial_number: &str) -> bool {
         match self.serial_number {
             Some(ref serial_number) => serial_number == expected_serial_number,
             None => false,
         }
     }
 
-    pub fn check_sku(&self, expected_sku: &String) -> bool {
+    pub fn check_sku(&self, expected_sku: &str) -> bool {
         match self.sku {
             Some(ref sku) => sku == expected_sku,
             None => false,
@@ -2093,6 +2087,23 @@ impl FromStr for UefiDevicePath {
     }
 }
 
+/// Inventory fields from one member of a Redfish chassis Assembly.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChassisAssembly {
+    /// Redfish member ID within this chassis's Assembly.
+    pub member_id: String,
+    /// Name of the FRU as reported by the BMC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Model of this assembly member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Serial number reported on this member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+}
+
 /// `Chassis` definition. Matches redfish definition
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -2101,7 +2112,11 @@ pub struct Chassis {
     pub manufacturer: Option<String>,
     pub model: Option<String>,
     pub part_number: Option<String>,
+    /// SerialNumber on the chassis resource. Older reports may contain the compute-tray serial here.
     pub serial_number: Option<String>,
+    /// Assembly members collected for this chassis, in BMC order. Absent in older reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assemblies: Vec<ChassisAssembly>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_adapters: Vec<NetworkAdapter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2112,6 +2127,20 @@ pub struct Chassis {
     pub topology_id: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<i32>,
+}
+
+impl Chassis {
+    /// Serial used for inventory matching and the RPC view. For reports without
+    /// assembly inventory, the saved chassis serial already provides the fallback.
+    pub fn inventory_serial_number(&self) -> Option<&str> {
+        self.assemblies
+            .iter()
+            .find(|assembly| is_compute_tray_assembly(&self.id, assembly.model.as_deref()))
+            .and_then(|assembly| assembly.serial_number.as_deref())
+            .map(str::trim)
+            .none_if_empty()
+            .or_else(|| self.serial_number.as_deref().map(str::trim))
+    }
 }
 
 /// `NetworkAdapter` definition. Matches redfish definition
@@ -2339,25 +2368,9 @@ pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
         || normalized_part_number.starts_with("900-9d4a4")
 }
 
-/// Whether a DPU BMC chassis member can carry the card product identity
-/// (part/model/serial).
-///
-/// Older Redfish reports publish this identity on `Card1`; newer BF4 firmware may
-/// instead publish it on the integrated BMC chassis (`Bluefield_BMC` or
-/// `BlueField_BMC_0`). Reports can contain several of these chassis, including
-/// placeholders or BMC component models. Model identification requires the
-/// recognized DPU generations to agree.
-fn is_dpu_product_chassis_id(id: &str) -> bool {
-    matches!(id, "Card1" | "Bluefield_BMC" | "BlueField_BMC_0")
-}
-
-/// Whether a Redfish ComputerSystem id identifies a BlueField DPU system.
-///
-/// Firmware is inconsistent: older dumps expose `/redfish/v1/Systems/Bluefield`
-/// while newer BF4 firmware exposes `/redfish/v1/Systems/BlueField_0`. Accept
-/// both so DPU detection is not silently skipped.
+/// Whether the Redfish ComputerSystem identifies a BlueField endpoint.
 pub fn is_bluefield_system(system: &ComputerSystem) -> bool {
-    matches!(system.id.as_str(), "Bluefield" | "BlueField_0")
+    bluefield_bmc::is_bluefield_system_id(&system.id)
 }
 
 fn chassis_part_number(chassis: &Chassis) -> Option<&str> {
@@ -2811,7 +2824,7 @@ mod explored_mlx_device_tests {
         bmc_chassis.serial_number = Some(SERIAL.to_string());
         bmc_chassis.model = Some("B4240".to_string());
 
-        assert_eq!(report.identify_dpu(), Some(DpuModel::Unknown));
+        assert_eq!(report.identify_dpu(), Some(DpuModel::BlueField4));
         assert_eq!(report.machine_id_serial_number(), Some(SERIAL));
         assert_eq!(report.dpu_pairing_serial_number(), Some(SERIAL));
     }
@@ -3476,8 +3489,12 @@ mod tests {
     #[test]
     fn identify_dpu_recognizes_bluefield_model_variants() {
         value_scenarios!(
-            run = |(system_id, model)| {
+            run = |(system_id, root_product, model): (&str, Option<&str>, &str)| {
                 let report = EndpointExplorationReport {
+                    service_root: root_product.map(|product| ServiceRoot {
+                        product: Some(product.into()),
+                        ..Default::default()
+                    }),
                     systems: vec![ComputerSystem {
                         id: system_id.to_string(),
                         ..Default::default()
@@ -3496,11 +3513,13 @@ mod tests {
                 identified
             };
             "BlueField model identification" {
-                ("Bluefield", "NVIDIA BlueField 2 DPU") => Some(DpuModel::BlueField2),
-                ("Bluefield", "NVIDIA BlueField 3 DPU") => Some(DpuModel::BlueField3),
-                ("Bluefield", "BlueField-3 DPU") => Some(DpuModel::BlueField3),
-                ("Bluefield", "unrecognized DPU") => Some(DpuModel::Unknown),
-                ("System", "BlueField-3 DPU") => None,
+                ("Bluefield", None, "NVIDIA BlueField 2 DPU") => Some(DpuModel::BlueField2),
+                ("Bluefield", None, "NVIDIA BlueField 3 DPU") => Some(DpuModel::BlueField3),
+                ("Bluefield", None, "BlueField-3 DPU") => Some(DpuModel::BlueField3),
+                ("Bluefield", None, "unrecognized DPU") => Some(DpuModel::Unknown),
+                ("BlueField_0", Some("B4240V"), "N/A") => Some(DpuModel::BlueField4),
+                ("Bluefield", Some("B4240"), "BlueField-3 DPU") => Some(DpuModel::Unknown),
+                ("System", Some("BlueField-4"), "BlueField-3 DPU") => None,
             }
         );
     }
@@ -4908,6 +4927,7 @@ mod tests {
                 model: None,
                 serial_number: Some("MT2242XZ00NX".to_string()),
                 part_number: None,
+                assemblies: Vec::new(),
                 network_adapters: vec![],
                 physical_slot_number: None,
                 compute_tray_index: None,
@@ -5138,6 +5158,7 @@ mod tests {
                 model: None,
                 serial_number: Some("MT2242XZ00NX".to_string()),
                 part_number: None,
+                assemblies: Vec::new(),
                 network_adapters: vec![],
                 physical_slot_number: None,
                 compute_tray_index: None,

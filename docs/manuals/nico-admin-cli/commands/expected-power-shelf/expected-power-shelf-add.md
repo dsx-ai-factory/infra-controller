@@ -14,7 +14,7 @@ nico-admin-cli expected-power-shelf add
 <-p|--bmc-password> <-s|--shelf-serial-number>
 [--meta-name] [--meta-description] [--label]
 [--host_name] [--rack_id] [--bmc-ip-address]
-[--bmc-retain-credentials] [--extended] [--sort-by]
+[--extended] [--bmc-retain-credentials] [--sort-by]
 [-h|--help]
 ```
 
@@ -69,6 +69,14 @@ Rack ID for this machine
 BMC IP address of the power shelf. Must not be unspecified, multicast,
 or IPv4 limited broadcast, including the IPv4-mapped IPv6 form of each
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
 When true, site-explorer skips BMC password rotation and stores
@@ -79,14 +87,6 @@ factory-default credentials in Vault as-is
 > - true
 >
 > - false
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

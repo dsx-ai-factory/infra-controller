@@ -26,6 +26,7 @@ bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-credential-rotation = { path = "../credential-rotation" }
 carbide-firmware = { path = "../firmware" }
 carbide-health-report = { path = "../health-report" }
 carbide-hw-identification = { path = "../hw-identification" }
@@ -54,9 +55,12 @@ http = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
 nv-redfish = { workspace = true, features = [
+  "accounts",
   "computer-systems",
   "managers",
+  "oem-nvidia",
   "secure-boot",
+  "update-service",
 ] }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }

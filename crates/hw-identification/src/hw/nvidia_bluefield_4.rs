@@ -17,10 +17,14 @@
 
 //! NVIDIA BlueField-4.
 
-use crate::pattern::{Pattern, prefix};
+use crate::pattern::{Pattern, exact, prefix};
 
 /// Part-number prefixes for the BlueField-4 B4240 and B4240V DPUs.
 pub const DPU_PART_NUMBERS: &[Pattern] = &[
     prefix("900-9D4B4"), // B4240
     prefix("900-9D4A4"), // B4240V
 ];
+
+/// BF4 Redfish ServiceRoot.Product and product Chassis.Model values.
+/// The board names occur on earlier firmware (#3044, #3053), and BF4 26.04 also reports "BlueField-4".
+pub const BMC_MODEL_NAMES: &[Pattern] = &[exact("B4240"), exact("B4240V"), exact("BlueField-4")];

@@ -12,10 +12,9 @@ use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use config_version::{ConfigVersion, Versioned};
 use model::machine::ManagedHostState;
-use model::nvlink_domain::{NvLinkDomainMember, NvLinkDomainMemberType};
+use model::nvlink_domain::{NvLinkDomain, NvLinkDomainMember, NvLinkDomainMemberType};
 use model::switch::SwitchControllerState;
 use sqlx::types::Json;
-use uuid::Uuid;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
@@ -183,18 +182,11 @@ where
 /// Each device type is read in one batch through the supplied reader.
 pub async fn resolve_domain_members<DB>(
     db: &mut DB,
-    domain_id: Uuid,
+    domain: &NvLinkDomain,
 ) -> DatabaseResult<Vec<ResolvedNvLinkDomainMember>>
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let domain = super::find_by_ids(&mut *db, &[domain_id])
-        .await?
-        .pop()
-        .ok_or_else(|| DatabaseError::NotFoundError {
-            kind: "nvlink_domain",
-            id: domain_id.to_string(),
-        })?;
     let group = crate::expected_rack_group::find_by_rack_group_id(&mut *db, &domain.rack_group_id)
         .await?
         .ok_or_else(|| DatabaseError::NotFoundError {
@@ -203,19 +195,19 @@ where
         })?;
     let mut members = domain
         .members
-        .into_iter()
+        .iter()
         .map(|member| {
             let rack = usize::try_from(member.rack_index)
                 .ok()
                 .and_then(|index| group.racks.get(index))
                 .ok_or_else(|| {
                     DatabaseError::FailedPrecondition(format!(
-                        "domain {domain_id} rack index {} is outside rack group {}",
-                        member.rack_index, group.rack_group_id
+                        "domain {} rack index {} is outside rack group {}",
+                        domain.id, member.rack_index, group.rack_group_id
                     ))
                 })?;
             Ok(ResolvedNvLinkDomainMember {
-                member,
+                member: member.clone(),
                 rack_id: rack.rack_id.clone(),
                 tray: None,
             })

@@ -36,7 +36,7 @@ use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::libredfish::{DirectRedfishPool, RedfishClientPool};
 use carbide_redfish::nv_redfish::RedfishBmc;
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::SecretsError;
@@ -104,11 +104,8 @@ pub struct Api {
     /// Ordinary BMC Redfish traffic: nico-bmc-proxy when `[bmc_proxy]` is
     /// enabled, the direct pool otherwise.
     pub(crate) redfish_pool: Arc<dyn RedfishClientPool>,
-    /// Credential-lifecycle operations (password set/rotate/clear, candidate
-    /// validation). A sealed trait implemented only by the direct pool, so
-    /// handing these to a wrapper pool is a compile error (a wrong-pool
-    /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
-    pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// Reaches BMCs without nico-bmc-proxy, for work with explicit credentials.
+    pub(crate) direct_redfish_pool: DirectRedfishPool,
     /// Connects moved BMC operations through their drivers when the site
     /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
     pub(crate) driver_connector: Option<Arc<DriverConnector>>,
@@ -167,7 +164,7 @@ fn _validate_api_auto_traits(api: &Api) {
         credential_manager,
         certificate_provider,
         redfish_pool,
-        bmc_credential_ops,
+        direct_redfish_pool,
         driver_connector,
         bmc_proxy_passthrough,
         bmc_session_manager,
@@ -202,7 +199,7 @@ fn _validate_api_auto_traits(api: &Api) {
     assert_send_sync(credential_manager);
     assert_send_sync(certificate_provider);
     assert_send_sync(redfish_pool);
-    assert_send_sync(bmc_credential_ops);
+    assert_send_sync(direct_redfish_pool);
     assert_send_sync(driver_connector);
     assert_send_sync(bmc_proxy_passthrough);
     assert_send_sync(bmc_session_manager);

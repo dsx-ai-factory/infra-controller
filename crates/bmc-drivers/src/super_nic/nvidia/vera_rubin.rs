@@ -91,10 +91,11 @@ impl<B: Bmc> SuperNic<B> for VeraRubinSuperNic {
         cx: &OpCx<'_, B>,
         index: u8,
     ) -> Result<Option<String>, PlatformError> {
-        let interface_id = host_interface_id(index);
         let missing = |what: String| PlatformError::InvalidResponse {
             message: format!("SuperNIC {index}: {what}"),
         };
+        let interface_id = host_interface_id(index)
+            .ok_or_else(|| missing("no known cage for this index".to_string()))?;
         let interfaces = cx
             .system()
             .await?
@@ -113,10 +114,14 @@ impl<B: Bmc> SuperNic<B> for VeraRubinSuperNic {
     }
 }
 
-/// SuperNIC `index`'s host Ethernet interface on the system: NICs pair onto
-/// cages 1, 3, 5 and 7, one per MPO, as `NIC_0_C<cage>_<mpo>`.
-fn host_interface_id(index: u8) -> String {
-    format!("NIC_0_C{}_{}", (index / 2) * 2 + 1, index % 2 + 1)
+/// SuperNIC `index`'s host Ethernet interface on the system,
+/// `NIC_0_C<cage>_<mpo>`. NICs pair onto cages, one per MPO: CX-0 and CX-1 on
+/// cage 1, CX-2 and CX-3 on cage 3, CX-4 and CX-5 on cage 7, and CX-6 and CX-7
+/// on cage 5.
+fn host_interface_id(index: u8) -> Option<String> {
+    const CAGES: [u8; 4] = [1, 3, 7, 5];
+    let cage = CAGES.get(usize::from(index / 2))?;
+    Some(format!("NIC_0_C{cage}_{}", index % 2 + 1))
 }
 
 #[cfg(test)]
@@ -208,6 +213,27 @@ mod tests {
         assert_eq!(
             body(&writes[0]),
             json!({"Oem": {"Nvidia": {"EastWestControlEnabled": true}}})
+        );
+    }
+
+    /// CX-4/CX-5 sit on cage 7 and CX-6/CX-7 on cage 5, not in cage order.
+    #[test]
+    fn host_interfaces_follow_the_cage_wiring() {
+        let ids: Vec<_> = (0..9).map(host_interface_id).collect();
+        assert_eq!(
+            ids,
+            [
+                Some("NIC_0_C1_1"),
+                Some("NIC_0_C1_2"),
+                Some("NIC_0_C3_1"),
+                Some("NIC_0_C3_2"),
+                Some("NIC_0_C7_1"),
+                Some("NIC_0_C7_2"),
+                Some("NIC_0_C5_1"),
+                Some("NIC_0_C5_2"),
+                None,
+            ]
+            .map(|id| id.map(str::to_string))
         );
     }
 

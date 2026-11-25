@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use arc_swap::ArcSwap;
 use carbide_hw_identification::host_bluefield::HostBlueFieldRules;
+use carbide_hw_identification::host_serial::HostSerialRules;
 use carbide_utils::HostPortPair;
 use carbide_utils::config::{
     as_duration, as_std_duration, deserialize_arc_atomic_bool, serialize_arc_atomic_bool,
@@ -245,6 +246,10 @@ pub struct SiteExplorerConfig {
     )]
     pub host_bluefield_rules: HostBlueFieldRules,
 
+    /// Ordered host serial sources for ExpectedMachine audits, ahead of built-in rules.
+    #[serde(default, skip_serializing_if = "HostSerialRules::uses_only_defaults")]
+    pub host_serial_rules: HostSerialRules,
+
     /// Site-wide host DPU policy. Per-host `Nic` and `Ignore` policies
     /// override it; per-host `Manage` inherits it for backward compatibility.
     /// `None` falls back to [`HostDpuPolicy::Manage`].
@@ -321,6 +326,7 @@ impl Default for SiteExplorerConfig {
             switches_created_per_run: Self::default_switches_created_per_run(),
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
             host_bluefield_rules: HostBlueFieldRules::default(),
+            host_serial_rules: HostSerialRules::default(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             deprecated_explore_mode: None,
@@ -358,6 +364,7 @@ impl PartialEq for SiteExplorerConfig {
             create_switches,
             switches_created_per_run,
             host_bluefield_rules,
+            host_serial_rules,
             dpu_policy,
             deprecated_force_dpu_nic_mode,
             deprecated_explore_mode,
@@ -398,6 +405,7 @@ impl PartialEq for SiteExplorerConfig {
                 == other.create_switches.load(AtomicOrdering::Relaxed)
             && *switches_created_per_run == other.switches_created_per_run
             && *host_bluefield_rules == other.host_bluefield_rules
+            && *host_serial_rules == other.host_serial_rules
             && *dpu_policy == other.dpu_policy
             && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
             && *deprecated_explore_mode == other.deprecated_explore_mode

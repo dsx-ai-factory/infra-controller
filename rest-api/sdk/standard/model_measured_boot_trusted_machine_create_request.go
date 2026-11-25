@@ -26,7 +26,7 @@ var _ MappedNullable = &MeasuredBootTrustedMachineCreateRequest{}
 type MeasuredBootTrustedMachineCreateRequest struct {
 	// ID of the Site where the approval applies.
 	SiteId string `json:"siteId"`
-	// Machine UUID, or `*` to approve all Machines at the Site.
+	// Machine ID, or `*` to approve all Machines at the Site.
 	MachineId string `json:"machineId"`
 	// Whether the approval is consumed once or persists for future reports.
 	ApprovalType string `json:"approvalType"`

@@ -48,7 +48,6 @@ rustls = { version = "0.23.46", features = ["aws_lc_rs"] }
 rustls-pki-types = "1.10.0"
 sqlx = { version = "0.9" }
 sqlx-core = { version = "0.9" }
-sqlx-macros-core = { version = "0.9" }
 
 opentelemetry = { version = "0.32.0", features = ["logs"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["logs", "rt-tokio"] }

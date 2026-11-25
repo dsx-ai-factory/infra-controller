@@ -15,11 +15,12 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use carbide_redfish::libredfish::RedfishClientPool as _;
 use carbide_redfish::libredfish::test_support::{RedfishSimAction, RedfishSimPlatformAction};
-use carbide_secrets::credentials::{CredentialKey, Credentials};
+use carbide_secrets::credentials::{CredentialKey, CredentialWriter as _, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, ManagedHostConfigExt as _,
@@ -251,16 +252,20 @@ async fn dpu_init_power_cycle_and_uefi_restart_wait_for_observations(
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.host.id.into()).await?;
     txn.commit().await?;
     mh.report_dpu_network_status().await;
-    env.redfish_sim
-        .seed_credential(
+    env.credential_manager
+        .set_credentials(
             &CredentialKey::dpu_uefi_site_default(0),
             &Credentials::UsernamePassword {
                 username: String::new(),
                 password: "uefi-v0".to_string(),
             },
         )
-        .await;
-    env.redfish_sim.set_uefi_setup_job_id(Some(String::new()));
+        .await
+        .expect("seed site DPU UEFI credential");
+    env.redfish_sim.set_bios_attributes(HashMap::from([(
+        "Attributes".to_string(),
+        serde_json::json!({ "CurrentUefiPassword": "" }),
+    )]));
     env.run_single_iteration().await;
     env.run_single_iteration().await;
     let waiting_for_uefi = dpu_init_state(DpuInitState::WaitingForUefiRestart);
@@ -348,7 +353,7 @@ async fn dpu_init_power_cycle_and_uefi_restart_wait_for_observations(
         env.redfish_sim
             .platform_actions()
             .iter()
-            .filter(|action| matches!(action, RedfishSimPlatformAction::UefiSetup { dpu: true }))
+            .filter(|action| matches!(action, RedfishSimPlatformAction::ChangeUefiPassword { .. }))
             .count(),
         mh.dpus.len()
     );

@@ -29,7 +29,7 @@
 //!   state, alongside stamping `machines.bios_password_set_time`).
 //! * `dpu_uefi` -- when the DPU UEFI password is set on the device, at the
 //!   machine-controller `DpuInitState::WaitingForPlatformConfiguration` state
-//!   right after `uefi_setup(dpu = true)` succeeds (keyed by the DPU BMC MAC,
+//!   right after the password is staged on the DPU (keyed by the DPU BMC MAC,
 //!   mirroring the backfill).
 //! * `lockdown_ikm` -- staged as a two-phase rotation keyed by the card (NIC)
 //!   MAC, so the recorded convergence version is always the one the hardware was

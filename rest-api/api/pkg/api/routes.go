@@ -498,6 +498,32 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteSpectrumXPartitionHandler(dbSession, scp, cfg),
 		},
+		// DhcpOptionSet endpoints
+		{
+			Path:    apiPathPrefix + "/dhcp-option-set",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateDhcpOptionSetHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/dhcp-option-set",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllDhcpOptionSetHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/dhcp-option-set/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetDhcpOptionSetHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/dhcp-option-set/:id",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateDhcpOptionSetHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/dhcp-option-set/:id",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteDhcpOptionSetHandler(dbSession, scp, cfg),
+		},
 		// NVLinkLogicalPartition endpoints
 		{
 			Path:    apiPathPrefix + "/nvlink-logical-partition",

@@ -8847,7 +8847,7 @@ mqtt_endpoint = "mqtt.forge"
                 dpa_config.astra.underlay_ip_rail_id_bit_len,
                 dpa_config.astra.underlay_ip_software_plane_id_bit_len,
             ),
-            (16, 13, 4, 8)
+            (16, 13, 3, 2)
         );
     }
 

@@ -13,9 +13,9 @@ case
 nico-admin-cli machine-validation tests update <--test-id>
 <--version> [--contexts] [--img-name]
 [--execute-in-host] [--container-arg] [--description]
-[--command] [--args] [--extra-err-file]
-[--extra-output-file] [--external-config-file]
-[--pre-condition] [--extended] [--timeout]
+[--command] [--args] [--extended]
+[--extra-err-file] [--extra-output-file]
+[--external-config-file] [--pre-condition] [--timeout]
 [--supported-platforms] [--custom-tags] [--components]
 [--is-enabled] [--sort-by] [-h|--help]
 ```
@@ -68,6 +68,14 @@ Command
 
 Command args
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--extra-err-file <EXTRA_ERR_FILE>`
 
 Command output error file
@@ -83,14 +91,6 @@ External file
 `--pre-condition <PRE_CONDITION>`
 
 Pre condition
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--timeout <TIMEOUT>`
 

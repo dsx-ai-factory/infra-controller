@@ -61,7 +61,7 @@ use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_secrets::credentials::{
     CompositeCredentialManager, CredentialKey, CredentialManager, CredentialReader, CredentialType,
-    Credentials,
+    CredentialWriter as _, Credentials,
 };
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_secrets::{ChainedCredentialReader, CredentialSnapshot, UsernamePassword};
@@ -373,7 +373,6 @@ impl TestEnv {
             db_reader: self.pool.clone().into(),
             redfish_client_pool: self.redfish_sim.clone(),
             bmc_connector: BmcConnector::Libredfish(self.redfish_sim.clone()),
-            bmc_credential_ops: self.redfish_sim.clone(),
             ipmi_tool: self.ipmi_tool.clone(),
             site_config: self.config.machine_state_handler_site_config().into(),
             component_manager: self.test_component_manager.clone(),
@@ -388,6 +387,7 @@ impl TestEnv {
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
             dpf_per_dpu_bmc_credentials: false,
+            dpf_rotation_locks: Some(self.api.work_lock_manager_handle.clone()),
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -1362,11 +1362,9 @@ async fn create_test_env_with_overrides_inner(
 
     // Seed the site-wide host and DPU UEFI site-default credentials (version 0).
     // These are written during site setup in production; tests don't run that.
-    // UEFI setup resolves and reads the site-wide credential in the controller
-    // (`read_site_uefi_credentials`) through `redfish_client_pool`'s reader --
-    // which in tests is the `RedfishSim`'s own store -- before calling the
-    // (mocked) `uefi_setup`, so a missing credential surfaces as a hard error.
-    // Seed centrally so every machine-driving test has them regardless of fixture.
+    // UEFI setup reads the site-wide credential through the credential manager,
+    // so a missing credential surfaces as a hard error. Seed centrally so every
+    // machine-driving test has them regardless of fixture.
     for key in [
         CredentialKey::HostUefi {
             credential_type: CredentialType::SiteDefault,
@@ -1375,15 +1373,16 @@ async fn create_test_env_with_overrides_inner(
             credential_type: CredentialType::SiteDefault,
         },
     ] {
-        redfish_sim
-            .seed_credential(
+        credential_manager
+            .set_credentials(
                 &key,
                 &Credentials::UsernamePassword {
                     username: "".to_string(),
                     password: "notforprod".to_string(),
                 },
             )
-            .await;
+            .await
+            .expect("seed site UEFI credential");
     }
 
     let nvlink_for_nmxc_sim = overrides
@@ -1711,7 +1710,6 @@ async fn create_test_env_with_overrides_inner(
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: redfish_sim.clone(),
                 bmc_connector: BmcConnector::Libredfish(redfish_sim.clone()),
-                bmc_credential_ops: redfish_sim.clone(),
                 ipmi_tool: ipmi_tool.clone(),
                 site_config: config.machine_state_handler_site_config().into(),
                 component_manager: test_component_manager.clone(),
@@ -1726,6 +1724,7 @@ async fn create_test_env_with_overrides_inner(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
                 dpf_per_dpu_bmc_credentials: false,
+                dpf_rotation_locks: Some(api.work_lock_manager_handle.clone()),
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -1951,6 +1950,7 @@ async fn create_test_env_with_overrides_inner(
             switches_created_per_run: 1,
             rotate_switch_nvos_credentials: Arc::new(false.into()),
             host_bluefield_rules: Default::default(),
+            host_serial_rules: Default::default(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             deprecated_explore_mode: None,

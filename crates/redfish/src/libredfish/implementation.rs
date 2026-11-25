@@ -231,11 +231,6 @@ impl RedfishClientPool for RedfishClientPoolImpl {
     }
 }
 
-impl super::sealed::Sealed for RedfishClientPoolImpl {}
-
-#[async_trait]
-impl super::BmcCredentialOps for RedfishClientPoolImpl {}
-
 /// A [`RedfishClientPool`] whose every client targets nico-bmc-proxy instead
 /// of the BMC itself.
 ///
@@ -247,10 +242,9 @@ impl super::BmcCredentialOps for RedfishClientPoolImpl {}
 /// mean the caller is doing credential-subject work, which must never route
 /// through the proxy, whose header stripping would silently discard them.
 ///
-/// This pool deliberately implements only [`RedfishClientPool`], never
-/// [`super::BmcCredentialOps`] (which is sealed): handing it
-/// credential-lifecycle work is a compile error, so the `Direct` rejection
-/// above is the only credential path left to guard at runtime.
+/// This pool is never a [`super::DirectRedfishPool`], so code that takes that
+/// type cannot be handed it. A `BmcConnector` built from it can still attempt
+/// explicit-credential work, which the `Direct` rejection above refuses.
 pub(super) struct ProxiedRedfishClientPoolImpl {
     instrumentation: carbide_instrument::Instrumentation,
     pool: libredfish::RedfishClientPool,

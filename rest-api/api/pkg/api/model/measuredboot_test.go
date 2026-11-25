@@ -15,30 +15,75 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-func TestMeasuredBootTrustedMachineCreateRequest(t *testing.T) {
-	req := APIMeasuredBootTrustedMachineCreateRequest{
-		SiteID:       "00000000-0000-0000-0000-000000000001",
-		MachineID:    "*",
-		ApprovalType: MeasuredBootApprovalTypePersist,
-		PCRRegisters: "0,3,5,6",
-		Comments:     "trusted fleet",
+func TestAPIMeasuredBootTrustedMachineCreateRequest_Validate(t *testing.T) {
+	cases := []struct {
+		name         string
+		machineID    string
+		approvalType string
+		wantError    string
+	}{
+		{name: "Core machine ID", machineID: "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", approvalType: MeasuredBootApprovalTypePersist},
+		{name: "wildcard", machineID: "*", approvalType: MeasuredBootApprovalTypePersist},
+		{name: "malformed ID is validated by Core", machineID: "not-a-machine-id", approvalType: MeasuredBootApprovalTypePersist},
+		{name: "whitespace is validated by Core", machineID: " ", approvalType: MeasuredBootApprovalTypePersist},
+		{name: "missing machine ID", approvalType: MeasuredBootApprovalTypePersist, wantError: "machineId"},
+		{name: "invalid approval type", machineID: "*", approvalType: "Forever", wantError: "approvalType"},
 	}
-	require.NoError(t, req.Validate())
-
-	protoReq := req.ToProto()
-	assert.Equal(t, "*", protoReq.GetMachineId())
-	assert.Equal(t, corev1.MeasurementApprovedTypePb_Persist, protoReq.GetApprovalType())
-	assert.Equal(t, "0,3,5,6", protoReq.GetPcrRegisters())
-	assert.Equal(t, "trusted fleet", protoReq.GetComments())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := APIMeasuredBootTrustedMachineCreateRequest{
+				SiteID:    "00000000-0000-0000-0000-000000000001",
+				MachineID: tc.machineID, ApprovalType: tc.approvalType,
+				PCRRegisters: "0,3,5,6", Comments: "trusted machine",
+			}
+			err := req.Validate()
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			protoReq := req.ToProto()
+			assert.Equal(t, tc.machineID, protoReq.GetMachineId())
+			assert.Equal(t, corev1.MeasurementApprovedTypePb_Persist, protoReq.GetApprovalType())
+			assert.Equal(t, "0,3,5,6", protoReq.GetPcrRegisters())
+			assert.Equal(t, "trusted machine", protoReq.GetComments())
+		})
+	}
 }
 
-func TestMeasuredBootTrustedMachineCreateRequestRejectsInvalidMachine(t *testing.T) {
-	req := APIMeasuredBootTrustedMachineCreateRequest{
-		SiteID:       "00000000-0000-0000-0000-000000000001",
-		MachineID:    "not-a-machine-id",
-		ApprovalType: MeasuredBootApprovalTypeOneshot,
+func TestAPIMeasuredBootTrustedMachineDeleteRequest_Validate(t *testing.T) {
+	cases := []struct {
+		name      string
+		selector  string
+		id        string
+		wantError string
+	}{
+		{name: "Core machine ID", selector: MeasuredBootTrustedMachineSelectorMachineID, id: "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"},
+		{name: "wildcard", selector: MeasuredBootTrustedMachineSelectorMachineID, id: "*"},
+		{name: "malformed ID is validated by Core", selector: MeasuredBootTrustedMachineSelectorMachineID, id: "not-a-machine-id"},
+		{name: "whitespace is validated by Core", selector: MeasuredBootTrustedMachineSelectorMachineID, id: " "},
+		{name: "missing machine ID", selector: MeasuredBootTrustedMachineSelectorMachineID, wantError: "ID"},
+		{name: "approval UUID", selector: MeasuredBootTrustedMachineSelectorApprovalID, id: "00000000-0000-0000-0000-000000000001"},
+		{name: "approval wildcard is invalid", selector: MeasuredBootTrustedMachineSelectorApprovalID, id: "*", wantError: "id"},
+		{name: "machine ID is not an approval UUID", selector: MeasuredBootTrustedMachineSelectorApprovalID, id: "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", wantError: "id"},
+		{name: "invalid selector", selector: "invalid", id: "*", wantError: "invalid selector"},
 	}
-	assert.ErrorContains(t, req.Validate(), "machineId")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := APIMeasuredBootTrustedMachineDeleteRequest{Selector: tc.selector, ID: tc.id}
+			err := req.Validate()
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			if tc.selector == MeasuredBootTrustedMachineSelectorApprovalID {
+				assert.Equal(t, tc.id, req.ToProto().GetApprovalId().GetValue())
+			} else {
+				assert.Equal(t, tc.id, req.ToProto().GetMachineId())
+			}
+		})
+	}
 }
 
 func TestMeasuredBootTrustedProfileCreateRequest(t *testing.T) {
@@ -56,27 +101,8 @@ func TestMeasuredBootTrustedProfileCreateRequest(t *testing.T) {
 	assert.Nil(t, protoReq.Comments)
 }
 
-func TestMeasuredBootCreateRequestRejectsInvalidApprovalType(t *testing.T) {
-	req := APIMeasuredBootTrustedMachineCreateRequest{
-		SiteID:       "00000000-0000-0000-0000-000000000001",
-		MachineID:    "00000000-0000-0000-0000-000000000002",
-		ApprovalType: "Forever",
-	}
-	assert.ErrorContains(t, req.Validate(), "approvalType")
-}
-
 func TestMeasuredBootDeleteRequestSelectors(t *testing.T) {
 	id := "00000000-0000-0000-0000-000000000001"
-
-	machineRequest := APIMeasuredBootTrustedMachineDeleteRequest{Selector: MeasuredBootTrustedMachineSelectorApprovalID, ID: id}
-	require.NoError(t, machineRequest.Validate())
-	machineByApproval := machineRequest.ToProto()
-	assert.Equal(t, id, machineByApproval.GetApprovalId().GetValue())
-
-	machineRequest = APIMeasuredBootTrustedMachineDeleteRequest{Selector: MeasuredBootTrustedMachineSelectorMachineID, ID: id}
-	require.NoError(t, machineRequest.Validate())
-	machineByMachine := machineRequest.ToProto()
-	assert.Equal(t, id, machineByMachine.GetMachineId())
 
 	profileRequest := APIMeasuredBootTrustedProfileDeleteRequest{Selector: MeasuredBootTrustedProfileSelectorApprovalID, ID: id}
 	require.NoError(t, profileRequest.Validate())
@@ -88,18 +114,9 @@ func TestMeasuredBootDeleteRequestSelectors(t *testing.T) {
 	profileByProfile := profileRequest.ToProto()
 	assert.Equal(t, id, profileByProfile.GetProfileId().GetValue())
 
-	machineRequest = APIMeasuredBootTrustedMachineDeleteRequest{Selector: MeasuredBootTrustedMachineSelectorMachineID, ID: "*"}
-	require.NoError(t, machineRequest.Validate())
-	assert.Equal(t, "*", machineRequest.ToProto().GetMachineId())
-
-	machineRequest = APIMeasuredBootTrustedMachineDeleteRequest{Selector: MeasuredBootTrustedMachineSelectorApprovalID, ID: "*"}
-	assert.Error(t, machineRequest.Validate())
-
 	profileRequest = APIMeasuredBootTrustedProfileDeleteRequest{Selector: MeasuredBootTrustedProfileSelectorProfileID, ID: "*"}
 	assert.Error(t, profileRequest.Validate())
 
-	machineRequest = APIMeasuredBootTrustedMachineDeleteRequest{Selector: "invalid", ID: id}
-	assert.ErrorContains(t, machineRequest.Validate(), "invalid selector")
 }
 
 func TestMeasuredBootResponsesFromProto(t *testing.T) {

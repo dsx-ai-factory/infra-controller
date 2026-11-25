@@ -14,8 +14,8 @@ nico-admin-cli expected-power-shelf update
 [-u|--bmc-username] [-p|--bmc-password]
 [-s|--shelf-serial-number] [--meta-name]
 [--meta-description] [--label] [--host_name]
-[--rack_id] [--bmc-ip-address]
-[--bmc-retain-credentials] [--extended] [--sort-by]
+[--extended] [--rack_id] [--bmc-ip-address]
+[--bmc-retain-credentials] [--sort-by]
 [-h|--help]
 ```
 
@@ -86,6 +86,14 @@ preserved. PATCH preserves omitted labels
 
 Unsupported for expected power shelf updates. Omit this option
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--rack_id <RACK_ID>`
 
 Rack ID for this power shelf
@@ -105,14 +113,6 @@ factory-default credentials in Vault as-is
 > - true
 >
 > - false
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

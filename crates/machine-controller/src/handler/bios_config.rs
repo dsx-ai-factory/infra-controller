@@ -18,13 +18,12 @@
 //! BIOS configuration: applying the platform settings, waiting for the BMC
 //! work they start, and PollingBiosSetup escalation.
 
-use bmc_backend::idrac_job;
+use bmc_backend::{BackendBmc, idrac_job};
 use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use chrono::Utc;
 use eyre::eyre;
-use libredfish::Redfish;
 use model::machine::{
     BiosConfigInfo, BiosConfigState, ManagedHostState, ManagedHostStateSnapshot,
     PowerState as ExpectedPowerState,
@@ -38,7 +37,7 @@ use super::{
 };
 use crate::config::MachineStateControllerConfig;
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
-use crate::platform_config::{self, PlatformBmc};
+use crate::platform_config;
 use crate::redfish::{power_state_name, reset_bmc};
 
 /// Outcome of configure_host_bios function.
@@ -103,13 +102,18 @@ fn bmc_unavailable(error: &PlatformError) -> bool {
 pub(super) async fn configure_host_bios(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     mh_snapshot: &ManagedHostStateSnapshot,
     boot_interface: Option<&BootInterfaceTarget>,
     retry_count: u32,
 ) -> Result<BiosConfigOutcome, StateHandlerError> {
-    let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
-    let applied = platform_config::apply(&bmc, &ctx.services.site_config, boot_interface).await;
+    let applied = platform_config::apply(
+        bmc,
+        &ctx.services.site_config,
+        boot_interface,
+        mh_snapshot.host_snapshot.associated_dpu_machine_ids().len(),
+    )
+    .await;
     let outcome = match applied {
         Err(e) if bmc_unavailable(&e) => {
             tracing::warn!(
@@ -181,7 +185,7 @@ pub(super) async fn configure_host_bios(
 /// Whether the platform settings are in effect on `mh_snapshot`'s host.
 pub(super) async fn platform_settings_in_effect(
     services: &MachineStateHandlerServices,
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<bool, StateHandlerError> {
     platform_config::in_effect(bmc, &services.site_config, boot_interface)
@@ -192,15 +196,14 @@ pub(super) async fn platform_settings_in_effect(
 /// Advance one step of the BIOS config job wait state machine.
 pub(super) async fn advance_bios_config_job(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     mh_snapshot: &ManagedHostStateSnapshot,
     info: BiosConfigInfo,
 ) -> Result<BiosConfigJobAdvanceOutcome, StateHandlerError> {
     let machine_controller_config = &ctx.services.site_config.machine_state_controller;
     match info.bios_config_state {
         BiosConfigState::WaitForBiosJobScheduled => {
-            let (job_id, job_status) =
-                read_bios_job(ctx.services, redfish_client, mh_snapshot, &info).await?;
+            let (job_id, job_status) = read_bios_job(bmc, mh_snapshot, &info).await?;
             let job_status = job_status.map_err(|e| platform_error("get_job_state", e))?;
             match job_status {
                 OperationStatus::Failed { .. } | OperationStatus::NeedsIntervention { .. } => {
@@ -250,8 +253,7 @@ pub(super) async fn advance_bios_config_job(
         }
         BiosConfigState::WaitForBiosJobCompletion => {
             const JOB_QUERY_WAIT_MINUTES: i64 = 5;
-            let (job_id, job_status) =
-                read_bios_job(ctx.services, redfish_client, mh_snapshot, &info).await?;
+            let (job_id, job_status) = read_bios_job(bmc, mh_snapshot, &info).await?;
             let job_status = match job_status {
                 Ok(status) => status,
                 Err(e) => {
@@ -412,8 +414,7 @@ fn try_bios_recovery_attempt(
 
 /// The job a job-polling substate waits for, and where it stands.
 async fn read_bios_job(
-    services: &MachineStateHandlerServices,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     mh_snapshot: &ManagedHostStateSnapshot,
     info: &BiosConfigInfo,
 ) -> Result<(VendorJobId, Result<OperationStatus, PlatformError>), StateHandlerError> {
@@ -428,33 +429,29 @@ async fn read_bios_job(
                 mh_snapshot.host_snapshot.id
             ))
         })?;
-    let status = vendor_job_status(services, redfish_client, mh_snapshot, &job_id).await?;
+    let status = vendor_job_status(bmc, &job_id).await;
     Ok((job_id, status))
 }
 
-/// What the BMC of `mh_snapshot`'s host reports of the vendor job `job_id`.
+/// What the host's BMC reports of the vendor job `job_id`.
 pub(super) async fn vendor_job_status(
-    services: &MachineStateHandlerServices,
-    redfish_client: &dyn Redfish,
-    mh_snapshot: &ManagedHostStateSnapshot,
+    bmc: &BackendBmc,
     job_id: &VendorJobId,
-) -> Result<Result<OperationStatus, PlatformError>, StateHandlerError> {
-    let bmc = PlatformBmc::connect(services, mh_snapshot, redfish_client).await?;
-    Ok(bmc.operation_status(&idrac_job(job_id.clone())).await)
+) -> Result<OperationStatus, PlatformError> {
+    bmc.operation_status(&idrac_job(job_id.clone())).await
 }
 
 pub(super) async fn advance_polling_bios_setup(
     services: &MachineStateHandlerServices,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     mh_snapshot: &ManagedHostStateSnapshot,
     retry_count: u32,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<PollingBiosSetupOutcome, StateHandlerError> {
     let machine_controller_config = &services.site_config.machine_state_controller;
     let stuck_for = mh_snapshot.host_snapshot.state.version.since_state_change();
-    let bmc = PlatformBmc::connect(services, mh_snapshot, redfish_client).await?;
 
-    match platform_config::in_effect(&bmc, &services.site_config, boot_interface).await {
+    match platform_config::in_effect(bmc, &services.site_config, boot_interface).await {
         Ok(true) => {
             tracing::info!("BIOS setup verified successfully");
             Ok(PollingBiosSetupOutcome::Verified)
@@ -524,11 +521,7 @@ pub(super) async fn handle_bios_setup_failed_recovery(
     let boot_interface =
         super::resolve_boot_interface_for_step(ctx, mh_snapshot, explicit_target).await?;
     let boot_interface = boot_interface.into_target();
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-    let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client.as_ref()).await?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
     match platform_config::in_effect(&bmc, &ctx.services.site_config, boot_interface.as_ref()).await
     {
         Ok(true) => {

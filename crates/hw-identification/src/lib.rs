@@ -17,6 +17,8 @@
 
 //! Hardware identification from BMC inventory reports.
 
+pub mod bluefield_bmc;
 pub mod host_bluefield;
+pub mod host_serial;
 pub mod hw;
 pub mod pattern;

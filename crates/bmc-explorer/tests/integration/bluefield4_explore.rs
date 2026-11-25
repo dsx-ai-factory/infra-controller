@@ -17,6 +17,7 @@
 use bmc_explorer::nv_generate_exploration_report;
 use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType, MachineInfo, test_support};
 use mac_address::MacAddress;
+use model::DpuModel;
 use model::site_explorer::EndpointType;
 use serde_json::json;
 use tokio::test;
@@ -40,6 +41,7 @@ async fn explore_bluefield4_and_generate_machine_id_from_system_serial() {
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
+    assert_eq!(report.identify_dpu(), Some(DpuModel::BlueField4));
 
     let system = report.systems.first().expect("systems must be present");
     assert_eq!(system.id, "BlueField_0");
@@ -116,6 +118,7 @@ async fn explore_b4240v_and_generate_machine_id() {
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
+    assert_eq!(report.identify_dpu(), Some(DpuModel::BlueField4));
     assert!(report.chassis.iter().any(|chassis| {
         chassis.id == "BlueField_0" && chassis.model.as_deref() == Some("B4240V")
     }));

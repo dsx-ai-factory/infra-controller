@@ -365,7 +365,7 @@ impl<R: DpuDeviceRepository, L> DpfSdk<R, L> {
                 if condition
                     .observed_generation
                     .zip(device.metadata.generation)
-                    .is_some_and(|(observed, generation)| observed < generation) =>
+                    .is_none_or(|(observed, generation)| observed != generation) =>
             {
                 BmcCredentialHealth::Pending
             }

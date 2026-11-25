@@ -421,6 +421,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _bmc_ip_address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
     }
@@ -429,6 +430,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         _username: &str,
         _password: &str,
         _role_id: RoleId,
@@ -440,6 +442,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         _username: &str,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
@@ -449,6 +452,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         _new_password: &str,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())

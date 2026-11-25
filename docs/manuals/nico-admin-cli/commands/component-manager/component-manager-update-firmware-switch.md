@@ -14,8 +14,8 @@ nico-admin-cli component-manager update-firmware switch
 [--bmc-username] [--bmc-password] [--nvos-username]
 [--nvos-password] [--switch-id] [--mac-address]
 [--target-version] [--sot-json-file] [--access-token]
-[--force-update] [--component]
-[--bypass-state-controller] [--extended] [--sort-by]
+[--extended] [--force-update] [--component]
+[--bypass-state-controller] [--sort-by]
 [-h|--help]
 ```
 
@@ -81,6 +81,14 @@ SOT JSON file for RMS ApplyFirmwareObject; exactly one of
 Artifact access token for RMS SOT JSON downloads; omit or pass empty for
 NOAUTH; only valid with --sot-json-file
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--force-update`
 
 Force firmware update when supported
@@ -104,14 +112,6 @@ components
 
 Bypass the state controller and dispatch directly to the component
 backend
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

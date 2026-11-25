@@ -18,7 +18,10 @@
 use bmc_drivers::CatalogError;
 use bmc_platform::{Bios, DriverOutcome, PlatformError};
 use bmc_runtime::BoundDriver;
-use carbide_redfish::libredfish::redact_passwords;
+use carbide_instrument::Instrumentation;
+use carbide_redfish::libredfish::{
+    emit_dpu_uefi_password_setup_skipped_if_needed, redact_passwords,
+};
 use carbide_redfish::nv_redfish::RedfishBmc;
 use libredfish::Redfish;
 
@@ -78,6 +81,38 @@ impl BackendBios<'_> {
                 .map(idrac_outcome)
                 .map_err(|err| platform_error(redact_passwords(err, &[current_password]))),
             Self::Drivers(bios) => bios.clear_uefi_password(current_password).await,
+        }
+    }
+
+    /// Whether a DPU's BIOS exposes a UEFI password, emitting the skip event
+    /// through `instrumentation` when it does not. The drivers decide by model
+    /// instead: BlueField-4 refuses [`Self::change_uefi_password`] as
+    /// `Unsupported`, and BlueField-3 always writes it.
+    pub async fn dpu_exposes_uefi_password(
+        &self,
+        instrumentation: &Instrumentation,
+    ) -> Result<bool, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                let attributes = client.bios().await.map_err(platform_error)?;
+                Ok(!emit_dpu_uefi_password_setup_skipped_if_needed(
+                    &attributes,
+                    instrumentation,
+                ))
+            }
+            Self::Drivers(_) => Ok(true),
+        }
+    }
+
+    /// See [`Bios::reset`].
+    pub async fn reset(&self) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => client
+                .reset_bios()
+                .await
+                .map(|()| DriverOutcome::complete())
+                .map_err(platform_error),
+            Self::Drivers(bios) => bios.reset().await,
         }
     }
 }

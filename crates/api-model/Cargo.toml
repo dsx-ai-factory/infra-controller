@@ -36,6 +36,7 @@ carbide-macros = { path = "../macros" }
 carbide-network = { path = "../network", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-health-report = { path = "../health-report" }
+carbide-hw-identification = { path = "../hw-identification" }
 carbide-instrument = { path = "../instrument" }
 carbide-ipxe-renderer = { path = "../ipxe-renderer" }
 carbide-utils = { path = "../utils" }

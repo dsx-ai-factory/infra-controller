@@ -47,7 +47,7 @@ use model::machine::{
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
 use model::site_explorer::{
-    BlueFieldOperatingMode, Chassis, ComponentIntegrityEntry, ComputerSystem,
+    BlueFieldOperatingMode, Chassis, ChassisAssembly, ComponentIntegrityEntry, ComputerSystem,
     EndpointExplorationError, EndpointExplorationReport, EndpointType, ExploredDpu,
     ExploredManagedHost, InitialBmcResetPhase, Inventory, NetworkAdapter, PowerState,
     PreingestionState, Service, UefiDevicePath,
@@ -3384,11 +3384,22 @@ async fn test_site_explorer_audit_exploration_results(
         7
     );
 
-    // Make a mock host for machines[4] to generate the report
-    // This serial is from the create_expected_machine.sql seed.
+    // Only the site-selected enclosure assembly carries the expected serial for machines[4].
     let machine_4_host = ManagedHostConfig::default()
-        .with_serial("VVG121GJ".to_string())
+        .with_serial("BOARD-4".to_string())
         .with_dpus(vec![DpuConfig::with_serial("dpu_serial1".to_string())]);
+    let mut host_report: EndpointExplorationReport = machine_4_host.clone().into();
+    host_report.chassis.push(Chassis {
+        id: "Enclosure".into(),
+        serial_number: Some("BOARD-4".into()),
+        assemblies: vec![ChassisAssembly {
+            member_id: "0".into(),
+            name: Some("Tray FRU".into()),
+            model: None,
+            serial_number: Some("VVG121GJ".into()),
+        }],
+        ..Default::default()
+    });
 
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
@@ -3416,6 +3427,10 @@ async fn test_site_explorer_audit_exploration_results(
         switches_created_per_run: 1,
         rotate_switch_nvos_credentials: Arc::new(false.into()),
         host_bluefield_rules: Default::default(),
+        host_serial_rules: serde_json::from_value(serde_json::json!([{
+            "id": "site-tray",
+            "source": {"kind": "chassis_assembly", "chassis_id": {"prefix": "encl"}, "name": {"exact": "Tray FRU"}}
+        }]))?,
         dpu_policy: None,
         deprecated_force_dpu_nic_mode: None,
         deprecated_explore_mode: None,
@@ -3513,10 +3528,7 @@ async fn test_site_explorer_audit_exploration_results(
                 ..Default::default()
             },
         ),
-        (
-            machines[4].ip.parse().unwrap(),
-            machine_4_host.clone().into(),
-        ),
+        (machines[4].ip.parse().unwrap(), host_report),
         (
             machines[5].ip.parse().unwrap(),
             EndpointExplorationReport {

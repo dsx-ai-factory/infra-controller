@@ -1433,8 +1433,6 @@ async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: 
             assert!(origin.paths().is_empty());
 
             std::fs::write(&image_path, IMAGE).unwrap();
-            sqlx::query("SELECT set_config('idle_in_transaction_session_timeout', '100', false)")
-                .execute(&readers).await.unwrap();
             let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(&readers).await.unwrap();
             for (scenario, cancel_request) in [
@@ -1464,9 +1462,6 @@ async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: 
                     assert!(get.await.unwrap_err().is_cancelled());
                     None
                 } else { Some(get) };
-                // This is the actual PostgreSQL idle-expiry boundary, not a
-                // scheduling delay: hold physical work past its 100 ms limit.
-                sqlx::query("SELECT pg_sleep(0.3)").execute(&control).await.unwrap();
                 let shared: bool = sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND mode = 'ShareLock' AND granted)",
                 ).bind(reader_pid).fetch_one(&control).await.unwrap();

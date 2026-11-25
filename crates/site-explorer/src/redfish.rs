@@ -20,15 +20,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_backend::BackendBmc;
+use bmc_backend::{BackendBmc, BmcConnector};
 use bmc_platform::{
-    BiosSettings, BootInterfaceSelector, LockdownDesiredState, LockdownScope, LockdownState,
-    NicMode, PlatformError, PowerState, ResetType,
+    AuthError, BiosSettings, BootInterfaceSelector, LockdownDesiredState, LockdownScope,
+    LockdownState, NicMode, PlatformError, PowerState, ResetType,
 };
 use bmc_runtime::DriverConnector;
+use carbide_credential_rotation::bmc_accounts;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
-    BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
+    DirectRedfishPool, RedfishAuth, RedfishClientCreationError, RedfishClientPool, probe_bmc_vendor,
 };
 use carbide_redfish::nv_redfish::{NvRedfishClientPool, RedfishBmc, ServiceRoot};
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
@@ -41,7 +42,9 @@ use model::site_explorer::{
     EndpointExplorationError, EndpointExplorationReport, InternalLockdownStatus, LockdownStatus,
     MachineSetupStatus,
 };
+use nv_redfish::account::ManagerAccountCreate;
 use nv_redfish::computer_system::ComputerSystem;
+use nv_redfish::core::EntityTypeRef as _;
 use nv_redfish::manager::Manager;
 use nv_redfish::schema::secure_boot::SecureBootUpdate;
 
@@ -50,7 +53,7 @@ use nv_redfish::schema::secure_boot::SecureBootUpdate;
 // Eventually, this file should only have code related to generating the site exploration report.
 #[derive(Clone)]
 pub(super) struct RedfishClient {
-    redfish_client_pool: Arc<dyn BmcCredentialOps>,
+    redfish_client_pool: DirectRedfishPool,
     nv_redfish_client_pool: Arc<NvRedfishClientPool>,
     /// Pools targeting nico-bmc-proxy; `Some` only when `[bmc_proxy]` is
     /// enabled. Established-endpoint traffic uses them; everything else,
@@ -102,7 +105,7 @@ pub enum BmcAccess {
 
 impl RedfishClient {
     pub(super) fn new(
-        redfish_client_pool: Arc<dyn BmcCredentialOps>,
+        redfish_client_pool: DirectRedfishPool,
         nv_redfish_client_pool: Arc<NvRedfishClientPool>,
         proxied: Option<ProxiedPools>,
     ) -> Self {
@@ -112,6 +115,16 @@ impl RedfishClient {
             proxied,
             driver_connector: None,
         }
+    }
+
+    /// The connector for explicit-credential account operations: libredfish on
+    /// the direct pool, or the drivers when configured. Not for stored-credential
+    /// traffic, which would also bypass `nico-bmc-proxy`.
+    fn bmc_connector(&self) -> BmcConnector {
+        BmcConnector::new(
+            self.redfish_client_pool.pool(),
+            self.driver_connector.clone(),
+        )
     }
 
     /// Connects to an established endpoint through the configured
@@ -205,6 +218,7 @@ impl RedfishClient {
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
         self.redfish_client_pool
+            .pool()
             .create_client(
                 &bmc_ip_address.ip().to_string(),
                 Some(bmc_ip_address.port()),
@@ -318,97 +332,125 @@ impl RedfishClient {
             .unwrap_or_default()
     }
 
-    pub(super) async fn validate_bmc_credentials(
+    /// Checks that the root `credentials` of an unexplored BMC authenticate,
+    /// failing with `Unauthorized` when the BMC rejects them.
+    pub(super) async fn validate_bmc_root_credentials(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
         credentials: Credentials,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_direct_redfish_client(bmc_ip_address, credentials, Some(RedfishVendor::Unknown))
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.get_systems().await.map_err(map_redfish_error)?;
-
-        Ok(())
+        let authenticated = bmc_accounts::probe_bmc_credentials(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            None,
+            credentials,
+            false,
+        )
+        .await
+        .map_err(map_platform_error)?;
+        if authenticated {
+            Ok(())
+        } else {
+            Err(map_platform_error(PlatformError::Auth(
+                AuthError::InvalidCredentials,
+            )))
+        }
     }
 
     /// Resolve the precise `RedfishVendor` of a BMC using the supplied
-    /// credentials, delegating to the shared `RedfishClientPool` probe (an
-    /// anonymous service-root read with a credentialed chassis-manufacturer
-    /// fallback for BMCs that don't populate the service-root vendor).
+    /// credentials (only for the standalone `ProbeBmcVendor` admin RPC).
     pub(super) async fn probe_bmc_vendor(
         &self,
         bmc_ip_address: SocketAddr,
         credentials: Credentials,
     ) -> Result<RedfishVendor, EndpointExplorationError> {
-        self.redfish_client_pool
-            .probe_bmc_vendor(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                credentials,
-            )
-            .await
-            .map_err(map_redfish_client_creation_error)
+        probe_bmc_vendor(
+            self.redfish_client_pool.pool().as_ref(),
+            &bmc_ip_address.ip().to_string(),
+            Some(bmc_ip_address.port()),
+            credentials,
+        )
+        .await
+        .map_err(map_redfish_client_creation_error)
     }
 
-    pub(super) async fn restore_bmc_root_ipmi_access(
-        &self,
-        bmc_ip_address: SocketAddr,
-        vendor: RedfishVendor,
-        credentials: Credentials,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client_pool
-            .restore_bmc_root_ipmi_access(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                vendor,
-                credentials,
-            )
-            .await
-            .map_err(map_redfish_client_creation_error)
-    }
-
+    /// Changes the root password, then applies the default account policy as
+    /// the new password.
     pub(super) async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
-        vendor: RedfishVendor,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
         current_bmc_root_credentials: Credentials,
         new_password: String,
     ) -> Result<(), EndpointExplorationError> {
-        // The two-client rotation flow (uninitialized `Unknown` client for the
-        // `/AccountService` PATCH, then a vendor-specific client for the
-        // password policy) and the per-vendor dispatch now live on the shared
-        // `RedfishClientPool` primitive so credential rotation can reuse them.
-        // See its docs for why the rotation PATCH must not initialize the
-        // vendor client first.
-        self.redfish_client_pool
-            .set_bmc_root_password(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                vendor,
-                current_bmc_root_credentials,
-                new_password,
-            )
+        let Credentials::UsernamePassword { username, .. } = &current_bmc_root_credentials;
+        let new_credentials = Credentials::new(username.as_str(), new_password.as_str());
+        self.change_bmc_root_password(
+            bmc_ip_address,
+            bmc_mac_address,
+            report,
+            current_bmc_root_credentials,
+            &new_password,
+        )
+        .await?;
+        self.apply_bmc_root_policy(bmc_ip_address, bmc_mac_address, report, new_credentials)
             .await
-            .map_err(map_redfish_client_creation_error)
+    }
+
+    pub(super) async fn change_bmc_root_password(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
+        current_bmc_root_credentials: Credentials,
+        new_password: &str,
+    ) -> Result<(), EndpointExplorationError> {
+        bmc_accounts::change_bmc_root_password(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            report,
+            current_bmc_root_credentials,
+            new_password,
+        )
+        .await
+        .map_err(map_platform_error)
+    }
+
+    pub(super) async fn apply_bmc_root_policy(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
+        credentials: Credentials,
+    ) -> Result<(), EndpointExplorationError> {
+        bmc_accounts::apply_bmc_root_policy(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            report,
+            credentials,
+        )
+        .await
+        .map_err(map_platform_error)
     }
 
     pub(super) async fn set_bf4_dpu_service_password(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
         root_credentials: Credentials,
         new_password: String,
     ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client_pool
-            .set_bf4_dpu_service_password(
-                &bmc_ip_address.ip().to_string(),
-                Some(bmc_ip_address.port()),
-                root_credentials,
-                new_password,
-            )
-            .await
-            .map_err(map_redfish_client_creation_error)
+        bmc_accounts::change_bmc_service_password(
+            &self.bmc_connector(),
+            &bmc_access(bmc_ip_address, bmc_mac_address),
+            None,
+            root_credentials,
+            &new_password,
+        )
+        .await
+        .map_err(map_platform_error)
     }
 
     /// Picks the nv-redfish pool and credentials for one report fetch.
@@ -439,6 +481,7 @@ impl RedfishClient {
         access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
         explore_drive_firmware: bool,
+        collect_chassis_assembly: bmc_explorer::ChassisAssemblyFilter<'_>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
         let service_root = nv_pool
@@ -461,7 +504,11 @@ impl RedfishClient {
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
             service_root,
-            &nv_bmc_explore_config(boot_interface, explore_drive_firmware),
+            &nv_bmc_explore_config(
+                boot_interface,
+                explore_drive_firmware,
+                collect_chassis_assembly,
+            ),
         )
         .await
         .map_err(map_nv_redfish_explore_error)?;
@@ -619,13 +666,7 @@ impl RedfishClient {
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
     ) -> Result<ComputerSystem<RedfishBmc>, EndpointExplorationError> {
-        let (nv_pool, credentials) = self.nv_pool_and_credentials(BmcAccess::Established(bmc));
-        let root = nv_pool
-            .service_root(bmc_ip_address, credentials)
-            .await
-            .map_err(|err| EndpointExplorationError::Other {
-                details: format!("Cannot Redfish service root: {err}"),
-            })?;
+        let root = self.established_service_root(bmc_ip_address, bmc).await?;
         primary_system(&root)
             .await?
             .ok_or_else(|| EndpointExplorationError::Other {
@@ -633,35 +674,31 @@ impl RedfishClient {
             })
     }
 
-    /// The manager exploration records: the host system's, or the first for a
-    /// BMC that lists no systems, such as a power shelf.
+    /// The manager exploration records, for calls without an explored report
+    /// to select drivers from; see [`primary_manager`].
     async fn host_manager(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
     ) -> Result<Manager<RedfishBmc>, EndpointExplorationError> {
+        let root = self.established_service_root(bmc_ip_address, bmc).await?;
+        let system = primary_system(&root).await?;
+        primary_manager(&root, system.as_ref(), bmc_ip_address).await
+    }
+
+    /// An established BMC's service root over plain Redfish.
+    async fn established_service_root(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc: EstablishedBmc,
+    ) -> Result<Arc<ServiceRoot>, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(BmcAccess::Established(bmc));
-        let root = nv_pool
+        nv_pool
             .service_root(bmc_ip_address, credentials)
             .await
             .map_err(|err| EndpointExplorationError::Other {
                 details: format!("Cannot Redfish service root: {err}"),
-            })?;
-        let no_managers = || EndpointExplorationError::Other {
-            details: format!("BMC {bmc_ip_address} lists no managers"),
-        };
-        let mut managers = root
-            .managers()
-            .await
-            .map_err(nv_error("managers"))?
-            .ok_or_else(no_managers)?
-            .members()
-            .await
-            .map_err(nv_error("managers members"))?;
-        let system = primary_system(&root).await?;
-        let index = bmc_explorer::primary_manager_index(&managers, system.as_ref())
-            .ok_or_else(no_managers)?;
-        Ok(managers.swap_remove(index))
+            })
     }
 
     /// Turns secure boot off for the next boot. A platform without secure boot
@@ -855,76 +892,118 @@ impl RedfishClient {
         Ok(())
     }
 
+    /// Whether the BMC is a DGX Viking: AMI firmware whose host system is
+    /// `DGX` and whose manager is `BMC`. The drivers backend reads these over
+    /// plain Redfish, choosing the system and manager as exploration does.
     pub(super) async fn is_viking(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
     ) -> Result<bool, EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        let service_root = client.get_service_root().await.map_err(map_redfish_error)?;
-        let system = client.get_system().await.map_err(map_redfish_error)?;
-        let manager = client.get_manager().await.map_err(map_redfish_error)?;
-        Ok(
-            service_root.vendor().unwrap_or(RedfishVendor::Unknown) == RedfishVendor::AMI
-                && system.id == "DGX"
-                && manager.id == "BMC",
-        )
+        if self.driver_connector.is_none() {
+            let client = self
+                .create_established_redfish_client(bmc_ip_address, bmc, None)
+                .await
+                .map_err(map_redfish_client_creation_error)?;
+            return Ok(client
+                .get_service_root()
+                .await
+                .map_err(map_redfish_error)?
+                .vendor()
+                .unwrap_or(RedfishVendor::Unknown)
+                == RedfishVendor::AMI
+                && client.get_system().await.map_err(map_redfish_error)?.id == "DGX"
+                && client.get_manager().await.map_err(map_redfish_error)?.id == "BMC");
+        }
+        let root = self.established_service_root(bmc_ip_address, bmc).await?;
+        if !root
+            .vendor()
+            .is_some_and(|vendor| vendor.inner().eq_ignore_ascii_case("AMI"))
+        {
+            return Ok(false);
+        }
+        let Some(system) = primary_system(&root)
+            .await?
+            .filter(|system| system.raw().id == "DGX")
+        else {
+            return Ok(false);
+        };
+        let manager = primary_manager(&root, Some(&system), bmc_ip_address).await?;
+        Ok(manager.raw().id == "BMC")
     }
 
+    /// Clears a DGX Viking's host BIOS NVRAM through the drivers an
+    /// identifying `report` selects. Without one, as after a first failed
+    /// exploration, the drivers backend sends the NVIDIA UpdateService OEM
+    /// action over plain Redfish.
     pub(super) async fn clear_nvram(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let Some(connector) = &self.driver_connector else {
+            let client = self
+                .create_established_redfish_client(bmc_ip_address, bmc, None)
+                .await
+                .map_err(map_redfish_client_creation_error)?;
+            return client.clear_nvram().await.map_err(map_redfish_error);
+        };
+        let Some(report) = identifying(report) else {
+            let root = self.established_service_root(bmc_ip_address, bmc).await?;
+            return clear_host_bios_nvram(&root).await;
+        };
+        let bmc =
+            Self::connect_drivers(connector, bmc_ip_address, bmc.bmc_mac_address, report, None)
+                .await?;
+        bmc.bios()
+            .map_err(|error| map_platform_error(error.into()))?
+            .clear_nvram()
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.clear_nvram().await.map_err(map_redfish_error)?;
-        Ok(())
+            .map(drop)
+            .map_err(map_platform_error)
     }
 
     pub(super) async fn create_bmc_user(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
         credentials: Credentials,
-        new_username: &str,
-        new_password: &str,
-        new_user_role_id: libredfish::RoleId,
+        request: ManagerAccountCreate,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+        let access = bmc_access(bmc_ip_address, bmc_mac_address);
+        let bmc =
+            bmc_accounts::connect_accounts(&self.bmc_connector(), &access, report, credentials)
+                .await
+                .map_err(map_platform_error)?;
+        bmc.accounts()
+            .map_err(|error| map_platform_error(error.into()))?
+            .create(request)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
-            .create_user(new_username, new_password, new_user_role_id)
-            .await
-            .map_err(map_redfish_error)?;
-        Ok(())
+            .map(drop)
+            .map_err(map_platform_error)
     }
 
     pub(super) async fn delete_bmc_user(
         &self,
         bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        report: Option<&EndpointExplorationReport>,
         credentials: Credentials,
         delete_user: &str,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+        let access = bmc_access(bmc_ip_address, bmc_mac_address);
+        let bmc =
+            bmc_accounts::connect_accounts(&self.bmc_connector(), &access, report, credentials)
+                .await
+                .map_err(map_platform_error)?;
+        bmc.accounts()
+            .map_err(|error| map_platform_error(error.into()))?
+            .delete(delete_user)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
-            .delete_user(delete_user)
-            .await
-            .map_err(map_redfish_error)?;
-        Ok(())
+            .map(drop)
+            .map_err(map_platform_error)
     }
 
     pub(super) async fn probe_vendor_name_from_chassis(
@@ -1031,6 +1110,58 @@ async fn primary_system(
     Ok(bmc_explorer::primary_system_index(&systems).map(|index| systems.swap_remove(index)))
 }
 
+/// The manager exploration records: the primary `system`'s, or the first for
+/// a BMC that lists no systems, such as a power shelf.
+async fn primary_manager(
+    root: &ServiceRoot,
+    system: Option<&ComputerSystem<RedfishBmc>>,
+    bmc_ip_address: SocketAddr,
+) -> Result<Manager<RedfishBmc>, EndpointExplorationError> {
+    let no_managers = || EndpointExplorationError::Other {
+        details: format!("BMC {bmc_ip_address} lists no managers"),
+    };
+    let mut managers = root
+        .managers()
+        .await
+        .map_err(nv_error("managers"))?
+        .ok_or_else(no_managers)?
+        .members()
+        .await
+        .map_err(nv_error("managers members"))?;
+    let index = bmc_explorer::primary_manager_index(&managers, system).ok_or_else(no_managers)?;
+    Ok(managers.swap_remove(index))
+}
+
+/// Clears the host BIOS NVRAM through the NVIDIA UpdateService OEM action, as
+/// the Viking BIOS driver does, for a BMC no explored report identifies.
+async fn clear_host_bios_nvram(root: &ServiceRoot) -> Result<(), EndpointExplorationError> {
+    let unsupported = || EndpointExplorationError::Other {
+        details: "the BMC offers no NVIDIA UpdateService ClearNVRAM action".to_string(),
+    };
+    let service = root
+        .update_service()
+        .await
+        .map_err(nv_error("update service"))?
+        .ok_or_else(unsupported)?;
+    let host_bios = format!(
+        "{}/HostBIOS_0",
+        service
+            .raw()
+            .firmware_inventory
+            .as_ref()
+            .ok_or_else(unsupported)?
+            .odata_id()
+    );
+    service
+        .oem_nvidia_actions()
+        .map_err(nv_error("NVIDIA update service actions"))?
+        .ok_or_else(unsupported)?
+        .clear_nvram(vec![host_bios])
+        .await
+        .map(drop)
+        .map_err(nv_error("clear NVRAM"))
+}
+
 /// Classifies an nv-redfish failure in `context` the way exploration does.
 fn nv_error(
     context: &'static str,
@@ -1059,6 +1190,14 @@ fn libredfish_manager_reset_type(
 
 /// Classifies a driver failure the way [`map_redfish_error`] classifies the
 /// libredfish one.
+fn bmc_access(bmc_ip_address: SocketAddr, bmc_mac_address: MacAddress) -> BmcAccessInfo {
+    BmcAccessInfo {
+        host: bmc_ip_address.ip().to_string(),
+        port: Some(bmc_ip_address.port()),
+        mac_address: bmc_mac_address,
+    }
+}
+
 pub(crate) fn map_platform_error(error: PlatformError) -> EndpointExplorationError {
     match &error {
         PlatformError::Unreachable => EndpointExplorationError::Unreachable {
@@ -1150,13 +1289,15 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
     }
 }
 
-fn nv_bmc_explore_config(
+fn nv_bmc_explore_config<'a>(
     boot_interface: Option<&BootInterfaceTarget>,
     explore_drive_firmware: bool,
-) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
+    collect_chassis_assembly: bmc_explorer::ChassisAssemblyFilter<'a>,
+) -> bmc_explorer::Config<'a, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
         error_classifier: &bmc_explorer::nv_redfish_error_class,
+        collect_chassis_assembly,
         // Chosen arbitrarily: we want to wait a bit between tries,
         // but not for too long relative to the total exploration
         // time.
@@ -1273,11 +1414,15 @@ mod tests {
     use axum::http::{Method, StatusCode};
     use axum::middleware::{self, Next};
     use axum::response::IntoResponse;
+    use bmc_mock::injection::{Action, Rule, RuleId, Selector};
     use bmc_mock::test_support::{
         dell_poweredge_r750_router_with_event_limits, delta_powershelf_router,
-        nvidia_gh200_swapped_managers_router, serve_https,
+        host_router_with_auth, nvidia_gh200_swapped_managers_router, record_writes, serve_https,
     };
-    use bmc_mock::{CombinedServer, EventServiceConfig};
+    use bmc_mock::{
+        CombinedServer, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, EventServiceConfig,
+        HardwareType,
+    };
     use bmc_runtime::DriverPools;
     use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_redfish::nv_redfish::NvRedfishClientPool;
@@ -1291,7 +1436,7 @@ mod tests {
     use model::site_explorer::{
         ComputerSystem as ExploredSystem, Manager as ExploredManager, ServiceRoot,
     };
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::{
         BmcAccess, BmcCredentialType, BootInterfaceTarget, CredentialKey, DriverConnector,
@@ -1308,7 +1453,7 @@ mod tests {
     fn build_redfish_client(sim: Arc<RedfishSim>) -> RedfishClient {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address));
-        RedfishClient::new(sim, nv_pool, None)
+        RedfishClient::new(sim.into(), nv_pool, None)
     }
 
     #[test]
@@ -1342,7 +1487,7 @@ mod tests {
         };
 
         value_scenarios!(run = |target: Option<BootInterfaceTarget>| {
-            let config = nv_bmc_explore_config(target.as_ref(), false);
+            let config = nv_bmc_explore_config(target.as_ref(), false, &|_| false);
             let mut status = MachineSetupStatus::default();
             record_evaluated_boot_interface(Some(&mut status), target.as_ref());
             (
@@ -1391,8 +1536,57 @@ mod tests {
             password: "factory_pass".to_string(),
         };
 
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let report = match vendor {
+            RedfishVendor::LiteOnPowerShelf => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot::default()),
+                chassis: vec![model::site_explorer::Chassis {
+                    manufacturer: Some("Lite-On Technology Corp.".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            RedfishVendor::DeltaPowerShelf => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot::default()),
+                chassis: vec![model::site_explorer::Chassis {
+                    manufacturer: Some("Delta Electronics".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            RedfishVendor::NvidiaGBx00 => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot {
+                    vendor: Some("NVIDIA".to_string()),
+                    product: Some("GB200 NVL".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            RedfishVendor::NvidiaDpu => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot {
+                    vendor: Some("Nvidia".to_string()),
+                    product: Some("BlueField-3 DPU".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            _ => EndpointExplorationReport {
+                service_root: Some(model::site_explorer::ServiceRoot {
+                    vendor: Some(vendor.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        };
+
         redfish
-            .set_bmc_root_password(test_addr(), vendor, factory_creds, "site_pass".to_string())
+            .set_bmc_root_password(
+                test_addr(),
+                mac,
+                Some(&report),
+                factory_creds,
+                "site_pass".to_string(),
+            )
             .await?;
 
         Ok(sim
@@ -1473,7 +1667,7 @@ mod tests {
         let general_sim = Arc::new(RedfishSim::default());
         let proxied_nv = nv_pool();
         let client = RedfishClient::new(
-            ops_sim.clone(),
+            ops_sim.clone().into(),
             nv_pool(),
             Some(ProxiedPools {
                 redfish: general_sim.clone(),
@@ -1532,7 +1726,7 @@ mod tests {
     async fn established_operations_dial_direct_with_carried_credentials_when_disabled() {
         use carbide_redfish::libredfish::test_support::RedfishAuthKind;
         let ops_sim = Arc::new(RedfishSim::default());
-        let client = RedfishClient::new(ops_sim.clone(), nv_pool(), None);
+        let client = RedfishClient::new(ops_sim.clone().into(), nv_pool(), None);
         let mac: MacAddress = "02:00:00:00:00:09".parse().unwrap();
 
         client
@@ -1560,18 +1754,31 @@ mod tests {
         use carbide_redfish::libredfish::test_support::RedfishAuthKind;
         let (client, ops_sim, general_sim, _) = proxied_client();
 
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let credentials = Credentials::new("root", "password");
         client
-            .validate_bmc_credentials(test_addr(), Credentials::new("root", "password"))
+            .validate_bmc_root_credentials(test_addr(), mac, credentials.clone())
             .await
             .expect("validation succeeds on the sim");
+        client
+            .apply_bmc_root_policy(test_addr(), mac, None, credentials)
+            .await
+            .expect("the policy applies on the sim");
 
         assert!(
             general_sim.create_client_calls().is_empty(),
             "credential validation must not route via the proxied pool"
         );
-        let calls = ops_sim.create_client_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].auth, RedfishAuthKind::Direct);
+        let auths: Vec<_> = ops_sim
+            .create_client_calls()
+            .into_iter()
+            .map(|call| call.auth)
+            .collect();
+        assert!(auths.contains(&RedfishAuthKind::Direct), "{auths:?}");
+        assert!(
+            !auths.contains(&RedfishAuthKind::Key),
+            "explicit-credential setup must not use stored credentials: {auths:?}"
+        );
     }
 
     /// The nv-redfish selection: established + proxy -> proxied pool with no
@@ -1592,7 +1799,8 @@ mod tests {
             "the proxy resolves the BMC's credentials itself"
         );
 
-        let direct_client = RedfishClient::new(Arc::new(RedfishSim::default()), nv_pool(), None);
+        let direct_client =
+            RedfishClient::new(Arc::new(RedfishSim::default()).into(), nv_pool(), None);
         let (pool, credentials) = direct_client
             .nv_pool_and_credentials(BmcAccess::Established(established(mac, stored.clone())));
         assert!(std::ptr::eq(
@@ -1694,6 +1902,114 @@ mod tests {
             credentials,
             actions,
         }
+    }
+
+    /// Under the drivers backend, remediation recognizes a DGX Viking over
+    /// plain Redfish and clears its NVRAM through the drivers an identifying
+    /// report selects, or else with the NVIDIA UpdateService OEM action the
+    /// Viking BIOS driver sends.
+    #[tokio::test]
+    async fn drivers_backend_identifies_a_viking_and_clears_it_through_its_report() {
+        const CLEAR_NVRAM: &str =
+            "/redfish/v1/UpdateService/Actions/Oem/NvidiaUpdateService.ClearNVRAM";
+        let (router, state) = host_router_with_auth(HardwareType::NvidiaDgxH100);
+        state
+            .account_service_state
+            .change_factory_default_password("password");
+        state.injection.upsert(Rule {
+            id: RuleId::from("clear-nvram-advertised"),
+            selector: Selector::Path {
+                method: Some("GET".to_string()),
+                glob: "/redfish/v1/UpdateService".to_string(),
+            },
+            action: Action::JsonMerge(json!({
+                "Actions": {"Oem": {"#NvidiaUpdateService.ClearNVRAM": {"target": CLEAR_NVRAM}}}
+            })),
+            remaining: None,
+        });
+        state.injection.upsert(Rule {
+            id: RuleId::from("clear-nvram-accepted"),
+            selector: Selector::Path {
+                method: Some("POST".to_string()),
+                glob: CLEAR_NVRAM.to_string(),
+            },
+            action: Action::Status(StatusCode::NO_CONTENT.as_u16()),
+            remaining: None,
+        });
+        let DriversBmc {
+            _server,
+            address,
+            client,
+            credentials,
+            actions,
+        } = drivers_bmc(router);
+        let mac: MacAddress = "02:00:00:00:00:0e".parse().unwrap();
+
+        let bmc = || established(mac, credentials.clone());
+        let failed =
+            EndpointExplorationReport::new_with_error(EndpointExplorationError::Unreachable {
+                details: None,
+            });
+        let identified = |vendor: Option<&str>| EndpointExplorationReport {
+            service_root: Some(ServiceRoot {
+                vendor: vendor.map(str::to_string),
+                ..Default::default()
+            }),
+            systems: vec![ExploredSystem {
+                id: "DGX".to_string(),
+                ..Default::default()
+            }],
+            managers: vec![ExploredManager {
+                id: "BMC".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let viking = identified(Some("AMI"));
+        let other_platform = identified(None);
+
+        assert!(client.is_viking(address, bmc()).await.expect("identifies"));
+        for (scenario, report, clears) in [
+            ("never explored: plain Redfish", None, true),
+            (
+                "a first failed exploration: plain Redfish",
+                Some(&failed),
+                true,
+            ),
+            ("an explored Viking: its BIOS driver", Some(&viking), true),
+            (
+                "a report naming another platform: its drivers, which cannot",
+                Some(&other_platform),
+                false,
+            ),
+        ] {
+            actions.lock().unwrap().clear();
+            let result = client.clear_nvram(address, bmc(), report).await;
+            assert_eq!(result.is_ok(), clears, "{scenario}: {result:?}");
+            let actions = actions.lock().unwrap();
+            if !clears {
+                assert!(actions.is_empty(), "{scenario}: {actions:?}");
+                continue;
+            }
+            let [(path, body)] = &actions[..] else {
+                panic!("{scenario}: expected one ClearNVRAM action: {actions:?}")
+            };
+            assert_eq!(path, CLEAR_NVRAM, "{scenario}");
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap(),
+                json!({"Targets": ["/redfish/v1/UpdateService/FirmwareInventory/HostBIOS_0"]}),
+                "{scenario}"
+            );
+        }
+
+        let dell = drivers_bmc(dell_router());
+        assert!(
+            !dell
+                .client
+                .is_viking(dell.address, established(mac, dell.credentials.clone()))
+                .await
+                .expect("checks a Dell")
+        );
     }
 
     /// Under the drivers backend, a power call without a report that
@@ -2003,6 +2319,46 @@ mod tests {
         assert_eq!(
             manager.raw().odata_id.to_string(),
             "/redfish/v1/Managers/BMC_0"
+        );
+    }
+
+    /// On the drivers backend, factory takeover of a BMC that refuses its
+    /// factory password outside AccountService changes the password, then
+    /// applies the default account policy, which the BMC only accepts with
+    /// the new password.
+    #[tokio::test]
+    async fn drivers_backend_factory_takeover_changes_the_password_then_applies_policy() {
+        let (router, _state) = host_router_with_auth(HardwareType::WiwynnGB200Nvl);
+        let (router, writes) = record_writes(router);
+        let bmc = drivers_bmc(router);
+        let mac: MacAddress = "02:00:00:00:00:0d".parse().unwrap();
+        bmc.client
+            .set_bmc_root_password(
+                bmc.address,
+                mac,
+                None,
+                Credentials::new(DUMMY_FACTORY_USERNAME, DUMMY_FACTORY_PASSWORD),
+                "site-pass".to_string(),
+            )
+            .await
+            .expect("factory takeover succeeds on drivers backend");
+
+        let accepted: Vec<_> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|write| write.status.is_success())
+            .map(|write| (write.method.clone(), write.path.clone()))
+            .collect();
+        assert_eq!(
+            accepted,
+            [
+                (
+                    Method::PATCH,
+                    format!("/redfish/v1/AccountService/Accounts/{DUMMY_FACTORY_USERNAME}"),
+                ),
+                (Method::PATCH, "/redfish/v1/AccountService".to_string()),
+            ]
         );
     }
 }

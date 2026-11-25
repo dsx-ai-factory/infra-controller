@@ -42,6 +42,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{Column, FromRow, Row};
 use strum_macros::EnumIter;
 
+use self::dpf_bmc_rotation::DpfBmcRotation;
 use self::network::{MachineNetworkStatusObservation, ManagedHostNetworkConfig};
 use super::StateSla;
 use super::instance::snapshot::InstanceSnapshot;
@@ -77,6 +78,7 @@ pub mod slas;
 pub mod astra;
 pub mod capabilities;
 pub mod config;
+pub mod dpf_bmc_rotation;
 pub mod health_override;
 pub mod infiniband;
 pub mod json;
@@ -1588,6 +1590,8 @@ pub enum ManagedHostState {
     RotatingBmc {
         #[serde(default)]
         retry_count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpf_rotation: Option<Box<DpfBmcRotation>>,
     },
 
     /// The host is converging its own UEFI (BIOS setup) password to the staged
@@ -6163,16 +6167,16 @@ mod tests {
             };
             "absent retry_count defaults to 0" {
                 r#"{"state":"rotatingbmc"}"# => Yields((
-                    ManagedHostState::RotatingBmc { retry_count: 0 },
-                    ManagedHostState::RotatingBmc { retry_count: 0 },
+                    ManagedHostState::RotatingBmc { retry_count: 0, dpf_rotation: None },
+                    ManagedHostState::RotatingBmc { retry_count: 0, dpf_rotation: None },
                     "RotatingBmc".to_string(),
                 )),
             }
 
             "explicit retry_count round-trips" {
                 r#"{"state":"rotatingbmc","retry_count":4}"# => Yields((
-                    ManagedHostState::RotatingBmc { retry_count: 4 },
-                    ManagedHostState::RotatingBmc { retry_count: 4 },
+                    ManagedHostState::RotatingBmc { retry_count: 4, dpf_rotation: None },
+                    ManagedHostState::RotatingBmc { retry_count: 4, dpf_rotation: None },
                     "RotatingBmc".to_string(),
                 )),
             }
@@ -6185,7 +6189,10 @@ mod tests {
                 .unwrap();
         let sla = state_sla(
             &machine_id,
-            &ManagedHostState::RotatingBmc { retry_count: 0 },
+            &ManagedHostState::RotatingBmc {
+                retry_count: 0,
+                dpf_rotation: None,
+            },
             &ConfigVersion::initial(),
             &health_report_with_alerts(vec![]),
             &slas::MachineSlaConfig::default(),
