@@ -5520,6 +5520,25 @@ impl DpuMachineStateHandler {
                     "ManagedHostState::DPUNotReady::Init"
                 );
 
+                // A later peer can block the group after an earlier peer has already been reset.
+                // Error outcomes discard the queued reboot timestamps, so check all peers first.
+                if state.dpu_snapshots.len() > 1 {
+                    for dpu in &state.dpu_snapshots {
+                        let check = async {
+                            let bmc = ctx.services.connect_bmc(dpu).await?;
+                            dpu_restart_power_action(dpu, dpu_restart_power_state(&bmc).await?)
+                        };
+                        check.await.inspect_err(|error| {
+                            tracing::error!(
+                                dpu_machine_id = %dpu.id,
+                                trigger_location = %std::panic::Location::caller(),
+                                %error,
+                                "DPU restart blocked"
+                            );
+                        })?;
+                    }
+                }
+
                 // All DPUs are discovered. Reboot them to proceed.
                 for dpu_snapshot in &state.dpu_snapshots {
                     handler_restart_dpu(
@@ -14355,7 +14374,7 @@ async fn handler_host_power_control_with_bmc(
 }
 
 async fn restart_dpu(
-    machine: &Machine<impl MachineIdSubtypeTrait>,
+    machine: &DpuMachine,
     services: &MachineStateHandlerServices,
     dpf_used_for_ingestion: bool,
 ) -> Result<(), StateHandlerError> {
@@ -14379,10 +14398,8 @@ async fn restart_dpu(
         }
     }
 
-    let power_state = power_state(&bmc)
-        .await
-        .map_err(|e| platform_error("get_power_state", e))?;
-    let power_action = dpu_restart_power_action(power_state)?;
+    let power_state = dpu_restart_power_state(&bmc).await?;
+    let power_action = dpu_restart_power_action(machine, power_state)?;
     if power_action == ResetType::On {
         tracing::warn!(
             machine_id = %machine.id,
@@ -14398,13 +14415,40 @@ async fn restart_dpu(
     Ok(())
 }
 
+async fn dpu_restart_power_state(
+    bmc: &BackendBmc,
+) -> Result<Option<PowerState>, StateHandlerError> {
+    power_state(bmc)
+        .await
+        .map_err(|e| platform_error("get_power_state", e))
+}
+
 fn dpu_restart_power_action(
+    machine: &DpuMachine,
     power_state: Option<PowerState>,
 ) -> Result<ResetType, StateHandlerError> {
     match power_state {
         Some(PowerState::Off) => Ok(ResetType::On),
         // A Paused system requires an explicit restart to begin a new boot sequence.
         Some(PowerState::On | PowerState::Paused) => Ok(ResetType::ForceRestart),
+        Some(PowerState::PoweringOn)
+            if matches!(machine.state.value, ManagedHostState::DPUInit { .. }) =>
+        {
+            let entered_at = machine.state.version.timestamp();
+            let discovery = match machine.status.last_discovery_time {
+                Some(time) if time > entered_at => format!("discovery completed at {time}"),
+                _ => format!("no discovery since state entry at {entered_at}"),
+            };
+            let last_request = machine
+                .status
+                .last_reboot_requested
+                .map(|r| format!(", last power request {} at {}", r.mode, r.time))
+                .unwrap_or_default();
+            Err(StateHandlerError::GenericError(eyre!(
+                "DPU {} restart deferred (controller power state PoweringOn), {discovery}{last_request}; retrying",
+                machine.id
+            )))
+        }
         Some(
             PowerState::PoweringOff
             | PowerState::PoweringOn
@@ -16215,6 +16259,7 @@ mod tests {
 
     #[test]
     fn dpu_restart_requires_a_stable_power_state() {
+        let machine = model::test_support::machine_snapshot::dpu_machine(0);
         check_values(
             [
                 Check {
@@ -16248,7 +16293,7 @@ mod tests {
                     expect: Err(()),
                 },
             ],
-            |power_state| dpu_restart_power_action(power_state).map_err(|_| ()),
+            |power_state| dpu_restart_power_action(&machine, power_state).map_err(|_| ()),
         );
     }
 

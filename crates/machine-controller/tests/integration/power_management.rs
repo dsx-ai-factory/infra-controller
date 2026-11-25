@@ -26,9 +26,11 @@ use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, ManagedHostConfigExt as _,
 };
 use carbide_utils::redfish::BmcAccessInfo;
+use chrono::Utc;
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    DpuInitState, DpuInitStates, MachineMaintenanceOperation, MachineState, ManagedHostState,
-    PerformPowerOperation,
+    DpuInitState, DpuInitStates, MachineLastRebootRequestedMode, MachineMaintenanceOperation,
+    MachineState, ManagedHostState, PerformPowerOperation,
 };
 use model::power_manager::PowerState;
 use model::test_support::ManagedHostConfig;
@@ -132,6 +134,180 @@ impl TestManagedHostPowerExt for TestManagedHost {
             .await
             .expect("database transaction should commit");
     }
+}
+
+/// Seed one synchronized DPUInit state with a retry already due on the test controller.
+async fn enter_dpu_init(
+    mh: &TestManagedHost,
+    discovered: bool,
+) -> Result<ManagedHostState, Box<dyn std::error::Error>> {
+    let init = ManagedHostState::DPUInit {
+        dpu_states: DpuInitStates {
+            states: mh
+                .dpus
+                .iter()
+                .map(|dpu| (dpu.id, DpuInitState::Init))
+                .collect(),
+        },
+    };
+    let current = mh.host.machine().await.state.version;
+    let entered_at = Utc::now() - chrono::Duration::minutes(3);
+    let version = format!(
+        "V{}-T{}",
+        current.version_nr() + 1,
+        entered_at.timestamp_micros()
+    )
+    .parse()?;
+    let mut txn = mh.api.txn_begin().await?;
+    assert_eq!(
+        db::machine::try_update_controller_state(&mut txn, &mh.host.id, current, version, &init)
+            .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    for dpu in &mh.dpus {
+        sqlx::query(
+            "UPDATE machines SET last_discovery_time = $1, last_reboot_requested = NULL WHERE id = $2",
+        )
+        .bind(discovered.then(Utc::now))
+        .bind(dpu.id)
+        .execute(txn.as_mut())
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(init)
+}
+
+#[sqlx_test]
+async fn dpu_init_powering_on_before_discovery(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let TestContext { mut env, mh } = TestContext::from_env(Env::builder(pool).build().await).await;
+    let init = enter_dpu_init(&mh, false).await?;
+    let dpu = mh.first_dpu().machine().await;
+    let bmc = dpu.bmc_addr().unwrap().ip().to_string();
+    let requested_at = dpu.state.version.timestamp();
+    let mut txn = mh.api.txn_begin().await?;
+    db::machine::update_reboot_requested_explicit_time(
+        &dpu.id,
+        txn.as_mut(),
+        MachineLastRebootRequestedMode::PowerOn,
+        requested_at,
+    )
+    .await?;
+    txn.commit().await?;
+    // The libredfish backend also classifies a Redfish Reset as PoweringOn.
+    env.redfish_sim
+        .set_power_state(&bmc, libredfish::PowerState::Reset);
+    let start = env.redfish_sim.timepoint();
+    env.run_single_iteration_without_requeue().await;
+
+    let host = mh.host.machine().await;
+    assert_eq!(host.state.value, init);
+    let Some(PersistentStateHandlerOutcome::Error { err, .. }) = host.controller_state_outcome
+    else {
+        panic!("expected the restart to be retried")
+    };
+    assert!(
+        err.contains(&format!(
+            "DPU {} restart deferred (controller power state PoweringOn)",
+            dpu.id
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "no discovery since state entry at {}",
+            host.state.version.timestamp()
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("last power request PowerOn at {requested_at}")),
+        "{err}"
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&start)
+            .for_host(&bmc)
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[sqlx_test]
+async fn dpu_init_powering_on_peer_holds_group_restart_until_recovery(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let TestContext { mut env, mh } = TestContext::from_env_with_config(
+        Env::builder(pool).build().await,
+        ManagedHostConfig::default().with_dpu_count(2),
+    )
+    .await;
+    let init = enter_dpu_init(&mh, true).await?;
+    let mut peers = Vec::new();
+    for dpu in &mh.dpus {
+        let machine = dpu.machine().await;
+        peers.push((
+            dpu,
+            machine.bmc_addr().unwrap().ip().to_string(),
+            machine.status.last_discovery_time.unwrap(),
+        ));
+    }
+    let start = env.redfish_sim.timepoint();
+    // Exercise both positions: the snapshot's DPU ordering is unspecified.
+    for (blocked, bmc, discovered_at) in &peers {
+        env.redfish_sim
+            .set_power_state(bmc, libredfish::PowerState::PoweringOn);
+        env.run_single_iteration_without_requeue().await;
+        let host = mh.host.machine().await;
+        assert_eq!(host.state.value, init);
+        for (_, addr, _) in &peers {
+            assert!(
+                env.redfish_sim
+                    .actions_since(&start)
+                    .for_host(addr)
+                    .is_empty()
+            );
+        }
+        let Some(PersistentStateHandlerOutcome::Error { err, .. }) = host.controller_state_outcome
+        else {
+            panic!("expected the blocked peer's restart outcome")
+        };
+        assert!(
+            err.contains(&format!(
+                "DPU {} restart deferred (controller power state PoweringOn)",
+                blocked.id
+            )),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("discovery completed at {discovered_at}")),
+            "{err}"
+        );
+        env.redfish_sim
+            .set_power_state(bmc, libredfish::PowerState::On);
+    }
+
+    env.run_single_iteration_without_requeue().await;
+    let ManagedHostState::DPUInit { dpu_states } = mh.host.machine().await.state.value else {
+        panic!("expected the initial group restart to finish")
+    };
+    for (dpu, bmc, _) in peers {
+        assert_eq!(
+            dpu_states.states[&dpu.id],
+            DpuInitState::WaitingForPlatformPowercycle {
+                substate: PerformPowerOperation::Off
+            }
+        );
+        assert!(dpu.machine().await.status.last_reboot_requested.is_some());
+        assert_eq!(
+            env.redfish_sim.actions_since(&start).for_host(&bmc),
+            vec![RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            )]
+        );
+    }
+    Ok(())
 }
 
 #[sqlx_test]
