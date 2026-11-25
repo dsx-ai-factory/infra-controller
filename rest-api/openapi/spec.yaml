@@ -12064,7 +12064,8 @@ paths:
                 Without Metadata:
                   value:
                     id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
-                    associatedDpuMachineIds: []
+                    associatedDpuMachineIds:
+                      - fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20
                     infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
                     siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                     instanceTypeId: 2e016c02-2c67-48aa-b289-5d3ca6320c52
@@ -12108,7 +12109,7 @@ paths:
                         machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                         controllerInterfaceId: ad3dac49-741d-4c1f-815c-c020127c532f
                         controllerSegmentId: f2207a3c-1847-42e5-bf2c-cd015f87a2bc
-                        attachedDpuMachineID: 'fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20,'
+                        attachedDpuMachineID: 'fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20'
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         hostname: example.com
                         isPrimary: true
@@ -12157,7 +12158,8 @@ paths:
                 With Metadata:
                   value:
                     id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
-                    associatedDpuMachineIds: []
+                    associatedDpuMachineIds:
+                      - fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20
                     infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
                     siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                     instanceTypeId: 2e016c02-2c67-48aa-b289-5d3ca6320c52
@@ -12202,7 +12204,7 @@ paths:
                         machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                         controllerInterfaceId: ad3dac49-741d-4c1f-815c-c020127c532f
                         controllerSegmentId: f2207a3c-1847-42e5-bf2c-cd015f87a2bc
-                        attachedDpuMachineID: 'fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20,'
+                        attachedDpuMachineID: 'fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20'
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         hostname: example.com
                         isPrimary: true
@@ -12311,7 +12313,8 @@ paths:
                 With Machine Health Alerts:
                   value:
                     id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
-                    associatedDpuMachineIds: []
+                    associatedDpuMachineIds:
+                      - fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20
                     infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
                     siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                     instanceTypeId: 2e016c02-2c67-48aa-b289-5d3ca6320c52
@@ -12355,7 +12358,7 @@ paths:
                         machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                         controllerInterfaceId: ad3dac49-741d-4c1f-815c-c020127c532f
                         controllerSegmentId: f2207a3c-1847-42e5-bf2c-cd015f87a2bc
-                        attachedDpuMachineID: 'fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20,'
+                        attachedDpuMachineID: 'fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20'
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         hostname: example.com
                         isPrimary: true
@@ -35192,7 +35195,7 @@ components:
           type:
             - array
             - 'null'
-          description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
+          description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it.
           items:
             $ref: '#/components/schemas/ExpectedRackGroupRackRequest'
         name:
@@ -37491,7 +37494,7 @@ components:
       title: DpuExtensionServiceDeploymentType
       type: string
       description: |-
-        Immutable deployment policy. Omitted or null on create defaults to `DemandDriven`,
+        Immutable deployment policy. Omitted on create defaults to `DemandDriven`,
         which deploys through instance attachment. `Baseline` is supported only for
         DpfHelmChart services and requests deployment to all DPUs managed by DPF at
         creation, without a DPU target. Baseline services cannot be attached to instances.
