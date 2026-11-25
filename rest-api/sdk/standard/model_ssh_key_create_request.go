@@ -29,7 +29,7 @@ type SshKeyCreateRequest struct {
 	// Must be an SSH key of type: RSA, ECDSA or ED25519
 	PublicKey string `json:"publicKey" validate:"regexp=^ssh-(rsa|ecdsa|ed25519) AAAA[0-9A-Za-z+/]+[=]{0\\,3}(\\s+.+)?$"`
 	// ID of the SSH Key Group this key should be attached to
-	SshKeyGroupId *string `json:"sshKeyGroupId,omitempty"`
+	SshKeyGroupId NullableString `json:"sshKeyGroupId,omitempty"`
 }
 
 type _SshKeyCreateRequest SshKeyCreateRequest
@@ -101,36 +101,47 @@ func (o *SshKeyCreateRequest) SetPublicKey(v string) {
 	o.PublicKey = v
 }
 
-// GetSshKeyGroupId returns the SshKeyGroupId field value if set, zero value otherwise.
+// GetSshKeyGroupId returns the SshKeyGroupId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SshKeyCreateRequest) GetSshKeyGroupId() string {
-	if o == nil || IsNil(o.SshKeyGroupId) {
+	if o == nil || IsNil(o.SshKeyGroupId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.SshKeyGroupId
+	return *o.SshKeyGroupId.Get()
 }
 
 // GetSshKeyGroupIdOk returns a tuple with the SshKeyGroupId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SshKeyCreateRequest) GetSshKeyGroupIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SshKeyGroupId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SshKeyGroupId, true
+	return o.SshKeyGroupId.Get(), o.SshKeyGroupId.IsSet()
 }
 
 // HasSshKeyGroupId returns a boolean if a field has been set.
 func (o *SshKeyCreateRequest) HasSshKeyGroupId() bool {
-	if o != nil && !IsNil(o.SshKeyGroupId) {
+	if o != nil && o.SshKeyGroupId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetSshKeyGroupId gets a reference to the given string and assigns it to the SshKeyGroupId field.
+// SetSshKeyGroupId gets a reference to the given NullableString and assigns it to the SshKeyGroupId field.
 func (o *SshKeyCreateRequest) SetSshKeyGroupId(v string) {
-	o.SshKeyGroupId = &v
+	o.SshKeyGroupId.Set(&v)
+}
+
+// SetSshKeyGroupIdNil sets the value for SshKeyGroupId to be an explicit nil
+func (o *SshKeyCreateRequest) SetSshKeyGroupIdNil() {
+	o.SshKeyGroupId.Set(nil)
+}
+
+// UnsetSshKeyGroupId ensures that no value is present for SshKeyGroupId, not even an explicit nil
+func (o *SshKeyCreateRequest) UnsetSshKeyGroupId() {
+	o.SshKeyGroupId.Unset()
 }
 
 func (o SshKeyCreateRequest) MarshalJSON() ([]byte, error) {
@@ -145,8 +156,8 @@ func (o SshKeyCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
 	toSerialize["publicKey"] = o.PublicKey
-	if !IsNil(o.SshKeyGroupId) {
-		toSerialize["sshKeyGroupId"] = o.SshKeyGroupId
+	if o.SshKeyGroupId.IsSet() {
+		toSerialize["sshKeyGroupId"] = o.SshKeyGroupId.Get()
 	}
 	return toSerialize, nil
 }

@@ -29,25 +29,25 @@ type VpcCreateRequest struct {
 	// Name of the VPC
 	Name string `json:"name"`
 	// Optional description for the VPC
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// ID of the Site where the VPC should be created
 	SiteId string `json:"siteId"`
 	// Network virtualization type of the VPC. If no value is specified, then defaults to `FNN` if Site has native networking enabled, or `ETHERNET_VIRTUALIZER` if native networking is disabled. Flat VPCs hold instances on zero-DPU hosts (or hosts with their DPU in NIC mode) and are never auto-selected -- `FLAT` must be specified explicitly.
-	NetworkVirtualizationType *string `json:"networkVirtualizationType,omitempty"`
+	NetworkVirtualizationType NullableString `json:"networkVirtualizationType,omitempty"`
 	// When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
 	SlaacEnabled *bool `json:"slaacEnabled,omitempty"`
 	// Specify a Site-configured routing profile returned by GET `/tenant/current/routing-profile` for the VPC. Only supported when `networkVirtualizationType` is set to `FNN`, or when `networkVirtualizationType` is omitted and Site has Native Networking enabled. Requires Tenant to have elevated privilege.
-	RoutingProfile *string `json:"routingProfile,omitempty"`
+	RoutingProfile NullableString `json:"routingProfile,omitempty"`
 	// Routing-profile properties to overlay on the resolved named profile. Only supported for FNN VPCs and requires `TargetedInstanceCreation` to be effective for the Tenant at the VPC's Site. `routingProfile` may be omitted when the Site and Tenant configuration select a named profile.
-	RoutingProfileOverrides *VpcRoutingProfileOverrides `json:"routingProfileOverrides,omitempty"`
+	RoutingProfileOverrides NullableVpcRoutingProfileOverrides `json:"routingProfileOverrides,omitempty"`
 	// Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true` and REST DPS power provisioning to be enabled.
-	PowerResourceGroup *string `json:"powerResourceGroup,omitempty"`
+	PowerResourceGroup NullableString `json:"powerResourceGroup,omitempty"`
 	// ID of the Network Security Group to attach to the VPC
-	NetworkSecurityGroupId *string `json:"networkSecurityGroupId,omitempty"`
+	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
 	// Explicitly requested VNI for the VPC
-	Vni *int32 `json:"vni,omitempty"`
+	Vni NullableInt32 `json:"vni,omitempty"`
 	// ID of the default NVLink Logical Partition that GPUs for all Instances in the VPC will attach to
-	NvLinkLogicalPartitionId *string `json:"nvLinkLogicalPartitionId,omitempty"`
+	NvLinkLogicalPartitionId NullableString `json:"nvLinkLogicalPartitionId,omitempty"`
 	// String key-value pairs describing VPC labels. Up to 10 key-value pairs can be specified
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -133,36 +133,47 @@ func (o *VpcCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *VpcCreateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
+}
+
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *VpcCreateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *VpcCreateRequest) UnsetDescription() {
+	o.Description.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -189,36 +200,47 @@ func (o *VpcCreateRequest) SetSiteId(v string) {
 	o.SiteId = v
 }
 
-// GetNetworkVirtualizationType returns the NetworkVirtualizationType field value if set, zero value otherwise.
+// GetNetworkVirtualizationType returns the NetworkVirtualizationType field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetNetworkVirtualizationType() string {
-	if o == nil || IsNil(o.NetworkVirtualizationType) {
+	if o == nil || IsNil(o.NetworkVirtualizationType.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.NetworkVirtualizationType
+	return *o.NetworkVirtualizationType.Get()
 }
 
 // GetNetworkVirtualizationTypeOk returns a tuple with the NetworkVirtualizationType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetNetworkVirtualizationTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.NetworkVirtualizationType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkVirtualizationType, true
+	return o.NetworkVirtualizationType.Get(), o.NetworkVirtualizationType.IsSet()
 }
 
 // HasNetworkVirtualizationType returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasNetworkVirtualizationType() bool {
-	if o != nil && !IsNil(o.NetworkVirtualizationType) {
+	if o != nil && o.NetworkVirtualizationType.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkVirtualizationType gets a reference to the given string and assigns it to the NetworkVirtualizationType field.
+// SetNetworkVirtualizationType gets a reference to the given NullableString and assigns it to the NetworkVirtualizationType field.
 func (o *VpcCreateRequest) SetNetworkVirtualizationType(v string) {
-	o.NetworkVirtualizationType = &v
+	o.NetworkVirtualizationType.Set(&v)
+}
+
+// SetNetworkVirtualizationTypeNil sets the value for NetworkVirtualizationType to be an explicit nil
+func (o *VpcCreateRequest) SetNetworkVirtualizationTypeNil() {
+	o.NetworkVirtualizationType.Set(nil)
+}
+
+// UnsetNetworkVirtualizationType ensures that no value is present for NetworkVirtualizationType, not even an explicit nil
+func (o *VpcCreateRequest) UnsetNetworkVirtualizationType() {
+	o.NetworkVirtualizationType.Unset()
 }
 
 // GetSlaacEnabled returns the SlaacEnabled field value if set, zero value otherwise.
@@ -253,196 +275,262 @@ func (o *VpcCreateRequest) SetSlaacEnabled(v bool) {
 	o.SlaacEnabled = &v
 }
 
-// GetRoutingProfile returns the RoutingProfile field value if set, zero value otherwise.
+// GetRoutingProfile returns the RoutingProfile field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetRoutingProfile() string {
-	if o == nil || IsNil(o.RoutingProfile) {
+	if o == nil || IsNil(o.RoutingProfile.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.RoutingProfile
+	return *o.RoutingProfile.Get()
 }
 
 // GetRoutingProfileOk returns a tuple with the RoutingProfile field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetRoutingProfileOk() (*string, bool) {
-	if o == nil || IsNil(o.RoutingProfile) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RoutingProfile, true
+	return o.RoutingProfile.Get(), o.RoutingProfile.IsSet()
 }
 
 // HasRoutingProfile returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasRoutingProfile() bool {
-	if o != nil && !IsNil(o.RoutingProfile) {
+	if o != nil && o.RoutingProfile.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRoutingProfile gets a reference to the given string and assigns it to the RoutingProfile field.
+// SetRoutingProfile gets a reference to the given NullableString and assigns it to the RoutingProfile field.
 func (o *VpcCreateRequest) SetRoutingProfile(v string) {
-	o.RoutingProfile = &v
+	o.RoutingProfile.Set(&v)
 }
 
-// GetRoutingProfileOverrides returns the RoutingProfileOverrides field value if set, zero value otherwise.
+// SetRoutingProfileNil sets the value for RoutingProfile to be an explicit nil
+func (o *VpcCreateRequest) SetRoutingProfileNil() {
+	o.RoutingProfile.Set(nil)
+}
+
+// UnsetRoutingProfile ensures that no value is present for RoutingProfile, not even an explicit nil
+func (o *VpcCreateRequest) UnsetRoutingProfile() {
+	o.RoutingProfile.Unset()
+}
+
+// GetRoutingProfileOverrides returns the RoutingProfileOverrides field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetRoutingProfileOverrides() VpcRoutingProfileOverrides {
-	if o == nil || IsNil(o.RoutingProfileOverrides) {
+	if o == nil || IsNil(o.RoutingProfileOverrides.Get()) {
 		var ret VpcRoutingProfileOverrides
 		return ret
 	}
-	return *o.RoutingProfileOverrides
+	return *o.RoutingProfileOverrides.Get()
 }
 
 // GetRoutingProfileOverridesOk returns a tuple with the RoutingProfileOverrides field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetRoutingProfileOverridesOk() (*VpcRoutingProfileOverrides, bool) {
-	if o == nil || IsNil(o.RoutingProfileOverrides) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RoutingProfileOverrides, true
+	return o.RoutingProfileOverrides.Get(), o.RoutingProfileOverrides.IsSet()
 }
 
 // HasRoutingProfileOverrides returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasRoutingProfileOverrides() bool {
-	if o != nil && !IsNil(o.RoutingProfileOverrides) {
+	if o != nil && o.RoutingProfileOverrides.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRoutingProfileOverrides gets a reference to the given VpcRoutingProfileOverrides and assigns it to the RoutingProfileOverrides field.
+// SetRoutingProfileOverrides gets a reference to the given NullableVpcRoutingProfileOverrides and assigns it to the RoutingProfileOverrides field.
 func (o *VpcCreateRequest) SetRoutingProfileOverrides(v VpcRoutingProfileOverrides) {
-	o.RoutingProfileOverrides = &v
+	o.RoutingProfileOverrides.Set(&v)
 }
 
-// GetPowerResourceGroup returns the PowerResourceGroup field value if set, zero value otherwise.
+// SetRoutingProfileOverridesNil sets the value for RoutingProfileOverrides to be an explicit nil
+func (o *VpcCreateRequest) SetRoutingProfileOverridesNil() {
+	o.RoutingProfileOverrides.Set(nil)
+}
+
+// UnsetRoutingProfileOverrides ensures that no value is present for RoutingProfileOverrides, not even an explicit nil
+func (o *VpcCreateRequest) UnsetRoutingProfileOverrides() {
+	o.RoutingProfileOverrides.Unset()
+}
+
+// GetPowerResourceGroup returns the PowerResourceGroup field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetPowerResourceGroup() string {
-	if o == nil || IsNil(o.PowerResourceGroup) {
+	if o == nil || IsNil(o.PowerResourceGroup.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.PowerResourceGroup
+	return *o.PowerResourceGroup.Get()
 }
 
 // GetPowerResourceGroupOk returns a tuple with the PowerResourceGroup field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetPowerResourceGroupOk() (*string, bool) {
-	if o == nil || IsNil(o.PowerResourceGroup) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PowerResourceGroup, true
+	return o.PowerResourceGroup.Get(), o.PowerResourceGroup.IsSet()
 }
 
 // HasPowerResourceGroup returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasPowerResourceGroup() bool {
-	if o != nil && !IsNil(o.PowerResourceGroup) {
+	if o != nil && o.PowerResourceGroup.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetPowerResourceGroup gets a reference to the given string and assigns it to the PowerResourceGroup field.
+// SetPowerResourceGroup gets a reference to the given NullableString and assigns it to the PowerResourceGroup field.
 func (o *VpcCreateRequest) SetPowerResourceGroup(v string) {
-	o.PowerResourceGroup = &v
+	o.PowerResourceGroup.Set(&v)
 }
 
-// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise.
+// SetPowerResourceGroupNil sets the value for PowerResourceGroup to be an explicit nil
+func (o *VpcCreateRequest) SetPowerResourceGroupNil() {
+	o.PowerResourceGroup.Set(nil)
+}
+
+// UnsetPowerResourceGroup ensures that no value is present for PowerResourceGroup, not even an explicit nil
+func (o *VpcCreateRequest) UnsetPowerResourceGroup() {
+	o.PowerResourceGroup.Unset()
+}
+
+// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetNetworkSecurityGroupId() string {
-	if o == nil || IsNil(o.NetworkSecurityGroupId) {
+	if o == nil || IsNil(o.NetworkSecurityGroupId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.NetworkSecurityGroupId
+	return *o.NetworkSecurityGroupId.Get()
 }
 
 // GetNetworkSecurityGroupIdOk returns a tuple with the NetworkSecurityGroupId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetNetworkSecurityGroupIdOk() (*string, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroupId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupId, true
+	return o.NetworkSecurityGroupId.Get(), o.NetworkSecurityGroupId.IsSet()
 }
 
 // HasNetworkSecurityGroupId returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasNetworkSecurityGroupId() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroupId) {
+	if o != nil && o.NetworkSecurityGroupId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroupId gets a reference to the given string and assigns it to the NetworkSecurityGroupId field.
+// SetNetworkSecurityGroupId gets a reference to the given NullableString and assigns it to the NetworkSecurityGroupId field.
 func (o *VpcCreateRequest) SetNetworkSecurityGroupId(v string) {
-	o.NetworkSecurityGroupId = &v
+	o.NetworkSecurityGroupId.Set(&v)
 }
 
-// GetVni returns the Vni field value if set, zero value otherwise.
+// SetNetworkSecurityGroupIdNil sets the value for NetworkSecurityGroupId to be an explicit nil
+func (o *VpcCreateRequest) SetNetworkSecurityGroupIdNil() {
+	o.NetworkSecurityGroupId.Set(nil)
+}
+
+// UnsetNetworkSecurityGroupId ensures that no value is present for NetworkSecurityGroupId, not even an explicit nil
+func (o *VpcCreateRequest) UnsetNetworkSecurityGroupId() {
+	o.NetworkSecurityGroupId.Unset()
+}
+
+// GetVni returns the Vni field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetVni() int32 {
-	if o == nil || IsNil(o.Vni) {
+	if o == nil || IsNil(o.Vni.Get()) {
 		var ret int32
 		return ret
 	}
-	return *o.Vni
+	return *o.Vni.Get()
 }
 
 // GetVniOk returns a tuple with the Vni field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetVniOk() (*int32, bool) {
-	if o == nil || IsNil(o.Vni) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Vni, true
+	return o.Vni.Get(), o.Vni.IsSet()
 }
 
 // HasVni returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasVni() bool {
-	if o != nil && !IsNil(o.Vni) {
+	if o != nil && o.Vni.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetVni gets a reference to the given int32 and assigns it to the Vni field.
+// SetVni gets a reference to the given NullableInt32 and assigns it to the Vni field.
 func (o *VpcCreateRequest) SetVni(v int32) {
-	o.Vni = &v
+	o.Vni.Set(&v)
 }
 
-// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value if set, zero value otherwise.
+// SetVniNil sets the value for Vni to be an explicit nil
+func (o *VpcCreateRequest) SetVniNil() {
+	o.Vni.Set(nil)
+}
+
+// UnsetVni ensures that no value is present for Vni, not even an explicit nil
+func (o *VpcCreateRequest) UnsetVni() {
+	o.Vni.Unset()
+}
+
+// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcCreateRequest) GetNvLinkLogicalPartitionId() string {
-	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
+	if o == nil || IsNil(o.NvLinkLogicalPartitionId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.NvLinkLogicalPartitionId
+	return *o.NvLinkLogicalPartitionId.Get()
 }
 
 // GetNvLinkLogicalPartitionIdOk returns a tuple with the NvLinkLogicalPartitionId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcCreateRequest) GetNvLinkLogicalPartitionIdOk() (*string, bool) {
-	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NvLinkLogicalPartitionId, true
+	return o.NvLinkLogicalPartitionId.Get(), o.NvLinkLogicalPartitionId.IsSet()
 }
 
 // HasNvLinkLogicalPartitionId returns a boolean if a field has been set.
 func (o *VpcCreateRequest) HasNvLinkLogicalPartitionId() bool {
-	if o != nil && !IsNil(o.NvLinkLogicalPartitionId) {
+	if o != nil && o.NvLinkLogicalPartitionId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNvLinkLogicalPartitionId gets a reference to the given string and assigns it to the NvLinkLogicalPartitionId field.
+// SetNvLinkLogicalPartitionId gets a reference to the given NullableString and assigns it to the NvLinkLogicalPartitionId field.
 func (o *VpcCreateRequest) SetNvLinkLogicalPartitionId(v string) {
-	o.NvLinkLogicalPartitionId = &v
+	o.NvLinkLogicalPartitionId.Set(&v)
+}
+
+// SetNvLinkLogicalPartitionIdNil sets the value for NvLinkLogicalPartitionId to be an explicit nil
+func (o *VpcCreateRequest) SetNvLinkLogicalPartitionIdNil() {
+	o.NvLinkLogicalPartitionId.Set(nil)
+}
+
+// UnsetNvLinkLogicalPartitionId ensures that no value is present for NvLinkLogicalPartitionId, not even an explicit nil
+func (o *VpcCreateRequest) UnsetNvLinkLogicalPartitionId() {
+	o.NvLinkLogicalPartitionId.Unset()
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -491,33 +579,33 @@ func (o VpcCreateRequest) ToMap() (map[string]interface{}, error) {
 		toSerialize["id"] = o.Id
 	}
 	toSerialize["name"] = o.Name
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
 	toSerialize["siteId"] = o.SiteId
-	if !IsNil(o.NetworkVirtualizationType) {
-		toSerialize["networkVirtualizationType"] = o.NetworkVirtualizationType
+	if o.NetworkVirtualizationType.IsSet() {
+		toSerialize["networkVirtualizationType"] = o.NetworkVirtualizationType.Get()
 	}
 	if !IsNil(o.SlaacEnabled) {
 		toSerialize["slaacEnabled"] = o.SlaacEnabled
 	}
-	if !IsNil(o.RoutingProfile) {
-		toSerialize["routingProfile"] = o.RoutingProfile
+	if o.RoutingProfile.IsSet() {
+		toSerialize["routingProfile"] = o.RoutingProfile.Get()
 	}
-	if !IsNil(o.RoutingProfileOverrides) {
-		toSerialize["routingProfileOverrides"] = o.RoutingProfileOverrides
+	if o.RoutingProfileOverrides.IsSet() {
+		toSerialize["routingProfileOverrides"] = o.RoutingProfileOverrides.Get()
 	}
-	if !IsNil(o.PowerResourceGroup) {
-		toSerialize["powerResourceGroup"] = o.PowerResourceGroup
+	if o.PowerResourceGroup.IsSet() {
+		toSerialize["powerResourceGroup"] = o.PowerResourceGroup.Get()
 	}
-	if !IsNil(o.NetworkSecurityGroupId) {
-		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId
+	if o.NetworkSecurityGroupId.IsSet() {
+		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
 	}
-	if !IsNil(o.Vni) {
-		toSerialize["vni"] = o.Vni
+	if o.Vni.IsSet() {
+		toSerialize["vni"] = o.Vni.Get()
 	}
-	if !IsNil(o.NvLinkLogicalPartitionId) {
-		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId
+	if o.NvLinkLogicalPartitionId.IsSet() {
+		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId.Get()
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

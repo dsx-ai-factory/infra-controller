@@ -31,9 +31,9 @@ type InterfaceCreateRequest struct {
 	// Address families requested for Controller prefix selection. Required with `vpcId` and prohibited otherwise. Specify `IPv4`, `IPv6`, or both for dual-stack allocation. Duplicate values are accepted and normalized in `IPv4`, then `IPv6` order.
 	IpFamilies []string
 	// Explicitly requested IP address for the interface. It can only be specified with an explicit `vpcPrefixId`. The least-significant host bit must be 1.
-	IpAddress *string
+	IpAddress NullableString
 	// Inline interface-local routing profile options. It cannot be specified for Subnet-based interfaces.
-	InlineRoutingProfile *InterfaceInlineRoutingProfile
+	InlineRoutingProfile NullableInterfaceInlineRoutingProfile
 	// Specifies whether this network should be attached to the Instance over a physical interface.
 	IsPhysical *bool
 	// Name of the device to use
@@ -41,7 +41,7 @@ type InterfaceCreateRequest struct {
 	// Index of the device, used to identify which interface card to attache the Partition to
 	DeviceInstance *int32
 	// Index of the virtual function to use, must be specified if isPhysical is false
-	VirtualFunctionId *int32
+	VirtualFunctionId NullableInt32
 }
 
 // NewInterfaceCreateRequest instantiates a new InterfaceCreateRequest object
@@ -189,68 +189,90 @@ func (o *InterfaceCreateRequest) SetIpFamilies(v []string) {
 	o.IpFamilies = v
 }
 
-// GetIpAddress returns the IpAddress field value if set, zero value otherwise.
+// GetIpAddress returns the IpAddress field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InterfaceCreateRequest) GetIpAddress() string {
-	if o == nil || IsNil(o.IpAddress) {
+	if o == nil || IsNil(o.IpAddress.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.IpAddress
+	return *o.IpAddress.Get()
 }
 
 // GetIpAddressOk returns a tuple with the IpAddress field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InterfaceCreateRequest) GetIpAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.IpAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IpAddress, true
+	return o.IpAddress.Get(), o.IpAddress.IsSet()
 }
 
 // HasIpAddress returns a boolean if a field has been set.
 func (o *InterfaceCreateRequest) HasIpAddress() bool {
-	if o != nil && !IsNil(o.IpAddress) {
+	if o != nil && o.IpAddress.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetIpAddress gets a reference to the given string and assigns it to the IpAddress field.
+// SetIpAddress gets a reference to the given NullableString and assigns it to the IpAddress field.
 func (o *InterfaceCreateRequest) SetIpAddress(v string) {
-	o.IpAddress = &v
+	o.IpAddress.Set(&v)
 }
 
-// GetInlineRoutingProfile returns the InlineRoutingProfile field value if set, zero value otherwise.
+// SetIpAddressNil sets the value for IpAddress to be an explicit nil
+func (o *InterfaceCreateRequest) SetIpAddressNil() {
+	o.IpAddress.Set(nil)
+}
+
+// UnsetIpAddress ensures that no value is present for IpAddress, not even an explicit nil
+func (o *InterfaceCreateRequest) UnsetIpAddress() {
+	o.IpAddress.Unset()
+}
+
+// GetInlineRoutingProfile returns the InlineRoutingProfile field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InterfaceCreateRequest) GetInlineRoutingProfile() InterfaceInlineRoutingProfile {
-	if o == nil || IsNil(o.InlineRoutingProfile) {
+	if o == nil || IsNil(o.InlineRoutingProfile.Get()) {
 		var ret InterfaceInlineRoutingProfile
 		return ret
 	}
-	return *o.InlineRoutingProfile
+	return *o.InlineRoutingProfile.Get()
 }
 
 // GetInlineRoutingProfileOk returns a tuple with the InlineRoutingProfile field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InterfaceCreateRequest) GetInlineRoutingProfileOk() (*InterfaceInlineRoutingProfile, bool) {
-	if o == nil || IsNil(o.InlineRoutingProfile) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InlineRoutingProfile, true
+	return o.InlineRoutingProfile.Get(), o.InlineRoutingProfile.IsSet()
 }
 
 // HasInlineRoutingProfile returns a boolean if a field has been set.
 func (o *InterfaceCreateRequest) HasInlineRoutingProfile() bool {
-	if o != nil && !IsNil(o.InlineRoutingProfile) {
+	if o != nil && o.InlineRoutingProfile.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetInlineRoutingProfile gets a reference to the given InterfaceInlineRoutingProfile and assigns it to the InlineRoutingProfile field.
+// SetInlineRoutingProfile gets a reference to the given NullableInterfaceInlineRoutingProfile and assigns it to the InlineRoutingProfile field.
 func (o *InterfaceCreateRequest) SetInlineRoutingProfile(v InterfaceInlineRoutingProfile) {
-	o.InlineRoutingProfile = &v
+	o.InlineRoutingProfile.Set(&v)
+}
+
+// SetInlineRoutingProfileNil sets the value for InlineRoutingProfile to be an explicit nil
+func (o *InterfaceCreateRequest) SetInlineRoutingProfileNil() {
+	o.InlineRoutingProfile.Set(nil)
+}
+
+// UnsetInlineRoutingProfile ensures that no value is present for InlineRoutingProfile, not even an explicit nil
+func (o *InterfaceCreateRequest) UnsetInlineRoutingProfile() {
+	o.InlineRoutingProfile.Unset()
 }
 
 // GetIsPhysical returns the IsPhysical field value if set, zero value otherwise.
@@ -349,36 +371,47 @@ func (o *InterfaceCreateRequest) SetDeviceInstance(v int32) {
 	o.DeviceInstance = &v
 }
 
-// GetVirtualFunctionId returns the VirtualFunctionId field value if set, zero value otherwise.
+// GetVirtualFunctionId returns the VirtualFunctionId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InterfaceCreateRequest) GetVirtualFunctionId() int32 {
-	if o == nil || IsNil(o.VirtualFunctionId) {
+	if o == nil || IsNil(o.VirtualFunctionId.Get()) {
 		var ret int32
 		return ret
 	}
-	return *o.VirtualFunctionId
+	return *o.VirtualFunctionId.Get()
 }
 
 // GetVirtualFunctionIdOk returns a tuple with the VirtualFunctionId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InterfaceCreateRequest) GetVirtualFunctionIdOk() (*int32, bool) {
-	if o == nil || IsNil(o.VirtualFunctionId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.VirtualFunctionId, true
+	return o.VirtualFunctionId.Get(), o.VirtualFunctionId.IsSet()
 }
 
 // HasVirtualFunctionId returns a boolean if a field has been set.
 func (o *InterfaceCreateRequest) HasVirtualFunctionId() bool {
-	if o != nil && !IsNil(o.VirtualFunctionId) {
+	if o != nil && o.VirtualFunctionId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetVirtualFunctionId gets a reference to the given int32 and assigns it to the VirtualFunctionId field.
+// SetVirtualFunctionId gets a reference to the given NullableInt32 and assigns it to the VirtualFunctionId field.
 func (o *InterfaceCreateRequest) SetVirtualFunctionId(v int32) {
-	o.VirtualFunctionId = &v
+	o.VirtualFunctionId.Set(&v)
+}
+
+// SetVirtualFunctionIdNil sets the value for VirtualFunctionId to be an explicit nil
+func (o *InterfaceCreateRequest) SetVirtualFunctionIdNil() {
+	o.VirtualFunctionId.Set(nil)
+}
+
+// UnsetVirtualFunctionId ensures that no value is present for VirtualFunctionId, not even an explicit nil
+func (o *InterfaceCreateRequest) UnsetVirtualFunctionId() {
+	o.VirtualFunctionId.Unset()
 }
 
 func (o InterfaceCreateRequest) MarshalJSON() ([]byte, error) {
@@ -403,11 +436,11 @@ func (o InterfaceCreateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.IpFamilies) {
 		toSerialize["ipFamilies"] = o.IpFamilies
 	}
-	if !IsNil(o.IpAddress) {
-		toSerialize["ipAddress"] = o.IpAddress
+	if o.IpAddress.IsSet() {
+		toSerialize["ipAddress"] = o.IpAddress.Get()
 	}
-	if !IsNil(o.InlineRoutingProfile) {
-		toSerialize["inlineRoutingProfile"] = o.InlineRoutingProfile
+	if o.InlineRoutingProfile.IsSet() {
+		toSerialize["inlineRoutingProfile"] = o.InlineRoutingProfile.Get()
 	}
 	if !IsNil(o.IsPhysical) {
 		toSerialize["isPhysical"] = o.IsPhysical
@@ -418,8 +451,8 @@ func (o InterfaceCreateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.DeviceInstance) {
 		toSerialize["deviceInstance"] = o.DeviceInstance
 	}
-	if !IsNil(o.VirtualFunctionId) {
-		toSerialize["virtualFunctionId"] = o.VirtualFunctionId
+	if o.VirtualFunctionId.IsSet() {
+		toSerialize["virtualFunctionId"] = o.VirtualFunctionId.Get()
 	}
 	return toSerialize, nil
 }

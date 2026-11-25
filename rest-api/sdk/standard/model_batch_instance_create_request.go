@@ -29,7 +29,7 @@ type BatchInstanceCreateRequest struct {
 	// Number of instances to create in this batch. Minimum 2, maximum 18 (limited by topology domain size)
 	Count int32 `json:"count"`
 	// Description applied to all instances in the batch, optional
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// ID of the Tenant creating the Instances
 	TenantId *string `json:"tenantId,omitempty"`
 	// ID of the Instance Type to use for all Instances in the batch
@@ -41,15 +41,15 @@ type BatchInstanceCreateRequest struct {
 	// IDs of additional VPCs every Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
 	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
 	// User data applied to all instances. Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
-	UserData *string `json:"userData,omitempty"`
+	UserData NullableString `json:"userData,omitempty"`
 	// Must be specified if iPXE Script field is empty
-	OperatingSystemId *string `json:"operatingSystemId,omitempty"`
+	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
 	// Power profile to apply to every Instance in the batch. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`.
-	PowerProfile *string `json:"powerProfile,omitempty"`
+	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
-	NetworkSecurityGroupId *string `json:"networkSecurityGroupId,omitempty"`
+	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
 	// Override iPXE script specified in OS, must be specified if Operating System is not specified
-	IpxeScript *string `json:"ipxeScript,omitempty"`
+	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instances. OS must be of iPXE type.
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe,omitempty"`
 	// When set to true, the Instances will be enabled with the Phone Home service.
@@ -149,36 +149,47 @@ func (o *BatchInstanceCreateRequest) SetCount(v int32) {
 	o.Count = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *BatchInstanceCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *BatchInstanceCreateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *BatchInstanceCreateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
+}
+
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetDescription() {
+	o.Description.Unset()
 }
 
 // GetTenantId returns the TenantId field value if set, zero value otherwise.
@@ -325,164 +336,219 @@ func (o *BatchInstanceCreateRequest) SetSecondaryVpcIds(v []string) {
 	o.SecondaryVpcIds = v
 }
 
-// GetUserData returns the UserData field value if set, zero value otherwise.
+// GetUserData returns the UserData field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetUserData() string {
-	if o == nil || IsNil(o.UserData) {
+	if o == nil || IsNil(o.UserData.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.UserData
+	return *o.UserData.Get()
 }
 
 // GetUserDataOk returns a tuple with the UserData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *BatchInstanceCreateRequest) GetUserDataOk() (*string, bool) {
-	if o == nil || IsNil(o.UserData) {
+	if o == nil {
 		return nil, false
 	}
-	return o.UserData, true
+	return o.UserData.Get(), o.UserData.IsSet()
 }
 
 // HasUserData returns a boolean if a field has been set.
 func (o *BatchInstanceCreateRequest) HasUserData() bool {
-	if o != nil && !IsNil(o.UserData) {
+	if o != nil && o.UserData.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetUserData gets a reference to the given string and assigns it to the UserData field.
+// SetUserData gets a reference to the given NullableString and assigns it to the UserData field.
 func (o *BatchInstanceCreateRequest) SetUserData(v string) {
-	o.UserData = &v
+	o.UserData.Set(&v)
 }
 
-// GetOperatingSystemId returns the OperatingSystemId field value if set, zero value otherwise.
+// SetUserDataNil sets the value for UserData to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetUserDataNil() {
+	o.UserData.Set(nil)
+}
+
+// UnsetUserData ensures that no value is present for UserData, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetUserData() {
+	o.UserData.Unset()
+}
+
+// GetOperatingSystemId returns the OperatingSystemId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetOperatingSystemId() string {
-	if o == nil || IsNil(o.OperatingSystemId) {
+	if o == nil || IsNil(o.OperatingSystemId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.OperatingSystemId
+	return *o.OperatingSystemId.Get()
 }
 
 // GetOperatingSystemIdOk returns a tuple with the OperatingSystemId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *BatchInstanceCreateRequest) GetOperatingSystemIdOk() (*string, bool) {
-	if o == nil || IsNil(o.OperatingSystemId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.OperatingSystemId, true
+	return o.OperatingSystemId.Get(), o.OperatingSystemId.IsSet()
 }
 
 // HasOperatingSystemId returns a boolean if a field has been set.
 func (o *BatchInstanceCreateRequest) HasOperatingSystemId() bool {
-	if o != nil && !IsNil(o.OperatingSystemId) {
+	if o != nil && o.OperatingSystemId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetOperatingSystemId gets a reference to the given string and assigns it to the OperatingSystemId field.
+// SetOperatingSystemId gets a reference to the given NullableString and assigns it to the OperatingSystemId field.
 func (o *BatchInstanceCreateRequest) SetOperatingSystemId(v string) {
-	o.OperatingSystemId = &v
+	o.OperatingSystemId.Set(&v)
 }
 
-// GetPowerProfile returns the PowerProfile field value if set, zero value otherwise.
+// SetOperatingSystemIdNil sets the value for OperatingSystemId to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetOperatingSystemIdNil() {
+	o.OperatingSystemId.Set(nil)
+}
+
+// UnsetOperatingSystemId ensures that no value is present for OperatingSystemId, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetOperatingSystemId() {
+	o.OperatingSystemId.Unset()
+}
+
+// GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetPowerProfile() string {
-	if o == nil || IsNil(o.PowerProfile) {
+	if o == nil || IsNil(o.PowerProfile.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.PowerProfile
+	return *o.PowerProfile.Get()
 }
 
 // GetPowerProfileOk returns a tuple with the PowerProfile field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *BatchInstanceCreateRequest) GetPowerProfileOk() (*string, bool) {
-	if o == nil || IsNil(o.PowerProfile) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PowerProfile, true
+	return o.PowerProfile.Get(), o.PowerProfile.IsSet()
 }
 
 // HasPowerProfile returns a boolean if a field has been set.
 func (o *BatchInstanceCreateRequest) HasPowerProfile() bool {
-	if o != nil && !IsNil(o.PowerProfile) {
+	if o != nil && o.PowerProfile.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetPowerProfile gets a reference to the given string and assigns it to the PowerProfile field.
+// SetPowerProfile gets a reference to the given NullableString and assigns it to the PowerProfile field.
 func (o *BatchInstanceCreateRequest) SetPowerProfile(v string) {
-	o.PowerProfile = &v
+	o.PowerProfile.Set(&v)
 }
 
-// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise.
+// SetPowerProfileNil sets the value for PowerProfile to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetPowerProfileNil() {
+	o.PowerProfile.Set(nil)
+}
+
+// UnsetPowerProfile ensures that no value is present for PowerProfile, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetPowerProfile() {
+	o.PowerProfile.Unset()
+}
+
+// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetNetworkSecurityGroupId() string {
-	if o == nil || IsNil(o.NetworkSecurityGroupId) {
+	if o == nil || IsNil(o.NetworkSecurityGroupId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.NetworkSecurityGroupId
+	return *o.NetworkSecurityGroupId.Get()
 }
 
 // GetNetworkSecurityGroupIdOk returns a tuple with the NetworkSecurityGroupId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *BatchInstanceCreateRequest) GetNetworkSecurityGroupIdOk() (*string, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroupId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupId, true
+	return o.NetworkSecurityGroupId.Get(), o.NetworkSecurityGroupId.IsSet()
 }
 
 // HasNetworkSecurityGroupId returns a boolean if a field has been set.
 func (o *BatchInstanceCreateRequest) HasNetworkSecurityGroupId() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroupId) {
+	if o != nil && o.NetworkSecurityGroupId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroupId gets a reference to the given string and assigns it to the NetworkSecurityGroupId field.
+// SetNetworkSecurityGroupId gets a reference to the given NullableString and assigns it to the NetworkSecurityGroupId field.
 func (o *BatchInstanceCreateRequest) SetNetworkSecurityGroupId(v string) {
-	o.NetworkSecurityGroupId = &v
+	o.NetworkSecurityGroupId.Set(&v)
 }
 
-// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise.
+// SetNetworkSecurityGroupIdNil sets the value for NetworkSecurityGroupId to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetNetworkSecurityGroupIdNil() {
+	o.NetworkSecurityGroupId.Set(nil)
+}
+
+// UnsetNetworkSecurityGroupId ensures that no value is present for NetworkSecurityGroupId, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetNetworkSecurityGroupId() {
+	o.NetworkSecurityGroupId.Unset()
+}
+
+// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetIpxeScript() string {
-	if o == nil || IsNil(o.IpxeScript) {
+	if o == nil || IsNil(o.IpxeScript.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.IpxeScript
+	return *o.IpxeScript.Get()
 }
 
 // GetIpxeScriptOk returns a tuple with the IpxeScript field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *BatchInstanceCreateRequest) GetIpxeScriptOk() (*string, bool) {
-	if o == nil || IsNil(o.IpxeScript) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IpxeScript, true
+	return o.IpxeScript.Get(), o.IpxeScript.IsSet()
 }
 
 // HasIpxeScript returns a boolean if a field has been set.
 func (o *BatchInstanceCreateRequest) HasIpxeScript() bool {
-	if o != nil && !IsNil(o.IpxeScript) {
+	if o != nil && o.IpxeScript.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetIpxeScript gets a reference to the given string and assigns it to the IpxeScript field.
+// SetIpxeScript gets a reference to the given NullableString and assigns it to the IpxeScript field.
 func (o *BatchInstanceCreateRequest) SetIpxeScript(v string) {
-	o.IpxeScript = &v
+	o.IpxeScript.Set(&v)
+}
+
+// SetIpxeScriptNil sets the value for IpxeScript to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetIpxeScriptNil() {
+	o.IpxeScript.Set(nil)
+}
+
+// UnsetIpxeScript ensures that no value is present for IpxeScript, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetIpxeScript() {
+	o.IpxeScript.Unset()
 }
 
 // GetAlwaysBootWithCustomIpxe returns the AlwaysBootWithCustomIpxe field value if set, zero value otherwise.
@@ -849,8 +915,8 @@ func (o BatchInstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["namePrefix"] = o.NamePrefix
 	toSerialize["count"] = o.Count
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
 	if !IsNil(o.TenantId) {
 		toSerialize["tenantId"] = o.TenantId
@@ -863,20 +929,20 @@ func (o BatchInstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.SecondaryVpcIds) {
 		toSerialize["secondaryVpcIds"] = o.SecondaryVpcIds
 	}
-	if !IsNil(o.UserData) {
-		toSerialize["userData"] = o.UserData
+	if o.UserData.IsSet() {
+		toSerialize["userData"] = o.UserData.Get()
 	}
-	if !IsNil(o.OperatingSystemId) {
-		toSerialize["operatingSystemId"] = o.OperatingSystemId
+	if o.OperatingSystemId.IsSet() {
+		toSerialize["operatingSystemId"] = o.OperatingSystemId.Get()
 	}
-	if !IsNil(o.PowerProfile) {
-		toSerialize["powerProfile"] = o.PowerProfile
+	if o.PowerProfile.IsSet() {
+		toSerialize["powerProfile"] = o.PowerProfile.Get()
 	}
-	if !IsNil(o.NetworkSecurityGroupId) {
-		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId
+	if o.NetworkSecurityGroupId.IsSet() {
+		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
 	}
-	if !IsNil(o.IpxeScript) {
-		toSerialize["ipxeScript"] = o.IpxeScript
+	if o.IpxeScript.IsSet() {
+		toSerialize["ipxeScript"] = o.IpxeScript.Get()
 	}
 	if !IsNil(o.AlwaysBootWithCustomIpxe) {
 		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe

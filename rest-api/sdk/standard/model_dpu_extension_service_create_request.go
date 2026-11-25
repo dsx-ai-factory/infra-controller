@@ -27,12 +27,12 @@ type DpuExtensionServiceCreateRequest struct {
 	// Name for the DPU Extension Service. Must be unique for a given Tenant
 	Name string `json:"name"`
 	// Optional description for the DPU Extension Service
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// Type of the DPU Extension Service
-	ServiceType    string                             `json:"serviceType"`
-	DeploymentType *DpuExtensionServiceDeploymentType `json:"deploymentType,omitempty"`
-	// Required for `DemandDriven` DpfHelmChart services; omitted for `Baseline` Helm and KubernetesPod services
-	DpuTarget *DpuExtensionServiceDpuTarget `json:"dpuTarget,omitempty"`
+	ServiceType    string                                    `json:"serviceType"`
+	DeploymentType NullableDpuExtensionServiceDeploymentType `json:"deploymentType,omitempty"`
+	// Required for `DemandDriven` DpfHelmChart services; omitted or null for `Baseline` Helm and KubernetesPod services
+	DpuTarget NullableDpuExtensionServiceDpuTarget `json:"dpuTarget,omitempty"`
 	// ID for the Site the DPU Extension Service belongs to
 	SiteId string                               `json:"siteId"`
 	Data   DpuExtensionServiceCreateRequestData `json:"data"`
@@ -52,8 +52,6 @@ func NewDpuExtensionServiceCreateRequest(name string, serviceType string, siteId
 	this := DpuExtensionServiceCreateRequest{}
 	this.Name = name
 	this.ServiceType = serviceType
-	var deploymentType DpuExtensionServiceDeploymentType = DPUEXTENSIONSERVICEDEPLOYMENTTYPE_DEMAND_DRIVEN
-	this.DeploymentType = &deploymentType
 	this.SiteId = siteId
 	this.Data = data
 	return &this
@@ -64,8 +62,6 @@ func NewDpuExtensionServiceCreateRequest(name string, serviceType string, siteId
 // but it doesn't guarantee that properties required by API are set
 func NewDpuExtensionServiceCreateRequestWithDefaults() *DpuExtensionServiceCreateRequest {
 	this := DpuExtensionServiceCreateRequest{}
-	var deploymentType DpuExtensionServiceDeploymentType = DPUEXTENSIONSERVICEDEPLOYMENTTYPE_DEMAND_DRIVEN
-	this.DeploymentType = &deploymentType
 	return &this
 }
 
@@ -93,36 +89,47 @@ func (o *DpuExtensionServiceCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *DpuExtensionServiceCreateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *DpuExtensionServiceCreateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
+}
+
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *DpuExtensionServiceCreateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *DpuExtensionServiceCreateRequest) UnsetDescription() {
+	o.Description.Unset()
 }
 
 // GetServiceType returns the ServiceType field value
@@ -149,68 +156,90 @@ func (o *DpuExtensionServiceCreateRequest) SetServiceType(v string) {
 	o.ServiceType = v
 }
 
-// GetDeploymentType returns the DeploymentType field value if set, zero value otherwise.
+// GetDeploymentType returns the DeploymentType field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceCreateRequest) GetDeploymentType() DpuExtensionServiceDeploymentType {
-	if o == nil || IsNil(o.DeploymentType) {
+	if o == nil || IsNil(o.DeploymentType.Get()) {
 		var ret DpuExtensionServiceDeploymentType
 		return ret
 	}
-	return *o.DeploymentType
+	return *o.DeploymentType.Get()
 }
 
 // GetDeploymentTypeOk returns a tuple with the DeploymentType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceCreateRequest) GetDeploymentTypeOk() (*DpuExtensionServiceDeploymentType, bool) {
-	if o == nil || IsNil(o.DeploymentType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DeploymentType, true
+	return o.DeploymentType.Get(), o.DeploymentType.IsSet()
 }
 
 // HasDeploymentType returns a boolean if a field has been set.
 func (o *DpuExtensionServiceCreateRequest) HasDeploymentType() bool {
-	if o != nil && !IsNil(o.DeploymentType) {
+	if o != nil && o.DeploymentType.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDeploymentType gets a reference to the given DpuExtensionServiceDeploymentType and assigns it to the DeploymentType field.
+// SetDeploymentType gets a reference to the given NullableDpuExtensionServiceDeploymentType and assigns it to the DeploymentType field.
 func (o *DpuExtensionServiceCreateRequest) SetDeploymentType(v DpuExtensionServiceDeploymentType) {
-	o.DeploymentType = &v
+	o.DeploymentType.Set(&v)
 }
 
-// GetDpuTarget returns the DpuTarget field value if set, zero value otherwise.
+// SetDeploymentTypeNil sets the value for DeploymentType to be an explicit nil
+func (o *DpuExtensionServiceCreateRequest) SetDeploymentTypeNil() {
+	o.DeploymentType.Set(nil)
+}
+
+// UnsetDeploymentType ensures that no value is present for DeploymentType, not even an explicit nil
+func (o *DpuExtensionServiceCreateRequest) UnsetDeploymentType() {
+	o.DeploymentType.Unset()
+}
+
+// GetDpuTarget returns the DpuTarget field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceCreateRequest) GetDpuTarget() DpuExtensionServiceDpuTarget {
-	if o == nil || IsNil(o.DpuTarget) {
+	if o == nil || IsNil(o.DpuTarget.Get()) {
 		var ret DpuExtensionServiceDpuTarget
 		return ret
 	}
-	return *o.DpuTarget
+	return *o.DpuTarget.Get()
 }
 
 // GetDpuTargetOk returns a tuple with the DpuTarget field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceCreateRequest) GetDpuTargetOk() (*DpuExtensionServiceDpuTarget, bool) {
-	if o == nil || IsNil(o.DpuTarget) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DpuTarget, true
+	return o.DpuTarget.Get(), o.DpuTarget.IsSet()
 }
 
 // HasDpuTarget returns a boolean if a field has been set.
 func (o *DpuExtensionServiceCreateRequest) HasDpuTarget() bool {
-	if o != nil && !IsNil(o.DpuTarget) {
+	if o != nil && o.DpuTarget.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDpuTarget gets a reference to the given DpuExtensionServiceDpuTarget and assigns it to the DpuTarget field.
+// SetDpuTarget gets a reference to the given NullableDpuExtensionServiceDpuTarget and assigns it to the DpuTarget field.
 func (o *DpuExtensionServiceCreateRequest) SetDpuTarget(v DpuExtensionServiceDpuTarget) {
-	o.DpuTarget = &v
+	o.DpuTarget.Set(&v)
+}
+
+// SetDpuTargetNil sets the value for DpuTarget to be an explicit nil
+func (o *DpuExtensionServiceCreateRequest) SetDpuTargetNil() {
+	o.DpuTarget.Set(nil)
+}
+
+// UnsetDpuTarget ensures that no value is present for DpuTarget, not even an explicit nil
+func (o *DpuExtensionServiceCreateRequest) UnsetDpuTarget() {
+	o.DpuTarget.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -336,15 +365,15 @@ func (o DpuExtensionServiceCreateRequest) MarshalJSON() ([]byte, error) {
 func (o DpuExtensionServiceCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
 	toSerialize["serviceType"] = o.ServiceType
-	if !IsNil(o.DeploymentType) {
-		toSerialize["deploymentType"] = o.DeploymentType
+	if o.DeploymentType.IsSet() {
+		toSerialize["deploymentType"] = o.DeploymentType.Get()
 	}
-	if !IsNil(o.DpuTarget) {
-		toSerialize["dpuTarget"] = o.DpuTarget
+	if o.DpuTarget.IsSet() {
+		toSerialize["dpuTarget"] = o.DpuTarget.Get()
 	}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["data"] = o.Data

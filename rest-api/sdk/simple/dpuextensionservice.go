@@ -108,18 +108,20 @@ func (dm DpuExtensionServiceManager) Create(ctx context.Context, request DpuExte
 	// Select the string alternative required by the REST handler.
 	apiReq := standard.DpuExtensionServiceCreateRequest{
 		Name:        request.Name,
-		Description: request.Description,
 		ServiceType: request.ServiceType,
 		SiteId:      dm.client.apiMetadata.SiteID,
 		Data:        standard.StringAsDpuExtensionServiceCreateRequestData(&request.Data),
 	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
+	}
 	if request.DeploymentType != nil {
 		deploymentType := standard.DpuExtensionServiceDeploymentType(*request.DeploymentType)
-		apiReq.DeploymentType = &deploymentType
+		apiReq.DeploymentType.Set(&deploymentType)
 	}
 	if request.DpuTarget != nil {
 		target := standard.DpuExtensionServiceDpuTarget(*request.DpuTarget)
-		apiReq.DpuTarget = &target
+		apiReq.DpuTarget.Set(&target)
 	}
 	apiDes, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.CreateDpuExtensionService(ctx, dm.client.apiMetadata.Organization).
 		DpuExtensionServiceCreateRequest(apiReq).Execute()
@@ -191,14 +193,17 @@ func (dm DpuExtensionServiceManager) Update(ctx context.Context, id string, requ
 	ctx = WithLogger(ctx, dm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, dm.client.Config.Token)
 
-	apiReq := standard.DpuExtensionServiceUpdateRequest{
-		Name:        request.Name,
-		Description: request.Description,
+	apiReq := standard.DpuExtensionServiceUpdateRequest{}
+	if request.Name != nil {
+		apiReq.Name.Set(request.Name)
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
 	}
 	if request.Data != nil {
 		// Keep updates serialized as strings despite the documentation's object alternative.
 		data := standard.StringAsDpuExtensionServiceUpdateRequestData(request.Data)
-		apiReq.Data = &data
+		apiReq.Data.Set(&data)
 	}
 	apiDes, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.UpdateDpuExtensionService(ctx, dm.client.apiMetadata.Organization, id).
 		DpuExtensionServiceUpdateRequest(apiReq).Execute()

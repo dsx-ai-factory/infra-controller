@@ -23,13 +23,13 @@ var _ MappedNullable = &SiteCapabilitiesUpdateRequest{}
 // SiteCapabilitiesUpdateRequest Request to modify Site's capabilities. Partial update allowed, only specify capabilities that should be updated.
 type SiteCapabilitiesUpdateRequest struct {
 	// Enable or disable native networking for the Site
-	NativeNetworking *bool `json:"nativeNetworking,omitempty"`
+	NativeNetworking NullableBool `json:"nativeNetworking,omitempty"`
 	// Enable or disable network security groups for the Site
-	NetworkSecurityGroup *bool `json:"networkSecurityGroup,omitempty"`
+	NetworkSecurityGroup NullableBool `json:"networkSecurityGroup,omitempty"`
 	// Enable or disable image-based operating system support for the Site
-	ImageBasedOperatingSystem *bool `json:"imageBasedOperatingSystem,omitempty"`
-	// Enable or disable DPS power management for the Site. Omission preserves the current value. Only Providers can update this field.
-	DpsPowerManagement *bool `json:"dpsPowerManagement,omitempty"`
+	ImageBasedOperatingSystem NullableBool `json:"imageBasedOperatingSystem,omitempty"`
+	// Enable or disable DPS power management for the Site. Omission or `null` preserves the current value. Only Providers can update this field.
+	DpsPowerManagement NullableBool `json:"dpsPowerManagement,omitempty"`
 }
 
 // NewSiteCapabilitiesUpdateRequest instantiates a new SiteCapabilitiesUpdateRequest object
@@ -49,132 +49,176 @@ func NewSiteCapabilitiesUpdateRequestWithDefaults() *SiteCapabilitiesUpdateReque
 	return &this
 }
 
-// GetNativeNetworking returns the NativeNetworking field value if set, zero value otherwise.
+// GetNativeNetworking returns the NativeNetworking field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SiteCapabilitiesUpdateRequest) GetNativeNetworking() bool {
-	if o == nil || IsNil(o.NativeNetworking) {
+	if o == nil || IsNil(o.NativeNetworking.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.NativeNetworking
+	return *o.NativeNetworking.Get()
 }
 
 // GetNativeNetworkingOk returns a tuple with the NativeNetworking field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SiteCapabilitiesUpdateRequest) GetNativeNetworkingOk() (*bool, bool) {
-	if o == nil || IsNil(o.NativeNetworking) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NativeNetworking, true
+	return o.NativeNetworking.Get(), o.NativeNetworking.IsSet()
 }
 
 // HasNativeNetworking returns a boolean if a field has been set.
 func (o *SiteCapabilitiesUpdateRequest) HasNativeNetworking() bool {
-	if o != nil && !IsNil(o.NativeNetworking) {
+	if o != nil && o.NativeNetworking.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNativeNetworking gets a reference to the given bool and assigns it to the NativeNetworking field.
+// SetNativeNetworking gets a reference to the given NullableBool and assigns it to the NativeNetworking field.
 func (o *SiteCapabilitiesUpdateRequest) SetNativeNetworking(v bool) {
-	o.NativeNetworking = &v
+	o.NativeNetworking.Set(&v)
 }
 
-// GetNetworkSecurityGroup returns the NetworkSecurityGroup field value if set, zero value otherwise.
+// SetNativeNetworkingNil sets the value for NativeNetworking to be an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) SetNativeNetworkingNil() {
+	o.NativeNetworking.Set(nil)
+}
+
+// UnsetNativeNetworking ensures that no value is present for NativeNetworking, not even an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) UnsetNativeNetworking() {
+	o.NativeNetworking.Unset()
+}
+
+// GetNetworkSecurityGroup returns the NetworkSecurityGroup field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SiteCapabilitiesUpdateRequest) GetNetworkSecurityGroup() bool {
-	if o == nil || IsNil(o.NetworkSecurityGroup) {
+	if o == nil || IsNil(o.NetworkSecurityGroup.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.NetworkSecurityGroup
+	return *o.NetworkSecurityGroup.Get()
 }
 
 // GetNetworkSecurityGroupOk returns a tuple with the NetworkSecurityGroup field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SiteCapabilitiesUpdateRequest) GetNetworkSecurityGroupOk() (*bool, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroup) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroup, true
+	return o.NetworkSecurityGroup.Get(), o.NetworkSecurityGroup.IsSet()
 }
 
 // HasNetworkSecurityGroup returns a boolean if a field has been set.
 func (o *SiteCapabilitiesUpdateRequest) HasNetworkSecurityGroup() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroup) {
+	if o != nil && o.NetworkSecurityGroup.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroup gets a reference to the given bool and assigns it to the NetworkSecurityGroup field.
+// SetNetworkSecurityGroup gets a reference to the given NullableBool and assigns it to the NetworkSecurityGroup field.
 func (o *SiteCapabilitiesUpdateRequest) SetNetworkSecurityGroup(v bool) {
-	o.NetworkSecurityGroup = &v
+	o.NetworkSecurityGroup.Set(&v)
 }
 
-// GetImageBasedOperatingSystem returns the ImageBasedOperatingSystem field value if set, zero value otherwise.
+// SetNetworkSecurityGroupNil sets the value for NetworkSecurityGroup to be an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) SetNetworkSecurityGroupNil() {
+	o.NetworkSecurityGroup.Set(nil)
+}
+
+// UnsetNetworkSecurityGroup ensures that no value is present for NetworkSecurityGroup, not even an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) UnsetNetworkSecurityGroup() {
+	o.NetworkSecurityGroup.Unset()
+}
+
+// GetImageBasedOperatingSystem returns the ImageBasedOperatingSystem field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SiteCapabilitiesUpdateRequest) GetImageBasedOperatingSystem() bool {
-	if o == nil || IsNil(o.ImageBasedOperatingSystem) {
+	if o == nil || IsNil(o.ImageBasedOperatingSystem.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.ImageBasedOperatingSystem
+	return *o.ImageBasedOperatingSystem.Get()
 }
 
 // GetImageBasedOperatingSystemOk returns a tuple with the ImageBasedOperatingSystem field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SiteCapabilitiesUpdateRequest) GetImageBasedOperatingSystemOk() (*bool, bool) {
-	if o == nil || IsNil(o.ImageBasedOperatingSystem) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ImageBasedOperatingSystem, true
+	return o.ImageBasedOperatingSystem.Get(), o.ImageBasedOperatingSystem.IsSet()
 }
 
 // HasImageBasedOperatingSystem returns a boolean if a field has been set.
 func (o *SiteCapabilitiesUpdateRequest) HasImageBasedOperatingSystem() bool {
-	if o != nil && !IsNil(o.ImageBasedOperatingSystem) {
+	if o != nil && o.ImageBasedOperatingSystem.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetImageBasedOperatingSystem gets a reference to the given bool and assigns it to the ImageBasedOperatingSystem field.
+// SetImageBasedOperatingSystem gets a reference to the given NullableBool and assigns it to the ImageBasedOperatingSystem field.
 func (o *SiteCapabilitiesUpdateRequest) SetImageBasedOperatingSystem(v bool) {
-	o.ImageBasedOperatingSystem = &v
+	o.ImageBasedOperatingSystem.Set(&v)
 }
 
-// GetDpsPowerManagement returns the DpsPowerManagement field value if set, zero value otherwise.
+// SetImageBasedOperatingSystemNil sets the value for ImageBasedOperatingSystem to be an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) SetImageBasedOperatingSystemNil() {
+	o.ImageBasedOperatingSystem.Set(nil)
+}
+
+// UnsetImageBasedOperatingSystem ensures that no value is present for ImageBasedOperatingSystem, not even an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) UnsetImageBasedOperatingSystem() {
+	o.ImageBasedOperatingSystem.Unset()
+}
+
+// GetDpsPowerManagement returns the DpsPowerManagement field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SiteCapabilitiesUpdateRequest) GetDpsPowerManagement() bool {
-	if o == nil || IsNil(o.DpsPowerManagement) {
+	if o == nil || IsNil(o.DpsPowerManagement.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.DpsPowerManagement
+	return *o.DpsPowerManagement.Get()
 }
 
 // GetDpsPowerManagementOk returns a tuple with the DpsPowerManagement field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SiteCapabilitiesUpdateRequest) GetDpsPowerManagementOk() (*bool, bool) {
-	if o == nil || IsNil(o.DpsPowerManagement) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DpsPowerManagement, true
+	return o.DpsPowerManagement.Get(), o.DpsPowerManagement.IsSet()
 }
 
 // HasDpsPowerManagement returns a boolean if a field has been set.
 func (o *SiteCapabilitiesUpdateRequest) HasDpsPowerManagement() bool {
-	if o != nil && !IsNil(o.DpsPowerManagement) {
+	if o != nil && o.DpsPowerManagement.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDpsPowerManagement gets a reference to the given bool and assigns it to the DpsPowerManagement field.
+// SetDpsPowerManagement gets a reference to the given NullableBool and assigns it to the DpsPowerManagement field.
 func (o *SiteCapabilitiesUpdateRequest) SetDpsPowerManagement(v bool) {
-	o.DpsPowerManagement = &v
+	o.DpsPowerManagement.Set(&v)
+}
+
+// SetDpsPowerManagementNil sets the value for DpsPowerManagement to be an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) SetDpsPowerManagementNil() {
+	o.DpsPowerManagement.Set(nil)
+}
+
+// UnsetDpsPowerManagement ensures that no value is present for DpsPowerManagement, not even an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) UnsetDpsPowerManagement() {
+	o.DpsPowerManagement.Unset()
 }
 
 func (o SiteCapabilitiesUpdateRequest) MarshalJSON() ([]byte, error) {
@@ -187,17 +231,17 @@ func (o SiteCapabilitiesUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o SiteCapabilitiesUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.NativeNetworking) {
-		toSerialize["nativeNetworking"] = o.NativeNetworking
+	if o.NativeNetworking.IsSet() {
+		toSerialize["nativeNetworking"] = o.NativeNetworking.Get()
 	}
-	if !IsNil(o.NetworkSecurityGroup) {
-		toSerialize["networkSecurityGroup"] = o.NetworkSecurityGroup
+	if o.NetworkSecurityGroup.IsSet() {
+		toSerialize["networkSecurityGroup"] = o.NetworkSecurityGroup.Get()
 	}
-	if !IsNil(o.ImageBasedOperatingSystem) {
-		toSerialize["imageBasedOperatingSystem"] = o.ImageBasedOperatingSystem
+	if o.ImageBasedOperatingSystem.IsSet() {
+		toSerialize["imageBasedOperatingSystem"] = o.ImageBasedOperatingSystem.Get()
 	}
-	if !IsNil(o.DpsPowerManagement) {
-		toSerialize["dpsPowerManagement"] = o.DpsPowerManagement
+	if o.DpsPowerManagement.IsSet() {
+		toSerialize["dpsPowerManagement"] = o.DpsPowerManagement.Get()
 	}
 	return toSerialize, nil
 }

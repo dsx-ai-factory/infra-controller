@@ -62,9 +62,11 @@ func (nlm NVLinkLogicalPartitionManager) Create(ctx context.Context, request NVL
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, nlm.client.Config.Token)
 
 	apiReq := standard.NVLinkLogicalPartitionCreateRequest{
-		Name:        request.Name,
-		Description: request.Description,
-		SiteId:      nlm.client.apiMetadata.SiteID,
+		Name:   request.Name,
+		SiteId: nlm.client.apiMetadata.SiteID,
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
 	}
 	apiNl, resp, err := nlm.client.apiClient.NVLinkLogicalPartitionAPI.CreateNvlinkLogicalPartition(ctx, nlm.client.apiMetadata.Organization).
 		NVLinkLogicalPartitionCreateRequest(apiReq).Execute()
@@ -136,9 +138,12 @@ func (nlm NVLinkLogicalPartitionManager) Update(ctx context.Context, id string, 
 	ctx = WithLogger(ctx, nlm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, nlm.client.Config.Token)
 
-	apiReq := standard.NVLinkLogicalPartitionUpdateRequest{
-		Name:        request.Name,
-		Description: request.Description,
+	apiReq := standard.NVLinkLogicalPartitionUpdateRequest{}
+	if request.Name != nil {
+		apiReq.Name.Set(request.Name)
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
 	}
 	apiNl, resp, err := nlm.client.apiClient.NVLinkLogicalPartitionAPI.UpdateNvlinkLogicalPartition(ctx, nlm.client.apiMetadata.Organization, id).
 		NVLinkLogicalPartitionUpdateRequest(apiReq).Execute()

@@ -23,9 +23,9 @@ var _ MappedNullable = &DpuExtensionServiceDpfHelmChartRollingUpdate{}
 // DpuExtensionServiceDpfHelmChartRollingUpdate Optional rolling-update limits passed to DPF
 type DpuExtensionServiceDpfHelmChartRollingUpdate struct {
 	// Optional additional pod count or percentage string, for example 1 or \"25%\"
-	MaxSurge *DpuExtensionServiceDpfHelmChartIntOrString `json:"maxSurge,omitempty"`
+	MaxSurge NullableDpuExtensionServiceDpfHelmChartIntOrString `json:"maxSurge,omitempty"`
 	// Optional unavailable pod count or percentage string, for example 1 or \"25%\"
-	MaxUnavailable *DpuExtensionServiceDpfHelmChartIntOrString `json:"maxUnavailable,omitempty"`
+	MaxUnavailable NullableDpuExtensionServiceDpfHelmChartIntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // NewDpuExtensionServiceDpfHelmChartRollingUpdate instantiates a new DpuExtensionServiceDpfHelmChartRollingUpdate object
@@ -45,68 +45,90 @@ func NewDpuExtensionServiceDpfHelmChartRollingUpdateWithDefaults() *DpuExtension
 	return &this
 }
 
-// GetMaxSurge returns the MaxSurge field value if set, zero value otherwise.
+// GetMaxSurge returns the MaxSurge field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) GetMaxSurge() DpuExtensionServiceDpfHelmChartIntOrString {
-	if o == nil || IsNil(o.MaxSurge) {
+	if o == nil || IsNil(o.MaxSurge.Get()) {
 		var ret DpuExtensionServiceDpfHelmChartIntOrString
 		return ret
 	}
-	return *o.MaxSurge
+	return *o.MaxSurge.Get()
 }
 
 // GetMaxSurgeOk returns a tuple with the MaxSurge field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) GetMaxSurgeOk() (*DpuExtensionServiceDpfHelmChartIntOrString, bool) {
-	if o == nil || IsNil(o.MaxSurge) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MaxSurge, true
+	return o.MaxSurge.Get(), o.MaxSurge.IsSet()
 }
 
 // HasMaxSurge returns a boolean if a field has been set.
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) HasMaxSurge() bool {
-	if o != nil && !IsNil(o.MaxSurge) {
+	if o != nil && o.MaxSurge.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetMaxSurge gets a reference to the given DpuExtensionServiceDpfHelmChartIntOrString and assigns it to the MaxSurge field.
+// SetMaxSurge gets a reference to the given NullableDpuExtensionServiceDpfHelmChartIntOrString and assigns it to the MaxSurge field.
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) SetMaxSurge(v DpuExtensionServiceDpfHelmChartIntOrString) {
-	o.MaxSurge = &v
+	o.MaxSurge.Set(&v)
 }
 
-// GetMaxUnavailable returns the MaxUnavailable field value if set, zero value otherwise.
+// SetMaxSurgeNil sets the value for MaxSurge to be an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) SetMaxSurgeNil() {
+	o.MaxSurge.Set(nil)
+}
+
+// UnsetMaxSurge ensures that no value is present for MaxSurge, not even an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) UnsetMaxSurge() {
+	o.MaxSurge.Unset()
+}
+
+// GetMaxUnavailable returns the MaxUnavailable field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) GetMaxUnavailable() DpuExtensionServiceDpfHelmChartIntOrString {
-	if o == nil || IsNil(o.MaxUnavailable) {
+	if o == nil || IsNil(o.MaxUnavailable.Get()) {
 		var ret DpuExtensionServiceDpfHelmChartIntOrString
 		return ret
 	}
-	return *o.MaxUnavailable
+	return *o.MaxUnavailable.Get()
 }
 
 // GetMaxUnavailableOk returns a tuple with the MaxUnavailable field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) GetMaxUnavailableOk() (*DpuExtensionServiceDpfHelmChartIntOrString, bool) {
-	if o == nil || IsNil(o.MaxUnavailable) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MaxUnavailable, true
+	return o.MaxUnavailable.Get(), o.MaxUnavailable.IsSet()
 }
 
 // HasMaxUnavailable returns a boolean if a field has been set.
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) HasMaxUnavailable() bool {
-	if o != nil && !IsNil(o.MaxUnavailable) {
+	if o != nil && o.MaxUnavailable.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetMaxUnavailable gets a reference to the given DpuExtensionServiceDpfHelmChartIntOrString and assigns it to the MaxUnavailable field.
+// SetMaxUnavailable gets a reference to the given NullableDpuExtensionServiceDpfHelmChartIntOrString and assigns it to the MaxUnavailable field.
 func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) SetMaxUnavailable(v DpuExtensionServiceDpfHelmChartIntOrString) {
-	o.MaxUnavailable = &v
+	o.MaxUnavailable.Set(&v)
+}
+
+// SetMaxUnavailableNil sets the value for MaxUnavailable to be an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) SetMaxUnavailableNil() {
+	o.MaxUnavailable.Set(nil)
+}
+
+// UnsetMaxUnavailable ensures that no value is present for MaxUnavailable, not even an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartRollingUpdate) UnsetMaxUnavailable() {
+	o.MaxUnavailable.Unset()
 }
 
 func (o DpuExtensionServiceDpfHelmChartRollingUpdate) MarshalJSON() ([]byte, error) {
@@ -119,11 +141,11 @@ func (o DpuExtensionServiceDpfHelmChartRollingUpdate) MarshalJSON() ([]byte, err
 
 func (o DpuExtensionServiceDpfHelmChartRollingUpdate) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.MaxSurge) {
-		toSerialize["maxSurge"] = o.MaxSurge
+	if o.MaxSurge.IsSet() {
+		toSerialize["maxSurge"] = o.MaxSurge.Get()
 	}
-	if !IsNil(o.MaxUnavailable) {
-		toSerialize["maxUnavailable"] = o.MaxUnavailable
+	if o.MaxUnavailable.IsSet() {
+		toSerialize["maxUnavailable"] = o.MaxUnavailable.Get()
 	}
 	return toSerialize, nil
 }

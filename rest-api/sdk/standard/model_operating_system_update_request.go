@@ -23,40 +23,40 @@ var _ MappedNullable = &OperatingSystemUpdateRequest{}
 // OperatingSystemUpdateRequest Request data to update an Operating System. For image-based OS, mutable image attributes (image authentication, root filesystem, image disk) can be updated; imageUrl and imageSha identify the underlying image and are immutable after creation. Only iPXE attributes can be updated for iPXE-based OS. A Templated iPXE Operating System can only be updated when it is associated with exactly one Site.
 type OperatingSystemUpdateRequest struct {
 	// Name of the Operating System
-	Name *string `json:"name,omitempty"`
+	Name NullableString `json:"name,omitempty"`
 	// Optional description of the Operating System
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// iPXE script or URL, only applicable for iPXE-based OS. Cannot be specified if imageUrl is specified
-	IpxeScript *string `json:"ipxeScript,omitempty"`
+	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// Original URL from which the Operating System image can be retrieved. Immutable after creation: it may be re-sent unchanged, but changing it is rejected. Create a new Operating System to use a different image.
-	ImageUrl *string `json:"imageUrl,omitempty"`
+	ImageUrl NullableString `json:"imageUrl,omitempty"`
 	// SHA hash of the image file. Immutable after creation: it may be re-sent unchanged, but changing it is rejected.
-	ImageSha *string `json:"imageSha,omitempty"`
-	// Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value; omitting this field leaves it unchanged.
-	ImageAuthType *string `json:"imageAuthType,omitempty"`
-	// Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value; omitting this field leaves it unchanged.
-	ImageAuthToken *string `json:"imageAuthToken,omitempty"`
-	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. Omitting this field preserves the current value. Sending an explicit empty string clears the value and restores automatic selection: prefer a disk with an EFI partition, then fall back to the first `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
-	ImageDisk *string `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\\s]+))$"`
+	ImageSha NullableString `json:"imageSha,omitempty"`
+	// Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.
+	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
+	// Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.
+	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`
+	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. Omitting this field or sending null preserves the current value. Sending an explicit empty string clears the value and restores automatic selection: prefer a disk with an EFI partition, then fall back to the first `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
+	ImageDisk NullableString `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\\s]+))$"`
 	// Root filesystem UUID; this or `rootFsLabel` is required for image-based OS
-	RootFsId *string `json:"rootFsId,omitempty"`
+	RootFsId NullableString `json:"rootFsId,omitempty"`
 	// Root filesystem label; this or `rootFsId` is required for image-based OS
-	RootFsLabel *string `json:"rootFsLabel,omitempty"`
+	RootFsLabel NullableString `json:"rootFsLabel,omitempty"`
 	// Indicates whether the Phone Home service should be enabled or disabled for Operating System
-	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
+	PhoneHomeEnabled NullableBool `json:"phoneHomeEnabled,omitempty"`
 	// User data for the Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
-	UserData *string `json:"userData,omitempty"`
+	UserData NullableString `json:"userData,omitempty"`
 	// Deprecated and ignored: whether the Operating System is cloud-init based. Value now derived from `userData`.
 	// Deprecated
-	IsCloudInit *bool `json:"isCloudInit,omitempty"`
+	IsCloudInit NullableBool `json:"isCloudInit,omitempty"`
 	// Indicates if the user data can be overridden at Instance creation time
-	AllowOverride *bool `json:"allowOverride,omitempty"`
+	AllowOverride NullableBool `json:"allowOverride,omitempty"`
 	// Indicates if the Operating System is active
-	IsActive *bool `json:"isActive,omitempty"`
+	IsActive NullableBool `json:"isActive,omitempty"`
 	// Optional deactivation note if OS is inactive
-	DeactivationNote *string `json:"deactivationNote,omitempty"`
+	DeactivationNote NullableString `json:"deactivationNote,omitempty"`
 	// ID of the iPXE template to use (Templated iPXE only). Mutually exclusive with ipxeScript and imageUrl.
-	IpxeTemplateId *string `json:"ipxeTemplateId,omitempty"`
+	IpxeTemplateId NullableString `json:"ipxeTemplateId,omitempty"`
 	// Parameters passed to the iPXE template (Templated iPXE only).
 	IpxeTemplateParameters []OperatingSystemIpxeParameter `json:"ipxeTemplateParameters,omitempty"`
 	// Artifacts (kernel, initrd, ISO, ...) for the iPXE OS definition (Templated iPXE only).
@@ -80,551 +80,738 @@ func NewOperatingSystemUpdateRequestWithDefaults() *OperatingSystemUpdateRequest
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil || IsNil(o.Name.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Name
+	return *o.Name.Get()
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return o.Name.Get(), o.Name.IsSet()
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
+	if o != nil && o.Name.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName gets a reference to the given NullableString and assigns it to the Name field.
 func (o *OperatingSystemUpdateRequest) SetName(v string) {
-	o.Name = &v
+	o.Name.Set(&v)
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// SetNameNil sets the value for Name to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetNameNil() {
+	o.Name.Set(nil)
+}
+
+// UnsetName ensures that no value is present for Name, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetName() {
+	o.Name.Unset()
+}
+
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *OperatingSystemUpdateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
 }
 
-// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise.
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetDescription() {
+	o.Description.Unset()
+}
+
+// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetIpxeScript() string {
-	if o == nil || IsNil(o.IpxeScript) {
+	if o == nil || IsNil(o.IpxeScript.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.IpxeScript
+	return *o.IpxeScript.Get()
 }
 
 // GetIpxeScriptOk returns a tuple with the IpxeScript field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetIpxeScriptOk() (*string, bool) {
-	if o == nil || IsNil(o.IpxeScript) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IpxeScript, true
+	return o.IpxeScript.Get(), o.IpxeScript.IsSet()
 }
 
 // HasIpxeScript returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasIpxeScript() bool {
-	if o != nil && !IsNil(o.IpxeScript) {
+	if o != nil && o.IpxeScript.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetIpxeScript gets a reference to the given string and assigns it to the IpxeScript field.
+// SetIpxeScript gets a reference to the given NullableString and assigns it to the IpxeScript field.
 func (o *OperatingSystemUpdateRequest) SetIpxeScript(v string) {
-	o.IpxeScript = &v
+	o.IpxeScript.Set(&v)
 }
 
-// GetImageUrl returns the ImageUrl field value if set, zero value otherwise.
+// SetIpxeScriptNil sets the value for IpxeScript to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetIpxeScriptNil() {
+	o.IpxeScript.Set(nil)
+}
+
+// UnsetIpxeScript ensures that no value is present for IpxeScript, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetIpxeScript() {
+	o.IpxeScript.Unset()
+}
+
+// GetImageUrl returns the ImageUrl field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetImageUrl() string {
-	if o == nil || IsNil(o.ImageUrl) {
+	if o == nil || IsNil(o.ImageUrl.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.ImageUrl
+	return *o.ImageUrl.Get()
 }
 
 // GetImageUrlOk returns a tuple with the ImageUrl field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetImageUrlOk() (*string, bool) {
-	if o == nil || IsNil(o.ImageUrl) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ImageUrl, true
+	return o.ImageUrl.Get(), o.ImageUrl.IsSet()
 }
 
 // HasImageUrl returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasImageUrl() bool {
-	if o != nil && !IsNil(o.ImageUrl) {
+	if o != nil && o.ImageUrl.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetImageUrl gets a reference to the given string and assigns it to the ImageUrl field.
+// SetImageUrl gets a reference to the given NullableString and assigns it to the ImageUrl field.
 func (o *OperatingSystemUpdateRequest) SetImageUrl(v string) {
-	o.ImageUrl = &v
+	o.ImageUrl.Set(&v)
 }
 
-// GetImageSha returns the ImageSha field value if set, zero value otherwise.
+// SetImageUrlNil sets the value for ImageUrl to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetImageUrlNil() {
+	o.ImageUrl.Set(nil)
+}
+
+// UnsetImageUrl ensures that no value is present for ImageUrl, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetImageUrl() {
+	o.ImageUrl.Unset()
+}
+
+// GetImageSha returns the ImageSha field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetImageSha() string {
-	if o == nil || IsNil(o.ImageSha) {
+	if o == nil || IsNil(o.ImageSha.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.ImageSha
+	return *o.ImageSha.Get()
 }
 
 // GetImageShaOk returns a tuple with the ImageSha field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetImageShaOk() (*string, bool) {
-	if o == nil || IsNil(o.ImageSha) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ImageSha, true
+	return o.ImageSha.Get(), o.ImageSha.IsSet()
 }
 
 // HasImageSha returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasImageSha() bool {
-	if o != nil && !IsNil(o.ImageSha) {
+	if o != nil && o.ImageSha.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetImageSha gets a reference to the given string and assigns it to the ImageSha field.
+// SetImageSha gets a reference to the given NullableString and assigns it to the ImageSha field.
 func (o *OperatingSystemUpdateRequest) SetImageSha(v string) {
-	o.ImageSha = &v
+	o.ImageSha.Set(&v)
 }
 
-// GetImageAuthType returns the ImageAuthType field value if set, zero value otherwise.
+// SetImageShaNil sets the value for ImageSha to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetImageShaNil() {
+	o.ImageSha.Set(nil)
+}
+
+// UnsetImageSha ensures that no value is present for ImageSha, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetImageSha() {
+	o.ImageSha.Unset()
+}
+
+// GetImageAuthType returns the ImageAuthType field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetImageAuthType() string {
-	if o == nil || IsNil(o.ImageAuthType) {
+	if o == nil || IsNil(o.ImageAuthType.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.ImageAuthType
+	return *o.ImageAuthType.Get()
 }
 
 // GetImageAuthTypeOk returns a tuple with the ImageAuthType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetImageAuthTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.ImageAuthType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ImageAuthType, true
+	return o.ImageAuthType.Get(), o.ImageAuthType.IsSet()
 }
 
 // HasImageAuthType returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasImageAuthType() bool {
-	if o != nil && !IsNil(o.ImageAuthType) {
+	if o != nil && o.ImageAuthType.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetImageAuthType gets a reference to the given string and assigns it to the ImageAuthType field.
+// SetImageAuthType gets a reference to the given NullableString and assigns it to the ImageAuthType field.
 func (o *OperatingSystemUpdateRequest) SetImageAuthType(v string) {
-	o.ImageAuthType = &v
+	o.ImageAuthType.Set(&v)
 }
 
-// GetImageAuthToken returns the ImageAuthToken field value if set, zero value otherwise.
+// SetImageAuthTypeNil sets the value for ImageAuthType to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetImageAuthTypeNil() {
+	o.ImageAuthType.Set(nil)
+}
+
+// UnsetImageAuthType ensures that no value is present for ImageAuthType, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetImageAuthType() {
+	o.ImageAuthType.Unset()
+}
+
+// GetImageAuthToken returns the ImageAuthToken field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetImageAuthToken() string {
-	if o == nil || IsNil(o.ImageAuthToken) {
+	if o == nil || IsNil(o.ImageAuthToken.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.ImageAuthToken
+	return *o.ImageAuthToken.Get()
 }
 
 // GetImageAuthTokenOk returns a tuple with the ImageAuthToken field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetImageAuthTokenOk() (*string, bool) {
-	if o == nil || IsNil(o.ImageAuthToken) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ImageAuthToken, true
+	return o.ImageAuthToken.Get(), o.ImageAuthToken.IsSet()
 }
 
 // HasImageAuthToken returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasImageAuthToken() bool {
-	if o != nil && !IsNil(o.ImageAuthToken) {
+	if o != nil && o.ImageAuthToken.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetImageAuthToken gets a reference to the given string and assigns it to the ImageAuthToken field.
+// SetImageAuthToken gets a reference to the given NullableString and assigns it to the ImageAuthToken field.
 func (o *OperatingSystemUpdateRequest) SetImageAuthToken(v string) {
-	o.ImageAuthToken = &v
+	o.ImageAuthToken.Set(&v)
 }
 
-// GetImageDisk returns the ImageDisk field value if set, zero value otherwise.
+// SetImageAuthTokenNil sets the value for ImageAuthToken to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetImageAuthTokenNil() {
+	o.ImageAuthToken.Set(nil)
+}
+
+// UnsetImageAuthToken ensures that no value is present for ImageAuthToken, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetImageAuthToken() {
+	o.ImageAuthToken.Unset()
+}
+
+// GetImageDisk returns the ImageDisk field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetImageDisk() string {
-	if o == nil || IsNil(o.ImageDisk) {
+	if o == nil || IsNil(o.ImageDisk.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.ImageDisk
+	return *o.ImageDisk.Get()
 }
 
 // GetImageDiskOk returns a tuple with the ImageDisk field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetImageDiskOk() (*string, bool) {
-	if o == nil || IsNil(o.ImageDisk) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ImageDisk, true
+	return o.ImageDisk.Get(), o.ImageDisk.IsSet()
 }
 
 // HasImageDisk returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasImageDisk() bool {
-	if o != nil && !IsNil(o.ImageDisk) {
+	if o != nil && o.ImageDisk.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetImageDisk gets a reference to the given string and assigns it to the ImageDisk field.
+// SetImageDisk gets a reference to the given NullableString and assigns it to the ImageDisk field.
 func (o *OperatingSystemUpdateRequest) SetImageDisk(v string) {
-	o.ImageDisk = &v
+	o.ImageDisk.Set(&v)
 }
 
-// GetRootFsId returns the RootFsId field value if set, zero value otherwise.
+// SetImageDiskNil sets the value for ImageDisk to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetImageDiskNil() {
+	o.ImageDisk.Set(nil)
+}
+
+// UnsetImageDisk ensures that no value is present for ImageDisk, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetImageDisk() {
+	o.ImageDisk.Unset()
+}
+
+// GetRootFsId returns the RootFsId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetRootFsId() string {
-	if o == nil || IsNil(o.RootFsId) {
+	if o == nil || IsNil(o.RootFsId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.RootFsId
+	return *o.RootFsId.Get()
 }
 
 // GetRootFsIdOk returns a tuple with the RootFsId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetRootFsIdOk() (*string, bool) {
-	if o == nil || IsNil(o.RootFsId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RootFsId, true
+	return o.RootFsId.Get(), o.RootFsId.IsSet()
 }
 
 // HasRootFsId returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasRootFsId() bool {
-	if o != nil && !IsNil(o.RootFsId) {
+	if o != nil && o.RootFsId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRootFsId gets a reference to the given string and assigns it to the RootFsId field.
+// SetRootFsId gets a reference to the given NullableString and assigns it to the RootFsId field.
 func (o *OperatingSystemUpdateRequest) SetRootFsId(v string) {
-	o.RootFsId = &v
+	o.RootFsId.Set(&v)
 }
 
-// GetRootFsLabel returns the RootFsLabel field value if set, zero value otherwise.
+// SetRootFsIdNil sets the value for RootFsId to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetRootFsIdNil() {
+	o.RootFsId.Set(nil)
+}
+
+// UnsetRootFsId ensures that no value is present for RootFsId, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetRootFsId() {
+	o.RootFsId.Unset()
+}
+
+// GetRootFsLabel returns the RootFsLabel field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetRootFsLabel() string {
-	if o == nil || IsNil(o.RootFsLabel) {
+	if o == nil || IsNil(o.RootFsLabel.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.RootFsLabel
+	return *o.RootFsLabel.Get()
 }
 
 // GetRootFsLabelOk returns a tuple with the RootFsLabel field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetRootFsLabelOk() (*string, bool) {
-	if o == nil || IsNil(o.RootFsLabel) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RootFsLabel, true
+	return o.RootFsLabel.Get(), o.RootFsLabel.IsSet()
 }
 
 // HasRootFsLabel returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasRootFsLabel() bool {
-	if o != nil && !IsNil(o.RootFsLabel) {
+	if o != nil && o.RootFsLabel.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRootFsLabel gets a reference to the given string and assigns it to the RootFsLabel field.
+// SetRootFsLabel gets a reference to the given NullableString and assigns it to the RootFsLabel field.
 func (o *OperatingSystemUpdateRequest) SetRootFsLabel(v string) {
-	o.RootFsLabel = &v
+	o.RootFsLabel.Set(&v)
 }
 
-// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
+// SetRootFsLabelNil sets the value for RootFsLabel to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetRootFsLabelNil() {
+	o.RootFsLabel.Set(nil)
+}
+
+// UnsetRootFsLabel ensures that no value is present for RootFsLabel, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetRootFsLabel() {
+	o.RootFsLabel.Unset()
+}
+
+// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetPhoneHomeEnabled() bool {
-	if o == nil || IsNil(o.PhoneHomeEnabled) {
+	if o == nil || IsNil(o.PhoneHomeEnabled.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.PhoneHomeEnabled
+	return *o.PhoneHomeEnabled.Get()
 }
 
 // GetPhoneHomeEnabledOk returns a tuple with the PhoneHomeEnabled field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetPhoneHomeEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.PhoneHomeEnabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PhoneHomeEnabled, true
+	return o.PhoneHomeEnabled.Get(), o.PhoneHomeEnabled.IsSet()
 }
 
 // HasPhoneHomeEnabled returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasPhoneHomeEnabled() bool {
-	if o != nil && !IsNil(o.PhoneHomeEnabled) {
+	if o != nil && o.PhoneHomeEnabled.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetPhoneHomeEnabled gets a reference to the given bool and assigns it to the PhoneHomeEnabled field.
+// SetPhoneHomeEnabled gets a reference to the given NullableBool and assigns it to the PhoneHomeEnabled field.
 func (o *OperatingSystemUpdateRequest) SetPhoneHomeEnabled(v bool) {
-	o.PhoneHomeEnabled = &v
+	o.PhoneHomeEnabled.Set(&v)
 }
 
-// GetUserData returns the UserData field value if set, zero value otherwise.
+// SetPhoneHomeEnabledNil sets the value for PhoneHomeEnabled to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetPhoneHomeEnabledNil() {
+	o.PhoneHomeEnabled.Set(nil)
+}
+
+// UnsetPhoneHomeEnabled ensures that no value is present for PhoneHomeEnabled, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetPhoneHomeEnabled() {
+	o.PhoneHomeEnabled.Unset()
+}
+
+// GetUserData returns the UserData field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetUserData() string {
-	if o == nil || IsNil(o.UserData) {
+	if o == nil || IsNil(o.UserData.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.UserData
+	return *o.UserData.Get()
 }
 
 // GetUserDataOk returns a tuple with the UserData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetUserDataOk() (*string, bool) {
-	if o == nil || IsNil(o.UserData) {
+	if o == nil {
 		return nil, false
 	}
-	return o.UserData, true
+	return o.UserData.Get(), o.UserData.IsSet()
 }
 
 // HasUserData returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasUserData() bool {
-	if o != nil && !IsNil(o.UserData) {
+	if o != nil && o.UserData.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetUserData gets a reference to the given string and assigns it to the UserData field.
+// SetUserData gets a reference to the given NullableString and assigns it to the UserData field.
 func (o *OperatingSystemUpdateRequest) SetUserData(v string) {
-	o.UserData = &v
+	o.UserData.Set(&v)
 }
 
-// GetIsCloudInit returns the IsCloudInit field value if set, zero value otherwise.
+// SetUserDataNil sets the value for UserData to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetUserDataNil() {
+	o.UserData.Set(nil)
+}
+
+// UnsetUserData ensures that no value is present for UserData, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetUserData() {
+	o.UserData.Unset()
+}
+
+// GetIsCloudInit returns the IsCloudInit field value if set, zero value otherwise (both if not set or set to explicit null).
 // Deprecated
 func (o *OperatingSystemUpdateRequest) GetIsCloudInit() bool {
-	if o == nil || IsNil(o.IsCloudInit) {
+	if o == nil || IsNil(o.IsCloudInit.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.IsCloudInit
+	return *o.IsCloudInit.Get()
 }
 
 // GetIsCloudInitOk returns a tuple with the IsCloudInit field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 // Deprecated
 func (o *OperatingSystemUpdateRequest) GetIsCloudInitOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsCloudInit) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsCloudInit, true
+	return o.IsCloudInit.Get(), o.IsCloudInit.IsSet()
 }
 
 // HasIsCloudInit returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasIsCloudInit() bool {
-	if o != nil && !IsNil(o.IsCloudInit) {
+	if o != nil && o.IsCloudInit.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetIsCloudInit gets a reference to the given bool and assigns it to the IsCloudInit field.
+// SetIsCloudInit gets a reference to the given NullableBool and assigns it to the IsCloudInit field.
 // Deprecated
 func (o *OperatingSystemUpdateRequest) SetIsCloudInit(v bool) {
-	o.IsCloudInit = &v
+	o.IsCloudInit.Set(&v)
 }
 
-// GetAllowOverride returns the AllowOverride field value if set, zero value otherwise.
+// SetIsCloudInitNil sets the value for IsCloudInit to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetIsCloudInitNil() {
+	o.IsCloudInit.Set(nil)
+}
+
+// UnsetIsCloudInit ensures that no value is present for IsCloudInit, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetIsCloudInit() {
+	o.IsCloudInit.Unset()
+}
+
+// GetAllowOverride returns the AllowOverride field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetAllowOverride() bool {
-	if o == nil || IsNil(o.AllowOverride) {
+	if o == nil || IsNil(o.AllowOverride.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.AllowOverride
+	return *o.AllowOverride.Get()
 }
 
 // GetAllowOverrideOk returns a tuple with the AllowOverride field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetAllowOverrideOk() (*bool, bool) {
-	if o == nil || IsNil(o.AllowOverride) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AllowOverride, true
+	return o.AllowOverride.Get(), o.AllowOverride.IsSet()
 }
 
 // HasAllowOverride returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasAllowOverride() bool {
-	if o != nil && !IsNil(o.AllowOverride) {
+	if o != nil && o.AllowOverride.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetAllowOverride gets a reference to the given bool and assigns it to the AllowOverride field.
+// SetAllowOverride gets a reference to the given NullableBool and assigns it to the AllowOverride field.
 func (o *OperatingSystemUpdateRequest) SetAllowOverride(v bool) {
-	o.AllowOverride = &v
+	o.AllowOverride.Set(&v)
 }
 
-// GetIsActive returns the IsActive field value if set, zero value otherwise.
+// SetAllowOverrideNil sets the value for AllowOverride to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetAllowOverrideNil() {
+	o.AllowOverride.Set(nil)
+}
+
+// UnsetAllowOverride ensures that no value is present for AllowOverride, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetAllowOverride() {
+	o.AllowOverride.Unset()
+}
+
+// GetIsActive returns the IsActive field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetIsActive() bool {
-	if o == nil || IsNil(o.IsActive) {
+	if o == nil || IsNil(o.IsActive.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.IsActive
+	return *o.IsActive.Get()
 }
 
 // GetIsActiveOk returns a tuple with the IsActive field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetIsActiveOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsActive) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsActive, true
+	return o.IsActive.Get(), o.IsActive.IsSet()
 }
 
 // HasIsActive returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasIsActive() bool {
-	if o != nil && !IsNil(o.IsActive) {
+	if o != nil && o.IsActive.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetIsActive gets a reference to the given bool and assigns it to the IsActive field.
+// SetIsActive gets a reference to the given NullableBool and assigns it to the IsActive field.
 func (o *OperatingSystemUpdateRequest) SetIsActive(v bool) {
-	o.IsActive = &v
+	o.IsActive.Set(&v)
 }
 
-// GetDeactivationNote returns the DeactivationNote field value if set, zero value otherwise.
+// SetIsActiveNil sets the value for IsActive to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetIsActiveNil() {
+	o.IsActive.Set(nil)
+}
+
+// UnsetIsActive ensures that no value is present for IsActive, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetIsActive() {
+	o.IsActive.Unset()
+}
+
+// GetDeactivationNote returns the DeactivationNote field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetDeactivationNote() string {
-	if o == nil || IsNil(o.DeactivationNote) {
+	if o == nil || IsNil(o.DeactivationNote.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.DeactivationNote
+	return *o.DeactivationNote.Get()
 }
 
 // GetDeactivationNoteOk returns a tuple with the DeactivationNote field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetDeactivationNoteOk() (*string, bool) {
-	if o == nil || IsNil(o.DeactivationNote) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DeactivationNote, true
+	return o.DeactivationNote.Get(), o.DeactivationNote.IsSet()
 }
 
 // HasDeactivationNote returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasDeactivationNote() bool {
-	if o != nil && !IsNil(o.DeactivationNote) {
+	if o != nil && o.DeactivationNote.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDeactivationNote gets a reference to the given string and assigns it to the DeactivationNote field.
+// SetDeactivationNote gets a reference to the given NullableString and assigns it to the DeactivationNote field.
 func (o *OperatingSystemUpdateRequest) SetDeactivationNote(v string) {
-	o.DeactivationNote = &v
+	o.DeactivationNote.Set(&v)
 }
 
-// GetIpxeTemplateId returns the IpxeTemplateId field value if set, zero value otherwise.
+// SetDeactivationNoteNil sets the value for DeactivationNote to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetDeactivationNoteNil() {
+	o.DeactivationNote.Set(nil)
+}
+
+// UnsetDeactivationNote ensures that no value is present for DeactivationNote, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetDeactivationNote() {
+	o.DeactivationNote.Unset()
+}
+
+// GetIpxeTemplateId returns the IpxeTemplateId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemUpdateRequest) GetIpxeTemplateId() string {
-	if o == nil || IsNil(o.IpxeTemplateId) {
+	if o == nil || IsNil(o.IpxeTemplateId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.IpxeTemplateId
+	return *o.IpxeTemplateId.Get()
 }
 
 // GetIpxeTemplateIdOk returns a tuple with the IpxeTemplateId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemUpdateRequest) GetIpxeTemplateIdOk() (*string, bool) {
-	if o == nil || IsNil(o.IpxeTemplateId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IpxeTemplateId, true
+	return o.IpxeTemplateId.Get(), o.IpxeTemplateId.IsSet()
 }
 
 // HasIpxeTemplateId returns a boolean if a field has been set.
 func (o *OperatingSystemUpdateRequest) HasIpxeTemplateId() bool {
-	if o != nil && !IsNil(o.IpxeTemplateId) {
+	if o != nil && o.IpxeTemplateId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetIpxeTemplateId gets a reference to the given string and assigns it to the IpxeTemplateId field.
+// SetIpxeTemplateId gets a reference to the given NullableString and assigns it to the IpxeTemplateId field.
 func (o *OperatingSystemUpdateRequest) SetIpxeTemplateId(v string) {
-	o.IpxeTemplateId = &v
+	o.IpxeTemplateId.Set(&v)
+}
+
+// SetIpxeTemplateIdNil sets the value for IpxeTemplateId to be an explicit nil
+func (o *OperatingSystemUpdateRequest) SetIpxeTemplateIdNil() {
+	o.IpxeTemplateId.Set(nil)
+}
+
+// UnsetIpxeTemplateId ensures that no value is present for IpxeTemplateId, not even an explicit nil
+func (o *OperatingSystemUpdateRequest) UnsetIpxeTemplateId() {
+	o.IpxeTemplateId.Unset()
 }
 
 // GetIpxeTemplateParameters returns the IpxeTemplateParameters field value if set, zero value otherwise.
@@ -701,56 +888,56 @@ func (o OperatingSystemUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o OperatingSystemUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
+	if o.Name.IsSet() {
+		toSerialize["name"] = o.Name.Get()
 	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.IpxeScript) {
-		toSerialize["ipxeScript"] = o.IpxeScript
+	if o.IpxeScript.IsSet() {
+		toSerialize["ipxeScript"] = o.IpxeScript.Get()
 	}
-	if !IsNil(o.ImageUrl) {
-		toSerialize["imageUrl"] = o.ImageUrl
+	if o.ImageUrl.IsSet() {
+		toSerialize["imageUrl"] = o.ImageUrl.Get()
 	}
-	if !IsNil(o.ImageSha) {
-		toSerialize["imageSha"] = o.ImageSha
+	if o.ImageSha.IsSet() {
+		toSerialize["imageSha"] = o.ImageSha.Get()
 	}
-	if !IsNil(o.ImageAuthType) {
-		toSerialize["imageAuthType"] = o.ImageAuthType
+	if o.ImageAuthType.IsSet() {
+		toSerialize["imageAuthType"] = o.ImageAuthType.Get()
 	}
-	if !IsNil(o.ImageAuthToken) {
-		toSerialize["imageAuthToken"] = o.ImageAuthToken
+	if o.ImageAuthToken.IsSet() {
+		toSerialize["imageAuthToken"] = o.ImageAuthToken.Get()
 	}
-	if !IsNil(o.ImageDisk) {
-		toSerialize["imageDisk"] = o.ImageDisk
+	if o.ImageDisk.IsSet() {
+		toSerialize["imageDisk"] = o.ImageDisk.Get()
 	}
-	if !IsNil(o.RootFsId) {
-		toSerialize["rootFsId"] = o.RootFsId
+	if o.RootFsId.IsSet() {
+		toSerialize["rootFsId"] = o.RootFsId.Get()
 	}
-	if !IsNil(o.RootFsLabel) {
-		toSerialize["rootFsLabel"] = o.RootFsLabel
+	if o.RootFsLabel.IsSet() {
+		toSerialize["rootFsLabel"] = o.RootFsLabel.Get()
 	}
-	if !IsNil(o.PhoneHomeEnabled) {
-		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled
+	if o.PhoneHomeEnabled.IsSet() {
+		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled.Get()
 	}
-	if !IsNil(o.UserData) {
-		toSerialize["userData"] = o.UserData
+	if o.UserData.IsSet() {
+		toSerialize["userData"] = o.UserData.Get()
 	}
-	if !IsNil(o.IsCloudInit) {
-		toSerialize["isCloudInit"] = o.IsCloudInit
+	if o.IsCloudInit.IsSet() {
+		toSerialize["isCloudInit"] = o.IsCloudInit.Get()
 	}
-	if !IsNil(o.AllowOverride) {
-		toSerialize["allowOverride"] = o.AllowOverride
+	if o.AllowOverride.IsSet() {
+		toSerialize["allowOverride"] = o.AllowOverride.Get()
 	}
-	if !IsNil(o.IsActive) {
-		toSerialize["isActive"] = o.IsActive
+	if o.IsActive.IsSet() {
+		toSerialize["isActive"] = o.IsActive.Get()
 	}
-	if !IsNil(o.DeactivationNote) {
-		toSerialize["deactivationNote"] = o.DeactivationNote
+	if o.DeactivationNote.IsSet() {
+		toSerialize["deactivationNote"] = o.DeactivationNote.Get()
 	}
-	if !IsNil(o.IpxeTemplateId) {
-		toSerialize["ipxeTemplateId"] = o.IpxeTemplateId
+	if o.IpxeTemplateId.IsSet() {
+		toSerialize["ipxeTemplateId"] = o.IpxeTemplateId.Get()
 	}
 	if !IsNil(o.IpxeTemplateParameters) {
 		toSerialize["ipxeTemplateParameters"] = o.IpxeTemplateParameters

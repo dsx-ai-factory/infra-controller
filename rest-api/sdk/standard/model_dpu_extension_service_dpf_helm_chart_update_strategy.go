@@ -23,8 +23,8 @@ var _ MappedNullable = &DpuExtensionServiceDpfHelmChartUpdateStrategy{}
 // DpuExtensionServiceDpfHelmChartUpdateStrategy Optional update strategy passed to DPF
 type DpuExtensionServiceDpfHelmChartUpdateStrategy struct {
 	// Update strategy type, typically RollingUpdate or OnDelete
-	Type          *string                                       `json:"type,omitempty"`
-	RollingUpdate *DpuExtensionServiceDpfHelmChartRollingUpdate `json:"rollingUpdate,omitempty"`
+	Type          NullableString                                       `json:"type,omitempty"`
+	RollingUpdate NullableDpuExtensionServiceDpfHelmChartRollingUpdate `json:"rollingUpdate,omitempty"`
 }
 
 // NewDpuExtensionServiceDpfHelmChartUpdateStrategy instantiates a new DpuExtensionServiceDpfHelmChartUpdateStrategy object
@@ -44,68 +44,90 @@ func NewDpuExtensionServiceDpfHelmChartUpdateStrategyWithDefaults() *DpuExtensio
 	return &this
 }
 
-// GetType returns the Type field value if set, zero value otherwise.
+// GetType returns the Type field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) GetType() string {
-	if o == nil || IsNil(o.Type) {
+	if o == nil || IsNil(o.Type.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Type
+	return *o.Type.Get()
 }
 
 // GetTypeOk returns a tuple with the Type field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) GetTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Type, true
+	return o.Type.Get(), o.Type.IsSet()
 }
 
 // HasType returns a boolean if a field has been set.
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) HasType() bool {
-	if o != nil && !IsNil(o.Type) {
+	if o != nil && o.Type.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetType gets a reference to the given string and assigns it to the Type field.
+// SetType gets a reference to the given NullableString and assigns it to the Type field.
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) SetType(v string) {
-	o.Type = &v
+	o.Type.Set(&v)
 }
 
-// GetRollingUpdate returns the RollingUpdate field value if set, zero value otherwise.
+// SetTypeNil sets the value for Type to be an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) SetTypeNil() {
+	o.Type.Set(nil)
+}
+
+// UnsetType ensures that no value is present for Type, not even an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) UnsetType() {
+	o.Type.Unset()
+}
+
+// GetRollingUpdate returns the RollingUpdate field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) GetRollingUpdate() DpuExtensionServiceDpfHelmChartRollingUpdate {
-	if o == nil || IsNil(o.RollingUpdate) {
+	if o == nil || IsNil(o.RollingUpdate.Get()) {
 		var ret DpuExtensionServiceDpfHelmChartRollingUpdate
 		return ret
 	}
-	return *o.RollingUpdate
+	return *o.RollingUpdate.Get()
 }
 
 // GetRollingUpdateOk returns a tuple with the RollingUpdate field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) GetRollingUpdateOk() (*DpuExtensionServiceDpfHelmChartRollingUpdate, bool) {
-	if o == nil || IsNil(o.RollingUpdate) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RollingUpdate, true
+	return o.RollingUpdate.Get(), o.RollingUpdate.IsSet()
 }
 
 // HasRollingUpdate returns a boolean if a field has been set.
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) HasRollingUpdate() bool {
-	if o != nil && !IsNil(o.RollingUpdate) {
+	if o != nil && o.RollingUpdate.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRollingUpdate gets a reference to the given DpuExtensionServiceDpfHelmChartRollingUpdate and assigns it to the RollingUpdate field.
+// SetRollingUpdate gets a reference to the given NullableDpuExtensionServiceDpfHelmChartRollingUpdate and assigns it to the RollingUpdate field.
 func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) SetRollingUpdate(v DpuExtensionServiceDpfHelmChartRollingUpdate) {
-	o.RollingUpdate = &v
+	o.RollingUpdate.Set(&v)
+}
+
+// SetRollingUpdateNil sets the value for RollingUpdate to be an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) SetRollingUpdateNil() {
+	o.RollingUpdate.Set(nil)
+}
+
+// UnsetRollingUpdate ensures that no value is present for RollingUpdate, not even an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartUpdateStrategy) UnsetRollingUpdate() {
+	o.RollingUpdate.Unset()
 }
 
 func (o DpuExtensionServiceDpfHelmChartUpdateStrategy) MarshalJSON() ([]byte, error) {
@@ -118,11 +140,11 @@ func (o DpuExtensionServiceDpfHelmChartUpdateStrategy) MarshalJSON() ([]byte, er
 
 func (o DpuExtensionServiceDpfHelmChartUpdateStrategy) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Type) {
-		toSerialize["type"] = o.Type
+	if o.Type.IsSet() {
+		toSerialize["type"] = o.Type.Get()
 	}
-	if !IsNil(o.RollingUpdate) {
-		toSerialize["rollingUpdate"] = o.RollingUpdate
+	if o.RollingUpdate.IsSet() {
+		toSerialize["rollingUpdate"] = o.RollingUpdate.Get()
 	}
 	return toSerialize, nil
 }

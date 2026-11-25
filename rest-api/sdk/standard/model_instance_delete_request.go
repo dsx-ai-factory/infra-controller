@@ -25,7 +25,7 @@ type InstanceDeleteRequest struct {
 	// Information regarding issue with the underlying Machine experienced by Tenant
 	MachineHealthIssue *InstanceDeleteHealthIssue `json:"machineHealthIssue,omitempty"`
 	// Should be set to true for Tenants who are performing investigation/repairing the Machine. Otherwise omit or set to false
-	IsRepairTenant *bool `json:"isRepairTenant,omitempty"`
+	IsRepairTenant NullableBool `json:"isRepairTenant,omitempty"`
 }
 
 // NewInstanceDeleteRequest instantiates a new InstanceDeleteRequest object
@@ -77,36 +77,47 @@ func (o *InstanceDeleteRequest) SetMachineHealthIssue(v InstanceDeleteHealthIssu
 	o.MachineHealthIssue = &v
 }
 
-// GetIsRepairTenant returns the IsRepairTenant field value if set, zero value otherwise.
+// GetIsRepairTenant returns the IsRepairTenant field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceDeleteRequest) GetIsRepairTenant() bool {
-	if o == nil || IsNil(o.IsRepairTenant) {
+	if o == nil || IsNil(o.IsRepairTenant.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.IsRepairTenant
+	return *o.IsRepairTenant.Get()
 }
 
 // GetIsRepairTenantOk returns a tuple with the IsRepairTenant field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceDeleteRequest) GetIsRepairTenantOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsRepairTenant) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsRepairTenant, true
+	return o.IsRepairTenant.Get(), o.IsRepairTenant.IsSet()
 }
 
 // HasIsRepairTenant returns a boolean if a field has been set.
 func (o *InstanceDeleteRequest) HasIsRepairTenant() bool {
-	if o != nil && !IsNil(o.IsRepairTenant) {
+	if o != nil && o.IsRepairTenant.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetIsRepairTenant gets a reference to the given bool and assigns it to the IsRepairTenant field.
+// SetIsRepairTenant gets a reference to the given NullableBool and assigns it to the IsRepairTenant field.
 func (o *InstanceDeleteRequest) SetIsRepairTenant(v bool) {
-	o.IsRepairTenant = &v
+	o.IsRepairTenant.Set(&v)
+}
+
+// SetIsRepairTenantNil sets the value for IsRepairTenant to be an explicit nil
+func (o *InstanceDeleteRequest) SetIsRepairTenantNil() {
+	o.IsRepairTenant.Set(nil)
+}
+
+// UnsetIsRepairTenant ensures that no value is present for IsRepairTenant, not even an explicit nil
+func (o *InstanceDeleteRequest) UnsetIsRepairTenant() {
+	o.IsRepairTenant.Unset()
 }
 
 func (o InstanceDeleteRequest) MarshalJSON() ([]byte, error) {
@@ -122,8 +133,8 @@ func (o InstanceDeleteRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.MachineHealthIssue) {
 		toSerialize["machineHealthIssue"] = o.MachineHealthIssue
 	}
-	if !IsNil(o.IsRepairTenant) {
-		toSerialize["isRepairTenant"] = o.IsRepairTenant
+	if o.IsRepairTenant.IsSet() {
+		toSerialize["isRepairTenant"] = o.IsRepairTenant.Get()
 	}
 	return toSerialize, nil
 }

@@ -26,8 +26,8 @@ var _ MappedNullable = &TaskRunFirmwareOperation{}
 type TaskRunFirmwareOperation struct {
 	// Target firmware version to roll out.
 	Version string `json:"version"`
-	// Operation Rule to pin for each target's firmware Task. Omit to let Flow's default rule resolution pick one.
-	RuleId *string `json:"ruleId,omitempty"`
+	// Operation Rule to pin for each target's firmware Task. Null to let Flow's default rule resolution pick one.
+	RuleId NullableString `json:"ruleId,omitempty"`
 	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
 	OverrideVersionCheck *bool `json:"overrideVersionCheck,omitempty"`
 	// Skip the pre-flight readiness check when true.
@@ -88,36 +88,47 @@ func (o *TaskRunFirmwareOperation) SetVersion(v string) {
 	o.Version = v
 }
 
-// GetRuleId returns the RuleId field value if set, zero value otherwise.
+// GetRuleId returns the RuleId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *TaskRunFirmwareOperation) GetRuleId() string {
-	if o == nil || IsNil(o.RuleId) {
+	if o == nil || IsNil(o.RuleId.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.RuleId
+	return *o.RuleId.Get()
 }
 
 // GetRuleIdOk returns a tuple with the RuleId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *TaskRunFirmwareOperation) GetRuleIdOk() (*string, bool) {
-	if o == nil || IsNil(o.RuleId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RuleId, true
+	return o.RuleId.Get(), o.RuleId.IsSet()
 }
 
 // HasRuleId returns a boolean if a field has been set.
 func (o *TaskRunFirmwareOperation) HasRuleId() bool {
-	if o != nil && !IsNil(o.RuleId) {
+	if o != nil && o.RuleId.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetRuleId gets a reference to the given string and assigns it to the RuleId field.
+// SetRuleId gets a reference to the given NullableString and assigns it to the RuleId field.
 func (o *TaskRunFirmwareOperation) SetRuleId(v string) {
-	o.RuleId = &v
+	o.RuleId.Set(&v)
+}
+
+// SetRuleIdNil sets the value for RuleId to be an explicit nil
+func (o *TaskRunFirmwareOperation) SetRuleIdNil() {
+	o.RuleId.Set(nil)
+}
+
+// UnsetRuleId ensures that no value is present for RuleId, not even an explicit nil
+func (o *TaskRunFirmwareOperation) UnsetRuleId() {
+	o.RuleId.Unset()
 }
 
 // GetOverrideVersionCheck returns the OverrideVersionCheck field value if set, zero value otherwise.
@@ -227,8 +238,8 @@ func (o TaskRunFirmwareOperation) MarshalJSON() ([]byte, error) {
 func (o TaskRunFirmwareOperation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["version"] = o.Version
-	if !IsNil(o.RuleId) {
-		toSerialize["ruleId"] = o.RuleId
+	if o.RuleId.IsSet() {
+		toSerialize["ruleId"] = o.RuleId.Get()
 	}
 	if !IsNil(o.OverrideVersionCheck) {
 		toSerialize["overrideVersionCheck"] = o.OverrideVersionCheck

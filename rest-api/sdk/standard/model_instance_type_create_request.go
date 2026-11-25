@@ -27,13 +27,13 @@ type InstanceTypeCreateRequest struct {
 	// Name of the Instance Type
 	Name string `json:"name"`
 	// Description of the Instance Type
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// ID of the site
 	SiteId string `json:"siteId"`
 	// User-defined key-value labels for the Instance Type
 	Labels map[string]string `json:"labels,omitempty"`
 	// Site Controller assigned Machine type
-	ControllerMachineType *string `json:"controllerMachineType,omitempty"`
+	ControllerMachineType NullableString `json:"controllerMachineType,omitempty"`
 	// List of Machine Capabilities to match
 	MachineCapabilities []InstanceTypeCapabilityCreateRequest `json:"machineCapabilities,omitempty"`
 }
@@ -83,36 +83,47 @@ func (o *InstanceTypeCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceTypeCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceTypeCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *InstanceTypeCreateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *InstanceTypeCreateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
+}
+
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *InstanceTypeCreateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *InstanceTypeCreateRequest) UnsetDescription() {
+	o.Description.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -171,36 +182,47 @@ func (o *InstanceTypeCreateRequest) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetControllerMachineType returns the ControllerMachineType field value if set, zero value otherwise.
+// GetControllerMachineType returns the ControllerMachineType field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceTypeCreateRequest) GetControllerMachineType() string {
-	if o == nil || IsNil(o.ControllerMachineType) {
+	if o == nil || IsNil(o.ControllerMachineType.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.ControllerMachineType
+	return *o.ControllerMachineType.Get()
 }
 
 // GetControllerMachineTypeOk returns a tuple with the ControllerMachineType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceTypeCreateRequest) GetControllerMachineTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.ControllerMachineType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ControllerMachineType, true
+	return o.ControllerMachineType.Get(), o.ControllerMachineType.IsSet()
 }
 
 // HasControllerMachineType returns a boolean if a field has been set.
 func (o *InstanceTypeCreateRequest) HasControllerMachineType() bool {
-	if o != nil && !IsNil(o.ControllerMachineType) {
+	if o != nil && o.ControllerMachineType.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetControllerMachineType gets a reference to the given string and assigns it to the ControllerMachineType field.
+// SetControllerMachineType gets a reference to the given NullableString and assigns it to the ControllerMachineType field.
 func (o *InstanceTypeCreateRequest) SetControllerMachineType(v string) {
-	o.ControllerMachineType = &v
+	o.ControllerMachineType.Set(&v)
+}
+
+// SetControllerMachineTypeNil sets the value for ControllerMachineType to be an explicit nil
+func (o *InstanceTypeCreateRequest) SetControllerMachineTypeNil() {
+	o.ControllerMachineType.Set(nil)
+}
+
+// UnsetControllerMachineType ensures that no value is present for ControllerMachineType, not even an explicit nil
+func (o *InstanceTypeCreateRequest) UnsetControllerMachineType() {
+	o.ControllerMachineType.Unset()
 }
 
 // GetMachineCapabilities returns the MachineCapabilities field value if set, zero value otherwise.
@@ -246,15 +268,15 @@ func (o InstanceTypeCreateRequest) MarshalJSON() ([]byte, error) {
 func (o InstanceTypeCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels
 	}
-	if !IsNil(o.ControllerMachineType) {
-		toSerialize["controllerMachineType"] = o.ControllerMachineType
+	if o.ControllerMachineType.IsSet() {
+		toSerialize["controllerMachineType"] = o.ControllerMachineType.Get()
 	}
 	if !IsNil(o.MachineCapabilities) {
 		toSerialize["machineCapabilities"] = o.MachineCapabilities

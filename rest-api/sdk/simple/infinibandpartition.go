@@ -65,9 +65,11 @@ func (ipm InfinibandPartitionManager) Create(ctx context.Context, request Infini
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, ipm.client.Config.Token)
 
 	apiReq := standard.InfiniBandPartitionCreateRequest{
-		Name:        request.Name,
-		Description: request.Description,
-		SiteId:      ipm.client.apiMetadata.SiteID,
+		Name:   request.Name,
+		SiteId: ipm.client.apiMetadata.SiteID,
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
 	}
 	apiIb, resp, err := ipm.client.apiClient.InfiniBandPartitionAPI.CreateInfinibandPartition(ctx, ipm.client.apiMetadata.Organization).
 		InfiniBandPartitionCreateRequest(apiReq).Execute()
@@ -148,8 +150,10 @@ func (ipm InfinibandPartitionManager) Update(ctx context.Context, id string, req
 		name = *request.Name
 	}
 	apiReq := standard.InfiniBandPartitionUpdateRequest{
-		Name:        &name,
-		Description: request.Description,
+		Name: &name,
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
 	}
 	apiIb, resp, err := ipm.client.apiClient.InfiniBandPartitionAPI.UpdateInfinibandPartition(ctx, ipm.client.apiMetadata.Organization, id).
 		InfiniBandPartitionUpdateRequest(apiReq).Execute()

@@ -29,7 +29,7 @@ type InstanceDeleteHealthIssue struct {
 	// Brief description of the issue for operators.
 	Summary string `json:"summary"`
 	// Diagnostic information, logs, ticket numbers, etc.
-	Details *string `json:"details,omitempty"`
+	Details NullableString `json:"details,omitempty"`
 }
 
 type _InstanceDeleteHealthIssue InstanceDeleteHealthIssue
@@ -101,36 +101,47 @@ func (o *InstanceDeleteHealthIssue) SetSummary(v string) {
 	o.Summary = v
 }
 
-// GetDetails returns the Details field value if set, zero value otherwise.
+// GetDetails returns the Details field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceDeleteHealthIssue) GetDetails() string {
-	if o == nil || IsNil(o.Details) {
+	if o == nil || IsNil(o.Details.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Details
+	return *o.Details.Get()
 }
 
 // GetDetailsOk returns a tuple with the Details field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceDeleteHealthIssue) GetDetailsOk() (*string, bool) {
-	if o == nil || IsNil(o.Details) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Details, true
+	return o.Details.Get(), o.Details.IsSet()
 }
 
 // HasDetails returns a boolean if a field has been set.
 func (o *InstanceDeleteHealthIssue) HasDetails() bool {
-	if o != nil && !IsNil(o.Details) {
+	if o != nil && o.Details.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDetails gets a reference to the given string and assigns it to the Details field.
+// SetDetails gets a reference to the given NullableString and assigns it to the Details field.
 func (o *InstanceDeleteHealthIssue) SetDetails(v string) {
-	o.Details = &v
+	o.Details.Set(&v)
+}
+
+// SetDetailsNil sets the value for Details to be an explicit nil
+func (o *InstanceDeleteHealthIssue) SetDetailsNil() {
+	o.Details.Set(nil)
+}
+
+// UnsetDetails ensures that no value is present for Details, not even an explicit nil
+func (o *InstanceDeleteHealthIssue) UnsetDetails() {
+	o.Details.Unset()
 }
 
 func (o InstanceDeleteHealthIssue) MarshalJSON() ([]byte, error) {
@@ -145,8 +156,8 @@ func (o InstanceDeleteHealthIssue) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["category"] = o.Category
 	toSerialize["summary"] = o.Summary
-	if !IsNil(o.Details) {
-		toSerialize["details"] = o.Details
+	if o.Details.IsSet() {
+		toSerialize["details"] = o.Details.Get()
 	}
 	return toSerialize, nil
 }

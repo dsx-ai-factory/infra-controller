@@ -23,9 +23,9 @@ var _ MappedNullable = &NetworkSecurityGroupUpdateRequest{}
 // NetworkSecurityGroupUpdateRequest Request data to update a Network Security Group
 type NetworkSecurityGroupUpdateRequest struct {
 	// Name of the Network Security Group
-	Name *string `json:"name,omitempty"`
+	Name NullableString `json:"name,omitempty"`
 	// Description of the Network Security Group
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// Egress rules with protocol and destination ports defined but without source ports defined should automatically be made stateful.
 	StatefulEgress *bool `json:"statefulEgress,omitempty"`
 	// Update rules of the Network Security Group. The rules will be replaced with the rules sent in the request. Any rules not included in the request will be removed. To retain existing rules, fetch them first and include them.
@@ -51,68 +51,90 @@ func NewNetworkSecurityGroupUpdateRequestWithDefaults() *NetworkSecurityGroupUpd
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *NetworkSecurityGroupUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil || IsNil(o.Name.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Name
+	return *o.Name.Get()
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *NetworkSecurityGroupUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return o.Name.Get(), o.Name.IsSet()
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *NetworkSecurityGroupUpdateRequest) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
+	if o != nil && o.Name.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName gets a reference to the given NullableString and assigns it to the Name field.
 func (o *NetworkSecurityGroupUpdateRequest) SetName(v string) {
-	o.Name = &v
+	o.Name.Set(&v)
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// SetNameNil sets the value for Name to be an explicit nil
+func (o *NetworkSecurityGroupUpdateRequest) SetNameNil() {
+	o.Name.Set(nil)
+}
+
+// UnsetName ensures that no value is present for Name, not even an explicit nil
+func (o *NetworkSecurityGroupUpdateRequest) UnsetName() {
+	o.Name.Unset()
+}
+
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *NetworkSecurityGroupUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *NetworkSecurityGroupUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *NetworkSecurityGroupUpdateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *NetworkSecurityGroupUpdateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
+}
+
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *NetworkSecurityGroupUpdateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *NetworkSecurityGroupUpdateRequest) UnsetDescription() {
+	o.Description.Unset()
 }
 
 // GetStatefulEgress returns the StatefulEgress field value if set, zero value otherwise.
@@ -221,11 +243,11 @@ func (o NetworkSecurityGroupUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o NetworkSecurityGroupUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
+	if o.Name.IsSet() {
+		toSerialize["name"] = o.Name.Get()
 	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
 	if !IsNil(o.StatefulEgress) {
 		toSerialize["statefulEgress"] = o.StatefulEgress

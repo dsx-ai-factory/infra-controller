@@ -28,7 +28,7 @@ type DpuExtensionServiceDpfHelmChartServiceDaemonSet struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// Optional resource quantities, for example {\"nvidia.com/bf_sf\":1,\"memory\":\"500Mi\"}
 	Resources      map[string]DpuExtensionServiceDpfHelmChartIntOrString `json:"resources,omitempty"`
-	UpdateStrategy *DpuExtensionServiceDpfHelmChartUpdateStrategy        `json:"updateStrategy,omitempty"`
+	UpdateStrategy NullableDpuExtensionServiceDpfHelmChartUpdateStrategy `json:"updateStrategy,omitempty"`
 }
 
 // NewDpuExtensionServiceDpfHelmChartServiceDaemonSet instantiates a new DpuExtensionServiceDpfHelmChartServiceDaemonSet object
@@ -144,36 +144,47 @@ func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) SetResources(v map[str
 	o.Resources = v
 }
 
-// GetUpdateStrategy returns the UpdateStrategy field value if set, zero value otherwise.
+// GetUpdateStrategy returns the UpdateStrategy field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetUpdateStrategy() DpuExtensionServiceDpfHelmChartUpdateStrategy {
-	if o == nil || IsNil(o.UpdateStrategy) {
+	if o == nil || IsNil(o.UpdateStrategy.Get()) {
 		var ret DpuExtensionServiceDpfHelmChartUpdateStrategy
 		return ret
 	}
-	return *o.UpdateStrategy
+	return *o.UpdateStrategy.Get()
 }
 
 // GetUpdateStrategyOk returns a tuple with the UpdateStrategy field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetUpdateStrategyOk() (*DpuExtensionServiceDpfHelmChartUpdateStrategy, bool) {
-	if o == nil || IsNil(o.UpdateStrategy) {
+	if o == nil {
 		return nil, false
 	}
-	return o.UpdateStrategy, true
+	return o.UpdateStrategy.Get(), o.UpdateStrategy.IsSet()
 }
 
 // HasUpdateStrategy returns a boolean if a field has been set.
 func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) HasUpdateStrategy() bool {
-	if o != nil && !IsNil(o.UpdateStrategy) {
+	if o != nil && o.UpdateStrategy.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetUpdateStrategy gets a reference to the given DpuExtensionServiceDpfHelmChartUpdateStrategy and assigns it to the UpdateStrategy field.
+// SetUpdateStrategy gets a reference to the given NullableDpuExtensionServiceDpfHelmChartUpdateStrategy and assigns it to the UpdateStrategy field.
 func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) SetUpdateStrategy(v DpuExtensionServiceDpfHelmChartUpdateStrategy) {
-	o.UpdateStrategy = &v
+	o.UpdateStrategy.Set(&v)
+}
+
+// SetUpdateStrategyNil sets the value for UpdateStrategy to be an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) SetUpdateStrategyNil() {
+	o.UpdateStrategy.Set(nil)
+}
+
+// UnsetUpdateStrategy ensures that no value is present for UpdateStrategy, not even an explicit nil
+func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) UnsetUpdateStrategy() {
+	o.UpdateStrategy.Unset()
 }
 
 func (o DpuExtensionServiceDpfHelmChartServiceDaemonSet) MarshalJSON() ([]byte, error) {
@@ -195,8 +206,8 @@ func (o DpuExtensionServiceDpfHelmChartServiceDaemonSet) ToMap() (map[string]int
 	if !IsNil(o.Resources) {
 		toSerialize["resources"] = o.Resources
 	}
-	if !IsNil(o.UpdateStrategy) {
-		toSerialize["updateStrategy"] = o.UpdateStrategy
+	if o.UpdateStrategy.IsSet() {
+		toSerialize["updateStrategy"] = o.UpdateStrategy.Get()
 	}
 	return toSerialize, nil
 }

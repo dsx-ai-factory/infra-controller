@@ -38,8 +38,8 @@ type MachineSpectrumXMultiplaneUpdateRequest struct {
 	PlaneRange *SpectrumXMultiplaneRange `json:"planeRange,omitempty"`
 	// True disables the selected links; false enables them.
 	MaintenanceMode bool `json:"maintenanceMode"`
-	// Omit to preserve it; send an empty string to clear it.
-	Reference *string `json:"reference,omitempty"`
+	// Omit or send null to preserve it; send an empty string to clear it.
+	Reference NullableString `json:"reference,omitempty"`
 	// Must be true when an Instance is attached to the Machine. Acknowledges that maintenance changes may disrupt the Instance's Tenant workload.
 	AcknowledgeAttachedInstance *bool `json:"acknowledgeAttachedInstance,omitempty"`
 }
@@ -280,36 +280,47 @@ func (o *MachineSpectrumXMultiplaneUpdateRequest) SetMaintenanceMode(v bool) {
 	o.MaintenanceMode = v
 }
 
-// GetReference returns the Reference field value if set, zero value otherwise.
+// GetReference returns the Reference field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineSpectrumXMultiplaneUpdateRequest) GetReference() string {
-	if o == nil || IsNil(o.Reference) {
+	if o == nil || IsNil(o.Reference.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Reference
+	return *o.Reference.Get()
 }
 
 // GetReferenceOk returns a tuple with the Reference field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineSpectrumXMultiplaneUpdateRequest) GetReferenceOk() (*string, bool) {
-	if o == nil || IsNil(o.Reference) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Reference, true
+	return o.Reference.Get(), o.Reference.IsSet()
 }
 
 // HasReference returns a boolean if a field has been set.
 func (o *MachineSpectrumXMultiplaneUpdateRequest) HasReference() bool {
-	if o != nil && !IsNil(o.Reference) {
+	if o != nil && o.Reference.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetReference gets a reference to the given string and assigns it to the Reference field.
+// SetReference gets a reference to the given NullableString and assigns it to the Reference field.
 func (o *MachineSpectrumXMultiplaneUpdateRequest) SetReference(v string) {
-	o.Reference = &v
+	o.Reference.Set(&v)
+}
+
+// SetReferenceNil sets the value for Reference to be an explicit nil
+func (o *MachineSpectrumXMultiplaneUpdateRequest) SetReferenceNil() {
+	o.Reference.Set(nil)
+}
+
+// UnsetReference ensures that no value is present for Reference, not even an explicit nil
+func (o *MachineSpectrumXMultiplaneUpdateRequest) UnsetReference() {
+	o.Reference.Unset()
 }
 
 // GetAcknowledgeAttachedInstance returns the AcknowledgeAttachedInstance field value if set, zero value otherwise.
@@ -373,8 +384,8 @@ func (o MachineSpectrumXMultiplaneUpdateRequest) ToMap() (map[string]interface{}
 		toSerialize["planeRange"] = o.PlaneRange
 	}
 	toSerialize["maintenanceMode"] = o.MaintenanceMode
-	if !IsNil(o.Reference) {
-		toSerialize["reference"] = o.Reference
+	if o.Reference.IsSet() {
+		toSerialize["reference"] = o.Reference.Get()
 	}
 	if !IsNil(o.AcknowledgeAttachedInstance) {
 		toSerialize["acknowledgeAttachedInstance"] = o.AcknowledgeAttachedInstance

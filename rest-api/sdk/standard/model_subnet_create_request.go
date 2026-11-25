@@ -27,7 +27,7 @@ type SubnetCreateRequest struct {
 	// Name of the Subnet
 	Name string `json:"name"`
 	// Description of the Subnet
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// ID of the Ethernet virtualizer VPC containing the Subnet
 	VpcId string `json:"vpcId"`
 	// ID of the Ready, derived Tenant IPv4 Block from an Allocation
@@ -83,36 +83,47 @@ func (o *SubnetCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SubnetCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SubnetCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *SubnetCreateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *SubnetCreateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
+}
+
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *SubnetCreateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *SubnetCreateRequest) UnsetDescription() {
+	o.Description.Unset()
 }
 
 // GetVpcId returns the VpcId field value
@@ -198,8 +209,8 @@ func (o SubnetCreateRequest) MarshalJSON() ([]byte, error) {
 func (o SubnetCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
 	toSerialize["vpcId"] = o.VpcId
 	toSerialize["ipv4BlockId"] = o.Ipv4BlockId

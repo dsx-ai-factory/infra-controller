@@ -18,8 +18,8 @@ import (
 	"fmt"
 )
 
-// DpuExtensionServiceDeploymentType Immutable deployment policy. Omitted on create defaults to
-// `DemandDriven`, which deploys through instance attachment. `Baseline` is supported only for
+// DpuExtensionServiceDeploymentType Immutable deployment policy. Omitted or null on create defaults
+// to `DemandDriven`, which deploys through instance attachment. `Baseline` is supported only for
 // DpfHelmChart services and requests deployment to all DPUs managed by DPF at creation, without a
 // DPU target. Baseline services cannot be attached to instances. Empty and unknown values are
 // rejected. Responses always include the stored policy. This field cannot be changed through

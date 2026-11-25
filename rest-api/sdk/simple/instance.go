@@ -83,13 +83,15 @@ func toStandardInfiniBandInterface(request InfiniBandInterfaceCreateOrUpdateRequ
 	apiReq := standard.InfiniBandInterfaceCreateRequest{
 		PartitionId:    request.PartitionID,
 		Device:         request.Device,
-		Vendor:         request.Vendor,
 		DeviceInstance: standard.PtrInt32(int32(request.DeviceInstance)),
 		IsPhysical:     request.IsPhysical,
 	}
+	if request.Vendor != nil {
+		apiReq.Vendor.Set(request.Vendor)
+	}
 	if request.VirtualFunctionID != nil {
 		vf := int32(*request.VirtualFunctionID)
-		apiReq.VirtualFunctionId = &vf
+		apiReq.VirtualFunctionId.Set(&vf)
 	}
 	return apiReq
 }
@@ -133,13 +135,17 @@ func toStandardInstanceCreateRequest(request InstanceCreateRequest, sshKeyGroupI
 	}
 	apiReq := standard.InstanceCreateRequest{
 		Name:           request.Name,
-		Description:    request.Description,
-		MachineId:      &request.MachineID,
-		UserData:       request.UserData,
+		MachineId:      *standard.NewNullableString(&request.MachineID),
 		VpcId:          vpcID,
 		Labels:         request.Labels,
 		SshKeyGroupIds: sshKeyGroupIDs,
 		Interfaces:     []standard.InterfaceCreateRequest{defaultIface},
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
+	}
+	if request.UserData != nil {
+		apiReq.UserData.Set(request.UserData)
 	}
 	if am.TenantID != "" {
 		apiReq.SetTenantId(am.TenantID)
@@ -161,11 +167,19 @@ func toStandardInstanceCreateRequest(request InstanceCreateRequest, sshKeyGroupI
 
 func toStandardInstanceUpdateRequest(request InstanceUpdateRequest) standard.InstanceUpdateRequest {
 	apiReq := standard.InstanceUpdateRequest{
-		Name:        request.Name,
-		Description: request.Description,
-		IpxeScript:  request.IpxeScript,
-		UserData:    request.UserData,
-		Labels:      request.Labels,
+		Labels: request.Labels,
+	}
+	if request.Name != nil {
+		apiReq.Name.Set(request.Name)
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
+	}
+	if request.IpxeScript != nil {
+		apiReq.IpxeScript.Set(request.IpxeScript)
+	}
+	if request.UserData != nil {
+		apiReq.UserData.Set(request.UserData)
 	}
 	// Only set slice fields when provided so partial updates do not reset other attributes.
 	// When the caller passes nil, no array must be sent so the server skips the field entirely.

@@ -72,14 +72,16 @@ func (osm OperatingSystemManager) Create(ctx context.Context, request OperatingS
 	ctx = WithLogger(ctx, osm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, osm.client.Config.Token)
 
-	apiReq := standard.OperatingSystemCreateRequest{
-		Name:        request.Name,
-		Description: request.Description,
-		IpxeScript:  request.IpxeScript,
-		UserData:    request.UserData,
-	}
+	apiReq := standard.OperatingSystemCreateRequest{Name: request.Name}
+	apiReq.Description.Set(request.Description)
 	if osm.client.apiMetadata.TenantID != "" {
-		apiReq.SetTenantId(osm.client.apiMetadata.TenantID)
+		apiReq.TenantId.Set(&osm.client.apiMetadata.TenantID)
+	}
+	if request.IpxeScript != nil {
+		apiReq.IpxeScript.Set(request.IpxeScript)
+	}
+	if request.UserData != nil {
+		apiReq.UserData.Set(request.UserData)
 	}
 	allowOverride := true
 	apiReq.AllowOverride = &allowOverride
@@ -153,11 +155,18 @@ func (osm OperatingSystemManager) Update(ctx context.Context, id string, request
 	ctx = WithLogger(ctx, osm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, osm.client.Config.Token)
 
-	apiReq := standard.OperatingSystemUpdateRequest{
-		Name:        request.Name,
-		Description: request.Description,
-		IpxeScript:  request.IpxeScript,
-		UserData:    request.UserData,
+	apiReq := standard.OperatingSystemUpdateRequest{}
+	if request.Name != nil {
+		apiReq.Name.Set(request.Name)
+	}
+	if request.Description != nil {
+		apiReq.Description.Set(request.Description)
+	}
+	if request.IpxeScript != nil {
+		apiReq.IpxeScript.Set(request.IpxeScript)
+	}
+	if request.UserData != nil {
+		apiReq.UserData.Set(request.UserData)
 	}
 
 	apiOS, resp, err := osm.client.apiClient.OperatingSystemAPI.UpdateOperatingSystem(ctx, osm.client.apiMetadata.Organization, id).

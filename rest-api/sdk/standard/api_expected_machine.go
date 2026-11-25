@@ -210,7 +210,7 @@ type ApiBatchUpdateExpectedMachinesRequest struct {
 	expectedMachineUpdateRequest *[]ExpectedMachineUpdateRequest
 }
 
-// Array of Expected Machine update requests.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
+// Array of Expected Machine update requests.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
 func (r ApiBatchUpdateExpectedMachinesRequest) ExpectedMachineUpdateRequest(expectedMachineUpdateRequest []ExpectedMachineUpdateRequest) ApiBatchUpdateExpectedMachinesRequest {
 	r.expectedMachineUpdateRequest = &expectedMachineUpdateRequest
 	return r
@@ -1718,7 +1718,7 @@ type ApiUpdateExpectedMachineRequest struct {
 	expectedMachineUpdateRequest *ExpectedMachineUpdateRequest
 }
 
-// Expected Machine update request.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. Credential removal is not supported.
+// Expected Machine update request.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported.
 func (r ApiUpdateExpectedMachineRequest) ExpectedMachineUpdateRequest(expectedMachineUpdateRequest ExpectedMachineUpdateRequest) ApiUpdateExpectedMachineRequest {
 	r.expectedMachineUpdateRequest = &expectedMachineUpdateRequest
 	return r

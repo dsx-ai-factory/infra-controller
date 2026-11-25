@@ -25,7 +25,7 @@ type InfiniBandPartitionUpdateRequest struct {
 	// Name of the InfiniBand Partition
 	Name *string `json:"name,omitempty"`
 	// Description of the InfiniBand Partition
-	Description *string `json:"description,omitempty"`
+	Description NullableString `json:"description,omitempty"`
 	// String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -79,36 +79,47 @@ func (o *InfiniBandPartitionUpdateRequest) SetName(v string) {
 	o.Name = &v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InfiniBandPartitionUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil || IsNil(o.Description.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.Description
+	return *o.Description.Get()
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InfiniBandPartitionUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return o.Description.Get(), o.Description.IsSet()
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *InfiniBandPartitionUpdateRequest) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
+	if o != nil && o.Description.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
 func (o *InfiniBandPartitionUpdateRequest) SetDescription(v string) {
-	o.Description = &v
+	o.Description.Set(&v)
+}
+
+// SetDescriptionNil sets the value for Description to be an explicit nil
+func (o *InfiniBandPartitionUpdateRequest) SetDescriptionNil() {
+	o.Description.Set(nil)
+}
+
+// UnsetDescription ensures that no value is present for Description, not even an explicit nil
+func (o *InfiniBandPartitionUpdateRequest) UnsetDescription() {
+	o.Description.Unset()
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -156,8 +167,8 @@ func (o InfiniBandPartitionUpdateRequest) ToMap() (map[string]interface{}, error
 	if !IsNil(o.Name) {
 		toSerialize["name"] = o.Name
 	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
+	if o.Description.IsSet() {
+		toSerialize["description"] = o.Description.Get()
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

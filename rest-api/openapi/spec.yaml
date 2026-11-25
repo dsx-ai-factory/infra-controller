@@ -5283,7 +5283,7 @@ paths:
         description: |-
           Expected Machine update request.
 
-          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. Credential removal is not supported.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -5478,7 +5478,7 @@ paths:
         description: |-
           Array of Expected Machine update requests.
 
-          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
         required: true
       responses:
         '200':
@@ -5785,7 +5785,7 @@ paths:
         description: |-
           Expected Power Shelf update request.
 
-          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. Credential removal is not supported.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -6950,7 +6950,7 @@ paths:
         description: |-
           Expected Switch update request.
 
-          Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported.
+          Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -22021,8 +22021,8 @@ components:
           type: boolean
           description: True disables the selected links; false enables them.
         reference:
-          type: string
-          description: Omit to preserve it; send an empty string to clear it.
+          type: [string, 'null']
+          description: Omit or send null to preserve it; send an empty string to clear it.
         acknowledgeAttachedInstance:
           type: boolean
           description: Must be true when an Instance is attached to the Machine. Acknowledges that maintenance changes may disrupt the Instance's Tenant workload.
@@ -23555,10 +23555,14 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Description for the Site
         serialConsoleHostname:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Hostname to reach Serial Console for the Site
           format: hostname
         location:
@@ -23575,17 +23579,25 @@ components:
       description: Request to modify Site's capabilities. Partial update allowed, only specify capabilities that should be updated.
       properties:
         nativeNetworking:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Enable or disable native networking for the Site
         networkSecurityGroup:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Enable or disable network security groups for the Site
         imageBasedOperatingSystem:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Enable or disable image-based operating system support for the Site
         dpsPowerManagement:
-          type: boolean
-          description: Enable or disable DPS power management for the Site. Omission preserves the current value. Only Providers can update this field.
+          type:
+            - boolean
+            - 'null'
+          description: Enable or disable DPS power management for the Site. Omission or `null` preserves the current value. Only Providers can update this field.
     SiteUpdateRequest:
       title: SiteUpdateRequest
       type: object
@@ -23603,16 +23615,22 @@ components:
             email: johndoe@nvidia.com
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Update name of the Site. Can only be updated by Provider
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Update description for the Site. Can only be updated by Provider
         renewRegistrationToken:
           type: boolean
           description: Set to true to issue a new registration token. Can only be updated by Provider
         serialConsoleHostname:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Hostname to reach Serial Console for the Site. Can only be updated by Provider
           format: hostname
         isSerialConsoleEnabled:
@@ -23791,7 +23809,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Detailed description for the Allocation
         tenantId:
           type: string
@@ -23820,12 +23840,16 @@ components:
           description: Echo Studios resource allocation in SJC4
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Update name of the Allocation
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Update description of the Allocation
     AllocationConstraint:
       title: AllocationConstraint
@@ -24322,14 +24346,18 @@ components:
           maxLength: 256
           description: Name of the VPC
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description for the VPC
         siteId:
           type: string
           format: uuid
           description: ID of the Site where the VPC should be created
         networkVirtualizationType:
-          type: string
+          type:
+            - string
+            - 'null'
           enum:
             - ETHERNET_VIRTUALIZER
             - FNN
@@ -24340,27 +24368,39 @@ components:
           default: false
           description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 3
           maxLength: 64
           description: Specify a Site-configured routing profile returned by GET `/tenant/current/routing-profile` for the VPC. Only supported when `networkVirtualizationType` is set to `FNN`, or when `networkVirtualizationType` is omitted and Site has Native Networking enabled. Requires Tenant to have elevated privilege.
         routingProfileOverrides:
-          $ref: '#/components/schemas/VpcRoutingProfileOverrides'
+          oneOf:
+            - $ref: '#/components/schemas/VpcRoutingProfileOverrides'
+            - type: 'null'
           description: Routing-profile properties to overlay on the resolved named profile. Only supported for FNN VPCs and requires `TargetedInstanceCreation` to be effective for the Tenant at the VPC's Site. `routingProfile` may be omitted when the Site and Tenant configuration select a named profile.
         powerResourceGroup:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true` and REST DPS power provisioning to be enabled.
         networkSecurityGroupId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: ID of the Network Security Group to attach to the VPC
         vni:
-          type: integer
+          type:
+            - integer
+            - 'null'
           minimum: 1
           maximum: 16777215
           description: Explicitly requested VNI for the VPC
         nvLinkLogicalPartitionId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: ID of the default NVLink Logical Partition that GPUs for all Instances in the VPC will attach to
         labels:
@@ -24378,26 +24418,38 @@ components:
           description: Virtual network for machines executing Spark jobs v1
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 2
           maxLength: 256
           description: Updated name of the VPC
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Updated description of the VPC
         networkSecurityGroupId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: ID of the Network Security Group to attach to the VPC
         nvLinkLogicalPartitionId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: ID of the default NVLink Logical Partition that GPUs for all Instances in the VPC will attach to. Can only be updated if VPC currently has no active Instances
         routingProfileOverrides:
-          $ref: '#/components/schemas/VpcRoutingProfileOverrides'
-          description: Replaces the current inline routing-profile definition when present. Requires `TargetedInstanceCreation` to be effective for the Tenant at the VPC's Site. Omission preserves the current definition. An empty object restores inheritance for every property; a partial object replaces the previous definition and inherits its omitted properties from the named profile.
+          oneOf:
+            - $ref: '#/components/schemas/VpcRoutingProfileOverrides'
+            - type: 'null'
+          description: Replaces the current inline routing-profile definition when present. Requires `TargetedInstanceCreation` to be effective for the Tenant at the VPC's Site. Omission or `null` preserves the current definition. An empty object restores inheritance for every property; a partial object replaces the previous definition and inherits its omitted properties from the named profile.
         powerResourceGroup:
-          type: string
-          description: Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission preserves the current association; an empty string clears it when DPS power management is disabled.
+          type:
+            - string
+            - 'null'
+          description: Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current association; an empty string clears it when DPS power management is disabled.
         labels:
           $ref: '#/components/schemas/Labels'
           description: 'Update labels of the VPC. Up to 10 key-value pairs can be specified. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.'
@@ -24416,10 +24468,12 @@ components:
           maxLength: 64
           description: Required Site-configured destination profile with the opposite internal setting from the current profile. The REST aliases `external`, `internal`, and `privileged-internal` map to Core's `EXTERNAL`, `INTERNAL`, and `PRIVILEGED_INTERNAL` names. Other configured names are passed unchanged; this is not a closed enum.
         vni:
-          type: integer
+          type:
+            - integer
+            - 'null'
           minimum: 1
           maximum: 16777215
-          description: Optional exact destination VNI. Omission reuses an allocation retained in the destination pool, otherwise allocates automatically. An exact request must match a retained destination allocation if present; otherwise it must name a free materialized entry in the destination pool, regardless of that entry's automatic-allocation setting. A mismatched, occupied, missing, or already active VNI is rejected without fallback.
+          description: Optional exact destination VNI. Omission or null reuses an allocation retained in the destination pool, otherwise allocates automatically. An exact request must match a retained destination allocation if present; otherwise it must name a free materialized entry in the destination pool, regardless of that entry's automatic-allocation setting. A mismatched, occupied, missing, or already active VNI is rejected without fallback.
       required:
         - routingProfile
     VpcRoutingState:
@@ -24914,7 +24968,7 @@ components:
           vpcId: 0b1c53a0-a27e-4714-98d7-0cd3bc579db2
           ipBlockId: 20d7dd4f-ae43-4245-a9d9-d093296009c4
           prefix: 10.217.98.0/25
-      description: Specify exactly one allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
+      description: Specify exactly one non-null allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
       properties:
         name:
           type: string
@@ -24933,11 +24987,11 @@ components:
           format: uuid
           description: ID of the Ready tenant IPv4 or IPv6 IP Block to allocate the VPC Prefix from. The block must be at the FNN VPC's Site.
         prefix:
-          type: string
+          type: [string, 'null']
           minLength: 1
           description: Exact network-aligned IPv4 or IPv6 CIDR to reserve. Accepted IPv6 text is canonicalized before persistence and response. IPv4 accepts `/8` through `/31`. IPv6 accepts `/8` through `/63` when the FNN VPC has `slaacEnabled=true`, or `/8` through `/126` otherwise. The CIDR must be contained by the selected IP Block, match its address family, and not overlap an existing reservation. An IPv4-mapped IPv6 CIDR is not accepted. Mutually exclusive with `prefixLength`.
         prefixLength:
-          type: integer
+          type: [integer, 'null']
           minimum: 8
           maximum: 126
           description: Prefix length for automatic allocation. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length. Mutually exclusive with `prefix`.
@@ -25012,11 +25066,13 @@ components:
           labels:
             environment: production
             owner: networking
-      description: Request data for updating a VPC Prefix. Omitting `name` preserves the stored name. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
+      description: Request data for updating a VPC Prefix. Omitting `name` or passing `null` preserves the stored name. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
       properties:
         name:
-          type: string
-          description: 'Name of the VPCPrefix. Omission preserves the stored name'
+          type:
+            - string
+            - 'null'
+          description: 'Name of the VPCPrefix. Omission or `null` preserves the stored name'
           minLength: 2
           maxLength: 256
         labels:
@@ -25228,7 +25284,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the Subnet'
         vpcId:
           type: string
@@ -25262,7 +25320,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the Subnet'
     InfiniBandPartition:
       title: InfiniBandPartition
@@ -25439,7 +25499,9 @@ components:
           maxLength: 256
           description: Name of the Partition to create
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description of the Partition
         siteId:
           type: string
@@ -25465,7 +25527,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the InfiniBand Partition'
         labels:
           $ref: '#/components/schemas/Labels'
@@ -25580,14 +25644,18 @@ components:
           maxLength: 256
           description: Name of the Partition to create
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description of the Partition
         siteId:
           type: string
           format: uuid
           description: ID of the Site the Partition should belong to
         vni:
-          type: integer
+          type:
+            - integer
+            - 'null'
           minimum: 0
           maximum: 2147483647
           description: 'Requested VXLAN Network Identifier. Omit it to let the Site allocate one from its pool. A requested value that is already allocated or outside that pool is rejected by the Site'
@@ -25852,7 +25920,9 @@ components:
           maxLength: 256
           description: Name of the NVLink Logical Partition to create
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description of the NVLink Logical Partition
         siteId:
           type: string
@@ -25870,12 +25940,16 @@ components:
       description: Request data to update an NVLink Logical Partition
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 2
           maxLength: 256
           description: Updated name for the NVLink Logical Partition
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Updated description for the NVLink Logical Partition
     OperatingSystem:
       title: OperatingSystem
@@ -26267,7 +26341,9 @@ components:
             - null
           description: 'Optional auth type: Basic or Bearer. An empty string is treated as no auth type.'
         authToken:
-          type: string
+          type:
+            - string
+            - 'null'
           writeOnly: true
           description: 'Optional auth token. Accepted in create/update requests and never returned in API responses.'
         cacheStrategy:
@@ -26449,15 +26525,21 @@ components:
           maxLength: 256
           description: Name of the Operating System
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description of the Operating System
         infrastructureProviderId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: 'Deprecated: Infrastructure Provider is now inferred from org membership.'
           deprecated: true
         tenantId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: 'Deprecated: Tenant is now inferred from org membership.'
           deprecated: true
@@ -26474,31 +26556,44 @@ components:
             array. The list is fixed at creation and cannot be changed on update.
             Not applicable to raw iPXE OS.
         ipxeScript:
-          type: string
+          type:
+            - string
+            - 'null'
           deprecated: true
           description: >-
             Deprecated: raw iPXE Operating Systems are superseded by Templated iPXE
             (ipxeTemplateId). iPXE script or URL, only applicable for iPXE-based OS.
             Cannot be specified if imageUrl is specified.
         imageUrl:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uri
           description: 'Original URL from which the Operating System image can be retrieved; required for image-based OS. Cannot be specified if ipxeScript is specified'
         imageSha:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'SHA hash of the image file, required for image-based OS'
         imageAuthType:
-          type: string
+          type:
+            - string
+            - 'null'
           enum:
             - Basic
             - Bearer
             - ''
+            - null
           description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. An empty string is treated as not specified.'
         imageAuthToken:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified'
         imageDisk:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
@@ -26512,21 +26607,29 @@ components:
             `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
-            `-part<digits>` are rejected. When omitted or empty on creation,
+            `-part<digits>` are rejected. When omitted, null, or empty on creation,
             the Site prefers a disk with an EFI partition, then falls back to the first
             `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or
             `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Root filesystem UUID; this or `rootFsLabel` is required for image-based OS'
         rootFsLabel:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Root filesystem label; this or `rootFsId` is required for image-based OS'
         phoneHomeEnabled:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Indicates whether the Phone Home service should be enabled or disabled for Operating System
         userData:
-          type: string
+          type:
+            - string
+            - 'null'
           description: User data for the Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         isCloudInit:
           type: boolean
@@ -26536,7 +26639,9 @@ components:
           type: boolean
           description: Indicates if the user data can be overridden at Instance creation time
         ipxeTemplateId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'ID of the iPXE template to use; identifies a Templated iPXE Operating System. Mutually exclusive with ipxeScript and imageUrl.'
         ipxeTemplateParameters:
           type: array
@@ -26571,35 +26676,52 @@ components:
       description: 'Request data to update an Operating System. For image-based OS, mutable image attributes (image authentication, root filesystem, image disk) can be updated; imageUrl and imageSha identify the underlying image and are immutable after creation. Only iPXE attributes can be updated for iPXE-based OS. A Templated iPXE Operating System can only be updated when it is associated with exactly one Site.'
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 2
           maxLength: 256
           description: Name of the Operating System
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description of the Operating System
         ipxeScript:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'iPXE script or URL, only applicable for iPXE-based OS. Cannot be specified if imageUrl is specified'
         imageUrl:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uri
           description: 'Original URL from which the Operating System image can be retrieved. Immutable after creation: it may be re-sent unchanged, but changing it is rejected. Create a new Operating System to use a different image.'
         imageSha:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'SHA hash of the image file. Immutable after creation: it may be re-sent unchanged, but changing it is rejected.'
         imageAuthType:
-          type: string
+          type:
+            - string
+            - 'null'
           enum:
             - Basic
             - Bearer
             - ''
-          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value; omitting this field leaves it unchanged.'
+            - null
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageAuthToken:
-          type: string
-          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value; omitting this field leaves it unchanged.'
+          type:
+            - string
+            - 'null'
+          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageDisk:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
@@ -26613,38 +26735,56 @@ components:
             `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
-            `-part<digits>` are rejected. Omitting this field preserves
+            `-part<digits>` are rejected. Omitting this field or sending null preserves
             the current value. Sending an explicit empty string clears the value and
             restores automatic selection: prefer a disk with an EFI partition, then
             fall back to the first `/dev/nvme<controller>n<namespace>`,
             `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Root filesystem UUID; this or `rootFsLabel` is required for image-based OS'
         rootFsLabel:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Root filesystem label; this or `rootFsId` is required for image-based OS'
         phoneHomeEnabled:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Indicates whether the Phone Home service should be enabled or disabled for Operating System
         userData:
-          type: string
+          type:
+            - string
+            - 'null'
           description: User data for the Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         isCloudInit:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           deprecated: true
           description: 'Deprecated and ignored: whether the Operating System is cloud-init based. Value now derived from `userData`.'
         allowOverride:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Indicates if the user data can be overridden at Instance creation time
         isActive:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Indicates if the Operating System is active
         deactivationNote:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional deactivation note if OS is inactive
         ipxeTemplateId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'ID of the iPXE template to use (Templated iPXE only). Mutually exclusive with ipxeScript and imageUrl.'
         ipxeTemplateParameters:
           type: array
@@ -26879,7 +27019,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the Instance Type'
         siteId:
           type: string
@@ -26889,7 +27031,9 @@ components:
           $ref: '#/components/schemas/Labels'
           description: 'User-defined key-value labels for the Instance Type'
         controllerMachineType:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Site Controller assigned Machine type'
         machineCapabilities:
           type: array
@@ -26907,12 +27051,16 @@ components:
       description: Request data to update an Instance Type
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Name of the Instance Type'
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the Instance Type'
         labels:
           $ref: '#/components/schemas/Labels'
@@ -26976,16 +27124,24 @@ components:
           type: string
           description: Name of the Capability component
         frequency:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Frequency of the Capability component, if available'
         capacity:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Capacity of the Capability component, if applicable'
         vendor:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Vendor of the Capability component, if available'
         count:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: uint32
           minimum: 0
           description: Count of the Capability component
@@ -26997,9 +27153,11 @@ components:
             format: uint32
             minimum: 0
         deviceType:
-          type: string
-          enum: [DPU, SpectrumX, NVLink]
-          description: 'Optional device type. `Network` accepts `DPU` or `SpectrumX`; `GPU` accepts `NVLink`; other capability types require omission. Omitting this field leaves device type unconstrained for every capability type. Empty strings are rejected'
+          type:
+            - string
+            - 'null'
+          enum: [DPU, SpectrumX, NVLink, null]
+          description: 'Optional device type. `Network` accepts `DPU` or `SpectrumX`; `GPU` accepts `NVLink`; other capability types require omission or null. Omitted or null leaves device type unconstrained for every capability type. Empty strings are rejected'
     Instance:
       title: Instance
       type: object
@@ -27470,11 +27628,13 @@ components:
               device: 'MT2910 Family [ConnectX-7]'
               deviceInstance: 0
               isPhysical: true
+              virtualFunctionId: null
           spectrumXAttachments:
             - spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
               device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
               deviceInstance: 0
               attachmentType: Physical
+              virtualFunctionId: null
           nvLinkInterfaces:
             - nvLinkLogicalPartitionId: 2f8676fd-d228-4db5-ac76-1cfc74f48a23
               deviceInstance: 0
@@ -27563,7 +27723,9 @@ components:
           maxLength: 256
           description: Name of the Instance
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the Instance, optional'
           maxLength: 1024
         tenantId:
@@ -27571,11 +27733,15 @@ components:
           format: uuid
           description: ID of the Tenant creating the Instance
         instanceTypeId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: ID of the Instance Type to use for Instance
         machineId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: ID of of specific Machine to use for Instance. Requires Targeted Instance Creation capability enabled for Tenant
         machineLabelSelector:
           $ref: '#/components/schemas/MachineLabelSelector'
@@ -27595,21 +27761,31 @@ components:
             type: string
             format: uuid
         userData:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         operatingSystemId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: Must be specified if iPXE Script field is empty
         powerProfile:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`.
         networkSecurityGroupId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: ID of the desired Network Security Group to attach to the Instance. Instance-level policy takes precedence over VPC-level policy on every Interface, including Interfaces attached to another Tenant's VPC.
         ipxeScript:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified'
         alwaysBootWithCustomIpxe:
           type: boolean
@@ -27695,6 +27871,7 @@ components:
               device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
               deviceInstance: 0
               attachmentType: Physical
+              virtualFunctionId: null
           nvLinkInterfaces:
             - nvLinkLogicalPartitionId: 2f8676fd-d228-4db5-ac76-1cfc74f48a23
               deviceInstance: 0
@@ -27730,7 +27907,9 @@ components:
           maximum: 18
           description: Number of instances to create in this batch. Minimum 2, maximum 18 (limited by topology domain size)
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description applied to all instances in the batch, optional'
           maxLength: 1024
         tenantId:
@@ -27759,22 +27938,32 @@ components:
             type: string
             format: uuid
         userData:
-          type: string
+          type:
+            - string
+            - 'null'
           description: User data applied to all instances. Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         operatingSystemId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: Must be specified if iPXE Script field is empty
         powerProfile:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Power profile to apply to every Instance in the batch. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`.
         networkSecurityGroupId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
         ipxeScript:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Override iPXE script specified in OS, must be specified if Operating System is not specified'
         alwaysBootWithCustomIpxe:
           type: boolean
@@ -27876,19 +28065,23 @@ components:
               device: 'MT2910 Family [ConnectX-7]'
               deviceInstance: 0
               isPhysical: true
+              virtualFunctionId: null
             - partitionId: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
               device: 'MT2910 Family [ConnectX-7]'
               deviceInstance: 1
               isPhysical: false
+              virtualFunctionId: null
             - partitionId: 8b05d5c3-8de4-48c8-8d1c-399a8abc3ab8
               device: 'MT2910 Family [ConnectX-7]'
               deviceInstance: 2
               isPhysical: false
+              virtualFunctionId: null
           spectrumXAttachments:
             - spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
               device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
               deviceInstance: 0
               attachmentType: Physical
+              virtualFunctionId: null
           dpuExtensionServiceDeployments:
             - dpuExtensionServiceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
               version: V1-T1761856992374052
@@ -27906,28 +28099,42 @@ components:
           applyUpdatesOnReboot: true
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 2
           maxLength: 256
           description: Updated name for the Instance
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Updated description of the Instance
           maxLength: 1024
         triggerReboot:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Trigger power cycle for Instance
         rebootWithCustomIpxe:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: 'When specified along with triggerReboot, the Instance will boot using the custom iPXE specified by OS. If Instance has alwaysBootWithCustomIpxe flag set then this value will be ignored.'
         applyUpdatesOnReboot:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: 'When specified, pending Instance updates such as DPU reprovisioning are applied on reboot'
         operatingSystemId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: The UUID of the desired operating system.
         ipxeScript:
-          type: string
+          type:
+            - string
+            - 'null'
           description: The iPXE script content to be used for booting.
         sshKeyGroupIds:
           type: array
@@ -27936,19 +28143,29 @@ components:
             type: string
             format: uuid
         networkSecurityGroupId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
         powerProfile:
-          type: string
-          description: Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission preserves the current profile; an empty string clears it when DPS power management is disabled.
+          type:
+            - string
+            - 'null'
+          description: Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current profile; an empty string clears it when DPS power management is disabled.
         userData:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Any user-data to be sent to the booting OS.  For example, cloud-init data. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.'
         alwaysBootWithCustomIpxe:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Whether the custom iPXE data should be used for every boot.
         phoneHomeEnabled:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Indicates whether the Phone Home service should be enabled or disabled for the Instance
         labels:
           $ref: '#/components/schemas/Labels'
@@ -27966,23 +28183,29 @@ components:
           items:
             $ref: '#/components/schemas/InterfaceCreateRequest'
         autoNetwork:
-          type: boolean
-          description: 'When set, asks NICo to auto-resolve the Instance''s network interfaces from the host''s underlay (HostInband) segments. Omission leaves the value unchanged; `true` (re-)resolves; `false` returns to explicit interface configuration. When `true`, the Instance''s VPC MUST already have `networkVirtualizationType: FLAT`, `interfaces` MUST be empty or omitted and `secondaryVpcIds` MUST be empty or omitted.'
+          type:
+            - boolean
+            - 'null'
+          description: 'When set, asks NICo to auto-resolve the Instance''s network interfaces from the host''s underlay (HostInband) segments. `null` leaves the value unchanged; `true` (re-)resolves; `false` returns to explicit interface configuration. When `true`, the Instance''s VPC MUST already have `networkVirtualizationType: FLAT`, `interfaces` MUST be empty or omitted, and `secondaryVpcIds` MUST be empty or omitted.'
         infinibandInterfaces:
           type: array
           description: Update InfiniBand Interfaces of the Instance
           items:
             $ref: '#/components/schemas/InfiniBandInterfaceCreateRequest'
         spectrumXAttachments:
-          type: array
+          type:
+            - array
+            - 'null'
           maxItems: 64
-          description: 'Update SpectrumX Partition attachments of the Instance. Omission leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Removing attachments from a running Instance immediately stops SpectrumX traffic on the detached NICs, but the guest may retain their IPv4 addresses and routes until the DHCP lease issued by the DOCA Weave DHCP agent expires (1 hour by default). NICo does not set this lease duration. Addresses and routes may remain longer if the guest DHCP client does not honor lease expiry. Replacing attachments on a running Instance, such as moving a NIC to a Partition with a different VNI, may leave the guest using its old address until DHCP renewal. Renew DHCP or restart networking on the affected NICs after replacing attachments.'
+          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Removing attachments from a running Instance immediately stops SpectrumX traffic on the detached NICs, but the guest may retain their IPv4 addresses and routes until the DHCP lease issued by the DOCA Weave DHCP agent expires (1 hour by default). NICo does not set this lease duration. Addresses and routes may remain longer if the guest DHCP client does not honor lease expiry. Replacing attachments on a running Instance, such as moving a NIC to a Partition with a different VNI, may leave the guest using its old address until DHCP renewal. Renew DHCP or restart networking on the affected NICs after replacing attachments.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
-          type: array
+          type:
+            - array
+            - 'null'
           description: >-
-            Update NVLink Interfaces of the Instance. Omission leaves interfaces unchanged; an explicit list replaces them entirely, detaching any not included. An empty list (`[]`) removes all existing interfaces. If the owning VPC has `nvLinkLogicalPartitionId` set, changes to an Instance that already has live interfaces will return 400.
+            Update NVLink Interfaces of the Instance. Omission or `null` leaves interfaces unchanged; an explicit list replaces them entirely, detaching any not included. An empty list (`[]`) removes all existing interfaces. If the owning VPC has `nvLinkLogicalPartitionId` set, changes to an Instance that already has live interfaces will return 400.
           items:
             $ref: '#/components/schemas/NVLinkInterfaceCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -28016,7 +28239,9 @@ components:
           maxLength: 1024
           description: Brief description of the issue for operators.
         details:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 8192
           description: Diagnostic information, logs, ticket numbers, etc.
     InstanceDeleteRequest:
@@ -28034,7 +28259,9 @@ components:
           $ref: '#/components/schemas/InstanceDeleteHealthIssue'
           description: Information regarding issue with the underlying Machine experienced by Tenant
         isRepairTenant:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Should be set to true for Tenants who are performing investigation/repairing the Machine. Otherwise omit or set to false
     Interface:
       title: Interface
@@ -28319,10 +28546,14 @@ components:
               - IPv4
               - IPv6
         ipAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Explicitly requested IP address for the interface. It can only be specified with an explicit `vpcPrefixId`. The least-significant host bit must be 1.
         inlineRoutingProfile:
-          $ref: '#/components/schemas/InterfaceInlineRoutingProfile'
+          oneOf:
+            - $ref: '#/components/schemas/InterfaceInlineRoutingProfile'
+            - type: 'null'
           description: Inline interface-local routing profile options. It cannot be specified for Subnet-based interfaces.
         isPhysical:
           type: boolean
@@ -28334,7 +28565,9 @@ components:
           type: integer
           description: 'Index of the device, used to identify which interface card to attache the Partition to'
         virtualFunctionId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           description: 'Index of the virtual function to use, must be specified if isPhysical is false'
           minimum: 0
           maximum: 15
@@ -28352,22 +28585,15 @@ components:
           - vpcId
       dependentSchemas:
         subnetId:
-          not:
-            anyOf:
-              - required:
-                  - ipAddress
-                properties:
-                  ipAddress: {}
-              - required:
-                  - inlineRoutingProfile
-                properties:
-                  inlineRoutingProfile: {}
+          properties:
+            ipAddress:
+              type: 'null'
+            inlineRoutingProfile:
+              type: 'null'
         vpcId:
-          not:
-            required:
-              - ipAddress
-            properties:
-              ipAddress: {}
+          properties:
+            ipAddress:
+              type: 'null'
     InfiniBandInterface:
       title: InfiniBandInterface
       type: object
@@ -28463,6 +28689,7 @@ components:
           device: 'MT2910 Family [ConnectX-7]'
           deviceInstance: 0
           isPhysical: true
+          virtualFunctionId: null
         - partitionId: 4f4decba-7d7f-46b9-9e5f-e5d71c2e0666
           device: 'MT2910 Family [ConnectX-7]'
           deviceInstance: 3
@@ -28482,7 +28709,9 @@ components:
           type: string
           description: Name of the InfiniBand device to use
         vendor:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Name of the InfiniBand device vendor, optional'
         deviceInstance:
           type: integer
@@ -28491,7 +28720,9 @@ components:
           type: boolean
           description: Specifies whether this Partition should be attached to the Instance over physical interface
         virtualFunctionId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           description: Must be specified if isPhysical is false
     InstanceSpectrumXAttachmentCreateOrUpdateRequest:
       title: InstanceSpectrumXAttachmentCreateOrUpdateRequest
@@ -28501,10 +28732,12 @@ components:
           device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
           deviceInstance: 0
           attachmentType: Physical
+          virtualFunctionId: null
         - spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
           device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
           deviceInstance: 3
           attachmentType: OVS
+          virtualFunctionId: null
           bridgeName: br-spx0
           ovnNetworkName: spx-net-a
       description: Request data to attach a SpectrumX Partition to an Instance
@@ -28529,16 +28762,22 @@ components:
             - OVS
           description: 'Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected.'
         virtualFunctionId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           description: Must be omitted, as virtual functions are not currently supported
         bridgeName:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           maxLength: 32
           pattern: '^[a-zA-Z0-9_.-]+$'
           description: 'OVS bridge to attach over. Required for an `OVS` attachment and must be omitted for any other type'
         ovnNetworkName:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           maxLength: 256
           pattern: '^[a-zA-Z0-9_-]+$'
@@ -29580,10 +29819,12 @@ components:
           format: uuid
           description: ID of the Site
         version:
-          type: string
+          type:
+            - string
+            - 'null'
           description: |-
             Target firmware input. NVLink Domain targets resolve to their member
-            racks. For rack-scale RMS components, an omitted, empty, or
+            racks. For rack-scale RMS components, an omitted, null, empty, or
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
@@ -29637,10 +29878,12 @@ components:
             pattern: '\S'
           description: Nonblank, case-sensitive IDs of the NVLink Domains to update. Exact duplicate IDs are rejected.
         version:
-          type: string
+          type:
+            - string
+            - 'null'
           description: |-
             Target firmware input. NVLink Domain targets resolve to their member
-            racks. For rack-scale RMS components, an omitted, empty, or
+            racks. For rack-scale RMS components, an omitted, null, empty, or
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
@@ -30615,7 +30858,9 @@ components:
           $ref: '#/components/schemas/RackFilter'
           description: 'Filter that selects Racks targeted for firmware update'
         version:
-          type: string
+          type:
+            - string
+            - 'null'
           description: |-
             Target firmware input serialized as a string. Its format is a
             contract between the caller and the component backend
@@ -30651,7 +30896,7 @@ components:
             mappings; a shared JSON object must not contain any of them.
             A missing tray type in the mapping skips that component type.
             A non-empty, non-layered value is forwarded unchanged.
-            For rack-scale RMS components, an omitted, empty, or
+            For rack-scale RMS components, an omitted, null, empty, or
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
@@ -30711,14 +30956,16 @@ components:
           deprecated: true
           description: |-
             Deprecated alias of downloadCredentials. Supply at most one
-            alias. Retained for existing clients.
+            non-null alias. Retained for existing clients.
         downloadCredentials:
-          $ref: '#/components/schemas/FirmwareAuthenticationData'
+          oneOf:
+            - $ref: '#/components/schemas/FirmwareAuthenticationData'
+            - type: 'null'
           writeOnly: true
           description: |-
             Optional authentication for downloading firmware files, independent
-            of device login credentials. Mutually exclusive with
-            authenticationData. When omitted, no download authentication is used.
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
         ruleId:
@@ -31775,10 +32022,12 @@ components:
           type: string
           description: Target firmware version to roll out.
         ruleId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: |-
-            Operation Rule to pin for each target's firmware Task. Omit to let
+            Operation Rule to pin for each target's firmware Task. Null to let
             Flow's default rule resolution pick one.
         overrideVersionCheck:
           type: boolean
@@ -31945,7 +32194,9 @@ components:
           $ref: '#/components/schemas/TrayFilter'
           description: 'Filter that selects Trays targeted for firmware update'
         version:
-          type: string
+          type:
+            - string
+            - 'null'
           description: |-
             Target firmware input serialized as a string. Its format is a
             contract between the caller and the component backend
@@ -31982,7 +32233,7 @@ components:
             mappings; a shared JSON object must not contain any of them.
             A missing tray type in the mapping skips that component type.
             A non-empty, non-layered value is forwarded unchanged.
-            For rack-scale RMS components, an omitted, empty, or
+            For rack-scale RMS components, an omitted, null, empty, or
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
@@ -32042,23 +32293,27 @@ components:
           deprecated: true
           description: |-
             Deprecated alias of downloadCredentials. Supply at most one
-            alias. Retained for existing clients.
+            non-null alias. Retained for existing clients.
         downloadCredentials:
-          $ref: '#/components/schemas/FirmwareAuthenticationData'
+          oneOf:
+            - $ref: '#/components/schemas/FirmwareAuthenticationData'
+            - type: 'null'
           writeOnly: true
           description: |-
             Optional authentication for downloading firmware files, independent
-            of device login credentials. Mutually exclusive with
-            authenticationData. When omitted, no download authentication is used.
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
         deviceCredentialOverrides:
-          $ref: '#/components/schemas/DeviceCredentialOverrides'
+          oneOf:
+            - $ref: '#/components/schemas/DeviceCredentialOverrides'
+            - type: 'null'
           writeOnly: true
           description: |-
             Optional device logins shared by all directly dispatched tray targets.
-            Requires overrideReadinessCheck=true. When omitted, configured
-            credential lookup is preserved. Rack firmware endpoints ignore this field.
+            Requires overrideReadinessCheck=true. Omitted or null preserves
+            configured credential lookup. Rack firmware endpoints ignore this field.
             Unsupported for
             standalone compute reprovisioning, DPU updates, the Core compute
             backend and legacy compute controllers. NVOS logins are supported only for switches.
@@ -32273,7 +32528,9 @@ components:
           format: uuid
           description: ID of the Site
         version:
-          type: string
+          type:
+            - string
+            - 'null'
           description: |-
             Target firmware input serialized as a string. Its format is a
             contract between the caller and the component backend
@@ -32310,7 +32567,7 @@ components:
             mappings; a shared JSON object must not contain any of them.
             A missing tray type in the mapping skips that component type.
             A non-empty, non-layered value is forwarded unchanged.
-            For rack-scale RMS components, an omitted, empty, or
+            For rack-scale RMS components, an omitted, null, empty, or
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
@@ -32370,23 +32627,27 @@ components:
           deprecated: true
           description: |-
             Deprecated alias of downloadCredentials. Supply at most one
-            alias. Retained for existing clients.
+            non-null alias. Retained for existing clients.
         downloadCredentials:
-          $ref: '#/components/schemas/FirmwareAuthenticationData'
+          oneOf:
+            - $ref: '#/components/schemas/FirmwareAuthenticationData'
+            - type: 'null'
           writeOnly: true
           description: |-
             Optional authentication for downloading firmware files, independent
-            of device login credentials. Mutually exclusive with
-            authenticationData. When omitted, no download authentication is used.
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
         deviceCredentialOverrides:
-          $ref: '#/components/schemas/DeviceCredentialOverrides'
+          oneOf:
+            - $ref: '#/components/schemas/DeviceCredentialOverrides'
+            - type: 'null'
           writeOnly: true
           description: |-
             Optional device logins shared by all directly dispatched tray targets.
-            Requires overrideReadinessCheck=true. When omitted, configured
-            credential lookup is preserved. Rack firmware endpoints ignore this field.
+            Requires overrideReadinessCheck=true. Omitted or null preserves
+            configured credential lookup. Rack firmware endpoints ignore this field.
             Unsupported for
             standalone compute reprovisioning, DPU updates, the Core compute
             backend and legacy compute controllers. NVOS logins are supported only for switches.
@@ -32851,20 +33112,28 @@ components:
       description: 'Request data to update Machine. Instance Type attribute updates, maintenance attribute updates, labels updates, and in-pool online repair (enter or exit) must be specified in separate requests. They cannot be processed at the same time.'
       properties:
         instanceTypeId:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 2
           maxLength: 256
           format: uuid
           description: Update the Instance Type of the Machine. Cannot be specified when clearing Instance Type. Can only be updated by Provider.
         clearInstanceType:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Set to true to clear the existing Instance Type. Cannot be specified if Instance Type ID is specified. Can only be set by Provider.
         setMaintenanceMode:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: Set to `true` to enable maintenance mode and to `false` to disable maintenance mode. Can be set by Provider or privileged Tenant.
         maintenanceMessage:
-          type: string
-          description: Describes the reason for moving Machine into maintenance mode. Required when `setMaintenanceMode` is `true`. Omit when `setMaintenanceMode` is omitted or `false`; a supplied message is rejected in those cases. Can be updated by Provider or privileged Tenant.
+          type:
+            - string
+            - 'null'
+          description: Describes the reason for moving Machine into maintenance mode. Required when `setMaintenanceMode` is `true`. Omit or set to null when `setMaintenanceMode` is omitted, null, or `false`; a non-null message is rejected in those cases. Can be updated by Provider or privileged Tenant.
           minLength: 5
           maxLength: 256
           pattern: '[^ \t\n\f\r]'
@@ -34123,11 +34392,15 @@ components:
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           description: MAC address of the Expected Machine's BMC (Baseboard Management Controller)
         defaultBmcUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 255
           description: Username for accessing the Expected Machine's BMC
         defaultBmcPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 255
           description: Password for accessing the Expected Machine's BMC
         chassisSerialNumber:
@@ -34136,70 +34409,113 @@ components:
           maxLength: 32
           description: Serial number of the Expected Machine's chassis
         fallbackDPUSerialNumbers:
-          type: array
+          type:
+            - array
+            - 'null'
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
         interfaces:
-          type: array
+          type:
+            - array
+            - 'null'
           description: |-
-            Physical-interface and DPU-loopback declarations. For a new machine, omission creates an empty list.
+            Physical-interface and DPU-loopback declarations. For a new machine, omission or null creates an empty list.
 
-            In a complete inventory replacement, this list replaces the physical-interface subset; omission or an empty list clears that subset. For a retained BMC MAC, stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations.
+            In a complete inventory replacement, this list replaces the physical-interface subset; omission, null, or an empty list clears that subset. For a retained BMC MAC, stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
         replaceDpuLoopbacks:
-          type: boolean
+          type: [boolean, 'null']
           default: false
-          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires interfaces to be provided; an empty list clears all interface declarations. Omission or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
+          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
         skuId:
-          type: string
-          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission leaves the SKU association unset. REST rejects an empty string with HTTP 400.
+          type:
+            - string
+            - 'null'
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400.
         rackId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional rack identifier for this component
         bmcIpAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Display name for this component
         manufacturer:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Manufacturer of this component
         model:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Model of this component
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Description of this component
         serverName:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Slot ID within the rack
         trayIdx:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Tray index within the rack
         hostId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Host ID within the tray
         isDpfEnabled:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: |-
             When true, this host is eligible for DPF-based provisioning.
-            Optional. Omission uses an effective default of true.
+            Optional. Omission or null uses an effective default of true.
             Set false explicitly to disable DPF-based provisioning.
+        dpuPolicy:
+          type:
+            - string
+            - 'null'
+          enum:
+            - Inherit
+            - Nic
+            - Ignore
+            - null
+          description: |-
+            Per-host DPU policy. `Inherit` uses the site-wide DPU policy. `Nic` operates installed DPUs as plain NICs.
+            `Ignore` does not configure or attach DPU hardware. Omission or `null` stores `Inherit`.
+            Separate from `isDpfEnabled`, which controls DPF provisioning eligibility.
         retainBmcCredentials:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: |-
             When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is.
-            Optional. Omission stores false, which rotates BMC credentials.
+            Optional. Omission or null stores false, which rotates BMC credentials.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -34245,11 +34561,11 @@ components:
       description: |-
         Request data to update an existing Expected Machine.
 
-        Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.
+        Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.
 
-        For single updates (`PATCH /expected-machine/{id}`), omit `id` to use the ID from the URL path. A supplied body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
+        For single updates (`PATCH /expected-machine/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
-        For batch updates (`PATCH /expected-machine/batch`), each item must include `id` to identify which Expected Machine to update.
+        For batch updates (`PATCH /expected-machine/batch`), each item must include a non-null `id` to identify which Expected Machine to update.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -34269,101 +34585,154 @@ components:
             rack: B2
       properties:
         id:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: |-
             ID of the Expected Machine to update.
 
-            For single updates, omit `id` to use the ID from the URL path. A supplied body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
+            For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
-            Required in every batch update item.
+            Required and non-null in every batch update item.
         bmcMacAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           deprecated: true
           description: |-
             The Expected Machine's BMC MAC address is immutable after creation. Omit this field, or provide another case/separator spelling of the current MAC as a compatibility no-op.
         defaultBmcUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           maxLength: 255
-          description: Username for accessing the Expected Machine's BMC. Omission preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+          description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           writeOnly: true
           maxLength: 255
-          description: Password for accessing the Expected Machine's BMC. Omission preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+          description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         chassisSerialNumber:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           maxLength: 32
           description: Serial number of the Expected Machine's chassis
         fallbackDPUSerialNumbers:
-          type: array
+          type:
+            - array
+            - 'null'
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
         interfaces:
-          type: array
+          type:
+            - array
+            - 'null'
           description: |-
-            Expected physical-interface and DPU-loopback declarations. Omission preserves the current list. A supplied list replaces the physical-interface subset; an empty list clears that subset.
+            Expected physical-interface and DPU-loopback declarations. Omission or null preserves the current list. A non-null list replaces the physical-interface subset; an empty list clears that subset.
 
             Stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations, clearing any omitted loopbacks.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
         replaceDpuLoopbacks:
-          type: boolean
+          type: [boolean, 'null']
           default: false
-          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires interfaces to be provided; an empty list clears all interface declarations. Omission or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
+          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
         skuId:
-          type: string
-          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
+          type:
+            - string
+            - 'null'
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
         rackId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional rack identifier for this component
         bmcIpAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           description: |-
-            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission preserves the current value.
+            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Display name for this component
         manufacturer:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Manufacturer of this component
         model:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Model of this component
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Description of this component
         serverName:
-          type: string
-          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation. An empty string clears the current value. Omission preserves it.
+          type:
+            - string
+            - 'null'
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation. An empty string clears the current value. Omission or null preserves it.
         slotId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Slot ID within the rack
         trayIdx:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Tray index within the rack
         hostId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Host ID within the tray
         isDpfEnabled:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: |-
             When true, this host is eligible for DPF-based provisioning.
-            Optional. Omission leaves the existing setting unchanged.
+            Optional. Omission or null leaves the existing setting unchanged.
             An explicit true or false value updates the setting.
+        dpuPolicy:
+          type:
+            - string
+            - 'null'
+          enum:
+            - Inherit
+            - Nic
+            - Ignore
+            - null
+          description: |-
+            Per-host DPU policy. `Inherit` uses the site-wide DPU policy. `Nic` operates installed DPUs as plain NICs.
+            `Ignore` does not configure or attach DPU hardware. Set `Inherit` to reset a host to the site-wide policy.
+            Omission or `null` leaves it unchanged.
         retainBmcCredentials:
-          type: boolean
+          type:
+            - boolean
+            - 'null'
           description: |-
             When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is.
-            Optional. Omission leaves the existing setting unchanged. An explicit true or false value updates the setting.
+            Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting.
             Site Explorer reads the setting the first time NICo stores credentials for the BMC; changing it later does not rotate or restore the BMC password.
             When BMC factory reset on instance termination is enabled, a later reset uses the current value, and true skips restoring the stored credentials.
             If NICo rotated the password before the value changed to true, NICo still holds the rotated password after the reset, so Site Explorer can no longer log in to the BMC and waits for an operator.
@@ -34509,11 +34878,15 @@ components:
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           description: MAC address of the Expected Power Shelf's BMC (Baseboard Management Controller)
         defaultBmcUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 16
           description: Username for accessing the Expected Power Shelf's BMC
         defaultBmcPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 255
           description: Password for accessing the Expected Power Shelf's BMC
         shelfSerialNumber:
@@ -34522,33 +34895,51 @@ components:
           maxLength: 32
           description: Serial number of the Expected Power Shelf
         bmcIpAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional rack identifier for this component
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Display name for this component
         manufacturer:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Manufacturer of this component
         model:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Model of this component
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Description of this component
         slotId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Slot ID within the rack
         trayIdx:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Tray index within the rack
         hostId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Host ID within the tray
         labels:
@@ -34592,7 +34983,7 @@ components:
       description: |-
         Request data to update an existing Expected Power Shelf.
 
-        Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.
+        Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -34605,14 +34996,18 @@ components:
             rack: B2
       properties:
         id:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: |-
             ID of the Expected Power Shelf to update.
 
-            For single updates, omit `id` to use the ID from the URL path. A supplied body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
+            For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
         bmcMacAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           deprecated: true
           description: |-
@@ -34621,49 +35016,73 @@ components:
             and preserves the originally stored spelling, but changing the physical MAC address is rejected
             with HTTP 400.
         defaultBmcUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Power Shelf's BMC. Omission preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+          description: Username for accessing the Expected Power Shelf's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           writeOnly: true
           maxLength: 255
-          description: Password for accessing the Expected Power Shelf's BMC. Omission preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+          description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         shelfSerialNumber:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           maxLength: 32
           description: Serial number of the Expected Power Shelf
         bmcIpAddress:
-          type: string
-          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
+          type:
+            - string
+            - 'null'
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional rack identifier for this component
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Display name for this component
         manufacturer:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Manufacturer of this component
         model:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Model of this component
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Description of this component
         slotId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Slot ID within the rack
         trayIdx:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Tray index within the rack
         hostId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Host ID within the tray
         labels:
@@ -34783,11 +35202,15 @@ components:
           deprecated: true
           description: Ignored compatibility field. Core derives the profile from the matching ExpectedRackGroup; omit this field.
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Human-readable name of the Expected Rack
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Human-readable description of the Expected Rack
         labels:
@@ -34845,11 +35268,11 @@ components:
       description: |-
         Request data to update an existing Expected Rack.
 
-        Provide a value for at least one of `rackId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
+        Provide a non-null value for at least one of `rackId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
 
-        For single updates, omit `id` to use the ID from the URL path. A supplied body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
+        For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
-        The `rackId` field is immutable on update. Omit it or provide the existing value.
+        The `rackId` field is immutable on update — omit it or provide the existing value.
 
         Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
         - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
@@ -34865,28 +35288,38 @@ components:
             location.position: A1
       properties:
         id:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: |-
             ID of the Expected Rack to update.
 
-            For single updates, omit `id` to use the ID from the URL path. A supplied body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
+            For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
         rackId:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           deprecated: true
           description: |-
-            Operator-supplied rack identifier. Immutable on update: omit this field or provide the existing value as a compatibility no-op. A changed value is rejected because Core and Flow use rackId as the identity key for expected racks.
+            Operator-supplied rack identifier. Immutable on update: omit this field, send `null`, or provide the existing value as a compatibility no-op. A changed value is rejected because Core and Flow use rackId as the identity key for expected racks.
         rackProfileId:
-          type: string
+          type:
+            - string
+            - 'null'
           deprecated: true
           description: Ignored compatibility field. Metadata updates preserve the stored profile; this field alone is not a valid update.
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Human-readable name of the Expected Rack
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           description: Human-readable description of the Expected Rack
         labels:
@@ -35043,22 +35476,28 @@ components:
           maxLength: 128
           description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
         protocol:
-          type: string
+          type: [string, 'null']
           minLength: 1
           maxLength: 128
-          description: Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+          description: Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission or null leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
-          type: array
-          description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on create, omission supplies an empty list.
+          type:
+            - array
+            - 'null'
+          description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
           items:
             $ref: '#/components/schemas/ExpectedRackGroupRackRequest'
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 256
           pattern: '^[\x00-\x7F]*$'
           description: ASCII human-readable name, at most 256 characters. An empty string is allowed.
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 1024
           description: Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
         labels:
@@ -35230,8 +35669,8 @@ components:
           pattern: '\S'
           description: External rack identifier.
         members:
-          type: array
-          description: Devices in this rack. Omission means an empty list.
+          type: [array, 'null']
+          description: Devices in this rack. Omitted or null means an empty list.
           items:
             $ref: '#/components/schemas/ExpectedRackGroupMemberRequest'
     ExpectedRackGroupMemberRequest:
@@ -35502,10 +35941,14 @@ components:
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           description: MAC address of the Expected Switch's BMC (Baseboard Management Controller)
         defaultBmcUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies)
         defaultBmcPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 255
           description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies)
         switchSerialNumber:
@@ -35514,10 +35957,14 @@ components:
           maxLength: 32
           description: Serial number of the Expected Switch
         nvOsUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           description: NvOS username for the Expected Switch
         nvOsPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           description: NvOS password for the Expected Switch
         nvosInterfaces:
           type: array
@@ -35534,33 +35981,51 @@ components:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
         rackId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional rack identifier for this component
         bmcIpAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Display name for this component
         manufacturer:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Manufacturer of this component
         model:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Model of this component
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Description of this component
         slotId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Slot ID within the rack
         trayIdx:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Tray index within the rack
         hostId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Host ID within the tray
         labels:
@@ -35608,7 +36073,7 @@ components:
       description: |-
         Request data to update an existing Expected Switch.
 
-        Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported. Credentials are never returned in responses.
+        Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -35627,14 +36092,18 @@ components:
             rack: B2
       properties:
         id:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: |-
             ID of the Expected Switch to update.
 
-            For single updates, omit `id` to use the ID from the URL path. A supplied body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
+            For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
         bmcMacAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           deprecated: true
           description: |-
@@ -35643,71 +36112,101 @@ components:
             and preserves the originally stored spelling, but changing the physical MAC address is rejected
             with HTTP 400.
         defaultBmcUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
-          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies). Omission preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           writeOnly: true
           maxLength: 255
-          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies). Omission preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         switchSerialNumber:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           maxLength: 32
           description: Serial number of the Expected Switch
         nvOsUsername:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
-          description: NvOS username for the Expected Switch. Omission preserves the value. A non-empty value can be supplied without nvOsPassword. Provide both fields when setting NVOS credentials for the first time.
+          description: NvOS username for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsPassword. Provide both fields when setting NVOS credentials for the first time.
         nvOsPassword:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           writeOnly: true
-          description: NvOS password for the Expected Switch. Omission preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
+          description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
-          type: array
+          type:
+            - array
+            - 'null'
           minItems: 1
-          description: Replace the Expected Switch's NVOS ethernet port set, including its optional static IP address. Omission preserves the stored ports and address; an empty array is rejected because a switch must keep at least one NVOS port. A supplied list without an ipAddress clears the previous NVOS address. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          description: Replace the Expected Switch's NVOS ethernet port set, including its optional static IP address. Omission or null preserves the stored ports and address; an empty array is rejected because a switch must keep at least one NVOS port. A supplied list without an ipAddress clears the previous NVOS address. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
           deprecated: true
-          description: Deprecated and ignored. Omitted, empty and nonempty values all leave stored ports and primary selection unchanged. Use `nvosInterfaces` to replace ports. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
+          description: Deprecated and ignored. Omitted, null, empty, and nonempty values all leave stored ports and primary selection unchanged. Use `nvosInterfaces` to replace ports. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
         rackId:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional rack identifier for this component
         bmcIpAddress:
-          type: string
-          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
+          type:
+            - string
+            - 'null'
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Display name for this component
         manufacturer:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Manufacturer of this component
         model:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Model of this component
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Description of this component
         slotId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Slot ID within the rack
         trayIdx:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Tray index within the rack
         hostId:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: int32
           description: Host ID within the tray
         labels:
@@ -35828,7 +36327,9 @@ components:
           type: string
           description: Human-readable SKU description
         deviceType:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional device type identifier
         components:
           $ref: '#/components/schemas/SkuComponents'
@@ -36363,7 +36864,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the IP Block'
         siteId:
           type: string
@@ -36403,12 +36906,16 @@ components:
           description: This is the primary IP overlay for SJC4. All IPs are publicly routable
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Name of the IP Block'
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the IP Block'
     NetworkSecurityGroup:
       type: object
@@ -36574,7 +37081,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the Network Security Group'
         siteId:
           type: string
@@ -36614,12 +37123,16 @@ components:
       description: Request data to update a Network Security Group
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Name of the Network Security Group'
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the Network Security Group'
         statefulEgress:
           type: boolean
@@ -36892,7 +37405,9 @@ components:
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 1024
           description: 'Description of the DHCP Option Set'
         siteId:
@@ -36921,12 +37436,16 @@ components:
       description: Request data to update a DHCP Option Set. Omitted attributes keep their current value
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Name of the DHCP Option Set'
           minLength: 2
           maxLength: 256
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           maxLength: 1024
           description: 'Description of the DHCP Option Set; an empty string clears it'
         ipv4:
@@ -37225,7 +37744,9 @@ components:
           type: string
           description: 'Name of the SSHKeyGroup'
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the SSHKeyGroup'
         siteIds:
           type: array
@@ -37257,10 +37778,14 @@ components:
           version: 098f6bcd4621d373cade4e832627b4f6
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Name of the SSHKeyGroup'
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Description of the SSHKeyGroup'
         siteIds:
           type: array
@@ -37345,7 +37870,9 @@ components:
           description: 'Must be an SSH key of type: RSA, ECDSA or ED25519'
           pattern: '^ssh-(rsa|ecdsa|ed25519) AAAA[0-9A-Za-z+/]+[=]{0,3}(\s+.+)?$'
         sshKeyGroupId:
-          type: string
+          type:
+            - string
+            - 'null'
           format: uuid
           description: ID of the SSH Key Group this key should be attached to
       required:
@@ -37359,7 +37886,9 @@ components:
         - name: sre-ssh-reno-integration
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: 'Name of the SSHKey'
     DpuExtensionService:
       title: DpuExtensionService
@@ -37494,7 +38023,7 @@ components:
       title: DpuExtensionServiceDeploymentType
       type: string
       description: |-
-        Immutable deployment policy. Omitted on create defaults to `DemandDriven`,
+        Immutable deployment policy. Omitted or null on create defaults to `DemandDriven`,
         which deploys through instance attachment. `Baseline` is supported only for
         DpfHelmChart services and requests deployment to all DPUs managed by DPF at
         creation, without a DPU target. Baseline services cannot be attached to instances.
@@ -37640,7 +38169,7 @@ components:
         security:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
-          type: object
+          type: [object, 'null']
           additionalProperties: true
           description: Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
         serviceDaemonSet:
@@ -37667,22 +38196,22 @@ components:
       example: {}
     DpuExtensionServiceDpfHelmChartServiceDaemonSet:
       title: DpuExtensionServiceDpfHelmChartServiceDaemonSet
-      type: object
+      type: [object, 'null']
       additionalProperties: false
       description: Optional tenant-configurable DaemonSet settings. NICo owns nodeSelector.
       properties:
         labels:
-          type: object
+          type: [object, 'null']
           additionalProperties:
             type: string
           description: Optional labels passed to DPF for the service DaemonSet
         annotations:
-          type: object
+          type: [object, 'null']
           additionalProperties:
             type: string
           description: Optional annotations passed to DPF for the service DaemonSet
         resources:
-          type: object
+          type: [object, 'null']
           additionalProperties:
             $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
           description: Optional resource quantities, for example {"nvidia.com/bf_sf":1,"memory":"500Mi"}
@@ -37690,26 +38219,30 @@ components:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartUpdateStrategy'
     DpuExtensionServiceDpfHelmChartUpdateStrategy:
       title: DpuExtensionServiceDpfHelmChartUpdateStrategy
-      type: object
+      type: [object, 'null']
       additionalProperties: false
       description: Optional update strategy passed to DPF
       properties:
         type:
-          type: string
+          type: [string, 'null']
           description: Update strategy type, typically RollingUpdate or OnDelete
         rollingUpdate:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartRollingUpdate'
     DpuExtensionServiceDpfHelmChartRollingUpdate:
       title: DpuExtensionServiceDpfHelmChartRollingUpdate
-      type: object
+      type: [object, 'null']
       additionalProperties: false
       description: Optional rolling-update limits passed to DPF
       properties:
         maxSurge:
-          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
           description: Optional additional pod count or percentage string, for example 1 or "25%"
         maxUnavailable:
-          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
           description: Optional unavailable pod count or percentage string, for example 1 or "25%"
     DpuExtensionServiceDpfHelmChartIntOrString:
       title: DpuExtensionServiceDpfHelmChartIntOrString
@@ -37751,7 +38284,9 @@ components:
           type: string
           description: Name for the DPU Extension Service. Must be unique for a given Tenant
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description for the DPU Extension Service
         serviceType:
           type: string
@@ -37760,10 +38295,14 @@ components:
             - KubernetesPod
             - DpfHelmChart
         deploymentType:
-          $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
+            - type: 'null'
         dpuTarget:
-          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Required for `DemandDriven` DpfHelmChart services; omitted for `Baseline` Helm and KubernetesPod services
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+            - type: 'null'
+          description: Required for `DemandDriven` DpfHelmChart services; omitted or null for `Baseline` Helm and KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -37807,17 +38346,22 @@ components:
                   path: /var/log/busybox.log
       properties:
         name:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Name for the DPU Extension Service. Must be unique for a given Tenant
         description:
-          type: string
+          type:
+            - string
+            - 'null'
           description: Optional description for the DPU Extension Service
         data:
           oneOf:
             - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartData'
             - type: string
               maxLength: 131072
-          description: Replacement deployment spec using the create request's format. Omission leaves the existing configuration unchanged.
+            - type: 'null'
+          description: Replacement deployment spec using the create request's format. Omission or null leaves the existing configuration unchanged.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
@@ -38978,12 +39522,14 @@ components:
         dryRun: true
       properties:
         organizationId:
-          type: string
+          type:
+            - string
+            - 'null'
           minLength: 1
           pattern: '^[A-Za-z0-9_-]+$'
           description: |-
             Optional tenant organization identifier (`org`), not the tenant's
-            REST resource UUID or display name. A supplied value must contain
+            REST resource UUID or display name. A non-null value must contain
             one or more ASCII letters, digits, underscores, or hyphens; empty
             and whitespace-containing strings are rejected, not treated as
             site-wide scope. The value is matched case-insensitively and is
@@ -38991,7 +39537,7 @@ components:
             tenant must be associated with and have tenant identity configuration on
             the Site; only that organization's secrets are re-wrapped. The URL
             `{org}` separately identifies the provider authorizing the
-            operation. If omitted, every row in the Site's tenant
+            operation. If omitted or null, every row in the Site's tenant
             identity store is processed.
         dryRun:
           type: boolean

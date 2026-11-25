@@ -33,7 +33,7 @@ type OperatingSystemIpxeArtifact struct {
 	// Optional auth type: Basic or Bearer. An empty string is treated as no auth type.
 	AuthType NullableString `json:"authType,omitempty"`
 	// Optional auth token. Accepted in create/update requests and never returned in API responses.
-	AuthToken *string `json:"authToken,omitempty"`
+	AuthToken NullableString `json:"authToken,omitempty"`
 	// How to handle caching for this artifact
 	CacheStrategy string `json:"cacheStrategy"`
 }
@@ -194,36 +194,47 @@ func (o *OperatingSystemIpxeArtifact) UnsetAuthType() {
 	o.AuthType.Unset()
 }
 
-// GetAuthToken returns the AuthToken field value if set, zero value otherwise.
+// GetAuthToken returns the AuthToken field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemIpxeArtifact) GetAuthToken() string {
-	if o == nil || IsNil(o.AuthToken) {
+	if o == nil || IsNil(o.AuthToken.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.AuthToken
+	return *o.AuthToken.Get()
 }
 
 // GetAuthTokenOk returns a tuple with the AuthToken field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemIpxeArtifact) GetAuthTokenOk() (*string, bool) {
-	if o == nil || IsNil(o.AuthToken) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AuthToken, true
+	return o.AuthToken.Get(), o.AuthToken.IsSet()
 }
 
 // HasAuthToken returns a boolean if a field has been set.
 func (o *OperatingSystemIpxeArtifact) HasAuthToken() bool {
-	if o != nil && !IsNil(o.AuthToken) {
+	if o != nil && o.AuthToken.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetAuthToken gets a reference to the given string and assigns it to the AuthToken field.
+// SetAuthToken gets a reference to the given NullableString and assigns it to the AuthToken field.
 func (o *OperatingSystemIpxeArtifact) SetAuthToken(v string) {
-	o.AuthToken = &v
+	o.AuthToken.Set(&v)
+}
+
+// SetAuthTokenNil sets the value for AuthToken to be an explicit nil
+func (o *OperatingSystemIpxeArtifact) SetAuthTokenNil() {
+	o.AuthToken.Set(nil)
+}
+
+// UnsetAuthToken ensures that no value is present for AuthToken, not even an explicit nil
+func (o *OperatingSystemIpxeArtifact) UnsetAuthToken() {
+	o.AuthToken.Unset()
 }
 
 // GetCacheStrategy returns the CacheStrategy field value
@@ -268,8 +279,8 @@ func (o OperatingSystemIpxeArtifact) ToMap() (map[string]interface{}, error) {
 	if o.AuthType.IsSet() {
 		toSerialize["authType"] = o.AuthType.Get()
 	}
-	if !IsNil(o.AuthToken) {
-		toSerialize["authToken"] = o.AuthToken
+	if o.AuthToken.IsSet() {
+		toSerialize["authToken"] = o.AuthToken.Get()
 	}
 	toSerialize["cacheStrategy"] = o.CacheStrategy
 	return toSerialize, nil
