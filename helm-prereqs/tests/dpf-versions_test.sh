@@ -145,7 +145,7 @@ extract_functions "${SCRIPT_DIR}/setup.sh" _dpf_release_key _wait_for_dpf_operat
 
 precheck_message="stub pre-upgrade validation message"
 # Answers the reads of _wait_for_dpf_operator_version: the status pair of each
-# read in turn (the last one repeats), then the condition for the failure report.
+# read in turn (the last one repeats), then the conditions for the failure report.
 # shellcheck disable=SC2329 # Called by _wait_for_dpf_operator_version.
 kubectl() {
     local _pairs _read
@@ -157,7 +157,7 @@ kubectl() {
             (( _read <= ${#_pairs[@]} )) || _read=${#_pairs[@]}
             printf '%s' "${_pairs[_read - 1]}"
             ;;
-        *PreUpgradeValidationReady*) printf 'False/Failed\n%s\n' "${precheck_message}" ;;
+        *'.status.conditions[?(@.status!="True")]'*) printf 'PreUpgradeValidationReady: False/Failed\n%s\n' "${precheck_message}" ;;
         *) return 1 ;;
     esac
 }
@@ -167,14 +167,17 @@ sleep() { echo $(( $(cat "${WORK}/clock") + $1 )) > "${WORK}/clock"; }
 # shellcheck disable=SC2329 # Called by _wait_for_dpf_operator_version.
 date() { cat "${WORK}/clock"; }
 # name ; operator image tag ; status.version|status.targetVersion per read (the
-# last repeats) ; reads until the wait returns (0 means it times out)
+# last repeats) ; reads until the wait returns (0 means it times out) ; text of
+# the failure report
 cases=(
-    "upgrade finishes after the operator records its target;v30.0.0;v26.8.0|v26.8.0 v26.8.0|v30.0.0 v30.0.0|v30.0.0;3"
-    "tag without a version takes the reported pair;custom-image;v30.0.0|v30.0.0;1"
-    "operator does not finish;v30.0.0;v26.8.0|v30.0.0;0"
+    "upgrade finishes after the operator records its target;v30.0.0;v26.8.0|v26.8.0 v26.8.0|v30.0.0 v30.0.0|v30.0.0;3;"
+    "tag without a release waits for the recorded target;custom-image;v26.8.0|v30.0.0 v30.0.0|v30.0.0;2;"
+    "operator does not finish;v30.0.0;v26.8.0|v30.0.0;0;${precheck_message}"
+    "image tag ahead of the build TAG;v30.1.0;v30.0.0|v30.0.0;0;built with TAG=v30.0.0"
+    "release with a leading zero and a digit above 7;v0.1.8;v0.1.8|v0.1.8;1;"
 )
 for row in "${cases[@]}"; do
-    IFS=';' read -r name tag FAKE_PAIRS want_reads <<< "${row}"
+    IFS=';' read -r name tag FAKE_PAIRS want_reads want_report <<< "${row}"
     : > "${WORK}/reads"
     echo 0 > "${WORK}/clock"
     wait_seconds=600
@@ -184,8 +187,8 @@ for row in "${cases[@]}"; do
     reads=$(( $(wc -l < "${WORK}/reads") ))
     if [[ "${want_reads}" == 0 ]]; then
         last_pair="${FAKE_PAIRS##* }"
-        [[ "${status}" -ne 0 && "${output}" == *"status.version is '${last_pair%|*}', status.targetVersion is '${last_pair#*|}'"*"${precheck_message}"* ]] \
-            || fail "${name}: want a failure that prints both status values and the PreUpgradeValidationReady message, got exit ${status}: ${output}"
+        [[ "${status}" -ne 0 && "${output}" == *"status.version is '${last_pair%|*}', status.targetVersion is '${last_pair#*|}'"*"${want_report}"* ]] \
+            || fail "${name}: want a failure that prints both status values and '${want_report}', got exit ${status}: ${output}"
     else
         [[ "${status}" -eq 0 && "${reads}" -eq "${want_reads}" ]] \
             || fail "${name}: want success after ${want_reads} reads, got exit ${status} after ${reads}: ${output}"

@@ -69,7 +69,13 @@
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
 #   NICO_DPF_IMAGE_TAG     DPF operator image tag. Defaults to the version in
-#                          dpf-versions.toml, prefixed with v.
+#                          dpf-versions.toml, prefixed with v. setup.sh reads
+#                          the release at the start of the tag. Preflight
+#                          checks the installed DPF version only for a tag on
+#                          the release line of dpf-versions.toml, and phase 5b
+#                          waits until the operator reports that release or a
+#                          later one. Start a custom tag with the
+#                          vMAJOR.MINOR.PATCH of the image's build TAG.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
 #                          the GA nvidia/doca images are public and pull
@@ -487,7 +493,7 @@ NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}
 # DPF operator image. Defaults to the public NGC image (anonymous pull). To use
 # your own registry (mirror or self-built, e.g. matching NICO_IMAGE_REGISTRY),
 # set NICO_DPF_IMAGE_REPO/_TAG and NICO_DPF_IMAGE_PULL_SECRET. The tag defaults
-# to dpf-versions.toml; keep the source chart pin compatible with that version.
+# to dpf-versions.toml. Keep the source chart pin compatible with that version.
 NICO_DPF_IMAGE_REPO="${NICO_DPF_IMAGE_REPO:-nvcr.io/nvidia/doca/dpf-system}"
 NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-}"
 if "${INSTALL_DPF}" && [[ -z "${NICO_DPF_IMAGE_TAG}" ]]; then
@@ -1691,13 +1697,15 @@ _wait_for_dpf_operator_version() {
     local _deadline=$(( $(date +%s) + $1 )) _floor _have _status _version="" _target=""
     _floor="$(_dpf_release_key "$2")"
     echo "Waiting up to ${1}s for the DPF operator to report its version..."
+    [[ -n "${_floor}" ]] \
+        || echo "  Image tag $2 does not start with a release, so this wait cannot tell a pending operator upgrade from the previous version."
     while true; do
         _status="$(kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
             -o jsonpath='{.status.version}|{.status.targetVersion}' 2>/dev/null || true)"
         IFS='|' read -r _version _target <<< "${_status}"
         _have="$(_dpf_release_key "${_version}")"
         if [[ -n "${_version}" && "${_version}" == "${_target}" ]] \
-            && { [[ -z "${_floor}" || -z "${_have}" ]] || (( _have >= _floor )); }; then
+            && { [[ -z "${_floor}" || -z "${_have}" ]] || (( 10#${_have} >= 10#${_floor} )); }; then
             echo "DPF operator version: ${_version}"
             return 0
         fi
@@ -1705,11 +1713,17 @@ _wait_for_dpf_operator_version() {
         sleep 10
     done
     echo "Error: the DPFOperatorConfig does not report the operator from image tag $2: status.version is '${_version:-<unset>}', status.targetVersion is '${_target:-<unset>}'." >&2
-    echo "  PreUpgradeValidationReady condition:" >&2
+    if [[ -n "${_version}" && "${_version}" == "${_target}" ]]; then
+        # Only the release in the image tag holds back an equal pair.
+        echo "  ${_version} is older than the release in image tag $2, and the operator has recorded no other target." >&2
+        echo "  The operator reports the TAG it was built with. For an image built with TAG=${_version}, use an image tag that does not start with a later release." >&2
+    fi
+    echo "  Conditions that are not True:" >&2
     kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
-        -o jsonpath='{range .status.conditions[?(@.type=="PreUpgradeValidationReady")]}{.status}/{.reason}{"\n"}{.message}{"\n"}{end}' 2>/dev/null \
+        -o jsonpath='{range .status.conditions[?(@.status!="True")]}{.type}: {.status}/{.reason}{"\n"}{.message}{"\n"}{end}' \
         | sed 's/^/    /' >&2 || true
-    echo "  Resolve what the condition reports, then run setup.sh again." >&2
+    echo "  Resolve what is reported above, then run setup.sh again." >&2
+    echo "  This stop does not need clean.sh, which removes the whole installation." >&2
     return 1
 }
 
@@ -1904,7 +1918,7 @@ if "${INSTALL_DPF}"; then
     #      (PCI class 0200). The in-repo source chart ships EMPTY
     #      controllerManager.image (CI stamps it when publishing to NGC), so we
     #      set it explicitly - matching the published nvidia/doca chart. Repo and
-    #      tag are overridable; the tag defaults to the pinned release.
+    #      tag are overridable. The tag defaults to dpf-versions.toml.
     #      Image pull secret: the GA nvidia/doca images are PUBLIC, so by default
     #      the operator pulls them anonymously. Attaching a registry-scoped
     #      secret that lacks nvidia/doca entitlement makes nvcr.io 403 the pull
@@ -1962,7 +1976,7 @@ if "${INSTALL_DPF}"; then
     #      the version it installed.
     _wait_for_dpf_operator_version 600 "${NICO_DPF_IMAGE_TAG}"
 
-    # 5b.8 Readiness — WARN only. Kamaji TenantControlPlane bring-up can take
+    # 5b.8 Readiness - WARN only. Kamaji TenantControlPlane bring-up can take
     #      minutes and depends on VIP routability that this script can't verify.
     echo "Waiting up to 300s for the DPU cluster control plane (non-fatal)..."
     _dpf_deadline=$(( $(date +%s) + 300 ))
