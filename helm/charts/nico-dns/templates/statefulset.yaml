@@ -64,11 +64,15 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           ports:
+            # Keep the named container ports in sync with the listener: the
+            # Services route to service.targetPort (default the service port),
+            # so when targetPort moves (e.g. 5353 on OpenShift) the container
+            # port must follow or the names no longer describe the pod.
             - name: udp
-              containerPort: 53
+              containerPort: {{ .Values.service.targetPort | default 53 }}
               protocol: UDP
             - name: tcp
-              containerPort: 53
+              containerPort: {{ .Values.service.targetPort | default 53 }}
               protocol: TCP
             # Prometheus metrics endpoint; scraped via a PodMonitor (no Service).
             - name: metrics

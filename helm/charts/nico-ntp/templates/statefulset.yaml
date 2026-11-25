@@ -52,7 +52,13 @@ spec:
         - name: chrony
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- $ctxOverrides := coalesce .Values.containerSecurityContext .Values.securityContext }}
+          # Prefer containerSecurityContext whenever it is set (including an
+          # explicit empty map, which coalesce would treat as unset); fall back
+          # to the deprecated securityContext key only when it is null/absent.
+          {{- $ctxOverrides := .Values.containerSecurityContext }}
+          {{- if kindIs "invalid" $ctxOverrides }}
+          {{- $ctxOverrides = .Values.securityContext }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             {{- with $ctxOverrides }}

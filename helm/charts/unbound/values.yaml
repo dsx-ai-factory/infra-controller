@@ -129,8 +129,14 @@ localConfig:
         local-data: "unknowndomain. 10800 IN NS localhost."
         local-data: "unknowndomain. 10800 IN SOA localhost. nobody.invalid. 1 3600 1200 604800 10800"
   forwarders.conf: |
-    # No forwarders configured. Override localConfig.forwarders.conf in values
-    # to add forward-zone blocks for upstream resolvers.
+    # Intentionally broken until configured: unbound must refuse to start
+    # without upstream forwarders, otherwise every non-local query fails at
+    # lookup time with no startup signal. Replace this file via
+    # localConfig.forwarders.conf with forward-zone blocks, e.g.
+    #   forward-zone:
+    #       name: .
+    #       forward-addr: 192.0.2.53
+    include: patchme/no-forwarders-configured-set-localConfig.forwarders.conf
 
 ## Optional override for the main unbound.cfg. When non-empty, the value is
 ## mounted at /etc/unbound/main.cfg (not inside local.conf.d — the *.conf

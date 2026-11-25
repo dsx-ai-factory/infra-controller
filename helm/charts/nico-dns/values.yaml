@@ -63,11 +63,12 @@ listenAddress: "[::]:53"
 service:
   # Allow configuring a different targetPort (e.g. 5353 when running as
   # unprivileged user under OpenShift restricted-v2 SCC). Applies to the
-  # cluster-internal Service and the per-pod external LoadBalancer Services.
-  # ⚠ The Services route to the container port; the listener itself is set by
-  # listenAddress above — when changing targetPort, change listenAddress to
-  # match (e.g. targetPort: 5353 + listenAddress: "[::]:5353"), or traffic is
-  # sent to a port where nico-dns is not listening.
+  # cluster-internal Service and the per-pod external LoadBalancer Services,
+  # and the StatefulSet's named container ports follow it. The listener itself
+  # is set by listenAddress above — when changing targetPort, change
+  # listenAddress to match (e.g. targetPort: 5353 + listenAddress:
+  # "[::]:5353"), or traffic is sent to a port where nico-dns is not
+  # listening.
   targetPort: null  # defaults to the service port when null
   ports:
     - port: 53

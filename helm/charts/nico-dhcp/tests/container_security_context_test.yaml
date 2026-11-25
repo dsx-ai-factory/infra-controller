@@ -1,6 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 suite: container security context (containerSecurityContext)
 templates:
   - deployment.yaml
+  - configmap.yaml
 release:
   namespace: nico-system
 tests:
@@ -13,10 +17,12 @@ tests:
         allowPrivilegeEscalation: true
         runAsNonRoot: true
     asserts:
-      - equal:
+      - template: deployment.yaml
+        equal:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
           value: false
-      - equal:
+      - template: deployment.yaml
+        equal:
           path: spec.template.spec.containers[0].securityContext.runAsNonRoot
           value: true
 
@@ -24,9 +30,11 @@ tests:
     set:
       containerSecurityContext: null
     asserts:
-      - notExists:
+      - template: deployment.yaml
+        notExists:
           path: spec.template.spec.containers[0].securityContext.capabilities
-      - equal:
+      - template: deployment.yaml
+        equal:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
           value: false
 
@@ -36,9 +44,11 @@ tests:
         capabilities:
           add: []
     asserts:
-      - equal:
+      - template: deployment.yaml
+        equal:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
           value: []
-      - equal:
+      - template: deployment.yaml
+        equal:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
           value: false

@@ -36,3 +36,21 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: '(?m)^\s*exec /opt/carbide/carbide-dns .* --listen="0\.0\.0\.0:53"\s*$'
+
+  - it: moves the container ports with the service targetPort override
+    set:
+      service:
+        targetPort: 5353
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: udp
+            containerPort: 5353
+            protocol: UDP
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: tcp
+            containerPort: 5353
+            protocol: TCP
