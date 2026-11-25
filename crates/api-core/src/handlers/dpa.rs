@@ -99,9 +99,11 @@ pub(crate) async fn delete(
 
     let req = request.into_inner();
 
-    let id = req.id.ok_or(CarbideError::InvalidArgument(
-        "at least one ID must be provided to delete dpa interface".to_string(),
-    ))?;
+    let id = req.id.ok_or_else(|| {
+        CarbideError::InvalidArgument(
+            "at least one ID must be provided to delete dpa interface".to_string(),
+        )
+    })?;
 
     // Prepare our txn to grab the NetworkSecurityGroups from the DB
     let mut txn = api.txn_begin().await?;

@@ -223,7 +223,10 @@ async fn firmware_inventory(cx: &CheckCx<'_>) -> Checked {
         summary: counted(inventory.len(), "entry", "entries"),
         fields: inventory
             .iter()
-            .map(|entry| (entry.id.clone(), reported(&entry.version.clone().flatten())))
+            .map(|entry| {
+                let version = entry.version.as_ref().and_then(Option::as_ref);
+                (entry.id.clone(), reported(&version))
+            })
             .collect(),
     })
 }

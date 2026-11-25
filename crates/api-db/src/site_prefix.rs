@@ -102,7 +102,7 @@ async fn lock_site_prefix_id(
         )
     "#;
     sqlx::query(query)
-        .bind(site_prefix_id.to_string())
+        .bind(sqlx::types::Text(site_prefix_id))
         .execute(txn)
         .await
         .map(|_| ())

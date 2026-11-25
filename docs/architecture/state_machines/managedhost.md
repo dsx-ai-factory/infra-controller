@@ -297,6 +297,11 @@ In `Rebooting`, Core completes the persisted activation handshake, including reb
 
 `Pending` is a queued check; the remaining phases belong to an admitted operation. A managed-host reset can preempt `Pending`, and a recorded host or DPU failure can move it to the global `Failed` state.
 
+While earlier hardware work is pending, Core returns a no-op before checking
+Scout capability. Otherwise, for saved `site_cache` operations, Core rejects unsupported Scout polls in
+`ObservingSupervisor`, `Unlocking`, and `UpdatingFirmware`. Refer to [Scout NIC firmware delivery](../../operations/firmware-updates/configuration.md#scout-nic-firmware-delivery)
+for capability and upgrade requirements.
+
 - **`Pending`:** The controller exposes the last admission diagnostic while the update manager retries policy and evidence checks. Restart preserves the original request age. Capacity waits do not freeze targets or reserve a slot; disablement and no-change continuations follow the admission results above.
 - **`ObservingSupervisor`:** Core polls for the current card's receipt. During receipt-free initial observation, Core can establish or refresh `supervisor_instance_id` before permitting `Unlocking`. After leaving that phase, a missing receipt from a replacement supervisor cannot renew submission permission. A retained receipt resumes `UpdatingFirmware`. Without a stop condition or retained receipt, `InvalidTask`, `Conflict`, and `Unsupported` delivery errors require operator intervention. Unresolved terminal evidence also requires intervention.
 - **`Unlocking`:** Core observes lockdown and changes it only when needed and the saved key identity permits it. An independent unlocked readback advances to `UpdatingFirmware`. Missing replies wait; change acknowledgements and reported errors return to observation.
@@ -428,7 +433,43 @@ stateDiagram-v2
 
 ## DPU Initialization State Details (DpuInitState)
 
-Shows DPU initialization including BFB installation:
+On the `Init` route, DPU initialization includes a host-wide power cycle.
+After all DPUs reach `WaitingForPlatformPowercycle/Off`, the controller requests
+host `ForceOff` unless Redfish already reports `Off`. Successful handling of
+either case persists `WaitingForPlatformPowerOff` for every DPU. BMC connection,
+power-state read, or power-control errors leave the `Off` phase in place for retry.
+DPF provisioning follows its own path.
+
+`WaitingForPlatformPowerOff` is a separate `DpuInitState` variant, outside
+`WaitingForPlatformPowercycle`. It polls host power and advances to the `On`
+phase only after Redfish reports `Off`. Other or unclassified power states keep
+polling. BMC connection and read errors, including a missing or null
+`PowerState`, retain the phase with an error outcome. This state does not reissue
+`ForceOff` or time out; waits beyond the 30-minute DPU initialization SLA are
+recorded as `TimeInStateAboveSla` errors while the phase remains in place.
+State metrics group this wait under `waitingforplatformpowercycle`.
+
+Redfish power actions are asynchronous: the host can still report `On` after
+accepting `ForceOff`. Observing `Off` prevents the later `On` phase from skipping
+the power cycle because of that stale reading. Refer to
+[Wait For Host Power-Off Before Powering It Back On](https://github.com/dsx-ai-factory/infra-controller/issues/4446)
+for background on this wait.
+
+After observing `Off`, the controller persists
+`WaitingForPlatformPowercycle/On` for every DPU before attempting power-on in a
+later iteration. The `On` phase waits until `power_down_wait` has elapsed since
+the host's last recorded reboot request (`last_reboot_requested.time`), normally
+the `ForceOff` request. Time spent waiting for `Off` counts toward the delay
+when it is measured from that request. If no request is recorded, the delay
+starts on entry to the persisted `On` phase.
+After the delay, a successful host `On` request or an already-`On` observation
+advances all DPUs to `WaitingForPlatformConfiguration`. BMC errors leave `On`
+in place for retry. After a restart, either power phase rechecks host power and
+skips its request if the target state is already reported. In particular, a
+restart after power-on succeeds but before the next state commits resumes the
+persisted `On` phase without another power action when the host reports `On`.
+
+The following diagram shows the DPU initialization states.
 
 ```mermaid
 stateDiagram-v2
@@ -446,9 +487,18 @@ stateDiagram-v2
 
     state "WaitingForPlatformPowercycle" as DI_WaitingForPlatformPowercycle {
         state "Off" as DI_W4PP_OFF
+        note left of DI_W4PP_OFF
+            Wait for all DPUs to synchronize.
+            Retry BMC errors.
+        end note
         state "On" as DI_W4PP_ON
+        note left of DI_W4PP_ON
+            Wait for power_down_wait.
+            Retry BMC errors.
+        end note
     }
 
+    state "WaitingForPlatformPowerOff" as DI_WaitingForPlatformPowerOff
     state "WaitingForPlatformConfiguration" as DI_WaitingForPlatformConfiguration
     state "WaitingForNetworkConfig" as DI_WaitingForNetworkConfig
     state "DpfStates/Provisioning" as DI_DpfStates_Provisioning
@@ -465,9 +515,12 @@ stateDiagram-v2
     DI_IDO_Completed --> DI_Init
 
     DI_Init --> DI_W4PP_OFF : Restart all DPUs
-    DI_W4PP_OFF --> DI_W4PP_OFF : DPUs not synchronized (wait more)
-    DI_W4PP_OFF --> DI_W4PP_ON : All DPUs synchronized, power OFF host
-    DI_W4PP_ON --> DI_WaitingForPlatformConfiguration : Power ON host
+    DI_W4PP_OFF --> DI_W4PP_OFF
+    DI_W4PP_OFF --> DI_WaitingForPlatformPowerOff : All DPUs synchronized, ForceOff succeeds or host already Off
+    DI_WaitingForPlatformPowerOff --> DI_WaitingForPlatformPowerOff : Host not reported Off or BMC error (retry)
+    DI_WaitingForPlatformPowerOff --> DI_W4PP_ON : Redfish reports host Off, persist On phase
+    DI_W4PP_ON --> DI_W4PP_ON
+    DI_W4PP_ON --> DI_WaitingForPlatformConfiguration : Delay elapsed, On succeeds or host already On
     DI_WaitingForPlatformConfiguration --> DI_WaitingForNetworkConfig : Call machine-setup/uefi-setup and restart DPU Restart DPU to apply BIOS settings
     DI_WaitingForNetworkConfig --> DI_WaitingForNetworkConfig : DPU network not ready (wait more, potentially reboot DPU)
     DI_WaitingForNetworkConfig --> HostInit_HI_EnableIpmiOverLan

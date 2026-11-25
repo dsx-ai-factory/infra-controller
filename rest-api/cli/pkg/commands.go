@@ -1187,12 +1187,12 @@ func readFlagValues(c *cli.Context, operationID string, p Parameter) []string {
 	switch schemaType {
 	case "integer":
 		if c.IsSet(flagName) {
-			return []string{fmt.Sprintf("%d", c.Int(flagName))}
+			return []string{strconv.Itoa(c.Int(flagName))}
 		}
 		return nil
 	case "boolean":
 		if c.IsSet(flagName) {
-			return []string{fmt.Sprintf("%t", c.Bool(flagName))}
+			return []string{strconv.FormatBool(c.Bool(flagName))}
 		}
 		return nil
 	default:

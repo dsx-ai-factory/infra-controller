@@ -406,6 +406,10 @@ plus thresholds for DPU agent compliance. Operators flip this from
   no DHCP lease is discovered at its static `expected_power_shelves` IP as a
   matter of course.
 
+These creation toggles do not control BMC pre-ingestion. In particular, disabling
+switch creation still allows [initial NVOS password rotation](../../../docs/operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
+to complete before a switch state machine is created.
+
 Site Explorer auto-creation is additionally gated per device on a matching
 expected-hardware record (`expected_machines`, `expected_switches`,
 `expected_power_shelves`), so it only ingests declared hardware; other
@@ -834,8 +838,13 @@ advertised. Both are documented field-by-field in
 `[ib_config]` toggles InfiniBand support fleet-wide. When enabled, it supports
 at most one configured fabric, named `default`. The
 [InfiniBand partitioning manual](../../../docs/manuals/networking/infiniband_partitioning.md#configuring-nico-to-talk-to-ufm)
-defines the supported fabric settings, P_Key ranges and separate credential
-configuration.
+defines the supported fabric settings, P_Key ranges, and credential
+configuration. The optional `auth` setting selects `"client_certificate"` or
+`"token"`. Client-certificate mode uses the default SPIFFE files and needs no
+UFM credential. Token mode requires a stored, nonblank UFM token. When
+`auth` is omitted, an empty or whitespace-only password selects the client
+certificate and any other password is a token. An `auth` change takes effect
+when Core restarts.
 
 ### Operator dev / debug knobs
 
@@ -1063,15 +1072,22 @@ overrides.
 | `host_disable_autoupdate` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `30s` | How often the firmware manager evaluates pending updates. |
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
-| `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
+| `concurrency_limit` | `16` | Maximum number of pre-ingestion endpoint tasks running concurrently within one pass. Separate from Machine Update Manager capacity for managed hosts. Use a positive value no greater than Tokio's semaphore maximum (`usize::MAX >> 3`). `0` stalls a nonempty pass; values above that maximum panic when the pass starts. |
 | `firmware_directory` | auto-detect (`/opt/nico/firmware` then `/opt/carbide/firmware`) | Where firmware binaries live on the API pod. Override to pin one location explicitly. |
 | `downloads` | See linked defaults | [Firmware download settings](https://docs.nvidia.com/infra-controller/documentation/operations-day-2/firmware-updates/configure-firmware-versions#firmware-downloads): worker, HTTP timeout, and response-size limits for each Core process. Requires a supporting Core build as described in the linked reference. |
 | `host_firmware_upgrade_retry_interval` | `60m` | Backoff between retries on failed host upgrades. |
-| `instance_updates_manual_tagging` | `true` | Require explicit instance tagging before instance-attached firmware upgrades fire. |
+| `instance_updates_manual_tagging` | `true` if field omitted; `false` if merged table absent | When `true`, automatic host candidate discovery requires top-level `Ready`. When `false`, discovery skips this state filter; `Ready` candidates still sort first. Other admission and [execution gates](../../../docs/operations/firmware-updates/host-firmware.md#scheduling-gates) still apply. |
 | `no_reset_retries` | `false` | Disable retry logic after BMC resets during firmware ops. |
 | `hgx_bmc_gpu_reboot_delay` | `30s` | Delay after GPU reboot before HGX BMC is contacted again. |
 | `requires_manual_upgrade` | `false` | Force every firmware upgrade to require explicit administrator approval. |
 | `max_concurrent_bfb_copies` | `10` | Concurrent DPU BFB copies. |
+
+Set `instance_updates_manual_tagging` explicitly. Core merges base configuration,
+site configuration, and `CARBIDE_API_` overrides before applying defaults.
+If the merged `firmware_global` table omits this field, its value is `true`;
+if that table is absent, its value is `false`. A `[firmware_global.downloads]`
+section also creates the parent table. The chart's bundled base configuration
+includes this table, so its omitted-field default is `true`.
 
 ### Update policy — `[machine_updater]`
 

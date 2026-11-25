@@ -119,15 +119,16 @@ impl MlxConfigProfile {
     // add_config_value is an internal method to add a config value
     // to the profile and update the lookup map.
     fn add_config_value(&mut self, config_value: MlxConfigValue) {
-        let name = config_value.name().to_string();
+        let name = config_value.name();
 
         // Check if we already have this variable configured.
-        if let Some(&existing_index) = self.config_lookup.get(&name) {
+        if let Some(&existing_index) = self.config_lookup.get(name) {
             // Replace the existing configuration in the same
             // index, leaving the config lookup map untouched.
             self.config_values[existing_index] = config_value;
         } else {
             // ..or not, and just add the new one.
+            let name = name.to_owned();
             let index = self.config_values.len();
             self.config_values.push(config_value);
             self.config_lookup.insert(name, index);

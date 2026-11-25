@@ -49,6 +49,16 @@ pub struct InstanceTypeId {
     value: String,
 }
 
+impl InstanceTypeId {
+    fn from_owned(value: String) -> Result<Self, InstanceTypeIdParseError> {
+        if value.is_empty() {
+            return Err(InstanceTypeIdParseError::Empty);
+        }
+
+        Ok(Self { value })
+    }
+}
+
 /* ********************************************* */
 /*  Basic trait implementations for conversions  */
 /* ********************************************* */
@@ -62,13 +72,7 @@ impl fmt::Display for InstanceTypeId {
 impl FromStr for InstanceTypeId {
     type Err = InstanceTypeIdParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Err(InstanceTypeIdParseError::Empty);
-        }
-
-        Ok(InstanceTypeId {
-            value: s.to_string(),
-        })
+        Self::from_owned(s.to_string())
     }
 }
 
@@ -90,7 +94,7 @@ impl Encode<'_, sqlx::Postgres> for InstanceTypeId {
         &self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, error::BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        buf.extend(self.value.as_bytes());
         Ok(IsNull::No)
     }
 
@@ -98,7 +102,7 @@ impl Encode<'_, sqlx::Postgres> for InstanceTypeId {
         self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, error::BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        buf.extend(self.value.as_bytes());
         Ok(IsNull::No)
     }
 }
@@ -113,7 +117,7 @@ where
         value: <DB as sqlx::database::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
         let str_id: String = String::decode(value)?;
-        Ok(InstanceTypeId::from_str(&str_id).map_err(|e| Error::Decode(Box::new(e)))?)
+        Self::from_owned(str_id).map_err(|error| Error::Decode(Box::new(error)).into())
     }
 }
 
@@ -161,7 +165,7 @@ impl Serialize for InstanceTypeId {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.serialize_str(&self.value)
     }
 }
 
@@ -172,10 +176,7 @@ impl<'de> Deserialize<'de> for InstanceTypeId {
     {
         use serde::de::Error;
 
-        let str_value = String::deserialize(deserializer)?;
-        let id =
-            InstanceTypeId::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(id)
+        Self::from_owned(String::deserialize(deserializer)?).map_err(Error::custom)
     }
 }
 

@@ -48,6 +48,7 @@ pub mod platform_config;
 pub mod redfish;
 pub(crate) mod rpc;
 pub(crate) mod scout_firmware_scripts;
+pub mod uefi_password;
 pub mod write_ops;
 
 pub use scout_firmware_scripts::has_packaged_scout_script;
@@ -91,7 +92,7 @@ where
     let state = get_measurement_bundle_state(db, machine_id)
         .await
         .map_err(StateHandlerError::GenericError)?
-        .ok_or(StateHandlerError::MissingData {
+        .ok_or_else(|| StateHandlerError::MissingData {
             object_id: machine_id.to_string(),
             missing: "expected bundle reference from journal for failed measurements",
         })?;

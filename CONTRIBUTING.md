@@ -308,9 +308,11 @@ Before introducing code or dependencies, check in this order:
 4. Does an existing workspace dependency or local helper already solve it?
 5. Can the change be expressed clearly inline instead of adding an abstraction?
 
-Only add a helper, abstraction, dependency, compatibility path, or migration
-when it removes real complexity, matches an established pattern, or is required
-for the requested behavior.
+Use existing values directly when they carry the required information. Introduce
+a helper or intermediate representation when it removes duplicated logic, enforces
+an invariant, or serves a concrete caller or performance need. Use established
+patterns to implement that need. Add dependencies, compatibility paths, and
+migrations only when the requested behavior requires them.
 
 ### Evidence and assumptions
 

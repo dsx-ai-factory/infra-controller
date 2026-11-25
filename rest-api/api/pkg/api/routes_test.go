@@ -56,6 +56,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"infiniband-interface":      2,
 		"infiniband-partition":      5,
 		"spectrumx-partition":       4,
+		"dhcp-option-set":           5,
 		"nvlink-interface":          2,
 		"nvlink-logical-partition":  4,
 		"expected-machine":          11,
@@ -249,6 +250,12 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, spectrumXPartitionPath)
 			assertRouteExists(t, got, http.MethodGet, spectrumXPartitionPath+"/:id")
 			assertRouteExists(t, got, http.MethodDelete, spectrumXPartitionPath+"/:id")
+			dhcpOptionSetPath := "/org/:orgName/" + cfg.GetAPIName() + "/dhcp-option-set"
+			assertRouteExists(t, got, http.MethodPost, dhcpOptionSetPath)
+			assertRouteExists(t, got, http.MethodGet, dhcpOptionSetPath)
+			assertRouteExists(t, got, http.MethodGet, dhcpOptionSetPath+"/:id")
+			assertRouteExists(t, got, http.MethodPatch, dhcpOptionSetPath+"/:id")
+			assertRouteExists(t, got, http.MethodDelete, dhcpOptionSetPath+"/:id")
 			taskPath := "/org/:orgName/" + cfg.GetAPIName() + "/task"
 			assertRouteExists(t, got, http.MethodGet, taskPath)
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")

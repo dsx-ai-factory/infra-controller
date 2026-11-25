@@ -5,7 +5,7 @@ package model
 
 import (
 	"encoding/json"
-	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -119,7 +119,7 @@ func TestValidateSpectrumXAttachmentsForMachine(t *testing.T) {
 			require.ErrorAs(t, err, &fields)
 			var selectors validation.Errors
 			require.ErrorAs(t, fields["spectrumXAttachments"], &selectors)
-			assert.Contains(t, selectors, fmt.Sprint(*test.invalidAt))
+			assert.Contains(t, selectors, strconv.Itoa(*test.invalidAt))
 		})
 	}
 }

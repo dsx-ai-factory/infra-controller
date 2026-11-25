@@ -20,7 +20,7 @@
 //! older jobs without one finish enrollment without claiming a site version.
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_secrets::credentials::{CredentialKey, Credentials};
+use carbide_secrets::credentials::{CredentialKey, CredentialWriter as _, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use db::TransactionVending as _;
@@ -191,23 +191,23 @@ async fn set_uefi_password_client_creation_failure_retries_in_place(
 
     // The SET step resolves the site-wide host UEFI credential (version 0 on
     // a fresh site) before dispatching.
-    env.redfish_sim
-        .seed_credential(
+    env.credential_manager
+        .set_credentials(
             &CredentialKey::host_uefi_site_default(0),
             &Credentials::UsernamePassword {
                 username: String::new(),
                 password: "uefi-v0".to_string(),
             },
         )
-        .await;
+        .await
+        .expect("seed site host UEFI credential");
 
     mh.advance_state(uefi_setup_state(UefiSetupState::SetUefiPassword))
         .await;
 
-    // A tick with the credential op failing on client creation must hold in
-    // place rather than fall through to the vendor skip.
-    env.redfish_sim
-        .set_uefi_setup_client_creation_error("bmc unreachable");
+    // A tick whose BMC connection fails must hold in place rather than fall
+    // through to the vendor skip.
+    env.redfish_sim.set_create_client_error("bmc unreachable");
     env.run_single_iteration().await;
     assert!(
         at_uefi_step(
@@ -219,7 +219,7 @@ async fn set_uefi_password_client_creation_failure_retries_in_place(
     );
 
     // Once creation succeeds again, the step proceeds normally.
-    env.redfish_sim.clear_uefi_setup_client_creation_error();
+    env.redfish_sim.clear_create_client_error();
     env.run_single_iteration().await;
     assert!(
         at_uefi_step(
@@ -251,19 +251,20 @@ async fn enrollment_keeps_the_version_sent_while_a_new_target_is_published(pool:
         username: String::new(),
         password: "uefi-v0".to_string(),
     };
-    env.redfish_sim
-        .seed_credential(&CredentialKey::host_uefi_site_default(0), &credentials)
-        .await;
+    env.credential_manager
+        .set_credentials(&CredentialKey::host_uefi_site_default(0), &credentials)
+        .await
+        .expect("seed site host UEFI credential");
     mh.advance_state(uefi_setup_state(UefiSetupState::SetUefiPassword))
         .await;
 
-    let (started, resume) = env.redfish_sim.pause_next_uefi_setup();
+    let (started, resume) = env.redfish_sim.pause_next_uefi_password_change();
     let publish_target = async {
         let sent = tokio::time::timeout(std::time::Duration::from_secs(30), started)
             .await
             .expect("controller reached UEFI setup")
             .expect("setup dispatched");
-        assert_eq!(sent, credentials);
+        assert_eq!(sent, "uefi-v0");
         sqlx::query("UPDATE sitewide_credential_rotation SET target_version = 1 WHERE credential_type = 'host_uefi'")
             .execute(&pool).await.unwrap();
         resume.send(()).unwrap();

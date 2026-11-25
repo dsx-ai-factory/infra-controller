@@ -71,7 +71,7 @@ pub async fn create(
         .bind(value.id)
         .bind(&config.metadata.name)
         .bind(&config.metadata.description)
-        .bind(config.tenant_organization_id.to_string())
+        .bind(&config.tenant_organization_id)
         .bind(config_version)
         .bind(sqlx::types::Json(&state))
         .fetch_one(txn)

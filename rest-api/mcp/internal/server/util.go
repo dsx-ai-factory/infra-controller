@@ -40,7 +40,7 @@ func sameBaseURL(a, b string) bool {
 	if !sameOrigin(left, right) || (left.User == nil) != (right.User == nil) {
 		return false
 	}
-	if left.User != nil && left.User.String() != right.User.String() {
+	if left.User != nil && *left.User != *right.User {
 		return false
 	}
 	left.Scheme, left.Host, left.User = "", "", nil

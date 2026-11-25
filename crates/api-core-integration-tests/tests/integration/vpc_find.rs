@@ -274,15 +274,15 @@ async fn test_vpc_search_based_on_labels(pool: PgPool) {
             .create_vpc(
                 rpc::VpcCreationRequest::builder("")
                     .metadata(rpc::Metadata {
-                        name: format!("VPC_{i}{i}{i}").to_string(),
-                        description: format!("VPC_{i}{i}{i} have labels").to_string(),
+                        name: format!("VPC_{i}{i}{i}"),
+                        description: format!("VPC_{i}{i}{i} have labels"),
                         labels: vec![
                             rpc::Label {
-                                key: format!("key_A_{i}{i}{i}").to_string(),
-                                value: Some(format!("value_A_{i}{i}{i}").to_string()),
+                                key: format!("key_A_{i}{i}{i}"),
+                                value: Some(format!("value_A_{i}{i}{i}")),
                             },
                             rpc::Label {
-                                key: format!("key_B_{i}{i}{i}").to_string(),
+                                key: format!("key_B_{i}{i}{i}"),
                                 value: None,
                             },
                         ],

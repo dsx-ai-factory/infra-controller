@@ -26,6 +26,7 @@
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::fmt::Write;
 
     use carbide_uuid::measured_boot::MeasurementReportId;
     use db::TransactionVending as _;
@@ -605,7 +606,7 @@ mod tests {
                 .map(char::from)
                 .collect();
 
-            random_str.push_str(&i.to_string());
+            write!(random_str, "{i}").unwrap();
 
             let values: Vec<PcrRegisterValue> = vec![
                 PcrRegisterValue {

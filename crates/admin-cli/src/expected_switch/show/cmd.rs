@@ -147,17 +147,17 @@ pub(super) async fn show(
 /// talks to. A lone port is implicitly primary and is tagged too.
 fn format_nvos_interfaces(interfaces: &[::rpc::forge::ExpectedNvosInterface]) -> String {
     let lone = interfaces.len() == 1;
-    interfaces
-        .iter()
-        .map(|interface| {
-            if interface.is_primary || lone {
-                format!("{} (primary)", interface.mac_address)
-            } else {
-                interface.mac_address.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = String::new();
+    for (index, interface) in interfaces.iter().enumerate() {
+        if index != 0 {
+            output.push('\n');
+        }
+        output.push_str(&interface.mac_address);
+        if interface.is_primary || lone {
+            output.push_str(" (primary)");
+        }
+    }
+    output
 }
 
 fn format_interface_ip(

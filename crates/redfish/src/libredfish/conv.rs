@@ -41,6 +41,7 @@ impl IntoLibredfish<libredfish::model::update_service::ComponentType> for Firmwa
             FirmwareComponentType::CombinedBmcUefi => ComponentType::Unknown,
             FirmwareComponentType::Gpu => ComponentType::Unknown,
             FirmwareComponentType::Cx7 => ComponentType::Unknown,
+            FirmwareComponentType::Cx8 => ComponentType::Unknown,
             FirmwareComponentType::Drive { .. } => ComponentType::Unknown,
             FirmwareComponentType::Unknown => ComponentType::Unknown,
         }
@@ -100,7 +101,7 @@ impl IntoModel<SystemStatus> for libredfish::model::SystemStatus {
         SystemStatus {
             health: self.health,
             health_rollup: self.health_rollup,
-            state: self.state.unwrap_or("".to_string()),
+            state: self.state.unwrap_or_default(),
         }
     }
 }

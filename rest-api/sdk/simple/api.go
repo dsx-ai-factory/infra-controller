@@ -472,7 +472,7 @@ func HandleResponseError(resp *http.Response, err error) *ApiError {
 				}
 				apiError.Data = nicoErr.GetData()
 			} else {
-				apiError.Message = fmt.Sprintf("Error processing API response: %v", string(oaErr.Body()))
+				apiError.Message = fmt.Sprintf("Error processing API response: %s", oaErr.Body())
 			}
 			return apiError
 		}

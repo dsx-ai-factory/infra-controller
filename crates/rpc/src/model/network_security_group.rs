@@ -868,9 +868,7 @@ mod tests {
                 action: NetworkSecurityGroupRuleAction::Deny,
                 priority: 9001,
                 src_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
-                dst_net: NetworkSecurityGroupRuleNet::Prefix(
-                    "0.0.0.0/0".to_string().parse().unwrap(),
-                ),
+                dst_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
             }],
         };
 

@@ -331,10 +331,12 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
     let has_network_security_group = !conf.network_security_groups.is_empty();
 
     for (i, nsg) in conf.network_security_groups.into_iter().enumerate() {
-        let idx = i.try_into().wrap_err(format!(
-            "number of unique network security groups exceeds {} limit",
-            u16::MAX
-        ))?;
+        let idx = i.try_into().wrap_err_with(|| {
+            format!(
+                "number of unique network security groups exceeds {} limit",
+                u16::MAX
+            )
+        })?;
 
         nsg_id_index_map.insert(nsg.id, idx);
 
@@ -517,7 +519,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             HasRoutingProfile: interface_routing_profile.is_some(),
             RoutingProfile: interface_routing_profile.unwrap_or_default(),
             IsPhy: network.is_phy,
-            L2VNI: network.vni.map(|x| x.to_string()).unwrap_or("".to_string()),
+            L2VNI: network.vni.map(|x| x.to_string()).unwrap_or_default(),
             // Preserve empty scalar gateway omission for legacy `write nvue` inputs.
             IPs: network
                 .gateway_cidrs

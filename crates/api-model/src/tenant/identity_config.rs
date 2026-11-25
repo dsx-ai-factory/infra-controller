@@ -77,13 +77,13 @@ impl sqlx::Encode<'_, sqlx::Postgres> for SigningAlgorithm {
         &self,
         buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <String as sqlx::Encode<'_, sqlx::Postgres>>::encode_by_ref(&self.to_string(), buf)
+        <&str as sqlx::Encode<'_, sqlx::Postgres>>::encode(self.as_jwt_alg_str(), buf)
     }
 }
 
 impl<'r> sqlx::Decode<'r, sqlx::Postgres> for SigningAlgorithm {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        let s = <&str as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
         s.parse()
             .map_err(|e: UnsupportedTenantSigningAlgorithm| sqlx::Error::Decode(Box::new(e)).into())
     }

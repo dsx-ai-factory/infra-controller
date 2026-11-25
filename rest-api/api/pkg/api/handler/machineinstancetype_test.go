@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -245,7 +245,7 @@ func TestCreateMachineInstanceTypeHandler_Handle(t *testing.T) {
 			}
 
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(mitcrJSON)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(mitcrJSON))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -261,7 +261,7 @@ func TestCreateMachineInstanceTypeHandler_Handle(t *testing.T) {
 
 			require.Equal(t, tt.wantStatusCode, rec.Code)
 			if rec.Code != http.StatusCreated {
-				fmt.Println(rec.Body.String())
+				fmt.Printf("%s\n", rec.Body.Bytes())
 				return
 			}
 
@@ -569,19 +569,19 @@ func TestDeleteMachineInstanceTypeHandler_Handle(t *testing.T) {
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it2.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 1}
 	okBodyIT, err := json.Marshal(model.APIAllocationCreateRequest{Name: "okit1", Description: cutil.GetPtr(""), TenantID: tenant.ID.String(), SiteID: st.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT}})
 	assert.Nil(t, err)
-	testCreateAllocation(t, dbSession, ipamStorage, ipu, org, string(okBodyIT))
+	testCreateAllocation(t, dbSession, ipamStorage, ipu, org, okBodyIT)
 
 	// Create Allocation for Instance Type 3
 	acGoodIT2 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it3.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 1}
 	okBodyIT2, err := json.Marshal(model.APIAllocationCreateRequest{Name: "okit2", Description: cutil.GetPtr(""), TenantID: tenant.ID.String(), SiteID: st.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT2}})
 	assert.Nil(t, err)
-	apial := testCreateAllocation(t, dbSession, ipamStorage, ipu, org, string(okBodyIT2))
+	apial := testCreateAllocation(t, dbSession, ipamStorage, ipu, org, okBodyIT2)
 
 	// Create Allocation for Instance Type 4
 	acGoodIT4 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it4.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 3}
 	okBodyIT4, err := json.Marshal(model.APIAllocationCreateRequest{Name: "okit4", Description: cutil.GetPtr(""), TenantID: tenant.ID.String(), SiteID: st.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT4}})
 	assert.Nil(t, err)
-	apial2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, org, string(okBodyIT4))
+	apial2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, org, okBodyIT4)
 	assert.NotNil(t, apial2)
 
 	vpc := common.TestBuildVPC(t, dbSession, "test-vpc", ip, tenant, st, cutil.GetPtr(uuid.New()), nil, nil, cdbm.VpcStatusReady, tnu)
@@ -843,7 +843,7 @@ func TestDeleteMachineInstanceTypeHandler_Handle(t *testing.T) {
 			err := dmith.Handle(ec)
 			require.NoError(t, err)
 
-			fmt.Printf("response: %v", rec.Body.String())
+			fmt.Printf("response: %s", rec.Body.Bytes())
 			assert.Equal(t, tt.wantStatusCode, rec.Code)
 
 			if tt.wantStatusCode != http.StatusAccepted {

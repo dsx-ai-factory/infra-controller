@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -489,6 +490,115 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				assert.NoError(t, tx2.Rollback())
 			}
+		})
+	}
+}
+
+// testTxCancelAfterQueryHook cancels the retry context after Bun scans the
+// contended lock result. It counts queries before database/sql can reject a
+// canceled context without reaching the mock driver.
+type testTxCancelAfterQueryHook struct {
+	query    string
+	cancel   context.CancelFunc
+	attempts int
+	queryErr error
+}
+
+func (h *testTxCancelAfterQueryHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if event.Query == h.query {
+		h.attempts++
+	}
+	return ctx
+}
+
+func (h *testTxCancelAfterQueryHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if event.Query == h.query {
+		h.queryErr = event.Err
+		h.cancel()
+	}
+}
+
+// Check final-error selection through both public methods. The existing
+// PostgreSQL tests cover lock ownership; these mocks control the failure order.
+func TestTx_tryAcquireAdvisoryLock(t *testing.T) {
+	queryErr := errors.New("lock query failed")
+	tests := []struct {
+		name          string
+		acquire       func(*Tx, context.Context, uint64, *LockRetryOptions) error
+		query         string
+		attemptErrors []error // nil returns a successfully scanned, contended lock
+		cancel        bool
+		wantErr       error
+	}{
+		{
+			name: "database error after contention", acquire: (*Tx).TryAcquireAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock(1)",
+			attemptErrors: []error{nil, queryErr}, wantErr: queryErr,
+		},
+		{
+			name: "contention remains contention", acquire: (*Tx).TryAcquireSharedAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock_shared(1)",
+			attemptErrors: []error{nil, nil}, wantErr: ErrXactAdvisoryLockFailed,
+		},
+		{
+			name: "cancellation after contention", acquire: (*Tx).TryAcquireSharedAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock_shared(1)",
+			attemptErrors: []error{nil}, cancel: true, wantErr: context.Canceled,
+		},
+		{
+			name: "last database error replaces earlier errors", acquire: (*Tx).TryAcquireAdvisoryLock,
+			query:         "SELECT pg_try_advisory_xact_lock(1)",
+			attemptErrors: []error{nil, queryErr, sql.ErrTxDone}, wantErr: sql.ErrTxDone,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Virtual time makes a lost cancellation fail promptly even with a long backoff.
+			synctest.Test(t, func(t *testing.T) {
+				sqlDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+				require.NoError(t, err)
+				t.Cleanup(func() { assert.NoError(t, mock.ExpectationsWereMet()) })
+				db := bun.NewDB(sqlDB, pgdialect.New())
+				t.Cleanup(func() { assert.NoError(t, db.Close()) })
+				mock.ExpectBegin()
+				bunTx, err := db.BeginTx(context.Background(), nil)
+				require.NoError(t, err)
+				tx := &Tx{tx: bunTx}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				for _, attemptErr := range tc.attemptErrors {
+					query := mock.ExpectQuery(tc.query)
+					if attemptErr == nil {
+						query.WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(false))
+					} else {
+						query.WillReturnError(attemptErr)
+					}
+				}
+				hook := &testTxCancelAfterQueryHook{query: tc.query, cancel: cancel}
+				attempts := len(tc.attemptErrors)
+				delay := time.Duration(0)
+				if tc.cancel {
+					db.AddQueryHook(hook)
+					attempts = 2
+					delay = time.Hour
+				}
+				mock.ExpectRollback()
+				mock.ExpectClose()
+				t.Cleanup(func() { assert.NoError(t, tx.Rollback()) })
+
+				// RandomDelay requires positive jitter; 1ns makes its random contribution zero.
+				options := &LockRetryOptions{Retries: &attempts, Delay: &delay, Jitter: cutil.GetPtr(time.Nanosecond)}
+				start := time.Now()
+				err = tc.acquire(tx, ctx, 1, options)
+
+				assert.Same(t, tc.wantErr, err)
+				if tc.cancel {
+					assert.Equal(t, 1, hook.attempts)
+					assert.NoError(t, hook.queryErr)
+					assert.Zero(t, time.Since(start), "cancellation must interrupt backoff")
+				}
+			})
 		})
 	}
 }

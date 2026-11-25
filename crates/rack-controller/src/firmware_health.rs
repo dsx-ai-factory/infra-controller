@@ -7,6 +7,7 @@
 //! as one alert listing the number and details of outstanding mismatches.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write;
 use std::net::IpAddr;
 
 use db::db_read::PgPoolReader;
@@ -187,14 +188,15 @@ fn compare(
                 }
             }
             if versions.len() > 1 {
-                let details = versions
-                    .into_iter()
-                    .map(|(version, mut devices)| {
-                        devices.sort();
-                        format!("{version}: [{}]", devices.join(", "))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
+                let mut details = String::new();
+                for (index, (version, mut devices)) in versions.into_iter().enumerate() {
+                    if index != 0 {
+                        details.push_str("; ");
+                    }
+                    devices.sort();
+                    write!(details, "{version}: [{}]", devices.join(", "))
+                        .expect("writing to a String cannot fail");
+                }
                 Some(HealthProbeAlert {
                     id: HealthProbeId::rack_firmware_mismatch(),
                     target: Some(format!("{prefix}{id}")),
@@ -299,6 +301,35 @@ mod tests {
                     .map(|alert| alert.target.unwrap())
                     .collect::<Vec<_>>()
             },
+        );
+    }
+
+    #[test]
+    fn mismatch_details_sort_versions_and_devices_within_each_group() {
+        let version_one = report(&[("BMC", Some("1"))]);
+        let version_two = report(&[("BMC", Some("2"))]);
+        let trays = [
+            TrayFirmware {
+                device_id: "z",
+                address: None,
+                report: Some(&version_two),
+            },
+            TrayFirmware {
+                device_id: "b",
+                address: Some("192.0.2.2".parse().unwrap()),
+                report: Some(&version_one),
+            },
+            TrayFirmware {
+                device_id: "a",
+                address: None,
+                report: Some(&version_two),
+            },
+        ];
+        let alerts = compare(TrayType::Compute, &trays, None);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(
+            alerts[0].message,
+            "compute trays report different firmware for BMC: 1: [b (bmc ip: 192.0.2.2)]; 2: [a, z]"
         );
     }
 

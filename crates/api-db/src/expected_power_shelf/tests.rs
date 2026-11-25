@@ -360,9 +360,9 @@ async fn test_find_rms_identities_by_bmc_macs(
     // Both racks are declared in expected_racks; only rack_live also has a
     // live racks row (with a different profile) to prove COALESCE precedence.
     sqlx::query("INSERT INTO expected_racks (rack_id, rack_profile_id) VALUES ($1, $2), ($3, $4)")
-        .bind(rack_expected.to_string())
-        .bind(profile_expected.to_string())
-        .bind(rack_live.to_string())
+        .bind(rack_expected.as_str())
+        .bind(profile_expected.as_str())
+        .bind(rack_live.as_str())
         .bind("NVL72-EXPECTED-IGNORED")
         .execute(txn.as_mut())
         .await?;
@@ -384,9 +384,9 @@ async fn test_find_rms_identities_by_bmc_macs(
                 ('PS-NORACK', $5::macaddr, 'admin', 'pw', NULL)",
     )
     .bind(bmc_expected_only)
-    .bind(rack_expected.to_string())
+    .bind(rack_expected.as_str())
     .bind(bmc_live_rack)
-    .bind(rack_live.to_string())
+    .bind(rack_live.as_str())
     .bind(bmc_no_rack)
     .execute(txn.as_mut())
     .await?;

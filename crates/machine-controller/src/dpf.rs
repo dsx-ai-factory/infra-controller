@@ -30,9 +30,9 @@ use carbide_dpf::types::{
     ServiceVpcNodeIdentity,
 };
 use carbide_dpf::{
-    AstraRoutePrefixes, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk,
-    DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo, DpuPhaseObservation, DpuWatcher, KubeRepository,
-    ResourceLabeler, node_id_from_dpu_node_cr_name,
+    AstraRoutePrefixes, BmcCredentialObservation, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL,
+    DpfError, DpfSdk, DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo, DpuPhaseObservation,
+    DpuWatcher, KubeRepository, ResourceLabeler, node_id_from_dpu_node_cr_name,
 };
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::dpu_machine_update::OutdatedDpfDpu;
@@ -73,6 +73,31 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
     /// Whether the startup-cached DPF version supports per-DPU BMC credential Secrets.
     fn supports_per_dpu_bmc_credentials(&self) -> bool;
 
+    async fn observe_bmc_credential(
+        &self,
+        device_id: &str,
+    ) -> Result<BmcCredentialObservation, DpfError>;
+
+    async fn ensure_bmc_rotation_secret(
+        &self,
+        device_id: &str,
+        version: u32,
+        password: &str,
+    ) -> Result<String, DpfError>;
+
+    async fn set_bmc_credential_reference(
+        &self,
+        observation: &BmcCredentialObservation,
+        secret_name: &str,
+    ) -> Result<(), DpfError>;
+
+    async fn delete_old_bmc_credential_secret(
+        &self,
+        device_id: &str,
+        old_secret_name: &str,
+        target_secret_name: &str,
+    ) -> Result<(), DpfError>;
+
     /// Register a DPU device using the full expected-machine entry when available.
     /// The expected-machine entry contains credentials and must not be logged.
     async fn register_dpu_device(
@@ -106,6 +131,14 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         node_id: &str,
         dpu_device_names: &[String],
     ) -> Result<bool, DpfError>;
+
+    async fn bmc_credential_resources_gone(
+        &self,
+        node_id: &str,
+        device_id: &str,
+    ) -> Result<bool, DpfError>;
+
+    async fn bmc_rotation_secret_exists(&self, secret_name: &str) -> Result<bool, DpfError>;
 
     /// Read a DPU phase and terminal failure details from the same CR observation.
     ///
@@ -862,6 +895,19 @@ async fn initial_dpu_bmc_credential(
 ) -> Result<(Option<u32>, String), DpfError> {
     use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
     use db::credential_rotation::{CredentialRotationType, device_rotation_operation_state};
+    if db::dpf_bmc_rotation::get(db_pool, bmc_mac_address)
+        .await
+        .map_err(|_| {
+            DpfError::BmcPasswordSourceUnavailable(
+                "could not read DPU BMC credential recovery state".to_string(),
+            )
+        })?
+        .is_some()
+    {
+        return Err(DpfError::BmcPasswordSourceUnavailable(
+            "DPU BMC credential recovery must complete before registration".to_string(),
+        ));
+    }
     let state =
         device_rotation_operation_state(db_pool, CredentialRotationType::Bmc, bmc_mac_address)
             .await
@@ -909,6 +955,45 @@ async fn initial_dpu_bmc_credential(
 impl DpfOperations for DpfSdkOps {
     fn supports_per_dpu_bmc_credentials(&self) -> bool {
         self.sdk.supports_per_dpu_bmc_credentials()
+    }
+
+    async fn observe_bmc_credential(
+        &self,
+        device_id: &str,
+    ) -> Result<BmcCredentialObservation, DpfError> {
+        self.sdk.observe_bmc_credential(device_id).await
+    }
+
+    async fn ensure_bmc_rotation_secret(
+        &self,
+        device_id: &str,
+        version: u32,
+        password: &str,
+    ) -> Result<String, DpfError> {
+        self.sdk
+            .ensure_bmc_credential_secret(device_id, Some(version), password)
+            .await
+    }
+
+    async fn set_bmc_credential_reference(
+        &self,
+        observation: &BmcCredentialObservation,
+        secret_name: &str,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .set_bmc_credential_reference(observation, secret_name)
+            .await
+    }
+
+    async fn delete_old_bmc_credential_secret(
+        &self,
+        device_id: &str,
+        old_secret_name: &str,
+        target_secret_name: &str,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .delete_old_bmc_credential_secret(device_id, old_secret_name, target_secret_name)
+            .await
     }
 
     async fn register_dpu_device(
@@ -985,6 +1070,27 @@ impl DpfOperations for DpfSdkOps {
         self.sdk
             .delete_host_bmc_credential_secrets(node_id, dpu_device_names)
             .await
+    }
+
+    async fn bmc_credential_resources_gone(
+        &self,
+        node_id: &str,
+        device_id: &str,
+    ) -> Result<bool, DpfError> {
+        self.sdk
+            .bmc_credential_resources_gone(node_id, &[device_id.to_string()])
+            .await
+    }
+
+    async fn bmc_rotation_secret_exists(&self, secret_name: &str) -> Result<bool, DpfError> {
+        use carbide_dpf::repository::BmcCredentialRepository;
+
+        Ok(self
+            .sdk
+            .repo()
+            .get_bmc_credential_secret(secret_name, self.sdk.namespace())
+            .await?
+            .is_some())
     }
 
     async fn reprovision_dpu(

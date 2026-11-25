@@ -1448,7 +1448,7 @@ async fn component_firmware_details_use_direct_core_and_effective_host_defaults(
     general.set_create_client_error("general pool must not serve standalone firmware");
     let mock = Arc::new(MockRmsApi::new());
     let (mut api, fetcher) = api(&env, pool, config, mock.clone(), false).await?;
-    api.bmc_credential_ops = direct.clone();
+    api.direct_redfish_pool = direct.clone().into();
     api.redfish_pool = general.clone();
 
     let response = api
@@ -1881,7 +1881,7 @@ async fn component_firmware_details_caller_budget_bounds_credentials(
     let (mut api, fetcher) = api(&env, pool, config, mock.clone(), false).await?;
     api.component_manager.as_mut().unwrap().compute_tray = Arc::new(
         component_manager::core_compute_manager::CoreComputeTrayManager::new(
-            api.bmc_credential_ops.clone(),
+            api.direct_redfish_pool.pool(),
         ),
     );
     let (arrivals, mut arrived) = tokio::sync::mpsc::unbounded_channel();

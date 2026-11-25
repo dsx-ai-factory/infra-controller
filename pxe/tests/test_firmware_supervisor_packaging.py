@@ -328,38 +328,44 @@ class FirmwareSupervisorPackagingTest(unittest.TestCase):
                 checks = []
                 image = self.directory / f"{arch}-image"
                 helper = image / "opt/forge" / SUPERVISOR
+                gpu_cli = image / "usr/bin/nvidia-container-cli"
                 for guard in ("if [ ! -e $bin ]", "$(ldd ${bin} | fgrep -c 'not found')"):
                     matching = [(binaries, body) for binaries, body in loops if guard in body]
                     self.assertEqual(len(matching), 1, guard)
                     binaries, body = matching[0]
                     paths = binaries.replace("\\\n", " ").split()
                     self.assertIn(f"/opt/forge/{SUPERVISOR}", paths)
-                    block = f"for bin in {binaries}\ndo\n{body}\ndone"
                     for path in paths:
                         installed = image / path.removeprefix("/")
                         installed.parent.mkdir(parents=True, exist_ok=True)
                         installed.write_bytes(b"fixture command")
-                        block = block.replace(path, str(installed))
+                    # Map whole paths so names such as runtime and runtime-hook
+                    # do not cause repeated prefix replacement.
+                    staged_paths = " ".join(str(image / path.removeprefix("/")) for path in paths)
+                    block = f"for bin in {staged_paths}\ndo\n{body}\ndone"
                     checks.append(block)
 
                 cases = [
                     # A complete install reaches the dependency check for the helper.
-                    ("present", True, False, 0),
+                    ("present", helper, True, False, 0),
                     # Missing helper output must fail even when Scout is installed.
-                    ("missing helper", False, False, 1),
+                    ("missing helper", helper, False, False, 1),
                     # An installed helper is unusable when its loader lacks a library.
-                    ("missing helper library", True, True, 1),
+                    ("missing helper library", helper, True, True, 1),
+                    # GPU containers cannot start without the host CLI or its libraries.
+                    ("missing GPU CLI", gpu_cli, False, False, 1),
+                    ("missing GPU CLI library", gpu_cli, True, True, 1),
                 ]
-                for name, present, missing_library, expected_exit in cases:
+                for name, checked_binary, present, missing_library, expected_exit in cases:
                     with self.subTest(check=name):
-                        if present:
-                            helper.write_bytes(b"fixture command")
-                        else:
-                            helper.unlink()
+                        for binary in (helper, gpu_cli):
+                            binary.write_bytes(b"fixture command")
+                        if not present:
+                            checked_binary.unlink()
                         log.write_text("")
                         result = subprocess.run(
                             ["bash", "-c", "set -Ee\n" + "\n".join(checks)],
-                            env={**self.env, "MISSING_LIBRARY_FOR": str(helper) if missing_library else ""},
+                            env={**self.env, "MISSING_LIBRARY_FOR": str(checked_binary) if missing_library else ""},
                             capture_output=True,
                             text=True,
                             timeout=20,
@@ -367,9 +373,9 @@ class FirmwareSupervisorPackagingTest(unittest.TestCase):
                         self.assertEqual(result.returncode, expected_exit, result.stdout + result.stderr)
                         if present:
                             commands = [json.loads(line) for line in log.read_text().splitlines()]
-                            self.assertIn(["ldd", str(helper)], commands)
+                            self.assertIn(["ldd", str(checked_binary)], commands)
                         if expected_exit:
-                            self.assertIn(str(helper), result.stdout)
+                            self.assertIn(str(checked_binary), result.stdout)
 
     def test_raw_bfb_payload_installs_current_and_legacy_executables(self):
         """New BFBs install both binaries; older Scout-only payloads still work."""

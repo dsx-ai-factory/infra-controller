@@ -76,10 +76,7 @@ impl<T: UuidSubtype + Send + Sync> prost::Message for TypedUuid<T> {
     }
 
     fn encoded_len(&self) -> usize {
-        let tmp = crate::CommonUuidPlaceholder {
-            value: self.uuid.to_string(),
-        };
-        prost::Message::encoded_len(&tmp)
+        crate::string_field_len(uuid::fmt::Hyphenated::LENGTH)
     }
 
     fn clear(&mut self) {
@@ -441,6 +438,37 @@ mod tests {
     }
 
     typed_uuid_tests!(ThingyId, "ThingyId", "id");
+
+    #[test]
+    fn optional_uuid_order_matches_canonical_text() {
+        use std::cmp::Ordering::{Equal, Less};
+
+        carbide_test_support::value_scenarios!(
+            run = |(left, right): (Option<&str>, Option<&str>)| {
+                let left = left.map(|value| ThingyId::try_parse(value).unwrap());
+                let right = right.map(|value| ThingyId::try_parse(value).unwrap());
+                (
+                    left.cmp(&right),
+                    left.map(|id| id.to_string()).cmp(&right.map(|id| id.to_string())),
+                )
+            };
+            "absent sorts before present" {
+                (None, Some("00000000-0000-0000-0000-000000000000")) => (Less, Less),
+            }
+            "hex digits sort before letters" {
+                (Some("00000000-0000-0000-0000-000000000009"),
+                 Some("00000000-0000-0000-0000-00000000000a")) => (Less, Less),
+            }
+            "earlier groups dominate later groups" {
+                (Some("00000000-ffff-ffff-ffff-ffffffffffff"),
+                 Some("00000001-0000-0000-0000-000000000000")) => (Less, Less),
+            }
+            "equal identifiers compare equally" {
+                (Some("01234567-89ab-cdef-0123-456789abcdef"),
+                 Some("01234567-89ab-cdef-0123-456789abcdef")) => (Equal, Equal),
+            }
+        );
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
     struct ThingyWithId {

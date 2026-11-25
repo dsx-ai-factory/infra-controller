@@ -100,7 +100,7 @@ async fn resolve_target(
         Some(mac) => Some(
             db::machine_topology::find_machine_id_by_bmc_mac(txn, mac)
                 .await?
-                .ok_or(CarbideError::NotFoundError {
+                .ok_or_else(|| CarbideError::NotFoundError {
                     kind: "BMC",
                     id: mac.to_string(),
                 })?,

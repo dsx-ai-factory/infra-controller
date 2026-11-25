@@ -29,7 +29,7 @@ func TestDeviceInfo_InfoMsg(t *testing.T) {
 	}{
 		"info message based on ID": {
 			byID:     true,
-			expected: fmt.Sprintf("%s [id: %s]", typ, di.ID.String()),
+			expected: fmt.Sprintf("%s [id: %s]", typ, di.ID),
 		},
 		"inf message based on serial information": {
 			byID:     false,

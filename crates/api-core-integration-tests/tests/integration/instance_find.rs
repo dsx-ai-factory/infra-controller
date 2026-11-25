@@ -42,15 +42,15 @@ async fn test_instance_search_based_on_labels(pool: sqlx::PgPool) {
             .instance_builder(&env.harness)
             .single_interface_network_config(segment_id)
             .metadata(rpc::forge::Metadata {
-                name: format!("instance_{i}{i}{i}").to_string(),
-                description: format!("instance_{i}{i}{i} have labels").to_string(),
+                name: format!("instance_{i}{i}{i}"),
+                description: format!("instance_{i}{i}{i} have labels"),
                 labels: vec![
                     rpc::forge::Label {
-                        key: format!("key_A_{i}{i}{i}").to_string(),
-                        value: Some(format!("value_A_{i}{i}{i}").to_string()),
+                        key: format!("key_A_{i}{i}{i}"),
+                        value: Some(format!("value_A_{i}{i}{i}")),
                     },
                     rpc::forge::Label {
-                        key: format!("key_B_{i}{i}{i}").to_string(),
+                        key: format!("key_B_{i}{i}{i}"),
                         value: None,
                     },
                 ],

@@ -142,7 +142,7 @@ fn convert(
     let metadata = Metadata::try_from(value.metadata.unwrap_or_default())?;
     metadata
         .validate(false)
-        .map_err(|e| invalid(&e.to_string()))?;
+        .map_err(|e| RpcDataConversionError::InvalidArgument(e.to_string()))?;
     Ok(ExpectedRackGroup {
         rack_group_id,
         topology: RackGroupTopology::new(value.topology),

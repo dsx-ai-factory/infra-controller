@@ -4,6 +4,7 @@
 package migrations
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"embed"
@@ -119,7 +120,7 @@ func checkMigrationSignature(contents []byte, oldHash string, options MigrateOpt
 	if options.IgnoreSignatureChanges {
 		return true, nil
 	}
-	if strings.Contains(string(contents), "Allow hash changing") {
+	if bytes.Contains(contents, []byte("Allow hash changing")) {
 		return false, nil
 	}
 	return false, errors.New("signature does not match")

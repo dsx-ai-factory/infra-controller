@@ -5,6 +5,7 @@ package server
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,17 +33,31 @@ type Options struct {
 	// Log is the logrus entry used for client request/response logging.
 	// If nil, a default entry wrapping the standard logger is used.
 	Log *logrus.Entry
+	// Metrics records tool calls and REST requests. If nil, a private
+	// instance is used, so recording never needs a nil check.
+	Metrics *Metrics
 }
 
+// Credential forwarding rejections, kept as values so metrics can tell them
+// apart from other configuration errors.
+var (
+	errBaseURLMismatch      = errors.New("per-call base_url does not match the configured server base URL")
+	errInheritedCredentials = errors.New("refusing to forward inherited credentials to a per-call base_url; pass token in the same tool call or configure the server base URL")
+)
+
 // withDefaults returns a copy of opts with empty optional fields filled
-// in with package defaults. APIName falls back to "nico" and Log to
-// logrus.StandardLogger() so callers can leave them unset.
+// in with package defaults. APIName falls back to "nico", Log to
+// logrus.StandardLogger(), and Metrics to a new instance so callers can
+// leave them unset.
 func (o Options) withDefaults() Options {
 	if o.APIName == "" {
 		o.APIName = "nico"
 	}
 	if o.Log == nil {
 		o.Log = logrus.NewEntry(logrus.StandardLogger())
+	}
+	if o.Metrics == nil {
+		o.Metrics = NewMetrics()
 	}
 	return o
 }
@@ -87,14 +102,14 @@ func (cfg *resolvedConfig) FromCallConfig(in map[string]any, req *mcp.CallToolRe
 	callBaseURL := normalizeBaseURL(stringArg(in, "base_url"))
 	configuredBaseURL := normalizeBaseURL(opts.BaseURL)
 	if configuredBaseURL != "" && callBaseURL != "" && !sameBaseURL(callBaseURL, configuredBaseURL) {
-		return fmt.Errorf("per-call base_url does not match the configured server base URL")
+		return errBaseURLMismatch
 	}
 
 	callToken := stringArg(in, "token")
 	inboundToken := bearerFromExtra(req)
 	if configuredBaseURL == "" && callBaseURL != "" && callToken == "" &&
 		(inboundToken != "" || opts.Token != "") {
-		return fmt.Errorf("refusing to forward inherited credentials to a per-call base_url; pass token in the same tool call or configure the server base URL")
+		return errInheritedCredentials
 	}
 
 	cfg.BaseURL = cmp.Or(callBaseURL, configuredBaseURL)

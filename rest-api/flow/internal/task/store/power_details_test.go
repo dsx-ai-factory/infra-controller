@@ -19,6 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
+	"github.com/uptrace/bun/extra/bunotel"
+	"go.opentelemetry.io/otel/metric/noop"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -327,6 +331,13 @@ func TestPostgresStore_ListTaskContextForRack(t *testing.T) {
 			sqlDB, mock, err := sqlmock.New()
 			require.NoError(t, err)
 			db := bun.NewDB(sqlDB, pgdialect.New())
+			var recorder *tracetest.SpanRecorder
+			if tc.invalidAttributes {
+				recorder = tracetest.NewSpanRecorder()
+				provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()), sdktrace.WithSpanProcessor(recorder))
+				t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+				db.AddQueryHook(bunotel.NewQueryHook(bunotel.WithTracerProvider(provider), bunotel.WithMeterProvider(noop.NewMeterProvider())))
+			}
 			t.Cleanup(func() {
 				mock.ExpectClose()
 				require.NoError(t, db.Close())
@@ -352,12 +363,23 @@ func TestPostgresStore_ListTaskContextForRack(t *testing.T) {
 					for range tc.count {
 						rows.AddRow(taskID, taskcommon.TaskTypeBringUp, rackID, attributes, taskcommon.TaskStatusPending, createdAt)
 					}
-					expectation.WillReturnRows(rows)
+					expectation.WillReturnRows(rows).RowsWillBeClosed()
 				}
 			}
 
 			got, err := NewPostgres(&cdb.Session{DB: db}).ListTaskContextForRack(ctx, rackID)
 
+			if recorder != nil {
+				spans := recorder.Ended()
+				require.Len(t, spans, 1, "positive control: the production query hook recorded the SELECT")
+				require.Equal(t, "SELECT", spans[0].Name())
+				require.NotContains(t, spans[0].Status().Description, "private-context-data")
+				for _, payload := range []any{spans[0].Events(), spans[0].Attributes()} {
+					encoded, encodeErr := json.Marshal(payload)
+					require.NoError(t, encodeErr)
+					require.NotContains(t, string(encoded), "private-context-data")
+				}
+			}
 			require.NotContains(t, diagnostics.String(), "private-context-data")
 			switch {
 			case tc.queryError != nil || tc.invalidAttributes:

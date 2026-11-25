@@ -98,7 +98,10 @@ pub struct IsInUseByTenant(pub bool);
 
 impl HealthMetricDimension for IsInUseByTenant {
     fn key_values(&self) -> Vec<KeyValue> {
-        vec![KeyValue::new("in_use", self.0.to_string())]
+        vec![KeyValue::new(
+            "in_use",
+            if self.0 { "true" } else { "false" },
+        )]
     }
 
     fn all_values() -> Vec<Self> {

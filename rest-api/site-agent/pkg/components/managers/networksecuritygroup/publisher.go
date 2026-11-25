@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverNetworkSecurityGroupInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("NetworkSecurityGroup: Successfully registered DiscoverNetworkSecurityGroupInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

@@ -62,15 +62,12 @@ async fn handle_validation_boot_config_stage(
     validation_id: MachineValidationId,
     stage: HostBootConfigStage,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
     match run_host_boot_config_stage(
         ctx,
         &host_handler_params.reachability_params,
-        redfish_client.as_ref(),
+        &bmc,
         mh_snapshot,
         None,
         stage,
@@ -267,17 +264,9 @@ pub(crate) async fn handle_machine_validation_state(
                     "verifying the boot config during validation",
                     |message| message,
                 )? {
-                    let redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
-                    match inspect_host_boot_config(
-                        ctx.services,
-                        redfish_client.as_ref(),
-                        mh_snapshot,
-                        &boot_interface,
-                    )
-                    .await
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                    match inspect_host_boot_config(ctx.services, &bmc, mh_snapshot, &boot_interface)
+                        .await
                     {
                         Ok(inspection)
                             if matches!(
@@ -483,13 +472,10 @@ pub(crate) async fn handle_machine_validation_state(
             Ok(StateHandlerOutcome::transition(validating(next)))
         }
         MachineValidatingState::CheckBootConfigForRepair { validation_id } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
             let next = match check_host_boot_config(
-                redfish_client.as_ref(),
+                &bmc,
                 mh_snapshot,
                 &host_handler_params.reachability_params,
                 HostBootConfigDpuFreshness::CurrentHostState,

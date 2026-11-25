@@ -744,6 +744,7 @@ async fn process_object<IO: StateControllerIO>(
 
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline,
             services: &mut services,
             metrics: &mut metrics.specific,
             pending_db_writes: &mut pending_db_writes,

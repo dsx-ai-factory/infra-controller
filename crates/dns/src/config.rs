@@ -175,7 +175,7 @@ fn serialize_uri<S>(uri: &http::Uri, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    serializer.serialize_str(&format!("{uri}"))
+    serializer.collect_str(uri)
 }
 
 fn deserialize_uri<'de, D>(deserializer: D) -> Result<http::Uri, D::Error>
@@ -183,7 +183,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let uri_str: String = Deserialize::deserialize(deserializer)?;
-    uri_str.parse().map_err(serde::de::Error::custom)
+    http::Uri::try_from(uri_str).map_err(serde::de::Error::custom)
 }
 
 fn serialize_optional_uri<S>(uri: &Option<http::Uri>, serializer: S) -> Result<S::Ok, S::Error>
@@ -202,8 +202,9 @@ where
 {
     let uri_str: Option<String> = Deserialize::deserialize(deserializer)?;
     uri_str
-        .map(|uri_str| uri_str.parse().map_err(serde::de::Error::custom))
+        .map(http::Uri::try_from)
         .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 impl Config {
@@ -239,11 +240,11 @@ impl Config {
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let cfg = std::fs::read_to_string(path).map_err(|error| ConfigError::CouldNotRead {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })?;
         toml::from_str::<Self>(&cfg).map_err(|error| ConfigError::InvalidToml {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })
     }

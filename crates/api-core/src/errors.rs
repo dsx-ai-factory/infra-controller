@@ -319,10 +319,6 @@ pub enum CarbideError {
         operation: &'static str,
     },
 
-    /// The bounded read of a component credential did not finish in time.
-    #[error("component credential read timed out")]
-    ComponentCredentialReadDeadlineExceeded,
-
     #[error("permission denied: {0}")]
     PermissionDeniedError(String),
 
@@ -624,8 +620,16 @@ impl OperatorError for CarbideError {
             | CarbideError::Ipv6LoopbackBackfillContended { .. } => ErrorCode::nico(Api, 503),
             CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
             CarbideError::ResourcePoolDeadlineExceeded { .. }
-            | CarbideError::MlxCommandDeadlineExceeded { .. }
-            | CarbideError::ComponentCredentialReadDeadlineExceeded => ErrorCode::nico(Api, 504),
+            | CarbideError::MlxCommandDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
+            CarbideError::ResourcePoolRegistration(error) => ErrorCode::nico(
+                Api,
+                match registration_status_code(error) {
+                    tonic::Code::FailedPrecondition => 412,
+                    tonic::Code::Unavailable => 503,
+                    tonic::Code::DeadlineExceeded => 504,
+                    _ => 500,
+                },
+            ),
             CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
                 Api,
                 match remote_resource_pool_status_code(error) {
@@ -660,6 +664,10 @@ impl OperatorError for CarbideError {
                 "Pool growth has committed. Check the current pool configuration and remaining IPv6 \
                  loopback assignments before retrying the same growth request after database \
                  contention clears.",
+            ),
+            CarbideError::ResourcePoolRegistration(_) => Some(
+                "A pool definition may already be saved or acknowledged. Retry the same growth input \
+                 after the reported problem clears. Different input cannot replace a pending definition.",
             ),
             CarbideError::DiscoveryContended(_) => {
                 Some("Retry discovery with a fresh request after database contention clears.")
@@ -771,6 +779,29 @@ fn remote_resource_pool_status_code(error: &RemoteResourcePoolError) -> tonic::C
     }
 }
 
+/// Registration retries reuse saved input, including after a lost acknowledgement.
+/// Provider credentials and configuration belong to NICo, not the API caller.
+fn registration_status_code(error: &RegistrationError) -> tonic::Code {
+    match error {
+        RegistrationError::Conflict => tonic::Code::FailedPrecondition,
+        RegistrationError::DeadlineExceeded
+        | RegistrationError::Provider(GrpcResourcePoolError::DeadlineExceeded) => {
+            tonic::Code::DeadlineExceeded
+        }
+        RegistrationError::Provider(GrpcResourcePoolError::Rpc(status))
+            if status.code() == tonic::Code::DeadlineExceeded =>
+        {
+            tonic::Code::DeadlineExceeded
+        }
+        RegistrationError::Provider(
+            GrpcResourcePoolError::Busy
+            | GrpcResourcePoolError::Connect(_)
+            | GrpcResourcePoolError::Rpc(_),
+        ) => tonic::Code::Unavailable,
+        _ => tonic::Code::Internal,
+    }
+}
+
 impl From<CarbideError> for tonic::Status {
     /// Maps errors to gRPC responses and operator metadata.
     /// `DBError` uses fixed `Internal` text and `nico-error-text`; the original
@@ -817,6 +848,10 @@ impl From<CarbideError> for tonic::Status {
                 Status::unavailable(error.to_string())
             }
             CarbideError::DiscoveryContended(message) => Status::unavailable(message),
+            CarbideError::ResourcePoolRegistration(registration) => Status::new(
+                registration_status_code(registration),
+                registration.to_string(),
+            ),
             CarbideError::RemoteResourcePool(remote) => {
                 Status::new(remote_resource_pool_status_code(remote), remote.to_string())
             }
@@ -849,8 +884,7 @@ impl From<CarbideError> for tonic::Status {
             CarbideError::ResourcePoolDeadlineExceeded { operation } => {
                 Status::deadline_exceeded(format!("{operation} timed out"))
             }
-            error @ (CarbideError::MlxCommandDeadlineExceeded { .. }
-            | CarbideError::ComponentCredentialReadDeadlineExceeded) => {
+            error @ CarbideError::MlxCommandDeadlineExceeded { .. } => {
                 Status::deadline_exceeded(error.to_string())
             }
             CarbideError::PermissionDeniedError(msg) => Status::permission_denied(msg),
@@ -1169,6 +1203,8 @@ fn missing_allocation_range_preserves_status_through_wrappers() {
 fn resource_pool_errors_preserve_status() {
     use carbide_test_support::{Check, check_values};
 
+    let registration_mitigation = "A pool definition may already be saved or acknowledged. Retry the same growth input after the reported problem clears. Different input cannot replace a pending definition.";
+
     check_values(
         [
             Check {
@@ -1236,6 +1272,35 @@ fn resource_pool_errors_preserve_status() {
                     tonic::Code::DeadlineExceeded,
                     "NICO-API-504".to_owned(),
                     None,
+                ),
+            },
+            Check {
+                scenario: "a competing definition requires the original growth input",
+                input: CarbideError::from(RegistrationError::Conflict),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    Some(registration_mitigation.to_owned()),
+                ),
+            },
+            Check {
+                scenario: "definition acknowledgement can outlive the caller deadline",
+                input: CarbideError::from(RegistrationError::DeadlineExceeded),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    Some(registration_mitigation.to_owned()),
+                ),
+            },
+            Check {
+                scenario: "an unavailable registration provider preserves retry status",
+                input: CarbideError::from(RegistrationError::Provider(GrpcResourcePoolError::Rpc(
+                    tonic::Status::unavailable("provider unavailable").into(),
+                ))),
+                expect: (
+                    tonic::Code::Unavailable,
+                    "NICO-API-503".to_owned(),
+                    Some(registration_mitigation.to_owned()),
                 ),
             },
             Check {

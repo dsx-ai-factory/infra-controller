@@ -32,7 +32,7 @@ fn fixture() -> (DpfSdk<KubeRepository>, ApiHandle) {
         labeler: NoLabels,
         operator_version: semver::Version::new(26, 8, 0),
         shared_bmc_password_ready: Arc::new(AtomicBool::new(false)),
-        _bmc_refresh_guard: None,
+        _bmc_bootstrap_guard: None,
     };
     (sdk, handle)
 }
@@ -496,6 +496,17 @@ async fn bmc_credential_observation_distinguishes_adoption_pending_and_dpf_failu
     cases.push((
         "stale condition",
         stale,
+        BmcCredentialHealth::Pending,
+        false,
+    ));
+    let mut no_generation = device(Some("new"), Some("new"), "True", "Success");
+    no_generation["status"]["conditions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("observedGeneration");
+    cases.push((
+        "condition generation missing",
+        no_generation,
         BmcCredentialHealth::Pending,
         false,
     ));

@@ -221,7 +221,7 @@ pub async fn find_ptr_record(
       AND (SELECT count(*) FROM ptr_candidates) = 1"#;
 
     sqlx::query_as::<_, DbPtrRecord>(query)
-        .bind(address.to_string())
+        .bind(address)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))

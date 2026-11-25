@@ -13,7 +13,7 @@ use rpc::forge::{
 use support::{Exchange, assert_success, run_command};
 
 /// The real command must send the selected prefix/relay/reservation and render
-/// the server's two stored prefixes, including populated and absent relay cells.
+/// the server's two stored prefixes, including relay cells and unmeasured counts.
 #[tokio::test]
 async fn add_prefix_sends_request_and_displays_stored_prefixes() {
     let id = "12345678-1234-5678-90ab-cdef01234567";
@@ -111,6 +111,7 @@ async fn add_prefix_sends_request_and_displays_stored_prefixes() {
         .await;
         assert_success(&output);
         let output = String::from_utf8(output.stdout).expect("UTF-8 output");
+        assert!(!output.contains("STATE HISTORY:"));
         Ok::<_, std::convert::Infallible>(
             output
                 .lines()
@@ -120,7 +121,7 @@ async fn add_prefix_sends_request_and_displays_stored_prefixes() {
                         label.trim(),
                         "Prefix" | "DHCPv6 Link" | "Reserve First" | "Free IP Count"
                     )
-                    .then_some((label.trim().to_string(), value.trim().to_string()))
+                    .then(|| (label.trim().to_string(), value.trim().to_string()))
                 })
                 .collect::<Vec<_>>(),
         )

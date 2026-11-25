@@ -44,6 +44,7 @@ pub fn ib_fabric_test_manager(
             } else {
                 Default::default()
             },
+            auth_modes: Default::default(),
             manager_type: if ib_config.enabled {
                 IBFabricManagerType::Mock
             } else {

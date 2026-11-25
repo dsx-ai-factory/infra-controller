@@ -99,8 +99,8 @@ async fn test_rack_metadata_from_expected(
     assert_eq!(rack.rack_group_id, Some(group_id));
     assert_eq!(rack.metadata.description, "A test rack");
     assert_eq!(
-        rack.metadata.labels.get("env"),
-        Some(&"staging".to_string())
+        rack.metadata.labels.get("env").map(String::as_str),
+        Some("staging")
     );
 
     txn.rollback().await?;
@@ -143,8 +143,8 @@ async fn test_rack_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std
     assert_eq!(updated_rack.metadata.name, "Updated Rack");
     assert_eq!(updated_rack.metadata.description, "Updated description");
     assert_eq!(
-        updated_rack.metadata.labels.get("team"),
-        Some(&"infra".to_string())
+        updated_rack.metadata.labels.get("team").map(String::as_str),
+        Some("infra")
     );
     assert_eq!(updated_rack.version.version_nr(), 2);
 

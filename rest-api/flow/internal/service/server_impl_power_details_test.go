@@ -988,6 +988,7 @@ func TestSameCoreComponentIdentity(t *testing.T) {
 		{name: "exact opaque identity", expected: "future-id", observed: "future-id", want: true},
 		// Only the hardware hash is case-insensitive in Core's representation.
 		{name: "uppercase hash", expected: uppercase, observed: canonical, want: true},
+		{name: "uppercase observed hash", expected: canonical, observed: uppercase, want: true},
 		// Host and DPU type bytes remain distinct even for identical hardware hashes.
 		{name: "different typed prefix", expected: "fm100dt" + uppercase[7:], observed: canonical},
 		// A valid but different 32-byte hash must not satisfy identity validation.

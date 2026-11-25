@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Prometheus metrics port
+templates:
+  - deployment.yaml
+  - service.yaml
+tests:
+  - it: starts the metrics listener and names its container port
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--metrics-listen"
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: ":9360"
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            containerPort: 9360
+            name: metrics
+  - it: exposes the metrics port on the Service without the MCP appProtocol
+    template: service.yaml
+    asserts:
+      - equal:
+          path: spec.ports[1]
+          value:
+            port: 9360
+            targetPort: 9360
+            name: metrics
+  - it: uses the configured metrics port
+    set:
+      metrics.port: 9999
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: ":9999"
+        template: deployment.yaml
+      - equal:
+          path: spec.ports[1].targetPort
+          value: 9999
+        template: service.yaml
+  - it: rejects a metrics port equal to the MCP port
+    template: deployment.yaml
+    set:
+      service.port: 9360
+    asserts:
+      - failedTemplate:
+          errorMessage: "metrics.port must differ from service.port: metrics are served on a separate listener"
+  - it: allows the MCP port on the default metrics port when metrics are disabled
+    template: deployment.yaml
+    set:
+      service.port: 9360
+      metrics.enabled: false
+    asserts:
+      - notFailedTemplate: {}
+  - it: leaves the metrics listener and port out when disabled
+    set:
+      metrics.enabled: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: "--metrics-listen"
+        template: deployment.yaml
+      - lengthEqual:
+          path: spec.template.spec.containers[0].ports
+          count: 1
+        template: deployment.yaml
+      - lengthEqual:
+          path: spec.ports
+          count: 1
+        template: service.yaml

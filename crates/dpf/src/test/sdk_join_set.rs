@@ -22,16 +22,28 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use crate::sdk::DpfSdkBuilder;
+use crate::{BmcPasswordProvider, DpfError};
 
 const TEST_NS: &str = "sdk-joinset-ns";
 
+struct MissingPassword;
+
+#[async_trait::async_trait]
+impl BmcPasswordProvider for MissingPassword {
+    async fn get_bmc_password(&self) -> Result<String, DpfError> {
+        Err(DpfError::BmcPasswordSourceUnavailable(
+            "missing credential".to_string(),
+        ))
+    }
+}
+
 #[tokio::test]
-async fn test_with_join_set_spawns_refresh_into_provided_set() {
+async fn test_with_join_set_spawns_bootstrap_into_provided_set() {
     let mut join_set = JoinSet::new();
     assert_eq!(join_set.len(), 0);
 
-    let _sdk = DpfSdkBuilder::new(super::helpers::ConfigMock, TEST_NS, String::new())
-        .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+    let _sdk = DpfSdkBuilder::new(super::helpers::ConfigMock, TEST_NS, MissingPassword)
+        .with_bmc_secret_retry_interval(Duration::from_secs(3600))
         .with_join_set(&mut join_set)
         .build_without_resources()
         .await
@@ -41,10 +53,11 @@ async fn test_with_join_set_spawns_refresh_into_provided_set() {
 }
 
 #[tokio::test]
-async fn test_without_refresh_interval_no_task_spawned() {
+async fn test_existing_password_needs_no_bootstrap_task() {
     let mut join_set = JoinSet::new();
 
-    let _sdk = DpfSdkBuilder::new(super::helpers::ConfigMock, TEST_NS, String::new())
+    let _sdk = DpfSdkBuilder::new(super::helpers::ConfigMock, TEST_NS, "password".to_string())
+        .with_bmc_secret_retry_interval(Duration::from_secs(3600))
         .with_join_set(&mut join_set)
         .build_without_resources()
         .await
@@ -54,11 +67,11 @@ async fn test_without_refresh_interval_no_task_spawned() {
 }
 
 #[tokio::test]
-async fn test_with_join_set_refresh_task_completes_after_sdk_drop() {
+async fn test_with_join_set_bootstrap_task_completes_after_sdk_drop() {
     let mut join_set = JoinSet::new();
 
-    let sdk = DpfSdkBuilder::new(super::helpers::ConfigMock, TEST_NS, String::new())
-        .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+    let sdk = DpfSdkBuilder::new(super::helpers::ConfigMock, TEST_NS, MissingPassword)
+        .with_bmc_secret_retry_interval(Duration::from_secs(3600))
         .with_join_set(&mut join_set)
         .build_without_resources()
         .await
@@ -70,7 +83,7 @@ async fn test_with_join_set_refresh_task_completes_after_sdk_drop() {
     let result = tokio::time::timeout(Duration::from_secs(5), join_set.join_next()).await;
     assert!(
         result.is_ok(),
-        "refresh task should complete after SDK is dropped"
+        "bootstrap task should complete after SDK is dropped"
     );
     assert_eq!(join_set.len(), 0);
 }

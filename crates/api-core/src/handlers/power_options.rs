@@ -83,7 +83,7 @@ pub(crate) async fn update_power_option(
             },
         )
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
@@ -150,9 +150,12 @@ pub(crate) async fn determine_machine_ingestion_state(
     //           No -> IngestionMachineNotCreated
     //.   Nope -> WaitingForIngestion
 
-    let mac_address = MacAddress::from_str(&request.mac_address.clone().ok_or(
-        CarbideError::InvalidArgument("no MAC address suplied".to_string()),
-    )?)
+    let mac_address = MacAddress::from_str(
+        request
+            .mac_address
+            .as_deref()
+            .ok_or_else(|| CarbideError::InvalidArgument("no MAC address suplied".to_string()))?,
+    )
     .map_err(CarbideError::MacAddressParseError)?;
 
     let explored_endpoint = match find_explored_endpoint(api.pg_pool(), &mac_address).await? {
@@ -206,9 +209,12 @@ pub(crate) async fn allow_ingestion_and_power_on(
     request: &rpc::BmcEndpointRequest,
 ) -> Result<tonic::Response<()>, tonic::Status> {
     // flip a flag in explored_endpoints and allow a power on
-    let mac_address = MacAddress::from_str(&request.mac_address.clone().ok_or(
-        CarbideError::InvalidArgument("no MAC address suplied".to_string()),
-    )?)
+    let mac_address = MacAddress::from_str(
+        request
+            .mac_address
+            .as_deref()
+            .ok_or_else(|| CarbideError::InvalidArgument("no MAC address suplied".to_string()))?,
+    )
     .map_err(CarbideError::MacAddressParseError)?;
 
     let mut txn = api.txn_begin().await?;

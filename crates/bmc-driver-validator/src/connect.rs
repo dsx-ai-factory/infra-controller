@@ -33,6 +33,7 @@ use bmc_runtime::{
     BmcRef, ConnectedBmc, ConnectionManager, CredentialLease, CredentialRequest, EndpointIpmiOps,
     RuntimeCredentialProvider,
 };
+use carbide_hw_identification::host_serial::HostSerialRules;
 use carbide_redfish::nv_redfish::{NvRedfishClientPool, NvRedfishConnection, RedfishBmc};
 use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
@@ -234,6 +235,9 @@ fn explore_config() -> bmc_explorer::Config<'static, RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: None,
         error_classifier: &bmc_explorer::nv_redfish_error_class,
+        collect_chassis_assembly: &|chassis| {
+            HostSerialRules::default().needs_chassis_assembly(&chassis.id)
+        },
         retry_timeout: EXPLORE_RETRY,
         explore_drive_firmware: false,
     }

@@ -50,15 +50,15 @@ pub struct AstraRoutePrefixes {
     pub software_plane_route_prefix_len: u8,
 }
 
-/// Async provider for BMC passwords used to create and refresh the K8s BMC
+/// Async provider for the initial password used to create the shared K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
 /// a vault or credential manager). Return
 /// [`crate::DpfError::BmcPasswordSourceUnavailable`] when the configured source
 /// cannot supply the credential. Return
 /// [`crate::DpfError::LocalBmcPasswordSourceUnavailable`] for an authoritative
 /// local version 0 miss so the SDK can reject source-policy activation before
-/// startup. After a value has been published, source-unavailable and ordinary
-/// transient lookup failures retain the last published value and are retried.
+/// startup. When startup retries are enabled, lookup errors can be retried
+/// in the background until the shared Secret is published.
 #[async_trait::async_trait]
 pub trait BmcPasswordProvider: Send + Sync {
     async fn get_bmc_password(&self) -> Result<String, crate::DpfError>;
@@ -206,6 +206,8 @@ pub struct InitDpfResourcesConfig {
     pub(crate) extra_bfcfg_parameters: Vec<String>,
     /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
     pub(crate) enable_delay_host_init: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage during provisioning.
+    pub(crate) enable_pci_switch_emulation: bool,
     /// Omit partial-multiplane maintenance initialization from Astra provisioning when true.
     pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
@@ -252,6 +254,7 @@ impl Default for InitDpfResourcesConfig {
             registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
+            enable_pci_switch_emulation: false,
             partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
         }

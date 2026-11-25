@@ -46,7 +46,7 @@ async fn update_bmc_network_into_topologies(
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?
-        .ok_or(DatabaseError::NotFoundError {
+        .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "machine_topologies.machine_id",
             id: machine_id.to_string(),
         })?;

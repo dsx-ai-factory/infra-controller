@@ -45,6 +45,7 @@ Common flags (each also reads its NICO_* environment variable):
   --api-name          API path segment in /v2/org/<org>/<name>/... (default "nico")
   --token             default bearer token for the configured base URL
   --shutdown-timeout  graceful shutdown timeout (default 10s)
+  --metrics-listen    address:port for Prometheus metrics at /metrics (off when empty)
   --debug             enable debug logging
 
 The server is stateless. A configured base URL pins the destination and is the

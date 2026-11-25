@@ -18,7 +18,6 @@ use std::fmt::{self, Display};
 use std::str::FromStr;
 
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
-use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::hardware_info::HardwareInfoError;
@@ -163,8 +162,7 @@ impl Serialize for ErrorCode {
 
 impl<'de> Deserialize<'de> for ErrorCode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        raw.parse().map_err(D::Error::custom)
+        crate::deserialize_from_str(deserializer)
     }
 }
 

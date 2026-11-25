@@ -149,14 +149,11 @@ impl Bluefield3<'_> {
                 .uefi_device_path("HD(1,GPT,2FAFB38D-05F6-DF41-AE01-F9991E2CC0F0,0x800,0x19000)/\\EFI\\ubuntu\\shimaa64.efi")
                 .build(BootOptionKind::Disk)
         ].into_iter().chain(self.oob_mac_address.iter().flat_map(|mac| {
-            let mocked_mac_no_colons = mac
-                .to_string()
-                .replace(':', "")
-                .to_ascii_uppercase();
+            let [a, b, c, d, e, f] = mac.bytes();
             vec![
                 boot_opt_builder("Boot0000")
                     .display_name("NET-OOB-IPV4-HTTP")
-                    .uefi_device_path(format!("MAC({mocked_mac_no_colons},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
+                    .uefi_device_path(format!("MAC({a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
                     .build(BootOptionKind::Network),
             ]
         })).collect::<Vec<_>>();
@@ -222,14 +219,8 @@ impl Bluefield3<'_> {
     }
 
     pub(crate) fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
-        let base_mac = self.base_mac().to_string().replace(':', "");
-        let sys_image = format!(
-            "{}:{}00:00{}:{}",
-            &base_mac[0..4],
-            &base_mac[4..6],
-            &base_mac[6..8],
-            &base_mac[8..12]
-        );
+        let [a, b, c, d, e, f] = self.base_mac().bytes();
+        let sys_image = format!("{a:02X}{b:02X}:{c:02X}00:00{d:02X}:{e:02X}{f:02X}");
         let fw = &self.firmware_versions;
         let fw_inv_builder = |id: &str| {
             redfish::software_inventory::builder(

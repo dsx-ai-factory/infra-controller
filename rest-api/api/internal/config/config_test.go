@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,12 +22,12 @@ import (
 )
 
 type logContainsWriter struct {
-	needle string
+	needle []byte
 	seen   chan struct{}
 }
 
 func (w logContainsWriter) Write(p []byte) (int, error) {
-	if strings.Contains(string(p), w.needle) {
+	if bytes.Contains(p, w.needle) {
 		select {
 		case w.seen <- struct{}{}:
 		default:
@@ -510,7 +511,7 @@ func TestConfig_WatchConfigFile(t *testing.T) {
 				seenConfigChange := make(chan struct{}, 1)
 				previousLogger := log.Logger
 				log.Logger = zerolog.New(logContainsWriter{
-					needle: "config file changed",
+					needle: []byte("config file changed"),
 					seen:   seenConfigChange,
 				})
 				t.Cleanup(func() {

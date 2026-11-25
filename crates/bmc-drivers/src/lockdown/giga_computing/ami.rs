@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
 use bmc_platform::{
     DriverOutcome, Lockdown, LockdownDesiredState, LockdownScope, LockdownState, LockdownStatus,
@@ -81,23 +83,24 @@ fn state(interfaces: &[Controls]) -> LockdownState {
 }
 
 fn message(interfaces: &[Controls]) -> String {
-    let read = if interfaces.is_empty() {
-        "no host interfaces found".to_string()
+    let mut message = String::new();
+    if interfaces.is_empty() {
+        message.push_str("no host interfaces found");
     } else {
-        interfaces
-            .iter()
-            .map(|controls| {
-                format!(
-                    "host_interface={}, auth_none={}, cred_bootstrap={}",
-                    controls.interface_enabled,
-                    controls.auth_none,
-                    controls.credential_bootstrapping
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ")
-    };
-    format!("{read}; KCS not exposed via Redfish on this platform (state unknown)")
+        for (index, controls) in interfaces.iter().enumerate() {
+            if index != 0 {
+                message.push_str("; ");
+            }
+            write!(
+                message,
+                "host_interface={}, auth_none={}, cred_bootstrap={}",
+                controls.interface_enabled, controls.auth_none, controls.credential_bootstrapping
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    message.push_str("; KCS not exposed via Redfish on this platform (state unknown)");
+    message
 }
 
 #[async_trait]

@@ -167,7 +167,7 @@ impl fmt::Display for BiosAttrValue<'_> {
             BiosAttrValue::Str(v) => v.fmt(f),
             BiosAttrValue::Bool(v) => v.fmt(f),
             BiosAttrValue::Int(v) => v.fmt(f),
-            BiosAttrValue::AnyStr(v) => write!(f, "any({})", v.iter().join(",")),
+            BiosAttrValue::AnyStr(v) => write!(f, "any({})", v.iter().format(",")),
         }
     }
 }

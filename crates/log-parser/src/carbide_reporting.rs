@@ -169,13 +169,13 @@ pub(crate) async fn send_health_alerts(
         machine_id = event.machine_id.clone();
         if event.alert {
             let alert = HealthProbeAlert {
-                id: HealthProbeId::from_str(event.name.clone().as_str())
+                id: HealthProbeId::from_str(event.name.as_str())
                     .map_err(|e| ReportingError::GenericError(e.to_string()))?,
                 in_alert_since: Some(event.timestamp),
                 message: format!(
                     "[{}] {}",
                     event.severity,
-                    event.description.clone().unwrap_or("".to_string())
+                    event.description.as_deref().unwrap_or("")
                 ),
                 tenant_message: None,
                 classifications: vec![
@@ -186,7 +186,7 @@ pub(crate) async fn send_health_alerts(
             report.alerts.push(alert);
         } else {
             let success = HealthProbeSuccess {
-                id: HealthProbeId::from_str(event.name.clone().as_str())
+                id: HealthProbeId::from_str(event.name.as_str())
                     .map_err(|e| ReportingError::GenericError(e.to_string()))?,
                 target: event.target.clone(),
             };

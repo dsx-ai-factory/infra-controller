@@ -737,7 +737,7 @@ fn pubkey_auth_admin_authorized_keys(
 
     let authorized_keys = AuthorizedKeys::read_file(authorized_keys_path).map_err(|error| {
         PubkeyAuthError::ReadingAuthorizedKeys {
-            path: authorized_keys_path.to_string_lossy().to_string(),
+            path: authorized_keys_path.to_string_lossy().into_owned(),
             error,
         }
     })?;

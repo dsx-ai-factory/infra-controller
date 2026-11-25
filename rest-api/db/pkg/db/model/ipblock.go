@@ -85,8 +85,8 @@ var (
 func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
 	return db.GetAdvisoryLockIDFromString(fmt.Sprintf(
 		"site-fabric-ip-blocks:%s:%s:%s",
-		infrastructureProviderID.String(),
-		siteID.String(),
+		infrastructureProviderID,
+		siteID,
 		IPBlockRoutingTypeDatacenterOnly,
 	))
 }

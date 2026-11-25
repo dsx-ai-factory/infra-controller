@@ -126,9 +126,7 @@ impl ControllerEnv {
                     credential_manager: test_credential_manager.clone(),
                     switch_mtls_services: default_switch_mtls_services(),
                     per_object_metrics_registry: per_object_metrics_registry.clone(),
-                    redfish_client_pool: redfish_sim.clone(),
                     bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_sim.clone()),
-                    bmc_credential_ops: redfish_sim.clone(),
                     bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::Bmc,
                     ),
@@ -204,7 +202,8 @@ pub(super) async fn new_switch(
             bmc_mac_address: bmc_mac.to_string(),
             bmc_username: "ADMIN".to_string(),
             bmc_password: "Pwd2023x0x0x0x7".to_string(),
-            switch_serial_number: format!("SW-{}", &fixture_id.simple().to_string()[..24]),
+            // Keep the first 24 lowercase hex digits of the UUID.
+            switch_serial_number: format!("SW-{:024x}", fixture_id.as_u128() >> 32),
             metadata: Some(rpc::forge::Metadata {
                 name,
                 ..Default::default()

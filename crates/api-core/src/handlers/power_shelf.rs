@@ -19,6 +19,7 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
 use db::{ObjectColumnFilter, power_shelf as db_power_shelf};
 use health_report::HealthReportApplyMode;
+use itertools::Itertools;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::metadata::Metadata;
 use tonic::{Request, Response, Status};
@@ -119,9 +120,9 @@ pub(crate) async fn decommission_power_shelf(
         if !assigned_hosts.is_empty() {
             let assignments = assigned_hosts
                 .iter()
-                .map(|(machine_id, instance_id)| format!("{machine_id} ({instance_id})"))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .format_with(", ", |(machine_id, instance_id), f| {
+                    f(&format_args!("{machine_id} ({instance_id})"))
+                });
             return Err(CarbideError::FailedPrecondition(format!(
                 "power shelf {power_shelf_id} cannot be decommissioned while managed hosts in rack {rack_id} are assigned to instances: {assignments}"
             ))

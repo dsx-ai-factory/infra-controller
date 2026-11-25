@@ -98,7 +98,7 @@ pub async fn find_by_object_ids(
     qb.push(" (");
     let mut separated = qb.separated(", ");
     for id in ids {
-        separated.push_bind(id.to_string());
+        separated.push_bind(sqlx::types::Text(id));
     }
     qb.push(")");
 
@@ -183,7 +183,7 @@ pub async fn persist(
         HealthHistoryTableId::Rack => persist_query!("rack_health_history"),
     };
     let _query_result = sqlx::query(query)
-        .bind(object_id.to_string())
+        .bind(sqlx::types::Text(object_id))
         .bind(sqlx::types::Json(health))
         .bind(health_hash)
         .bind(chrono::Utc::now())
@@ -216,8 +216,8 @@ pub async fn update_object_ids(
         HealthHistoryTableId::Rack => update_object_ids_query!("rack_health_history"),
     };
     sqlx::query(query)
-        .bind(new_object_id.to_string())
-        .bind(old_object_id.to_string())
+        .bind(sqlx::types::Text(new_object_id))
+        .bind(sqlx::types::Text(old_object_id))
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -342,6 +342,51 @@ mod tests {
         SELECT * FROM new_history_record
         WHERE NOT EXISTS (SELECT health_hash FROM last_history_record WHERE last_history_record.health_hash = new_history_record.health_hash);";
         assert_eq!(persist_query!("rack_health_history"), original);
+    }
+
+    #[crate::sqlx_test]
+    async fn machine_health_history_retains_newest_250_records(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Exercise the migrated machine retention trigger without provisioning a host.
+        let mut conn = pool.acquire().await?;
+        let object_id = "machine-health-history-retention-test";
+        const EXPECTED_LIMIT: usize = 250;
+        let reports: Vec<_> = (0..=EXPECTED_LIMIT)
+            .map(|i| health_with_alert(&format!("Alert{i}")))
+            .collect();
+
+        for report in &reports[..EXPECTED_LIMIT] {
+            persist(&mut conn, HealthHistoryTableId::Machine, &object_id, report).await?;
+        }
+        assert_eq!(
+            count_records(&mut conn, HealthHistoryTableId::Machine, object_id).await,
+            EXPECTED_LIMIT
+        );
+
+        persist(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &object_id,
+            &reports[EXPECTED_LIMIT],
+        )
+        .await?;
+
+        let records = find_by_object_ids(
+            &mut *conn,
+            HealthHistoryTableId::Machine,
+            &[object_id],
+            None,
+            None,
+        )
+        .await?
+        .remove(object_id)
+        .expect("machine health history must exist after insertion");
+        let retained_reports: Vec<_> = records.into_iter().map(|record| record.health).collect();
+        let expected_reports: Vec<_> = reports.into_iter().skip(1).rev().collect();
+        assert_eq!(retained_reports, expected_reports);
+
+        Ok(())
     }
 
     #[crate::sqlx_test]

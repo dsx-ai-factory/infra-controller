@@ -17,6 +17,8 @@
 
 //! Handler for RackState::Error.
 
+use std::fmt::Write;
+
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_rack_controller::ready::detect_component_failure;
@@ -40,12 +42,14 @@ pub async fn handle_error(
         let activities_desc = if scope.activities.is_empty() {
             "all non-power activities".to_string()
         } else {
-            scope
-                .activities
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut description = String::new();
+            for (index, activity) in scope.activities.iter().enumerate() {
+                if index > 0 {
+                    description.push_str(", ");
+                }
+                write!(description, "{activity}").expect("writing to a String cannot fail");
+            }
+            description
         };
         if scope.is_full_rack() {
             tracing::info!(

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use carbide_utils::SCOUT_FIRMWARE_SCRIPTS_DIR;
 use eyre::{WrapErr, bail};
+use itertools::Itertools;
 use model::firmware::{FirmwareComponentType, ScoutConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -245,7 +246,6 @@ impl ScoutFirmwareScriptSelector {
 fn safe_lookup_key(value: &str) -> Option<String> {
     let value = value
         .split_ascii_whitespace()
-        .collect::<Vec<_>>()
         .join("_")
         .to_ascii_lowercase();
     let mut key = String::with_capacity(value.len());

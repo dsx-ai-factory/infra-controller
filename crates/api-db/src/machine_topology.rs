@@ -208,13 +208,12 @@ pub async fn find_by_machine_ids<ID: MachineIdSubtypeTrait>(
     // TODO: Actually this shouldn't be able to return multiple entries,
     // since there is a check in create that for existing interfaces
     // But due to race conditions we can likely still have multiple of those interfaces
-    let str_ids: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
     let query = format!(
         "SELECT {} FROM machine_topologies WHERE machine_id=ANY($1)",
         MachineTopology::db_table_columns(),
     );
     let topologies = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(str_ids)
+        .bind(machine_ids)
         .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))?
@@ -376,12 +375,7 @@ where
         ORDER BY mi.machine_id, family(mia.address), mia.address
     "#;
     let results: Vec<(MachineId, Option<String>)> = sqlx::query_as(query)
-        .bind(
-            machine_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>(),
-        )
+        .bind(machine_ids)
         .fetch_all(conn)
         .await
         .map_err(|e| {

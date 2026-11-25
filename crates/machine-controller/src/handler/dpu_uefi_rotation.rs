@@ -40,9 +40,7 @@
 //! [`RotatingDpuUefi`]: model::machine::ManagedHostState::RotatingDpuUefi
 //! [`RotationGate::rotation_needed`]: carbide_credential_rotation::RotationGate::rotation_needed
 
-use bmc_vendor::DpuModel;
-use carbide_redfish::libredfish::CredentialOpError;
-use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
+use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_uuid::machine::DpuMachineId;
 use db::TransactionVending as _;
 use db::credential_rotation::NoStagedCredentialRotation;
@@ -54,6 +52,7 @@ use state_controller::state_handler::{
 
 use super::{current_site_uefi_target, handler_restart_dpu, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
+use crate::uefi_password::{read_dpu_factory_default, rotate_uefi_password_candidates};
 
 /// `true` when this DPU's UEFI credential lags the staged site-wide `dpu_uefi`
 /// target and is not quarantined. A DPU with no BMC MAC (untrackable) or no
@@ -135,7 +134,9 @@ pub(crate) async fn dpu_uefi_current_candidates(
         }
     }
     // Factory default last: a never-set DPU still holds its hardware password.
-    candidates.push(read_dpu_factory_default(reader).await?);
+    candidates.push(read_dpu_factory_default(reader).await.map_err(|e| {
+        StateHandlerError::GenericError(eyre!("read DPU UEFI factory default: {e}"))
+    })?);
     Ok(candidates)
 }
 
@@ -153,30 +154,6 @@ async fn read_dpu_uefi_password(
         ))
     })?;
     Ok(credentials.map(|Credentials::UsernamePassword { password, .. }| password))
-}
-
-/// Read the DPU hardware factory-default UEFI password (a hardware constant, not
-/// a versioned/site credential), falling back to the well-known "bluefield"
-/// default when the store has no entry -- matching the ingestion `uefi_setup`
-/// path so a never-set DPU authenticates identically whether it converges via
-/// ingestion or via a forced rotation.
-async fn read_dpu_factory_default(
-    reader: &dyn CredentialReader,
-) -> Result<String, StateHandlerError> {
-    let key = CredentialKey::DpuUefi {
-        credential_type: CredentialType::DpuHardwareDefault {
-            model: DpuModel::Unknown,
-        },
-    };
-    let credentials = reader.get_credentials(&key).await.map_err(|e| {
-        StateHandlerError::GenericError(eyre::eyre!(
-            "read dpu UEFI factory default {}: {e}",
-            key.to_key_str()
-        ))
-    })?;
-    Ok(credentials
-        .map(|Credentials::UsernamePassword { password, .. }| password)
-        .unwrap_or_else(|| "bluefield".to_string()))
 }
 
 /// Converge one DPU's UEFI (BIOS setup) password to the staged site-wide
@@ -221,7 +198,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
         .status
         .bmc_info
         .mac
-        .ok_or(StateHandlerError::MissingData {
+        .ok_or_else(|| StateHandlerError::MissingData {
             object_id: dpu.id.to_string(),
             missing: "bmc_mac",
         })?;
@@ -249,7 +226,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
     // password before touching the device; scope the credential reader so it is
     // not held across the mutable-context DPU restart below.
     let (candidates, new_password) = {
-        let reader = ctx.services.bmc_credential_ops.credential_reader();
+        let reader = ctx.services.credential_manager.as_ref();
         let candidates = dpu_uefi_current_candidates(reader, current_version, target).await?;
         let Credentials::UsernamePassword {
             password: new_password,
@@ -274,16 +251,13 @@ pub(crate) async fn handle_rotating_dpu_uefi(
         })?;
     }
 
-    let access = ctx.services.bmc_access_info_for_machine(dpu).await?;
-    match ctx
-        .services
-        .bmc_credential_ops
-        .rotate_uefi_password(&access, &candidates, new_password)
-        .await
-    {
-        // The DPU stages the change through Bios/Settings and schedules no job
-        // (`job_id` is always `None`); the restart below commits it.
-        Ok(_job_id) => {
+    // Connection failures return Err so the state framework retries; quarantine
+    // is reserved for the password-change operation itself failing on the device.
+    let bmc = ctx.services.connect_bmc(dpu).await?;
+    match rotate_uefi_password_candidates(&bmc, &candidates, &new_password).await {
+        // The DPU stages the change through Bios/Settings and schedules no job;
+        // the restart below commits it.
+        Ok(_outcome) => {
             handler_restart_dpu(dpu, ctx, dpf_used_for_ingestion).await?;
 
             let mut txn = db_pool
@@ -323,15 +297,11 @@ pub(crate) async fn handle_rotating_dpu_uefi(
             }
             Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
         }
-        // Client creation failed (credential store, TCP, or the vendor
-        // probe): return Err so the state framework retries; quarantine is
-        // reserved for the operation itself failing on the device.
-        Err(CredentialOpError::ClientCreation(e)) => Err(e.into()),
-        Err(CredentialOpError::Operation(e)) => {
+        Err(e) => {
             // Device-level failure (all current-password candidates rejected, or
-            // the DPU refused the change). The pool already redacted the password
-            // out of the error. Quarantine with backoff and return to Ready so
-            // the host never wedges in this state.
+            // the DPU refused the change). Passwords are already redacted out of
+            // the error. Quarantine with backoff and return to Ready so the host
+            // never wedges in this state.
             let redacted = e.to_string();
             let quarantined_until =
                 db::credential_rotation::backoff_until(prior_attempts, chrono::Utc::now());
@@ -373,8 +343,9 @@ pub(crate) async fn handle_rotating_dpu_uefi(
 
 #[cfg(test)]
 mod tests {
+    use bmc_vendor::DpuModel;
     use carbide_secrets::MemoryCredentialStore;
-    use carbide_secrets::credentials::CredentialWriter;
+    use carbide_secrets::credentials::{CredentialType, CredentialWriter};
 
     use super::*;
 

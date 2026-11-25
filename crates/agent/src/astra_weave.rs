@@ -2234,8 +2234,9 @@ pub(crate) mod tests {
                 .as_ref()
                 .unwrap()
                 .user_data
-                .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY),
-            Some(&"test-revision".to_string())
+                .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
+                .map(String::as_str),
+            Some("test-revision")
         );
         assert_eq!(
             calls.create_virtual_network_attachments[0]
@@ -2400,8 +2401,11 @@ pub(crate) mod tests {
             Some("test-resource-version")
         );
         assert_eq!(
-            metadata.user_data.get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY),
-            Some(&"test-revision".to_string())
+            metadata
+                .user_data
+                .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
+                .map(String::as_str),
+            Some("test-revision")
         );
         assert!(calls.delete_virtual_network_attachments.is_empty());
         assert!(calls.create_virtual_network_attachments.is_empty());
@@ -2416,8 +2420,11 @@ pub(crate) mod tests {
             Some("test-resource-version")
         );
         assert_eq!(
-            metadata.user_data.get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY),
-            Some(&"test-revision".to_string())
+            metadata
+                .user_data
+                .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
+                .map(String::as_str),
+            Some("test-revision")
         );
 
         server.shutdown().await?;
@@ -3023,8 +3030,9 @@ pub(crate) mod tests {
                     .as_ref()
                     .unwrap()
                     .user_data
-                    .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY),
-                Some(&"revision-1".to_string())
+                    .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
+                    .map(String::as_str),
+                Some("revision-1")
             );
             assert_eq!(calls.create_virtual_network_attachments.len(), 1);
             assert_eq!(
@@ -3056,8 +3064,11 @@ pub(crate) mod tests {
             );
             assert!(calls.create_virtual_networks.iter().all(|request| {
                 request.metadata.as_ref().and_then(|metadata| {
-                    metadata.user_data.get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
-                }) == Some(&"revision-2".to_string())
+                    metadata
+                        .user_data
+                        .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
+                        .map(String::as_str)
+                }) == Some("revision-2")
             }));
             assert!(calls.delete_virtual_network_attachments.is_empty());
             assert_eq!(calls.create_virtual_network_attachments.len(), 1);
@@ -3075,8 +3086,11 @@ pub(crate) mod tests {
                     .iter()
                     .all(|request| {
                         request.metadata.as_ref().and_then(|metadata| {
-                            metadata.user_data.get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
-                        }) == Some(&"revision-2".to_string())
+                            metadata
+                                .user_data
+                                .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
+                                .map(String::as_str)
+                        }) == Some("revision-2")
                     })
             );
             *calls = RecordedWeaveEwVpcCalls::default();
@@ -3116,8 +3130,11 @@ pub(crate) mod tests {
                     .iter()
                     .all(|request| {
                         request.metadata.as_ref().and_then(|metadata| {
-                            metadata.user_data.get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
-                        }) == Some(&"revision-3".to_string())
+                            metadata
+                                .user_data
+                                .get(WEAVE_EW_VPC_REVISION_USER_DATA_KEY)
+                                .map(String::as_str)
+                        }) == Some("revision-3")
                     })
             );
             *calls = RecordedWeaveEwVpcCalls::default();

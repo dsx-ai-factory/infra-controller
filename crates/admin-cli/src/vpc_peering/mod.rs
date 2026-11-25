@@ -47,12 +47,12 @@ fn convert_vpc_peerings_to_table(vpc_peerings: &[VpcPeering]) -> CarbideCliResul
             .vpc_id
             .as_ref()
             .map(|uuid| uuid.to_string())
-            .unwrap_or("None".to_string());
+            .unwrap_or_else(|| "None".to_string());
         let peer_vpc_id = vpc_peering
             .peer_vpc_id
             .as_ref()
             .map(|uuid| uuid.to_string())
-            .unwrap_or("None".to_string());
+            .unwrap_or_else(|| "None".to_string());
 
         table.add_row(row![id, vpc_id, peer_vpc_id]);
     }

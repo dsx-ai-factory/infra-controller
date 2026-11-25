@@ -533,9 +533,9 @@ func TestOperatingSystemSiteAssociationSQLDAO_Update(t *testing.T) {
 			})
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
-				assert.Equal(t, tc.expectedOperatingSystemID.String(), got.OperatingSystemID.String())
+				assert.Equal(t, *tc.expectedOperatingSystemID, got.OperatingSystemID)
 				assert.Equal(t, tc.expectedVersion, got.Version)
-				assert.Equal(t, tc.expectedSiteID.String(), got.SiteID.String())
+				assert.Equal(t, *tc.expectedSiteID, got.SiteID)
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, *tc.IsMissingOnSite, got.IsMissingOnSite)
 			}

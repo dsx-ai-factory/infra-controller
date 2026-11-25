@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -487,10 +488,10 @@ func TestGetAllInfiniBandInterface_Handle(t *testing.T) {
 				q.Add("includeRelation", *tt.queryIncludeRelations2)
 			}
 			if tt.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tt.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tt.pageNumber))
 			}
 			if tt.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tt.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tt.pageSize))
 			}
 			if tt.orderBy != nil {
 				q.Set("orderBy", *tt.orderBy)
@@ -536,18 +537,18 @@ func TestGetAllInfiniBandInterface_Handle(t *testing.T) {
 			assert.Equal(t, tt.expectedTotal, pr.Total)
 
 			if tt.queryIncludeRelations1 != nil || tt.queryIncludeRelations2 != nil {
-				if tt.expectedInfiniBandPartitionID != nil && tt.expectedInfiniBandPartitionID.String() != "" {
+				if tt.expectedInfiniBandPartitionID != nil {
 					assert.Equal(t, tt.expectedInfiniBandPartitionID.String(), rst[0].InfiniBandPartition.ID)
 				}
-				if tt.expectedInstance != nil && tt.expectedInstance.ID.String() != "" {
+				if tt.expectedInstance != nil {
 					assert.Equal(t, tt.expectedInstance.ID.String(), rst[0].InstanceID)
 				}
 			} else {
 				if len(rst) > 0 {
-					if tt.expectedInstance != nil && tt.expectedInstance.ID.String() != "" {
+					if tt.expectedInstance != nil {
 						assert.Equal(t, tt.expectedInstance.ID.String(), rst[0].InstanceID)
 					}
-					if tt.expectedInfiniBandPartitionID != nil && tt.expectedInfiniBandPartitionID.String() != "" {
+					if tt.expectedInfiniBandPartitionID != nil {
 						assert.Equal(t, tt.expectedInfiniBandPartitionID.String(), rst[0].InfiniBandPartitonID)
 					}
 				}
@@ -1015,10 +1016,10 @@ func TestGetAllInstanceInfiniBandInterfaceHandler_Handle(t *testing.T) {
 				q.Add("includeRelation", *tt.queryIncludeRelations2)
 			}
 			if tt.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tt.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tt.pageNumber))
 			}
 			if tt.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tt.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tt.pageSize))
 			}
 			if tt.orderBy != nil {
 				q.Set("orderBy", *tt.orderBy)

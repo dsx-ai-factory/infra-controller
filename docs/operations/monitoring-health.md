@@ -942,7 +942,7 @@ does not add high-cardinality series to the existing `/metrics` endpoint.
 enabled = true
 listen_address = "[::]:9091"
 # Defaults to all supported object types; also valid: "network_segment",
-# "vpc_prefix", "spdm_attestation", "ib_partition".
+# "vpc_prefix", "spdm_attestation", "ib_partition", "nvlink_domain".
 object_types = ["machine", "switch", "power_shelf", "rack"]
 ```
 

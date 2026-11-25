@@ -12,7 +12,7 @@ Before enabling the DHCPv6 workload, review the following requirements:
 - Supply a site-unique, stable server identifier consisting of exactly 12 hexadecimal digits. Keep it unchanged across pod replacements and upgrades. Kea advertises a DHCP unique identifier (DUID) based on a link-layer address (DUID-LL), with Ethernet hardware type and this identifier. It does not generate or persist a pod-local identity.
 - Point IPv4 relays to the IPv4-only DHCP Service on UDP 67. Point IPv6 relays to the separate IPv6-only DHCP Service on UDP 547. A MetalLB deployment needs a distinct IPv6 virtual IP address (VIP) from an IPv6 address pool and a working route from the relay to that VIP.
 - Configure relays to supply option 79, defined in [RFC 6939: Client Link-Layer Address Option in DHCPv6](https://www.rfc-editor.org/rfc/rfc6939), for clients whose DUID has no Ethernet media access control (MAC) address. These include enterprise-number DUIDs (DUID-EN) and universally unique identifier DUIDs (DUID-UUID).
-- [Prepare the managed network](#prepare-the-managed-network) with an IPv6 prefix and the relay link-address before enabling DHCPv6.
+- [Prepare the managed network](#prepare-the-managed-network) with an IPv6 prefix before enabling DHCPv6. An explicit relay link-address selector is optional.
 - DHCPv6 runs one replica with a `Recreate` rollout. The chart's `replicas` value controls DHCPv4 only and defaults to one. Enabling DHCPv6 does not restrict that setting. Leases use pod-local memfiles. Durable lease storage and active-writer coordination remain outside this deployment's supported scope.
 
 NICo accepts option 79 only from relay metadata, with Ethernet hardware type 1 and exactly six MAC bytes. That MAC takes precedence over a DUID-LL or DUID-LLT (link-layer address plus time) MAC. Mismatches produce a warning. If the relay supplies no usable option 79, NICo falls back to the Ethernet MAC in DUID-LL or DUID-LLT. Requests without either MAC source are dropped before API discovery (`no_mac_no_option79`). A missing or malformed client DUID is rejected even when option 79 is usable.
@@ -25,9 +25,11 @@ The IPv6 LoadBalancer Service uses `externalTrafficPolicy: Local` to preserve re
 
 ## Prepare the Managed Network
 
-Network definitions apply only when Core first creates a segment. Changing `prefix_v6`, `dhcpv6_link_address`, or `infer_slaac_eui64_addresses` in the site configuration does not update an existing segment. A change from an existing seed snapshot reports configuration drift. For an older segment without a snapshot, Core records the declaration without changing the segment.
+Use the [existing BMC underlay procedure](#add-ipv6-to-an-existing-bmc-underlay) to add IPv6 to an IPv4 out-of-band network. For a new segment, use a site TOML declaration instead.
 
-The network-segment command-line interface (CLI) and remote procedure calls (RPCs) provide no in-place prefix or inference-flag update. An existing segment needs a reviewed migration to add IPv6 or enable inference. Keep the DHCPv6 workload disabled until the stored segments it will serve are ready.
+Core uses TOML to seed segments, not to update them. Leave the original declaration unchanged after an API addition: a restart preserves the added prefix. If a declaration differs from its stored seed snapshot, Core reports configuration drift (`carbide_config_drift_total`) rather than applying the change. For an older segment without a snapshot, Core can record the declaration without changing the segment when the name matches exactly one segment and Core can select a forward DNS domain.
+
+### Create a Segment From TOML
 
 For a new segment, add the following definition to the existing TOML in `nico-api.siteConfig.nicoApiSiteConfig`. Retain the rest of the site's TOML. A Helm string override replaces the entire value. Replace the segment name and addresses with unused site allocations before the segment is first created:
 
@@ -44,15 +46,17 @@ reserve_first = 5
 
 `prefix_v6` is an optional IPv6 prefix in Classless Inter-Domain Routing (CIDR) notation that adds a second prefix to the same segment as the IPv4 `prefix`. Omitting it leaves this definition IPv4-only. `dhcpv6_link_address` is an optional IPv6 address used for exact matching of the relay's link-address. It can be outside the IPv6 prefix and requires an IPv6 prefix to be configured. The server prefers an exact link-address match and otherwise falls back to prefix containment. `gateway` applies only to IPv4, and `reserve_first` reserves the same number of leading addresses in each prefix. [IP and Network Configuration](ip-and-network-configuration.md) describes the physical interface and segment-type rules.
 
-`infer_slaac_eui64_addresses` is an optional per-network Boolean that defaults to `false` and applies to the whole segment. Set it to `true` only for clients that derive Stateless Address Autoconfiguration (SLAAC) addresses from their MAC addresses using modified EUI-64.
+Apply the site configuration through the normal Core deployment workflow. Read the segment by UUID with [network-segment show](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-show.md#examples) and verify the stored `PREFIXES` before enabling DHCPv6.
+
+### SLAAC Inference
+
+`infer_slaac_eui64_addresses` is an optional per-network Boolean that defaults to `false` and applies to the whole segment. Set it at creation only for clients that derive Stateless Address Autoconfiguration (SLAAC) addresses from their MAC addresses using modified EUI-64. Verify `INFER SLAAC EUI-64` in the single-segment detail view; the list view does not display it.
 
 For site-relayed INFORMATION-REQUEST messages and SOLICIT messages without IA_NA, Core can infer and persist the client's SLAAC address and refresh its DNS naming. Creating an inferred address requires all of the following:
 
 - The segment uses `allocation_strategy = "dynamic"`, which is the default. Inference is disabled for `allocation_strategy = "reserved"`.
 - The segment has exactly one IPv6 prefix, and that prefix is a `/64`.
 - The interface has no existing IPv6 assignment.
-
-For a new segment, apply the site configuration through the normal API deployment workflow. Then, from your admin CLI environment, use [network-segment show](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-show.md#examples) with the segment ID. Inspect `PREFIXES` and `INFER SLAAC EUI-64`; the list-all view does not display the inference flag. SLAAC inference requires exactly one IPv6 `/64` and an inference value of `true`. Verify these stored values before enabling the DHCPv6 workload.
 
 ## Enable the DHCPv6 Workload
 
@@ -76,6 +80,46 @@ nico-dhcp:
 Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
 
 The example enables address allocation, not HTTP boot. Refer to [Helm Values](#helm-values) for the complete settings and defaults, then complete [Deployment Verification and Metrics](#deployment-verification-and-metrics).
+
+## Add IPv6 to an Existing BMC Underlay
+
+Use this procedure on an authorized **non-production** site to add IPv6 to the out-of-band network of an ingested host or DPU baseboard management controller (BMC). Keep IPv4 management active. Adding a prefix neither assigns a BMC address nor switches Redfish to IPv6. Only an unattached underlay is eligible; this is not a tenant or admin network operation.
+
+### Check the Target and Address Plan
+
+Before adding the prefix, complete these checks:
+
+- Verify the admin CLI's effective API URL and administrator mTLS identity against the intended test site. Check the serving Core `git_sha` in the [version report](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/version/version.md#examples) over a verified server connection. It must contain both [the prefix API](https://github.com/dsx-ai-factory/infra-controller/pull/8806) and [the managed BMC discovery fix](https://github.com/dsx-ai-factory/infra-controller/pull/8747). Upgrade if either change is absent. Confirm Site Explorer is enabled in Core. Check the client separately with `nico-admin-cli network-segment add-prefix --help`.
+- Read the segment by UUID using [network-segment show](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-show.md#examples). The detail view must show `STATE: ready`, `TYPE: Underlay`, `DELETED: Not Deleted`, the all-zero `VPC` UUID, and exactly one IPv4 prefix. Record its prefix ID and settings. Check `config.mtu` in the segment's JSON and verify the link and routed IPv6 path support at least 1280 bytes.
+- Select a pilot BMC. Use [machine-interfaces show](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine-interfaces/machine-interfaces-show.md#examples) to find its interface UUID by MAC, then read that UUID in JSON. Confirm `interface_type` is `1` (BMC), `association_type` is `1` (machine), and the machine and segment IDs match your inventory. Record the current IPv4 address. Verify that every BMC the pilot can reach is already ingested, or keep IPv6 disabled on the other BMCs. A new endpoint without a managed machine owner can enter automatic preingestion, including reset.
+- Choose an unused IPv6 network CIDR with an explicit length and no host bits. Do not supply an IPv6 gateway. Exclude addresses used by routers, relays, static devices, or other allocators, and leave usable capacity for clients. The optional `--reserve-first` holds back leading addresses (0 through 2,147,483,647; default 0). Core does not check the site's external allocations. Refer to the [DHCP Cutover Checklist](ip-and-network-configuration.md#dhcp-cutover-checklist).
+- Check the relay's IPv6 Relay-Forward `link-address`; do not infer it from the packet source or Service VIP. To select this segment by exact match, supply that value as `--dhcpv6-link-address`. It must be unique, can lie outside the prefix, and must not redirect another link's traffic. If omitted, the received link-address must fall within the intended prefix and not match another segment's exact selector.
+- Confirm the segment's effective allocation policy with the site operator; the segment readout does not include it. Appending a prefix preserves that policy. On a reserved segment, [reserve the BMC's IPv6 address](expected-machine-interfaces.md#allow-only-reserved-addresses) after adding the prefix and before enabling clients, unless the interface already has a usable IPv6 assignment. An IPv4 reservation does not provide a first IPv6 lease.
+
+### Add and Activate the Prefix
+
+1. Prepare IPv6 routing and the relay, but keep DHCPv6 forwarding and IPv6 router advertisements inactive on the target link until readback. Leave IPv4 and unrelated DHCPv6 links running. If traffic can already reach a running DHCPv6 service, Core can serve the new prefix immediately after commit. Isolate the pilot if the link is shared: router advertisements reach other clients on that link.
+2. Run [network-segment add-prefix](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-add-prefix.md#options). It calls the Core administrator RPC `forge.Forge/AddNetworkSegmentPrefix`; there is no REST endpoint for this mutation. The required top-level `--cloud-unsafe-op=USERNAME` acknowledgement precedes the subcommand. It does not authenticate the operator or select a site. Replace the example username, UUID, and addresses with your verified values:
+
+   ```bash
+   nico-admin-cli --cloud-unsafe-op=admin network-segment add-prefix \
+     --id 12345678-1234-5678-90ab-cdef01234567 --prefix 2001:db8::/64 \
+     --reserve-first 5 --dhcpv6-link-address 2001:db8:ffff::1
+   ```
+
+3. Read the segment again by UUID. Under `PREFIXES`, confirm the original IPv4 prefix ID and settings, the new IPv6 CIDR, `Reserve First`, and `DHCPv6 Link`. If readback differs from your address plan, keep the target link inactive. There is no per-prefix update or removal operation. Escalate through the site's change process rather than deleting the occupied segment.
+4. After readback and any required reservations, [enable the DHCPv6 workload](#enable-the-dhcpv6-workload) if needed. Activate the relay for the pilot, then enable the intended router advertisements and BMC client behavior. For stateful DHCPv6, advertise `M=1` and have the BMC request a lease. For SLAAC, advertise the segment's stored `/64` with `A=1`, `M=0`, and `O=1`. Verify the [inference prerequisites](#slaac-inference) before relying on an options-only request. Core does not learn arbitrary SLAAC addresses. If inference is disabled, use stateful DHCPv6 or plan a reviewed migration; there is no CLI or RPC to change the existing flag.
+
+If the command times out, loses its reply, or cannot print its output, reread before retrying: Core might already have committed. An identical request returns the stored segment without another write while the target remains eligible. A different same-family prefix or setting fails. For `NOT_FOUND`, check the UUID. For `FAILED_PRECONDITION`, recheck the lifecycle, attachment, and stored settings. For `INVALID_ARGUMENT`, check the fields, prefix overlap, and relay selector. Correct local argument errors before sending a request. Check credentials for a permission error and serving versions for an unsupported RPC. For storage errors, inspect the Core logs, correct the cause, and reread. The prefix and any new reverse zone commit together.
+
+### Verify the Pilot BMC
+
+Verify the following before expanding the rollout:
+
+- Read the original interface UUID again. Compare the MAC, machine and segment IDs, and IPv4 address with the baseline. Use [machine-interfaces show-addresses](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine-interfaces/machine-interfaces-show-addresses.md#examples) with that UUID. Compare the recorded IPv6 `Address` with the address the BMC actually uses. Expect `Type` to be `dhcp` for a dynamic pool lease, `static` for a Fixed or Retained assignment, or `slaac` for inference. A later stateful allocation can replace the inferred address.
+- Inspect the [Site Explorer endpoint report](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/site-explorer/site-explorer-get-report-endpoint.md#examples) separately for the IPv4 and IPv6 literals. At first discovery of a new address on a machine-owned BMC interface, `Preingestion State` starts at `Complete`, without starting another preingestion sequence. A refresh preserves an operator-requested retry. `Complete` does not mean the probe succeeded. Require both reports, with `Endpoint Type` identifying a BMC and no `Last Exploration Error`.
+- Check the [machine health report](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine/machine-health-report-show.md) across successive Site Explorer audits. A failing BMC address can raise `BmcExplorationFailure` and prevent allocations even if IPv4 still works. Pause if either endpoint is absent, fails exploration, has unexpected ownership or preingestion, or if machine health changes between audits.
+- For a BMC in a managed DNS domain, query the site resolver for A and AAAA records at the interface's current `<hostname>.<domain>`. Check that its IPv6 address resolves back to that name, not the machine-ID alias. [Reverse DNS](../configuration/dns.md#reverse-dns) explains how assignment, zone alignment, and site forwarding affect these checks. Verify IPv4 Redfish access using the original IPv4 literal. Verify the IPv6 path separately; DNS or stored state does not establish switch, routing, or firmware support.
 
 ## Deployment Verification and Metrics
 
@@ -111,7 +155,7 @@ For SLAAC boot through a site DHCPv6 relay, configure all of the following:
 
 - Set `M=0` and the other-configuration flag (`O=1`) in router advertisements.
 - Advertise exactly one autonomous `/64` (`A=1`) that matches the managed segment's IPv6 prefix.
-- Enable modified EUI-64 inference as described in [Prepare the Managed Network](#prepare-the-managed-network). Core uses the options-only INFORMATION-REQUEST to record iPXE's address.
+- Enable modified EUI-64 inference as described in [SLAAC Inference](#slaac-inference). Core uses the options-only INFORMATION-REQUEST to record iPXE's address.
 
 This SLAAC boot path does not cover privacy addresses, multiple autonomous prefixes, or DPU-local boot. [Interface Selection](#interface-selection) explains the multi-interface limitation.
 

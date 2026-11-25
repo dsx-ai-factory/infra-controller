@@ -19,122 +19,17 @@
 //! `set_boot_order_dpu_first`, and the choice between it and the drivers by
 //! the site's `bmc_backend`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use bmc_backend::{idrac_outcome, libredfish_operation_status, platform_error};
-use bmc_platform::{
-    BiosSettings, DriverOutcome, ManagerSettings, OperationReference, OperationStatus,
-    PlatformError, PlatformIdentity,
-};
-use bmc_runtime::ConnectedBmc;
+use bmc_backend::{idrac_outcome, platform_error};
+use bmc_platform::{BiosSettings, DriverOutcome, ManagerSettings, PlatformError, PlatformIdentity};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
-use carbide_redfish::nv_redfish::RedfishBmc;
-use carbide_uuid::machine::MachineIdSubtypeTrait;
 use libredfish::{BiosProfileVendor, Redfish, RedfishError};
-use model::machine::{Machine, ManagedHostStateSnapshot};
 use serde_json::Value;
-use state_controller::state_handler::StateHandlerError;
 
-use super::{BIOS_PROFILE_LABEL, BiosProfileSelection, DpuSettings};
+use super::DpuSettings;
 use crate::config::MachineStateHandlerSiteConfig;
-use crate::context::MachineStateHandlerServices;
-
-/// A host's or DPU's BMC for its platform settings: the libredfish client the
-/// caller already holds, or the drivers.
-pub enum PlatformBmc<'a> {
-    Libredfish {
-        client: &'a dyn Redfish,
-        /// libredfish reports a host without a boot interface as an error,
-        /// which stands only when the host has DPUs to boot from.
-        expected_dpu_count: usize,
-    },
-    Drivers {
-        bmc: Box<ConnectedBmc<RedfishBmc>>,
-        bios_profile: BiosProfileSelection,
-    },
-}
-
-impl<'a> PlatformBmc<'a> {
-    /// The host's BMC through the site's `bmc_backend`, reusing
-    /// `redfish_client` under libredfish.
-    pub(crate) async fn connect(
-        services: &MachineStateHandlerServices,
-        mh_snapshot: &ManagedHostStateSnapshot,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        let host = &mh_snapshot.host_snapshot;
-        let expected_dpu_count = host.associated_dpu_machine_ids().len();
-        Self::connect_machine(
-            services,
-            host,
-            expected_dpu_count,
-            Some(&host.metadata.labels),
-            redfish_client,
-        )
-        .await
-    }
-
-    /// The BMC of `dpu` through the site's `bmc_backend`, reusing
-    /// `redfish_client` under libredfish. The DPU's host has at least this
-    /// DPU.
-    pub(crate) async fn connect_dpu(
-        services: &MachineStateHandlerServices,
-        dpu: &Machine<impl MachineIdSubtypeTrait>,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        Self::connect_machine(services, dpu, 1, None, redfish_client).await
-    }
-
-    async fn connect_machine(
-        services: &MachineStateHandlerServices,
-        machine: &Machine<impl MachineIdSubtypeTrait>,
-        expected_dpu_count: usize,
-        host_labels: Option<&HashMap<String, String>>,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        Ok(match services.connect_drivers(machine).await? {
-            Some(bmc) => Self::Drivers {
-                bios_profile: drivers_bios_profile(
-                    &services.site_config,
-                    host_labels,
-                    bmc.endpoint().identity(),
-                ),
-                bmc,
-            },
-            None => Self::Libredfish {
-                client: redfish_client,
-                expected_dpu_count,
-            },
-        })
-    }
-
-    /// See [`ConnectedBmc::operation_status`] and
-    /// [`libredfish_operation_status`].
-    pub(crate) async fn operation_status(
-        &self,
-        reference: &OperationReference,
-    ) -> Result<OperationStatus, PlatformError> {
-        match self {
-            // Boxed so the state handler's future stays within the stack limit.
-            Self::Drivers { bmc, .. } => Box::pin(bmc.operation_status(reference)).await,
-            Self::Libredfish { client, .. } => {
-                libredfish_operation_status(*client, reference).await
-            }
-        }
-    }
-}
-
-fn drivers_bios_profile(
-    site_config: &MachineStateHandlerSiteConfig,
-    host_labels: Option<&HashMap<String, String>>,
-    identity: &PlatformIdentity,
-) -> BiosProfileSelection {
-    let bios_profile_label = host_labels
-        .and_then(|labels| labels.get(BIOS_PROFILE_LABEL))
-        .map(String::as_str);
-    BiosProfileSelection::select(site_config, bios_profile_label, identity)
-}
 
 /// See [`super::apply`].
 pub(super) async fn apply(
@@ -330,7 +225,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::NamedBiosProfile;
 
     /// A profile applies to the BMCs whose service root vendor names its
     /// vendor key and whose system model, with spaces made underscores, names
@@ -381,74 +275,6 @@ mod tests {
             let (bios, manager) = profiles(&site_config, &identity);
             assert_eq!(bios.attributes, expected, "{scenario}");
             assert_eq!(manager.attributes, expected, "{scenario}");
-        }
-    }
-
-    #[test]
-    fn the_drivers_pick_the_named_bios_profile_from_the_host_labels() {
-        let site_config = MachineStateHandlerSiteConfig {
-            named_bios_profiles: HashMap::from([(
-                "gpu-perf".to_string(),
-                NamedBiosProfile {
-                    vendor: "HPE".to_string(),
-                    model: "ProLiant_DL380a_Gen11".to_string(),
-                    attributes: HashMap::from([(
-                        "WorkloadProfile".to_string(),
-                        json!("HighPerformanceCompute"),
-                    )]),
-                },
-            )]),
-            ..MachineStateHandlerSiteConfig::test_default()
-        };
-        let identity = PlatformIdentity {
-            service_root: ServiceRootIdentity {
-                vendor: Some("HPE".to_string()),
-                ..Default::default()
-            },
-            system: Some(SystemIdentity {
-                model: Some("ProLiant DL380a Gen11".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let labels = |bios_profile_label: Option<&str>| {
-            let mut labels = HashMap::from([("rack".to_string(), "r12".to_string())]);
-            if let Some(name) = bios_profile_label {
-                labels.insert(BIOS_PROFILE_LABEL.to_string(), name.to_string());
-            }
-            labels
-        };
-
-        for (scenario, host_labels, expected) in [
-            (
-                "a labelled host with a matching recipe",
-                Some(labels(Some("gpu-perf"))),
-                BiosProfileSelection::Named(BiosSettings {
-                    attributes: BTreeMap::from([(
-                        "WorkloadProfile".to_string(),
-                        json!("HighPerformanceCompute"),
-                    )]),
-                }),
-            ),
-            (
-                "an unlabelled host",
-                Some(labels(None)),
-                BiosProfileSelection::SiteDefault,
-            ),
-            (
-                "a label naming no recipe",
-                Some(labels(Some("missing"))),
-                BiosProfileSelection::Fallback(
-                    "bios-profile missing is not defined in named_bios_profiles".to_string(),
-                ),
-            ),
-            ("a DPU", None, BiosProfileSelection::SiteDefault),
-        ] {
-            assert_eq!(
-                drivers_bios_profile(&site_config, host_labels.as_ref(), &identity),
-                expected,
-                "{scenario}"
-            );
         }
     }
 

@@ -434,7 +434,7 @@ func (gerh GetExpectedRackGroupHandler) Handle(c echo.Context) error {
 	expectedRackGroup, err := erDAO.Get(ctx, nil, expectedRackGroupID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack Group with ID: %s", expectedRackGroupID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack Group with ID: %s", expectedRackGroupID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Rack Group from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Rack Group due to DB error", nil)
@@ -553,7 +553,7 @@ func (uerh UpdateExpectedRackGroupHandler) Handle(c echo.Context) error {
 	expectedRackGroup, err := erDAO.Get(ctx, nil, expectedRackGroupID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack Group with ID: %s", expectedRackGroupID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack Group with ID: %s", expectedRackGroupID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Rack Group from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Rack Group due to DB error", nil)
@@ -715,7 +715,7 @@ func (derh DeleteExpectedRackGroupHandler) Handle(c echo.Context) error {
 	expectedRackGroup, err := erDAO.Get(ctx, nil, expectedRackGroupID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack Group with ID: %s", expectedRackGroupID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack Group with ID: %s", expectedRackGroupID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Rack Group from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Rack Group due to DB error", nil)

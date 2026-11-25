@@ -98,19 +98,19 @@ pub(super) async fn list_versions(
                     let name = format_compute_tray_component(cv.component);
                     let versions = common::join_or_dash(&cv.versions);
                     table.add_row(Row::new(vec![
-                        Cell::new(&component_id),
-                        Cell::new(&result_status),
+                        Cell::new(component_id),
+                        Cell::new(result_status),
                         Cell::new(&format!("{name}: {versions}")),
-                        Cell::new(&error),
+                        Cell::new(error),
                     ]));
                 }
             } else {
                 let versions = common::join_or_dash(&device.versions);
                 table.add_row(Row::new(vec![
-                    Cell::new(&component_id),
-                    Cell::new(&result_status),
+                    Cell::new(component_id),
+                    Cell::new(result_status),
                     Cell::new(&versions),
-                    Cell::new(&error),
+                    Cell::new(error),
                 ]));
             }
         }

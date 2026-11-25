@@ -93,7 +93,7 @@ pub async fn spawn(
         let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         TcpListener::bind(socket_addr)
             .await
-            .context(format!("error listening on {socket_addr}"))?
+            .with_context(|| format!("error listening on {socket_addr}"))?
     } else {
         TcpListener::bind("0.0.0.0:0")
             .await

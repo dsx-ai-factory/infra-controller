@@ -318,9 +318,29 @@ impl<'de> Deserialize<'de> for Trip {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(D::Error::custom)
+        struct TripVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TripVisitor {
+            type Value = Result<Trip, UnknownTrip>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(value.parse())
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer
+            .deserialize_string(TripVisitor)?
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -597,6 +617,44 @@ mod tests {
     use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn trip_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "timeout";
+        let cases = [
+            (
+                "borrowed string",
+                Trip::deserialize(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                Trip::deserialize(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                Trip::deserialize(StringDeserializer::<Error>::new(input.to_string())),
+            ),
+            (
+                "bytes",
+                Trip::deserialize(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert!(matches!(value, Trip::Timeout), "{scenario}");
+        }
+
+        let error = Trip::deserialize(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
 
     const MINIMAL_TLS: &str = r#"
         [tls]

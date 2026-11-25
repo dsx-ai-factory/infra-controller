@@ -29,8 +29,8 @@ use sqlx::PgConnection;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
-/// Allocate IP's for this network config, filling the InstanceInterfaceConfigs with the newly
-/// allocated IP's.
+/// Fills a workload network configuration with resources using
+/// [`crate::instance_address::allocate`]'s segment admission and reuse rules.
 pub async fn with_allocated_ips(
     value: InstanceNetworkConfig,
     txn: &mut PgConnection,

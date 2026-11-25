@@ -1154,9 +1154,9 @@ where
     S: Serializer,
 {
     if d.lt(&Duration::from_secs(1)) {
-        serializer.serialize_str(&format!("{}ms", d.as_millis()))
+        serializer.collect_str(&format_args!("{}ms", d.as_millis()))
     } else {
-        serializer.serialize_str(&format!("{}s", d.as_secs()))
+        serializer.collect_str(&format_args!("{}s", d.as_secs()))
     }
 }
 

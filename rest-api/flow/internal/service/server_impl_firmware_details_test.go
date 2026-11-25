@@ -56,12 +56,14 @@ func (r *firmwareDetailsCoreReader) GetComponentFirmwareDetails(ctx context.Cont
 // context read. Any unexpected mutation panics through the embedded nil store.
 type firmwareDetailsTaskStore struct {
 	taskstore.Store
-	calls        int
-	rackID       uuid.UUID
-	deadline     time.Time
-	contextCalls int
-	read         func(context.Context) ([]taskdef.FirmwareTaskDetails, error)
-	contextRead  func(context.Context) ([]taskdef.TaskContextMetadata, error)
+	calls           int
+	rackID          uuid.UUID
+	deadline        time.Time
+	contextCalls    int
+	contextDeadline time.Time
+	contextRackID   uuid.UUID
+	read            func(context.Context) ([]taskdef.FirmwareTaskDetails, error)
+	contextRead     func(context.Context) ([]taskdef.TaskContextMetadata, error)
 }
 
 // ListFirmwareTasksForRack records one complete bounded query for the current rack.
@@ -73,8 +75,10 @@ func (s *firmwareDetailsTaskStore) ListFirmwareTasksForRack(ctx context.Context,
 }
 
 // ListTaskContextForRack distinguishes a skipped optional read from an empty result.
-func (s *firmwareDetailsTaskStore) ListTaskContextForRack(ctx context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+func (s *firmwareDetailsTaskStore) ListTaskContextForRack(ctx context.Context, id uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	s.contextCalls++
+	s.contextDeadline, _ = ctx.Deadline()
+	s.contextRackID = id
 	if s.contextRead != nil {
 		return s.contextRead(ctx)
 	}

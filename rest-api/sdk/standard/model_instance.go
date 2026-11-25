@@ -79,7 +79,7 @@ type Instance struct {
 	InfinibandInterfaces []InfiniBandInterface `json:"infinibandInterfaces,omitempty"`
 	// SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance
 	SpectrumXAttachments []SpectrumXAttachment `json:"spectrumXAttachments,omitempty"`
-	// NVLinkInterfaces are list of the NVLinkInterface associated with the Instance
+	// Stored NVLink Interface records for the Instance. The list can include interfaces in `Deleting` status and can contain both retiring and replacement records for the same GPU.
 	NvLinkInterfaces []NVLinkInterface `json:"nvLinkInterfaces,omitempty"`
 	// DPU Extension Services deployed on DPUs of this Instance
 	DpuExtensionServiceDeployments []DpuExtensionServiceDeployment `json:"dpuExtensionServiceDeployments,omitempty"`

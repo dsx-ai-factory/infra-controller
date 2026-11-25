@@ -749,6 +749,18 @@ impl NvRedfishClientPool {
             .await
     }
 
+    /// Reads the BMC's service root with no credentials, for readiness probes
+    /// that must not spend a login attempt. Unlike [`Self::service_root`], it
+    /// dials anonymously on any pool and never caches the root.
+    pub async fn anonymous_service_root(
+        &self,
+        bmc_address: SocketAddr,
+    ) -> Result<Arc<ServiceRoot>, Error> {
+        self.refresh_mutual_client().await?;
+        let bmc = self.create_bmc(bmc_address, BmcCredentials::anonymous(), false)?;
+        ServiceRoot::new(bmc).await.map(Arc::new)
+    }
+
     /// Same as [`Self::service_root`], but a freshly fetched root is cached
     /// only when `should_cache` returns true for it.
     #[tracing::instrument(

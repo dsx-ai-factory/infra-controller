@@ -110,7 +110,7 @@ pub(crate) async fn redfish_browse(
         .map(|(x, y)| {
             (
                 x.to_string(),
-                String::from_utf8_lossy(y.as_bytes()).to_string(),
+                String::from_utf8_lossy(y.as_bytes()).into_owned(),
             )
         })
         .collect::<HashMap<String, String>>();
@@ -184,9 +184,9 @@ pub(crate) async fn redfish_create_action(
 ) -> Result<tonic::Response<::rpc::forge::RedfishCreateActionResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let authored_by = external_user_info(&request)?.user.ok_or(
-        CarbideError::ClientCertificateMissingInformation("external user name".to_string()),
-    )?;
+    let authored_by = external_user_info(&request)?.user.ok_or_else(|| {
+        CarbideError::ClientCertificateMissingInformation("external user name".to_string())
+    })?;
 
     let rpc_request = request.into_inner();
     let ips = rpc_request.ips.clone();
@@ -219,9 +219,9 @@ pub(crate) async fn redfish_approve_action(
 ) -> Result<tonic::Response<::rpc::forge::RedfishApproveActionResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let approver = external_user_info(&request)?.user.ok_or(
-        CarbideError::ClientCertificateMissingInformation("external user name".to_string()),
-    )?;
+    let approver = external_user_info(&request)?.user.ok_or_else(|| {
+        CarbideError::ClientCertificateMissingInformation("external user name".to_string())
+    })?;
 
     let request: model::redfish::RedfishActionId = request.into_inner().into();
 
@@ -257,9 +257,9 @@ pub(crate) async fn redfish_apply_action(
 ) -> Result<tonic::Response<::rpc::forge::RedfishApplyActionResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let applier = external_user_info(&request)?.user.ok_or(
-        CarbideError::ClientCertificateMissingInformation("external user name".to_string()),
-    )?;
+    let applier = external_user_info(&request)?.user.ok_or_else(|| {
+        CarbideError::ClientCertificateMissingInformation("external user name".to_string())
+    })?;
 
     let request: model::redfish::RedfishActionId = request.into_inner().into();
 
@@ -426,7 +426,7 @@ async fn handle_request(
                     .map(|(x, y)| {
                         (
                             x.to_string(),
-                            String::from_utf8_lossy(y.as_bytes()).to_string(),
+                            String::from_utf8_lossy(y.as_bytes()).into_owned(),
                         )
                     })
                     .collect::<HashMap<String, String>>();
@@ -434,7 +434,7 @@ async fn handle_request(
                 let body = response
                     .text()
                     .await
-                    .unwrap_or("could not decode body as text".to_owned());
+                    .unwrap_or_else(|_| "could not decode body as text".to_owned());
                 Ok(BMCResponse {
                     status,
                     headers,
@@ -453,7 +453,7 @@ async fn handle_request(
             status: e
                 .status_code
                 .map(|s| s.to_string())
-                .unwrap_or("missing status".to_owned()),
+                .unwrap_or_else(|| "missing status".to_owned()),
             body: e.description,
             completed_at: DateTime::from(Local::now()),
         },

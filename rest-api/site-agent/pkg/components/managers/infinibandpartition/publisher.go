@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverInfiniBandPartitionInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("InfiniBandPartition: Successfully registered DiscoverInfiniBandPartitionInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

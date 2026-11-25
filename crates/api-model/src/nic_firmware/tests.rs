@@ -620,6 +620,9 @@ fn named_profile_ids_are_not_silently_normalized() {
             let parsed = id.parse::<NicFirmwareProfileId>().ok();
             let decoded = serde_json::from_value::<NicFirmwareProfileId>(serde_json::json!(id)).ok();
             assert_eq!(decoded, parsed);
+            let json = serde_json::to_string(id).unwrap();
+            let decoded = serde_json::from_str::<NicFirmwareProfileId>(&json).ok();
+            assert_eq!(decoded, parsed);
             parsed.map(|profile| {
                 assert_eq!(serde_json::to_value(&profile).unwrap(), serde_json::json!(id));
                 profile.to_string()
@@ -627,5 +630,56 @@ fn named_profile_ids_are_not_silently_normalized() {
         };
         "case-sensitive name" { "Baseline" => Some("Baseline".to_string()) }
         "invalid names" { "" => None, " baseline " => None, "base\nline" => None }
+    );
+}
+
+#[test]
+fn named_profile_id_owned_bytes_preserve_validation() {
+    struct OwnedBytes(Vec<u8>);
+
+    impl<'de> serde::Deserializer<'de> for OwnedBytes {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'de>,
+        {
+            visitor.visit_byte_buf(self.0)
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map struct
+            enum identifier ignored_any
+        }
+    }
+
+    check_cases(
+        [
+            Case {
+                scenario: "owned bytes preserve case",
+                input: b"Baseline".to_vec(),
+                expect: Yields("Baseline".to_string()),
+            },
+            Case {
+                scenario: "owned bytes use profile name validation",
+                input: Vec::new(),
+                expect: FailsWith(
+                    "".parse::<NicFirmwareProfileId>()
+                        .expect_err("empty profile ID is invalid")
+                        .to_string(),
+                ),
+            },
+            Case {
+                scenario: "invalid UTF-8 bytes are rejected",
+                input: vec![0xff],
+                expect: FailsWith("invalid value: byte array, expected a string".to_string()),
+            },
+        ],
+        |bytes| {
+            NicFirmwareProfileId::deserialize(OwnedBytes(bytes))
+                .map(|id| id.to_string())
+                .map_err(|error| error.to_string())
+        },
     );
 }

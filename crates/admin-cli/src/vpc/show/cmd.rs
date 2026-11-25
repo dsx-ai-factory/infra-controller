@@ -20,7 +20,7 @@ use std::fmt::Write;
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge::{self as forgerpc};
 use carbide_uuid::vpc::VpcId;
-use prettytable::{Table, row};
+use prettytable::{Cell, Row, Table, row};
 
 use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
@@ -132,29 +132,37 @@ fn convert_vpcs_to_nice_table(vpcs: forgerpc::VpcList) -> Box<Table> {
             config.network_virtualization_type.unwrap_or_default(),
         )
         .unwrap_or_default()
-        .as_str_name()
-        .to_string();
+        .as_str_name();
 
-        table.add_row(row![
-            vpc.id.unwrap_or_default(),
-            metadata.name,
-            config.tenant_organization_id,
-            config.network_security_group_id.unwrap_or_default(),
-            vpc.version,
-            vpc.created.unwrap_or_default(),
-            virt_type,
-            format_slaac_enabled(config.slaac_enabled),
-            metadata
-                .labels
-                .iter()
-                .map(|label| {
-                    let key = &label.key;
-                    let value = label.value.as_deref().unwrap_or_default();
-                    format!("\"{key}:{value}\"")
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-        ]);
+        let mut labels = String::new();
+        for (index, label) in metadata.labels.iter().enumerate() {
+            if index != 0 {
+                labels.push_str(", ");
+            }
+            write!(
+                labels,
+                "\"{}:{}\"",
+                label.key,
+                label.value.as_deref().unwrap_or_default()
+            )
+            .expect("writing to a String cannot fail");
+        }
+        table.add_row(Row::new(vec![
+            Cell::new(&vpc.id.unwrap_or_default().to_string()),
+            Cell::new(&metadata.name),
+            Cell::new(&config.tenant_organization_id),
+            Cell::new(
+                config
+                    .network_security_group_id
+                    .as_deref()
+                    .unwrap_or_default(),
+            ),
+            Cell::new(&vpc.version),
+            Cell::new(&vpc.created.unwrap_or_default().to_string()),
+            Cell::new(virt_type),
+            Cell::new(format_slaac_enabled(config.slaac_enabled)),
+            Cell::new(&labels),
+        ]));
     }
 
     table.into()
@@ -400,6 +408,20 @@ mod tests {
                 .map(|(name, slaac_enabled)| forgerpc::Vpc {
                     metadata: Some(forgerpc::Metadata {
                         name: name.to_string(),
+                        labels: if name == "enabled" {
+                            vec![
+                                forgerpc::Label {
+                                    key: "κ\"".to_string(),
+                                    value: None,
+                                },
+                                forgerpc::Label {
+                                    key: "z".to_string(),
+                                    value: Some("v'".to_string()),
+                                },
+                            ]
+                        } else {
+                            Vec::new()
+                        },
                         ..Default::default()
                     }),
                     config: Some(forgerpc::VpcConfig {
@@ -444,6 +466,7 @@ mod tests {
         let header = cells_for("SLAAC Enabled");
         assert_eq!(header[7], "SLAAC Enabled");
         assert_eq!(cells_for("enabled")[7], "true");
+        assert_eq!(cells_for("enabled")[8], "\"κ\":\", \"z:v'\"");
         assert_eq!(cells_for("disabled")[7], "false");
         let older_core = cells_for("older-core");
         assert_eq!(older_core[7], "Unknown");

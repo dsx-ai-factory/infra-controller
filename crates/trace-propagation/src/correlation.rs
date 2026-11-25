@@ -222,14 +222,20 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert(
             "traceparent",
-            format!("00-{ID}-1234567890abcdef-00").parse().unwrap(),
+            http::HeaderValue::try_from(format!("00-{ID}-1234567890abcdef-00")).unwrap(),
         );
         assert_eq!(from_headers(&headers).to_string(), ID);
 
         let explicit = TraceId::generate();
-        headers.insert(HEADER, explicit.to_string().parse().unwrap());
+        headers.insert(
+            HEADER,
+            http::HeaderValue::try_from(explicit.to_string()).unwrap(),
+        );
         assert_eq!(from_headers(&headers), explicit);
-        headers.append(HEADER, explicit.to_string().parse().unwrap());
+        headers.append(
+            HEADER,
+            http::HeaderValue::try_from(explicit.to_string()).unwrap(),
+        );
         assert_eq!(from_headers(&headers).to_string(), ID);
         for invalid in ["invalid", "00000000000000000000000000000000"] {
             headers.insert(HEADER, invalid.parse().unwrap());

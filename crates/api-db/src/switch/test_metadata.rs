@@ -89,7 +89,10 @@ async fn test_switch_metadata_from_expected(
 
     assert_eq!(switch.metadata.name, "My Switch");
     assert_eq!(switch.metadata.description, "Top-of-rack switch");
-    assert_eq!(switch.metadata.labels.get("role"), Some(&"tor".to_string()));
+    assert_eq!(
+        switch.metadata.labels.get("role").map(String::as_str),
+        Some("tor")
+    );
 
     txn.rollback().await?;
     Ok(())
@@ -137,8 +140,12 @@ async fn test_switch_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     assert_eq!(updated_switch.metadata.name, "Updated Switch");
     assert_eq!(updated_switch.metadata.description, "Updated description");
     assert_eq!(
-        updated_switch.metadata.labels.get("team"),
-        Some(&"network".to_string())
+        updated_switch
+            .metadata
+            .labels
+            .get("team")
+            .map(String::as_str),
+        Some("network")
     );
     assert_eq!(updated_switch.version.version_nr(), 2);
 

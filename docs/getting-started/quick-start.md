@@ -78,6 +78,9 @@ helm plugin install https://github.com/databus23/helm-diff
 
 Review this entire step **before** running `setup.sh` and complete every item that applies to your environment. Missing required values can cause setup to fail or produce an incorrectly configured deployment that is hard to fix afterward.
 
+Complete the [Control-Plane Network Requirements and Site Worksheet](https://github.com/dsx-ai-factory/infra-controller/blob/main/scripts/control-plane-dpu/control-plane-network.md)
+with your network team before filling in the site values below.
+
 ### 3a. Set Deployment Environment Variables
 
 ```bash
@@ -378,6 +381,14 @@ Add or remove `BGPPeer` blocks to match your node count, with one block per work
 
 <Note>If your environment does not use BGP (local dev, flat network), comment out the `BGPPeer` and `BGPAdvertisement` sections and uncomment the `L2Advertisement` section at the bottom of the file.</Note>
 
+In [MetalLB layer 2 mode](https://metallb.io/concepts/layer2/), one elected
+node advertises each service VIP and receives its incoming traffic. Multiple
+running speaker pods do not demonstrate VIP failover. Before relying on this
+mode, test loss of the advertising node and verify that DHCP, PXE, DNS, and
+API clients can reach their VIPs through another eligible node. Check the
+`L2Advertisement` node and interface selectors and client ARP/NDP cache
+updates if a VIP remains unreachable.
+
 ### 3h. Assign Service VIPs
 
 Each NICo Core service that exposes a LoadBalancer needs a **specific, stable IP** from your MetalLB pool. Without explicit assignments, MetalLB picks IPs randomly on each install, which means your DHCP relay, DNS records, PXE config, and API hostname cannot be pre-configured and will break on redeploy.
@@ -387,13 +398,16 @@ Open `helm-prereqs/values/nico-core.yaml` and update the VIP for each service:
 | Service | Values key | Pool to use |
 |---------|-----------|-------------|
 | `nico-api` external API | `nico-api.externalService.annotations` | External (client-facing) |
-| `nico-dhcp` | `nico-dhcp.externalService.annotations` | Internal (cluster-facing) |
+| `nico-dhcp-external` (DHCPv4) | `nico-dhcp.externalService.annotations` | Internal (relay-facing IPv4) |
 | `nico-dns` instance-0 | `nico-dns.externalService.perPodAnnotations[0]` | Internal or External |
 | `nico-dns` instance-1 | `nico-dns.externalService.perPodAnnotations[1]` | Internal or External |
 | `nico-pxe` | `nico-pxe.externalService.annotations` | Internal (cluster-facing) |
 | `nico-ssh-console-rs` | `nico-ssh-console-rs.externalService.annotations` | Internal (cluster-facing) |
 
 All IPs must be within the `IPAddressPool` ranges you defined in `values/metallb-config.yaml` and must be unique across services.
+
+When DHCPv6 is enabled, assign `nico-dhcp6-external` a separate IPv6 VIP from
+an IPv6 pool, following [Deploy DHCPv6](../provisioning/dhcpv6-deployment.md).
 
 - **nico-dhcp Note**: `externalService.enabled: true` must be set explicitly; it defaults to false in the chart.
 - **nico-dns Note**: Use `perPodAnnotations` (a list) rather than `annotations` because each replica gets its own VIP.
@@ -572,10 +586,12 @@ All LoadBalancer services should have an external IP from your `IPAddressPool` r
 ### Verify That DHCP and PXE Are Serving
 
 ```bash
-kubectl get svc nico-dhcp nico-pxe -n nico-system
+kubectl get svc nico-dhcp-external nico-pxe-external -n nico-system
 ```
 
-Both external IPs should be within your internal VIP pool range.
+Both external IPs should be within your internal VIP pool range. This checks
+address assignment. Verify DHCP and PXE from a client after configuring the
+relay in [Step 6](#step-6--connect-the-oob-network).
 
 ### Acquire a Keycloak Access Token
 
@@ -653,10 +669,10 @@ auth:
 This `GET` endpoint lazily initializes the org on first call as follows:
 
 1. Checks if service account is enabled in the auth config
-2. Creates an **InfrastructureProvider** for the org if one doesn't exist
-3. Creates a **Tenant** for the org if one doesn't exist
-4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
-5. Returns the service account status with the provider and tenant IDs
+1. Creates an **InfrastructureProvider** for the org if one doesn't exist
+1. Creates a **Tenant** for the org if one doesn't exist
+1. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
+1. Returns the service account status with the provider and tenant IDs
 
 Without this call, site operations return 404. Subsequent calls are read-only.
 
@@ -670,7 +686,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 #### 6. Verify your Site
 
-**Do not run `nicocli site create`.** `setup.sh` Phase 7g already bootstraps and registers the site automatically via the `nico-rest-site-agent` bootstrap Job (`POST /v1/site` to `nico-rest-site-manager`), obtains a one-time password (OTP), and stores the registration in the `site-registration` Secret. Running `nicocli site create` would create a second site that the already-deployed site-agent cannot use — the site-agent is bound to the UUID generated during setup and cannot be reassigned without a full redeploy.
+**Do not run `nicocli site create`.** In `setup.sh` phase 7i, the `nico-rest-site-agent-bootstrap` Helm hook Job registers the site (`POST /v1/site` to `nico-rest-site-manager`). It obtains the one-time password (OTP) from site-manager and stores the registration in the `site-registration` Secret before the Site Agent starts. Running `nicocli site create` creates a second site and does not rebind the deployed Site Agent. To bind this installation to an existing site, set `NICO_SITE_UUID` and rerun `setup.sh`. Setup removes stale registration and re-bootstraps the agent.
 
 This is a **one-to-one deployment**: one site per NICo installation. The site is managed by `setup.sh`; do not create additional sites manually.
 
@@ -714,13 +730,18 @@ the [Reference Installation](installation-options/reference-install.md) guide.
 
 Configure the out-of-band network to relay BMC DHCP requests to the NICo DHCP service.
 
-1. *Configure the DHCP relay* on your OOB switches to forward DHCP requests to the `nico-dhcp` LoadBalancer VIP (assigned in Step 3h).
+1. *Configure the DHCP relay* on your OOB switches for each address family in use. Send DHCPv4 requests to the `nico-dhcp-external` LoadBalancer VIP on UDP 67 (assigned in Step 3h). For optional DHCPv6, use the separate `nico-dhcp6-external` IPv6 VIP on UDP 547, following [Deploy DHCPv6](../provisioning/dhcpv6-deployment.md).
 
-2. *Verify DHCP requests are reaching NICo* by checking the DHCP service logs:
+1. *Verify DHCP requests are reaching NICo* by checking the DHCP service logs:
 
    ```bash
    kubectl logs -n nico-system -l app.kubernetes.io/name=nico-dhcp --tail=20
    ```
+
+1. *Verify the client path* with a representative client after configuring the
+   relay. Confirm a DHCP exchange through the relay and a PXE download from
+   the managed network. For optional DHCPv6, follow
+   [Deployment Verification](../provisioning/dhcpv6-deployment.md#deployment-verification-and-metrics).
 
 For detailed OOB network requirements, refer to the [BMC and Out-of-Band Setup](prerequisites/bmc-oob-setup.md) guide.
 
@@ -746,6 +767,12 @@ kubectl get svc nico-api -n nico-system -o jsonpath='{.status.loadBalancer.ingre
 
 Configure the credentials NICo will apply to BMCs and UEFI after ingestion. These commands write to the configured credential store: Vault by default, or Postgres when the site was set up as described in [Day 0 Credential Store](installation-options/day0-credential-store.md).
 
+When REST is available, prefer the stdin-based workflows for the
+[Site-wide BMC Root](../provisioning/ingesting-hosts.md#store-host-and-dpu-bmc-password)
+and [Host and DPU UEFI Defaults](../provisioning/ingesting-hosts.md#store-host-and-dpu-uefi-passwords).
+They keep passwords out of process arguments; follow their credential-source
+prerequisites and disable shell tracing while entering secrets.
+
 If `nico-api.credentials.bmcSiteWideRootSource` is `local`, skip the first
 command: the local environment-then-file chain owns version 0 of the site-wide
 BMC root, and the API rejects attempts to write that credential to the backend.
@@ -758,10 +785,14 @@ nico-admin-cli -a <api-url> credential add-uefi --kind=dpu --password='<password
 ```
 
 <Warning>
-`nico-admin-cli` accepts these passwords only as command-line arguments, so each
-one lands in your shell history and is visible in the process argument list
-while the command runs. Run them from a shell with history disabled, and clear
-any history file that captured them.
+These CLI commands expose passwords in process arguments and can record them
+in shell history or tracing output. Run them only on a trusted administrative
+host where process inspection and command-argument collection are restricted
+to authorized credential administrators. Disable shell history and tracing,
+and clear any history file that captured a password. Disabling history does
+not hide process arguments. The watched Secret option below supplies the
+site-wide BMC root only; the host and DPU UEFI site defaults still require
+separate setup.
 </Warning>
 
 Site Explorer requires all three — the site-wide BMC root and both the `host`

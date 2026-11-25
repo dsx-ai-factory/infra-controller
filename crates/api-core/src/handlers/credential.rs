@@ -302,8 +302,7 @@ pub(crate) async fn create_credential(
                     .map_err(|e| {
                         CarbideError::internal(format!(
                             "error setting credential for NmxM {}: {:?} ",
-                            username.clone(),
-                            e
+                            username, e
                         ))
                     })?;
             } else {
@@ -382,15 +381,9 @@ pub(crate) async fn delete_credential(
         rpc::CredentialType::Ufm => {
             if let Some(username) = req.username {
                 api.credential_manager
-                    .set_credentials(
-                        &CredentialKey::UfmAuth {
-                            fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
-                        },
-                        &Credentials::UsernamePassword {
-                            username: username.clone(),
-                            password: "".to_string(),
-                        },
-                    )
+                    .delete_credentials(&CredentialKey::UfmAuth {
+                        fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
+                    })
                     .await
                     .map_err(|error| {
                         map_credential_mutation_error(
@@ -801,7 +794,7 @@ async fn write_ufm_certs(api: &Api, fabric: String) -> Result<(), CarbideError> 
         .map_err(|err| CarbideError::ClientCertificateError(err.to_string()))?;
 
     let mut cert_filename = format!("{CERT_PATH}/{fabric}-ufm-ca-intermediate.crt");
-    let mut cert_file = File::create(cert_filename.clone()).map_err(|e| {
+    let mut cert_file = File::create(&cert_filename).map_err(|e| {
         CarbideError::internal(format!("could not create: {cert_filename} err: {e:?}"))
     })?;
     cert_file
@@ -813,7 +806,7 @@ async fn write_ufm_certs(api: &Api, fabric: String) -> Result<(), CarbideError> 
         })?;
 
     cert_filename = format!("{CERT_PATH}/{fabric}-ufm-server.key");
-    cert_file = File::create(cert_filename.clone()).map_err(|e| {
+    cert_file = File::create(&cert_filename).map_err(|e| {
         CarbideError::internal(format!("could not create: {cert_filename} err: {e:?}"))
     })?;
     cert_file
@@ -825,7 +818,7 @@ async fn write_ufm_certs(api: &Api, fabric: String) -> Result<(), CarbideError> 
         })?;
 
     cert_filename = format!("{CERT_PATH}/{fabric}-ufm-server.crt");
-    cert_file = File::create(cert_filename.clone()).map_err(|e| {
+    cert_file = File::create(&cert_filename).map_err(|e| {
         CarbideError::internal(format!("could not create: {cert_filename} err: {e:?}"))
     })?;
     cert_file

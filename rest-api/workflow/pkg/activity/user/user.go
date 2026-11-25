@@ -110,14 +110,14 @@ func (mu ManageUser) GetUserDataFromNgc(ctx context.Context, userID uuid.UUID, e
 
 // getUserDataFromNGC retrieves user data from NGC user API endpoint
 func getUserDataFromNGC(ctx context.Context, baseURL string, ngcToken string, logger zerolog.Logger) (*NgcUser, error) {
-	reqURL := fmt.Sprintf("%v/v2/users/me", baseURL)
+	reqURL := baseURL + "/v2/users/me"
 	// The request carries the activity context, so the activity timeout ends the call
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		logger.Error().Err(err).Str("Request URL", reqURL).Msg("failed to build NGC user API request")
 		return nil, err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %v", ngcToken))
+	req.Header.Set("Authorization", "Bearer "+ngcToken)
 	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -273,7 +273,7 @@ func (mu ManageUser) CreateOrUpdateUserInDBWithAuxiliaryID(ctx context.Context, 
 
 		if starfleetIDUsers[0].ID != auxiliaryIDUsers[0].ID {
 			return errors.Wrap(cdb.ErrInvalidParams, fmt.Sprintf("different users found: StarfleetID %s belongs to user %s, AuxiliaryID %s belongs to user %s",
-				ngcUser.StarfleetID, starfleetIDUsers[0].ID.String(), ngcUser.ClientID, auxiliaryIDUsers[0].ID.String()))
+				ngcUser.StarfleetID, starfleetIDUsers[0].ID, ngcUser.ClientID, auxiliaryIDUsers[0].ID))
 		}
 
 		existingUser = &starfleetIDUsers[0]

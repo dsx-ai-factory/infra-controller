@@ -396,10 +396,12 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
         None => (AgentConfig::default(), "default".to_string()),
         // development overrides
         Some(config_path) => (
-            AgentConfig::load_from(&config_path).wrap_err(format!(
-                "error loading agent configuration from {}",
-                config_path.display()
-            ))?,
+            AgentConfig::load_from(&config_path).wrap_err_with(|| {
+                format!(
+                    "error loading agent configuration from {}",
+                    config_path.display()
+                )
+            })?,
             config_path.display().to_string(),
         ),
     };
@@ -963,14 +965,14 @@ fn fake_dpu_discovery_info() -> DiscoveryInfo {
 }
 
 pub fn pretty_cmd(c: &Command) -> String {
-    format!(
-        "{} {}",
-        c.get_program().to_string_lossy(),
-        c.get_args()
-            .map(|x| x.to_string_lossy())
-            .collect::<Vec<std::borrow::Cow<'_, str>>>()
-            .join(" ")
-    )
+    let mut output = format!("{} ", c.get_program().to_string_lossy());
+    for (index, argument) in c.get_args().enumerate() {
+        if index != 0 {
+            output.push(' ');
+        }
+        output.push_str(&argument.to_string_lossy());
+    }
+    output
 }
 
 // fill_fake_dpu_info will take a pre-populated DiscoveryInfo

@@ -13,14 +13,13 @@ nico-admin-cli expected-machine add
 <-a|--bmc-mac-address> <-u|--bmc-username>
 [-p|--bmc-password] <-s|--chassis-serial-number>
 [-d|--fallback-dpu-serial-number] [--meta-name]
-[--meta-description] [--label] [--sku-id] [--id]
-[--interfaces] [--rack_id]
+[--meta-description] [--label] [--sku-id]
+[--extended] [--id] [--interfaces] [--rack_id]
 [--default_pause_ingestion_and_poweron] [--dpf-enabled]
-[--extended] [--bmc-ip-address]
-[--bmc-retain-credentials] [--dpu-policy]
-[--bmc-ip-allocation] [--disable-lockdown]
-[--retain-hbn-config-on-boot] [--sort-by]
-[-h|--help]
+[--bmc-ip-address] [--bmc-retain-credentials]
+[--dpu-policy] [--bmc-ip-allocation]
+[--disable-lockdown] [--retain-hbn-config-on-boot]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -73,6 +72,14 @@ DATACENTER:XYZ
 
 A SKU ID that will be added for the newly created Machine.
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--id <UUID>`
 
 Optional unique ID to assign to the ExpectedMachine on create
@@ -120,14 +127,6 @@ Whether DPF is enabled for this machine. Defaults to true.
 > - true
 >
 > - false
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--bmc-ip-address <BMC_IP_ADDRESS>`
 
@@ -200,12 +199,13 @@ behavior of locking down the server after configuring the BIOS.
 
 `--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
 
-If true, designate the machine to retain its HBN config on boot. This allows
-the machine to boot while NICO's DHCP and gRPC services are unavailable. The
-machine must declare a DPU BMC and a DPU OS interface, and the host BMC
-and both DPU interfaces must then use a fixed or retained IP allocation.
-A machine whose DPU policy attaches no DPU declares neither. If unset or
-false, the machine will need NICo to be up in order to boot.
+If true, designate the machine to retain its HBN config on boot. This
+allows the machine to boot while NICO's DHCP and gRPC services are
+unavailable. The machine must declare a DPU BMC and a DPU OS interface,
+and the host BMC and both DPU interfaces must then use a fixed or
+retained IP allocation. A machine whose DPU policy attaches no DPU
+declares neither. If unset or false, the machine will need NICo to be up
+in order to boot.
 
 *Possible values:*
 

@@ -4,9 +4,9 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -564,7 +564,7 @@ func (c *Config) SetTemporalEncryptionKey() {
 	if err != nil {
 		log.Panic().Err(err).Msgf("failed to read encryption key file: %s", err)
 	}
-	encryptionKey := strings.TrimSpace(string(encryptionKeyBytes))
+	encryptionKey := string(bytes.TrimSpace(encryptionKeyBytes))
 
 	c.v.Set(ConfigTemporalEncryptionKey, encryptionKey)
 }

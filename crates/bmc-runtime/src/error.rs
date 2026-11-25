@@ -50,3 +50,16 @@ pub enum ExploredConnectError {
     #[error(transparent)]
     Connect(#[from] ConnectError),
 }
+
+impl ExploredConnectError {
+    /// Classifies this connection failure as a [`PlatformError`] so callers can
+    /// branch on authentication or transport failures uniformly.
+    pub fn into_platform_error(self) -> PlatformError {
+        match self {
+            Self::Connect(ConnectError::Transport(err) | ConnectError::Credentials(err)) => err,
+            Self::Reference(err) => PlatformError::InvalidResponse {
+                message: err.to_string(),
+            },
+        }
+    }
+}

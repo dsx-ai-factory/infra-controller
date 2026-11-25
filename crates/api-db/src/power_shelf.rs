@@ -245,7 +245,7 @@ pub async fn find_ids(
 
     if let Some(state) = &filter.controller_state {
         qb.push(" AND ps.controller_state->>'state' = ");
-        qb.push_bind(state.clone());
+        qb.push_bind(state);
     }
 
     if let Some(mac) = filter.bmc_mac {

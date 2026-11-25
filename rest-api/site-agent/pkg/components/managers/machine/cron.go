@@ -44,6 +44,7 @@ func (api *API) RegisterCron() {
 
 	if err != nil {
 		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("Machine: Error registering Inventory Collect/Publish cron")
+		return
 	}
 
 	wid := ""

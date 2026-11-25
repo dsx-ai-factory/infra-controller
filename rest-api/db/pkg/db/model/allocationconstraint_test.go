@@ -6,8 +6,10 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -641,7 +643,7 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 		expectedConstraintType    *string
 		expectedConstraintValue   *int
 		expectedDerivedResourceID *uuid.UUID
-		expectedUpdate            bool
+		wantTimestampChange       bool
 		verifyChildSpanner        bool
 	}{
 		{
@@ -657,7 +659,7 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 			expectedConstraintType:    cutil.GetPtr(AllocationConstraintTypeReserved),
 			expectedConstraintValue:   &constraintValue,
 			expectedDerivedResourceID: &derivedResourceID,
-			expectedUpdate:            false,
+			wantTimestampChange:       false,
 			verifyChildSpanner:        true,
 		},
 		{
@@ -674,7 +676,6 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 			expectedConstraintType:    cutil.GetPtr(AllocationConstraintTypeReserved),
 			expectedConstraintValue:   &constraintValue,
 			expectedDerivedResourceID: &derivedResourceID,
-			expectedUpdate:            true,
 		},
 		{
 			desc: "can update AllocationID ResourceType and ResourceTypeID",
@@ -692,7 +693,7 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 			expectedConstraintType:    cutil.GetPtr(AllocationConstraintTypeReserved),
 			expectedConstraintValue:   &constraintValue,
 			expectedDerivedResourceID: &derivedResourceID,
-			expectedUpdate:            true,
+			wantTimestampChange:       true,
 		},
 		{
 			desc: "can update Constraint Type Value and ResourceID",
@@ -710,7 +711,7 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 			expectedConstraintType:    cutil.GetPtr(AllocationConstraintTypePreemptible),
 			expectedConstraintValue:   &constraintValue2,
 			expectedDerivedResourceID: &derivedResourceID2,
-			expectedUpdate:            true,
+			wantTimestampChange:       true,
 		},
 		{
 			desc: "invalid Constraint Type",
@@ -726,7 +727,6 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 			expectedConstraintType:    cutil.GetPtr(AllocationConstraintTypePreemptible),
 			expectedConstraintValue:   &constraintValue2,
 			expectedDerivedResourceID: &derivedResourceID2,
-			expectedUpdate:            true,
 		},
 		{
 			desc: "invalid Resource Type",
@@ -742,11 +742,16 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 			expectedConstraintType:    cutil.GetPtr(AllocationConstraintTypePreemptible),
 			expectedConstraintValue:   &constraintValue2,
 			expectedDerivedResourceID: &derivedResourceID2,
-			expectedUpdate:            true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := asd.GetByID(ctx, nil, tc.input.AllocationConstraintID, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := asd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
@@ -758,9 +763,7 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedConstraintValue, got.ConstraintValue)
 				assert.Equal(t, tc.expectedDerivedResourceID, got.DerivedResourceID)
 
-				if tc.expectedUpdate && got.Updated.String() == a1.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.Equal(t, tc.wantTimestampChange, !got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 			}
 
 			if tc.verifyChildSpanner {

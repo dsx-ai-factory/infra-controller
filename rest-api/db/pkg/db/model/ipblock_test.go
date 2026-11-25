@@ -1551,6 +1551,9 @@ func TestIPBlockSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			predecessor, getErr := ipbsd.GetByID(ctx, nil, tc.ipb.ID, nil)
+			require.NoError(t, getErr)
+			previousUpdated := predecessor.Updated
 			got, err := ipbsd.Update(
 				ctx,
 				nil,
@@ -1594,9 +1597,7 @@ func TestIPBlockSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedFullGrant, got.FullGrant)
 			}
 
-			if got.Updated.String() == tc.ipb.Updated.String() {
-				t.Errorf("got.Updated = %v, want different value", got.Updated)
-			}
+			assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

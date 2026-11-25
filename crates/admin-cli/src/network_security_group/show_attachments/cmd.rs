@@ -49,7 +49,7 @@ pub(super) async fn show_attachments(
     if nsg_attachments.vpc_ids.is_empty() && nsg_attachments.instance_ids.is_empty() {
         println!(
             "Network security group {} is not referenced by any objects",
-            args.id.clone()
+            args.id
         );
 
         return Ok(());

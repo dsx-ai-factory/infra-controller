@@ -68,8 +68,8 @@ fn test_serializable_profile_creation() {
     assert_eq!(profile.name, "test_profile");
     assert_eq!(profile.registry_name, "test_registry");
     assert_eq!(
-        profile.description,
-        Some("Test profile for unit tests".to_string())
+        profile.description.as_deref(),
+        Some("Test profile for unit tests")
     );
     assert_eq!(profile.config.len(), 3);
 }
@@ -213,8 +213,8 @@ fn test_try_from_protobuf_basic() {
     assert_eq!(profile.name, "proto_test");
     assert_eq!(profile.registry_name, "test_registry");
     assert_eq!(
-        profile.description,
-        Some("Testing protobuf conversion".to_string())
+        profile.description.as_deref(),
+        Some("Testing protobuf conversion")
     );
     assert_eq!(profile.config.len(), 3);
 
@@ -256,17 +256,20 @@ fn test_try_into_protobuf_basic() {
     assert_eq!(proto.name, "proto_test");
     assert_eq!(proto.registry_name, "test_registry");
     assert_eq!(
-        proto.description,
-        Some("Testing protobuf conversion".to_string())
+        proto.description.as_deref(),
+        Some("Testing protobuf conversion")
     );
     assert_eq!(proto.config.len(), 3);
 
     // Verify the config values were serialized correctly
-    assert_eq!(proto.config.get("BOOL_VAR"), Some(&"true".to_string()));
-    assert_eq!(proto.config.get("INT_VAR"), Some(&"789".to_string()));
     assert_eq!(
-        proto.config.get("STRING_VAR"),
-        Some(&"proto_value".to_string())
+        proto.config.get("BOOL_VAR").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(proto.config.get("INT_VAR").map(String::as_str), Some("789"));
+    assert_eq!(
+        proto.config.get("STRING_VAR").map(String::as_str),
+        Some("proto_value")
     );
 }
 
@@ -317,7 +320,7 @@ fn test_edge_cases() {
     let empty_desc = SerializableProfile::new("empty_desc", "registry")
         .with_description("")
         .with_config("VAR", "value");
-    assert_eq!(empty_desc.description, Some("".to_string()));
+    assert_eq!(empty_desc.description.as_deref(), Some(""));
 }
 
 #[test]
@@ -367,8 +370,8 @@ ROCE_RTT_RESP_DSCP_P1 = 46
     assert_eq!(profile.name, "nested_test");
     assert_eq!(profile.registry_name, "test_registry");
     assert_eq!(
-        profile.description,
-        Some("Testing nested TOML config".to_string())
+        profile.description.as_deref(),
+        Some("Testing nested TOML config")
     );
     assert_eq!(profile.config.len(), 4);
 
@@ -846,7 +849,7 @@ NUM_OF_VFS = 4
         .expect("should have profile 1");
     assert_eq!(profile1.name, "test-profile-1");
     assert_eq!(profile1.registry.name, "mlx_generic");
-    assert_eq!(profile1.description, Some("First test profile".to_string()));
+    assert_eq!(profile1.description.as_deref(), Some("First test profile"));
     assert_eq!(profile1.variable_count(), 2);
 
     // Verify profile 2.
@@ -855,10 +858,7 @@ NUM_OF_VFS = 4
         .expect("should have profile 2");
     assert_eq!(profile2.name, "test-profile-2");
     assert_eq!(profile2.registry.name, "mlx_generic");
-    assert_eq!(
-        profile2.description,
-        Some("Second test profile".to_string())
-    );
+    assert_eq!(profile2.description.as_deref(), Some("Second test profile"));
     assert_eq!(profile2.variable_count(), 2);
 }
 

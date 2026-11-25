@@ -22,6 +22,10 @@ use db::DatabaseError;
 pub enum PreingestionManagerError {
     #[error("database error: {0}")]
     DatabaseError(#[from] DatabaseError),
+    #[error("component manager operation failed: {0}")]
+    ComponentManager(#[from] component_manager::error::ComponentManagerError),
+    #[error("credential store operation failed: {0}")]
+    Credentials(carbide_secrets::SecretsError),
     #[error("error in libredfish: {0}")]
     RedfishError(#[from] libredfish::RedfishError),
     #[error("BMC operation failed: {0}")]
@@ -30,6 +34,12 @@ pub enum PreingestionManagerError {
     InvalidArgument(String),
     #[error("internal error: {message}")]
     Internal { message: String },
+}
+
+impl From<carbide_secrets::SecretsError> for PreingestionManagerError {
+    fn from(error: carbide_secrets::SecretsError) -> Self {
+        Self::Credentials(error)
+    }
 }
 
 impl PreingestionManagerError {

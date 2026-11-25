@@ -24,6 +24,7 @@ use std::str::FromStr;
 use base64::prelude::*;
 use carbide_utils::arch::CpuArchitecture;
 use carbide_uuid::nvlink::NvLinkDomainId;
+use itertools::Itertools;
 use mac_address::{MacAddress, MacParseError};
 use serde::{Deserialize, Serialize};
 
@@ -376,7 +377,10 @@ impl Serialize for TpmEkCertificate {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&BASE64_STANDARD.encode(self.as_bytes()))
+        serializer.collect_str(&base64::display::Base64Display::new(
+            self.as_bytes(),
+            &BASE64_STANDARD,
+        ))
     }
 }
 
@@ -385,13 +389,29 @@ impl<'de> Deserialize<'de> for TpmEkCertificate {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
+        struct StringVisitor;
 
-        let str_value = String::deserialize(deserializer)?;
-        let bytes = BASE64_STANDARD
-            .decode(str_value)
-            .map_err(|err| Error::custom(err.to_string()))?;
-        Ok(Self(bytes))
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = Result<TpmEkCertificate, base64::DecodeError>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(BASE64_STANDARD.decode(value).map(TpmEkCertificate))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer
+            .deserialize_string(StringVisitor)?
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -504,18 +524,16 @@ pub fn is_mnnvl_capable_gpu(gpu: &Gpu, dmi_product_name: Option<&str>) -> bool {
 pub fn mnnvl_gpu_name_sql_like_conditions() -> String {
     let gpu_name_conditions = MNNVL_KNOWN_GPU_NAMES
         .iter()
-        .map(|marker| format!("gpu->>'name' LIKE '%{marker}%'"))
-        .collect::<Vec<_>>()
-        .join("\n                      OR ");
+        .format_with("\n                      OR ", |marker, f| {
+            f(&format_args!("gpu->>'name' LIKE '%{marker}%'"))
+        });
     let dmi_product_name_conditions = MNNVL_KNOWN_GPU_NAMES
         .iter()
-        .map(|marker| {
-            format!(
+        .format_with("\n                      OR ", |marker, f| {
+            f(&format_args!(
                 "mt.topology->'discovery_data'->'Info'->'dmi_data'->>'product_name' LIKE '%{marker}%'"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n                      OR ");
+            ))
+        });
     format!("{gpu_name_conditions}\n                      OR {dmi_product_name_conditions}")
 }
 

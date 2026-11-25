@@ -200,7 +200,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			return block, nil
 		})
 		if err != nil {
-			if isSitePrefixLockContention(err) {
+			if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
 				logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
 					Msg("skipping SitePrefix due to Site fabric lock contention")
 				continue
@@ -288,7 +288,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			return nil
 		})
 		if err != nil {
-			if isSitePrefixLockContention(err) {
+			if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
 				logger.Warn().Err(err).Str("IP Block ID", candidate.ID.String()).
 					Msg("skipping missing SitePrefix due to Site fabric lock contention")
 				continue
@@ -298,15 +298,6 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	}
 	logger.Info().Msg("completing activity")
 	return ctx.Err()
-}
-
-func isSitePrefixLockContention(err error) bool {
-	// The retry aggregate includes earlier failures; classify its last attempt.
-	lastErr := errors.Unwrap(err)
-	if lastErr == nil {
-		lastErr = err
-	}
-	return errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed)
 }
 
 func (manager ManageSitePrefix) updateIPBlockStatusInDB(ctx context.Context, tx *cdb.Tx, block *cdbm.IPBlock, status, message string) (*cdbm.IPBlock, error) {

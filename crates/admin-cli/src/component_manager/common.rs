@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::fmt::Write;
+
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
@@ -438,7 +440,7 @@ pub(super) fn component_failure_count_and_summary<'a>(
     let mut summary = format!(": {}", details.join("; "));
     let omitted = failures.saturating_sub(details.len());
     if omitted > 0 {
-        summary.push_str(&format!("; ... and {omitted} more"));
+        write!(summary, "; ... and {omitted} more").expect("writing to a String cannot fail");
     }
 
     (failures, summary)
@@ -463,18 +465,14 @@ fn component_failure_detail(result: Option<&rpc::forge::ComponentResult>) -> Str
 
 pub(super) fn component_result_fields(
     result: Option<&rpc::forge::ComponentResult>,
-) -> (String, String, String) {
+) -> (&str, &str, &str) {
     match result {
         Some(result) => (
             display_or_dash(component_result_identifier(result)),
-            component_result_status_name(result.status).to_string(),
+            component_result_status_name(result.status),
             display_or_dash(&result.error),
         ),
-        None => (
-            "-".to_string(),
-            "missing-result".to_string(),
-            "-".to_string(),
-        ),
+        None => ("-", "missing-result", "-"),
     }
 }
 
@@ -517,12 +515,8 @@ pub(crate) fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::
     }
 }
 
-pub(super) fn display_or_dash(value: &str) -> String {
-    if value.is_empty() {
-        "-".to_string()
-    } else {
-        value.to_string()
-    }
+pub(super) fn display_or_dash(value: &str) -> &str {
+    if value.is_empty() { "-" } else { value }
 }
 
 /// The identifier to display for a component result: the component ID for an

@@ -22,6 +22,67 @@ use model::firmware::{Firmware, FirmwareComponentType, HostFirmwareConfig};
 
 use crate::config::*;
 
+#[test]
+fn bluefield_bmc_reports_resolve_existing_firmware_profiles() {
+    use bmc_vendor::BMCVendor;
+    use model::site_explorer::{Chassis, ComputerSystem, EndpointExplorationReport};
+
+    let profiles = |names: &[&str]| {
+        names
+            .iter()
+            .map(|&model| {
+                (
+                    model.to_owned(),
+                    Firmware {
+                        vendor: BMCVendor::Nvidia,
+                        model: model.to_owned(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    };
+    let snapshot = FirmwareConfig::new(
+        Default::default(),
+        &profiles(&["B4240", "B4240V"]),
+        &profiles(&[
+            "Bluefield 2 SmartNIC Main Card",
+            "Bluefield 3 SmartNIC Main Card",
+        ]),
+    )
+    .create_snapshot();
+    for (system_model, card_model, expected_profile) in [
+        (
+            None,
+            "NVIDIA BlueField 2 DPU",
+            "Bluefield 2 SmartNIC Main Card",
+        ),
+        (None, "BlueField-3 DPU", "Bluefield 3 SmartNIC Main Card"),
+        (Some("B4240"), "B4240", "B4240"),
+        (Some("B4240V"), "B4240V", "B4240V"),
+    ] {
+        let report = EndpointExplorationReport {
+            vendor: Some(BMCVendor::Nvidia),
+            systems: vec![ComputerSystem {
+                id: "Bluefield".into(),
+                model: system_model.map(str::to_owned),
+                ..Default::default()
+            }],
+            chassis: vec![Chassis {
+                id: "Card1".into(),
+                model: Some(card_model.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let selected = snapshot.find_fw_info_for_host_report(&report);
+        assert_eq!(
+            selected.as_ref().map(|fw| fw.model.as_str()),
+            Some(expected_profile)
+        );
+    }
+}
+
 const LENOVO_CFG: &str = r#"
 model = "ThinkSystem HS350X V3"
 vendor = "Lenovo"

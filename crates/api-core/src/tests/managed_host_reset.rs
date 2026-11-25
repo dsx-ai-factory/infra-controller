@@ -49,6 +49,91 @@ use crate::tests::dpf::phase_observation;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A retained reboot attempt must not intercept the operator's reset transition.
+#[crate::sqlx_test]
+async fn reset_preempts_a_pending_instance_reboot(pool: sqlx::PgPool) {
+    let env = dpf_test_env(pool).await;
+    let host = dpf_ingested_host(&env).await;
+    let segment = env.create_vpc_and_tenant_segment().await;
+    let instance =
+        crate::tests::instance_ipxe_behaviors::create_instance(&env, &host, false, segment).await;
+    // Saved requests remain meaningful after new queue entries are disabled.
+    assert!(
+        !env.api
+            .runtime_config
+            .machine_state_controller
+            .instance_reboot_queue_enabled
+    );
+    let before = db::machine::find_one(&env.pool, &host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut txn = env.pool.begin().await.unwrap();
+    let token = uuid::Uuid::new_v4();
+    db::hardware_dispatch::begin(
+        txn.as_mut(),
+        token,
+        &model::hardware_dispatch::HardwareDispatchOwner::InstanceReboot {
+            machine_id: *host.id,
+            instance_id: instance.id,
+            bmc: before.status.bmc_info.clone(),
+            last_attempt_at: None,
+            reconcile_after: None,
+        },
+    )
+    .await
+    .unwrap();
+    let queued = db::hardware_dispatch::find(txn.as_mut(), token)
+        .await
+        .unwrap()
+        .unwrap()
+        .1;
+    txn.commit().await.unwrap();
+
+    // A process can stop after committing the attempt and before its BMC call.
+    // Reload this reachable checkpoint through the real controller below.
+    let mut txn = env.pool.begin().await.unwrap();
+    let pending = db::hardware_dispatch::record_instance_reboot_attempt(
+        txn.as_mut(),
+        *host.id,
+        &queued,
+        chrono::Duration::minutes(9),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    txn.commit().await.unwrap();
+    host.mark_machine_for_updates().await;
+    env.api
+        .trigger_managed_host_reset(reset_request_allowing_instance(host.id.into()))
+        .await
+        .unwrap();
+    let actions = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+
+    let after = db::machine::find_one(&env.pool, &host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.state.value,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        }
+    );
+    assert_ne!(after.state.version, before.state.version);
+    assert!(after.reset_requested.unwrap().started_at.is_some());
+    assert_eq!(after.status.hardware_dispatch.as_ref(), Some(&pending));
+    assert!(pending.is_pending());
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .all_hosts()
+            .is_empty()
+    );
+}
+
 /// Expectations for the initial provisioning flow, shared by every env below.
 fn provisioning_mock() -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
@@ -70,7 +155,7 @@ fn provisioning_mock() -> MockDpfOperations {
 /// A reset is only offered to DPF-ingested hosts, and `create_managed_host_with_dpf`
 /// drives the real provisioning flow, so these tests need DPF enabled in config plus an
 /// SDK for it to register against. Same starting point as the `dpf` suites.
-async fn dpf_test_env(pool: sqlx::PgPool) -> TestEnv {
+pub(in crate::tests) async fn dpf_test_env(pool: sqlx::PgPool) -> TestEnv {
     env_with_dpf_mock(pool, provisioning_mock()).await
 }
 
@@ -152,7 +237,7 @@ async fn env_with_dpf_mock(pool: sqlx::PgPool, mock: MockDpfOperations) -> TestE
     .await
 }
 
-async fn dpf_ingested_host(env: &TestEnv) -> TestManagedHost {
+pub(in crate::tests) async fn dpf_ingested_host(env: &TestEnv) -> TestManagedHost {
     timeout(TEST_TIMEOUT, create_managed_host_with_dpf(env))
         .await
         .expect("timed out during initial provisioning")
@@ -169,7 +254,9 @@ fn reset_request(machine_id: MachineId, mode: Mode) -> Request<ManagedHostResetR
 }
 
 /// The operator's acknowledgement that the reset may destroy a live instance.
-fn reset_request_allowing_instance(machine_id: MachineId) -> Request<ManagedHostResetRequest> {
+pub(in crate::tests) fn reset_request_allowing_instance(
+    machine_id: MachineId,
+) -> Request<ManagedHostResetRequest> {
     let mut request = reset_request(machine_id, Mode::Set);
     request.get_mut().allow_reset_with_instance = true;
     request

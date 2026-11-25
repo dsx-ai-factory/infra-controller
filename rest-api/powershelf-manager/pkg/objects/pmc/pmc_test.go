@@ -240,7 +240,7 @@ func TestSetVendor(t *testing.T) {
 	}
 }
 
-func TestPatch(t *testing.T) {
+func TestPMC_Patch(t *testing.T) {
 	credPtr := func(u, p string) *credential.Credential { return newCred(u, p) }
 
 	// Helper to create PMC quickly
@@ -261,6 +261,29 @@ func TestPatch(t *testing.T) {
 		"no patch if MAC different": {
 			base:        makePMC("00:11:22:33:44:55", "192.168.1.10", vendor.VendorCodeLiteon, credPtr("admin", "a")),
 			to:          makePMC("66:77:88:99:00:11", "192.168.1.100", vendor.VendorCodeLiteon, credPtr("root", "r")),
+			wantPatched: false,
+			wantIP:      "192.168.1.10",
+			wantUser:    "admin",
+			wantPass:    "a",
+		},
+		"nil and empty MAC match": {
+			base: PMC{
+				IP:         net.ParseIP("192.168.1.10"),
+				Credential: credPtr("admin", "a"),
+			},
+			to: PMC{
+				MAC:        net.HardwareAddr{},
+				IP:         net.ParseIP("192.168.1.100"),
+				Credential: credPtr("root", "r"),
+			},
+			wantPatched: true,
+			wantIP:      "192.168.1.100",
+			wantUser:    "root",
+			wantPass:    "r",
+		},
+		"no patch if MAC lengths differ": {
+			base:        makePMC("00:11:22:33:44:55", "192.168.1.10", vendor.VendorCodeLiteon, credPtr("admin", "a")),
+			to:          makePMC("00:11:22:33:44:55:66:77", "192.168.1.100", vendor.VendorCodeLiteon, credPtr("root", "r")),
 			wantPatched: false,
 			wantIP:      "192.168.1.10",
 			wantUser:    "admin",

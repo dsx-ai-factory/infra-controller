@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -338,7 +339,7 @@ func TestFabricHandler_Get(t *testing.T) {
 			if !tc.expectedErr {
 				rsp := &model.APIFabric{}
 				b := rec.Body.Bytes()
-				fmt.Println(string(b))
+				fmt.Printf("%s\n", b)
 				err := json.Unmarshal(b, rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedID, rsp.ID)
@@ -594,10 +595,10 @@ func TestFabricHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)

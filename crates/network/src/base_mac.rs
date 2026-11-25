@@ -75,10 +75,30 @@ impl<'de> Deserialize<'de> for BaseMac {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
+        struct StringVisitor;
 
-        let str_value = String::deserialize(deserializer)?;
-        Self::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = Result<BaseMac, eyre::Error>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(value.parse())
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                match std::str::from_utf8(value) {
+                    Ok(value) => self.visit_str(value),
+                    Err(_) => Err(E::invalid_value(serde::de::Unexpected::Bytes(value), &self)),
+                }
+            }
+        }
+
+        deserializer
+            .deserialize_string(StringVisitor)?
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -91,6 +111,27 @@ mod test {
 
     fn mac(bytes: [u8; 6]) -> BaseMac {
         BaseMac(MacAddress::new(bytes))
+    }
+
+    #[test]
+    fn deserialization_accepts_reader_and_byte_inputs() {
+        use serde::de::value::{BytesDeserializer, Error};
+
+        let expected = mac([1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            serde_json::from_reader::<_, BaseMac>(b"\"010203040506\"".as_slice()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            BaseMac::deserialize(BytesDeserializer::<Error>::new(b"010203040506")).unwrap(),
+            expected
+        );
+        let bytes = &[0xff];
+        let expected_error =
+            String::deserialize(BytesDeserializer::<Error>::new(bytes)).unwrap_err();
+        let actual_error =
+            BaseMac::deserialize(BytesDeserializer::<Error>::new(bytes)).unwrap_err();
+        assert_eq!(actual_error.to_string(), expected_error.to_string());
     }
 
     // --- Display: total, uppercase hex, no colons ---

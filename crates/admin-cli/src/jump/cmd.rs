@@ -89,7 +89,7 @@ pub(super) async fn jump(args: Cmd, ctx: &mut RuntimeContext) -> color_eyre::Res
                 InstanceAddress => {
                     instance::handle_show(
                         instance::ShowInstance {
-                            id: m.owner_id.ok_or(CarbideCliError::GenericError(
+                            id: m.owner_id.ok_or_else(|| CarbideCliError::GenericError(
                                 "failed to unwrap owner_id after finding instance for IP"
                                     .to_string(),
                             ))?,
@@ -111,7 +111,7 @@ pub(super) async fn jump(args: Cmd, ctx: &mut RuntimeContext) -> color_eyre::Res
                             machine: Some(
                                 m.owner_id
                                     .and_then(|id| id.parse::<MachineId>().ok())
-                                    .ok_or(CarbideCliError::GenericError(
+                                    .ok_or_else(|| CarbideCliError::GenericError(
                                         "failed to unwrap owner_id after finding machine for IP"
                                             .to_string(),
                                     ))?,
@@ -165,7 +165,7 @@ pub(super) async fn jump(args: Cmd, ctx: &mut RuntimeContext) -> color_eyre::Res
                         network_segment::ShowNetworkSegment {
                             network: Some(
                                 m.owner_id
-                                    .ok_or(CarbideCliError::GenericError(
+                                    .ok_or_else(|| CarbideCliError::GenericError(
                                         "failed to unwrap owner_id after finding network segment for IP".to_string(),
                                     ))?
                                     .parse()?,
@@ -183,7 +183,7 @@ pub(super) async fn jump(args: Cmd, ctx: &mut RuntimeContext) -> color_eyre::Res
                 DpaInterface =>  {
                     dpa::show(
                         &ShowDpa {
-                            id: Some(m.owner_id.ok_or(CarbideCliError::GenericError(
+                            id: Some(m.owner_id.ok_or_else(|| CarbideCliError::GenericError(
                                 "failed to unwrap owner_id after dpa interface for IP".to_string(),
                             ))?.parse()?),
                         },

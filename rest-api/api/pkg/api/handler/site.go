@@ -759,7 +759,7 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 		for _, status := range statusQuery {
 			_, ok := cdbm.SiteStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				statusError := validation.Errors{
 					"status": errors.New(status),
 				}

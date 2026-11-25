@@ -42,6 +42,6 @@ impl Run for Args {
             .api_client
             .get_machine_health_history(self.machine_id)
             .await?;
-        display_health_history(&self.machine_id.to_string(), history, ctx.config.format)
+        display_health_history(self.machine_id, history, ctx.config.format)
     }
 }

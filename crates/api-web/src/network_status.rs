@@ -61,7 +61,10 @@ pub(super) async fn show_html(
     AxumState(state): AxumState<Arc<Api>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let filter = params.get("filter").cloned().unwrap_or("all".to_string());
+    let filter = params
+        .get("filter")
+        .cloned()
+        .unwrap_or_else(|| "all".to_string());
 
     let current_page = params
         .get("current_page")

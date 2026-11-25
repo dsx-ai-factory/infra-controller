@@ -15,6 +15,7 @@ var (
 	ErrTypeNICoObjectNotFound     = "NICoObjectNotFound"
 	ErrTypeNICoUnimplemented      = "NICoUnimplemented"
 	ErrTypeNICoUnavailable        = "NICoUnavailable"
+	ErrTypeNICoDeadlineExceeded   = "NICoDeadlineExceeded"
 	ErrTypeNICoDenied             = "NICoDenied"
 	ErrTypeNICoAlreadyExists      = "NICoAlreadyExists"
 	ErrTypeNICoAborted            = "NICoAborted"
@@ -92,6 +93,8 @@ func WrapErr(err error) error {
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoUnimplemented, err)
 		case codes.Unavailable:
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoUnavailable, err)
+		case codes.DeadlineExceeded:
+			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoDeadlineExceeded, err)
 		case codes.PermissionDenied:
 			return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeNICoDenied, err)
 		case codes.Aborted:

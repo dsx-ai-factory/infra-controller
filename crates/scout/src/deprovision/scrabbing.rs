@@ -424,7 +424,7 @@ async fn all_nvme_cleanup(instrumentation: &Instrumentation) -> Result<(), Carbi
                 continue;
             }
 
-            let nvmename = path.to_string_lossy().to_string();
+            let nvmename = path.to_string_lossy().into_owned();
             if NVME_DEV_RE.is_match(&nvmename) {
                 nvme_devicepaths.push(nvmename);
             }
@@ -588,7 +588,7 @@ fn sysfs_symlink_basename(path: &std::path::Path) -> Option<String> {
     fs::canonicalize(path).ok().and_then(|target| {
         target
             .file_name()
-            .map(|name| name.to_string_lossy().to_string())
+            .map(|name| name.to_string_lossy().into_owned())
     })
 }
 
@@ -709,7 +709,7 @@ async fn all_hdd_cleanup(instrumentation: &Instrumentation) -> Result<(), Carbid
                 Ok(o) => o,
                 Err(_) => continue,
             };
-            let devname = entry.file_name().to_string_lossy().to_string();
+            let devname = entry.file_name().to_string_lossy().into_owned();
             let devpath = format!("/dev/{devname}");
             if SD_DEV_RE.is_match(&devpath) {
                 if let Some(reason) = block_device_cleanup_skip_reason(&devname) {
@@ -1045,7 +1045,7 @@ async fn do_cleanup(
 
     // do nvme/hdd cleanup only if stdin is /dev/null. This is because we afraid to cleanup someone's drives.
     let stdin_link = match fs::read_link("/proc/self/fd/0") {
-        Ok(o) => o.to_string_lossy().to_string(),
+        Ok(o) => o.to_string_lossy().into_owned(),
         Err(_) => "None".to_string(),
     };
 

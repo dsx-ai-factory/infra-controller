@@ -1107,8 +1107,12 @@ back to Vault follows the asymmetric rule in
 there is no export from Postgres to Vault.
 
 The installer does not deploy the REST `powershelf-manager` and
-`nvswitch-manager`; a selectable credential backend for those services is
-tracked in [#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954).
+`nvswitch-manager`. When started with `serve --datastore Persistent`, both
+services keep device credentials in Vault. Both are deprecated in favor of RMS,
+so a credential backend without Vault is not planned for them
+([#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954)).
+On an installation without Vault, keep the default `rms` backend for power
+shelves and switches.
 
 ## Upgrading deployments that bundled PSM and NSM
 

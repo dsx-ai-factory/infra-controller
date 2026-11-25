@@ -676,6 +676,21 @@ async fn run_integration() -> eyre::Result<()> {
         "# TYPE carbide_object_unhealthy_by_classification_count gauge\n",
     )
     .await?;
+    // The hold gauges are read from the database with or without DPF, so they
+    // are in the scrape, at zero, before any hold exists. A read that fails
+    // publishes nothing and is retried a minute later with a 30 second
+    // deadline, so the wait is long enough for one retry.
+    for gauge in [
+        "carbide_hosts_dpu_service_sync_pending_count",
+        "carbide_hosts_dpu_service_sync_oldest_pending_age_seconds",
+    ] {
+        metrics::wait_for_metric_line_within(
+            &test_env.carbide_metrics_addrs,
+            &format!("# TYPE {gauge} gauge\n"),
+            Duration::from_secs(120),
+        )
+        .await?;
+    }
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
     metric_infos.extend(collect_dhcp_metric_infos().await?);
@@ -1100,11 +1115,12 @@ async fn exercise_admin_address_reconcile_failures(
 }
 
 /// Proves `FindIBPartitionsByIds` returns a row with an unrecognized stored MTU
-/// and exports the fallback counter for the generated catalogue.
+/// and exercises the fallback and controller transition metrics for the catalogue.
 async fn exercise_ib_partition_mtu_fallback(
     test_env: &IntegrationTestEnvironment,
 ) -> eyre::Result<()> {
     use carbide_uuid::infiniband::IBPartitionId;
+    use model::ib_partition::IBPartitionControllerState;
     use rpc::carbide_api_client::CarbideApiClient;
     use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
@@ -1112,11 +1128,12 @@ async fn exercise_ib_partition_mtu_fallback(
     sqlx::query(
         "INSERT INTO ib_partitions
             (id, name, organization_id, config_version, controller_state_version,
-             mtu, rate_limit, service_level)
-         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, 3, 200, 0)",
+             controller_state, mtu, rate_limit, service_level)
+         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, $3, 3, 200, 0)",
     )
     .bind(id)
     .bind(ConfigVersion::initial())
+    .bind(sqlx::types::Json(IBPartitionControllerState::Provisioning))
     .execute(&test_env.db_pool)
     .await?;
 
@@ -1141,6 +1158,15 @@ async fn exercise_ib_partition_mtu_fallback(
             include_history: false,
         })
         .await;
+    // Keep the fixture until the controller has recorded the transition and
+    // all three families are visible in the live scrape.
+    for line in [
+        "# TYPE carbide_ib_partitions_state_entered_total counter\n",
+        "# TYPE carbide_ib_partitions_state_exited_total counter\n",
+        "# TYPE carbide_ib_partitions_time_in_state_seconds histogram\n",
+    ] {
+        metrics::wait_for_metric_line(&test_env.carbide_metrics_addrs, line).await?;
+    }
     sqlx::query("DELETE FROM ib_partitions WHERE id = $1")
         .bind(id)
         .execute(&test_env.db_pool)

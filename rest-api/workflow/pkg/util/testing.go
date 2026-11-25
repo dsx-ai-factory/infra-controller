@@ -52,6 +52,9 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create NetworkSecurityGroup table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NetworkSecurityGroup)(nil))
 	assert.Nil(t, err)
+	// create DhcpOptionSet table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.DhcpOptionSet)(nil))
+	assert.Nil(t, err)
 	// create TenantSite table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil))
 	assert.Nil(t, err)

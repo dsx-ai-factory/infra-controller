@@ -20,7 +20,7 @@ use std::fs;
 use std::time::Duration;
 
 use carbide_firmware::test_support::script_setup;
-use carbide_machine_controller::config::{FirmwareGlobal, TimePeriod};
+use carbide_machine_controller::config::TimePeriod;
 use carbide_machine_controller::handler::MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES;
 use carbide_uuid::machine::StableHostMachineId;
 use common::api_fixtures::instance::TestInstance;
@@ -1494,6 +1494,8 @@ async fn test_script_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
 #[crate::sqlx_test]
 async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     let mut config = get_config();
+    // Retry failed scripts immediately so the test reaches exhaustion without sleeping.
+    config.firmware_global.host_firmware_upgrade_retry_interval = chrono::TimeDelta::zero();
     config.host_models = HashMap::from([(
         "1".to_string(),
         Firmware {
@@ -1567,16 +1569,15 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::FailedFirmwareUpgrade { .. } = reprovision_state else {
-        panic!("Not in FailedFirmwareUpgrade");
+    let HostReprovisionState::FailedFirmwareUpgrade {
+        report_time: Some(_),
+        ..
+    } = reprovision_state
+    else {
+        panic!("Expected FailedFirmwareUpgrade with a retry timestamp, got {reprovision_state:?}");
     };
 
     for retry_i in 1..=MAX_FIRMWARE_UPGRADE_RETRIES {
-        // Wait and try again, it will increment the retry_count and move to CheckingFirmware again
-        tokio::time::sleep(std::time::Duration::from_secs(
-            FirmwareGlobal::get_retry_interval().as_seconds_f64() as u64,
-        ))
-        .await;
         env.run_machine_state_controller_iteration_no_requeue()
             .await;
         let host = mh.host().db_machine(&env.pool).await;
@@ -1631,19 +1632,29 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
             panic!("Not in HostReprovision");
         };
         assert_eq!(*retry_count, retry_i);
-        let HostReprovisionState::FailedFirmwareUpgrade { .. } = reprovision_state else {
-            panic!("Not in FailedFirmwareUpgrade");
+        let HostReprovisionState::FailedFirmwareUpgrade {
+            report_time: Some(_),
+            ..
+        } = reprovision_state
+        else {
+            panic!(
+                "Expected FailedFirmwareUpgrade with a retry timestamp, got {reprovision_state:?}"
+            );
         };
     }
 
-    // Wait and try again, it should not retry any more and stay in FailedFirmwareUpgrade
-    tokio::time::sleep(std::time::Duration::from_secs(
-        FirmwareGlobal::get_retry_interval().as_seconds_f64() as u64,
-    ))
-    .await;
+    // With no retry delay, this pass checks that the budget blocks another attempt.
     env.run_machine_state_controller_iteration().await;
     let host = mh.host().db_machine(&env.pool).await;
 
+    assert!(
+        matches!(
+            &host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::DoNothing { .. })
+        ),
+        "expected DoNothing after exhausting retries, got {:?}",
+        host.controller_state_outcome
+    );
     assert!(host.host_reprovision_requested.is_some());
     let ManagedHostState::HostReprovision {
         reprovision_state,

@@ -57,7 +57,7 @@ pub(crate) async fn trigger_host_reprovisioning(
     let snapshot =
         db::managed_host::load_snapshot(&mut txn, &machine_id, LoadSnapshotOptions::default())
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;

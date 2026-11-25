@@ -38,7 +38,7 @@ async fn test_dynamic_log_filter(db_pool: PgPool) -> eyre::Result<()> {
     // 1. It's correct when we start
     // This is actually set in TestEnv so not especially useful check, but we need it later
     let local = EnvFilter::builder()
-        .parse(std::env::var("RUST_LOG").unwrap_or("trace".to_string()))
+        .parse(std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string()))
         .unwrap()
         .to_string();
     let base = env.api().log_filter_string();

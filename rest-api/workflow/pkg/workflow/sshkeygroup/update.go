@@ -4,7 +4,6 @@
 package sshkeygroup
 
 import (
-	"fmt"
 	"time"
 
 	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
@@ -31,7 +30,7 @@ func UpdateSSHKeyGroupInventory(ctx workflow.Context, siteID string, sshKeyGroup
 
 	parsedSiteID, err := uuid.Parse(siteID)
 	if err != nil {
-		logger.Warn().Err(err).Msg(fmt.Sprintf("workflow triggered with invalid site ID: %s", siteID))
+		logger.Warn().Err(err).Msgf("workflow triggered with invalid site ID: %s", siteID)
 		return err
 	}
 

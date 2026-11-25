@@ -4,7 +4,7 @@
 package processor
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -168,7 +168,7 @@ func (p *Processor) materializeTaskTargets(
 	}
 
 	slices.SortFunc(targets, func(a, b operation.RackExecutionTarget) int {
-		return cmp.Compare(a.RackID.String(), b.RackID.String())
+		return bytes.Compare(a.RackID[:], b.RackID[:])
 	})
 
 	return targets, nil

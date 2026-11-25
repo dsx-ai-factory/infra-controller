@@ -93,12 +93,14 @@ impl Default for ActiveLevel {
 
 impl ActiveLevel {
     pub fn new(f: EnvFilter, reload_handle: Option<Box<dyn Reloadable>>) -> Self {
+        let filter = f.to_string();
+        let targets = filter.parse().ok();
         Self {
-            current: ArcSwap::new(f.to_string().into()),
-            base: f.to_string(),
+            current: ArcSwap::new(filter.clone().into()),
+            base: filter,
             expiry: Default::default(),
             reload_handle,
-            targets: ArcSwap::from_pointee(f.to_string().parse().ok()),
+            targets: ArcSwap::from_pointee(targets),
         }
     }
 
@@ -124,9 +126,10 @@ impl ActiveLevel {
         if let Some(handle) = self.reload_handle.as_ref() {
             handle.reload(current.clone())?;
         }
-        self.current.store(Arc::new(current.to_string()));
-        self.targets
-            .store(Arc::new(current.to_string().parse().ok()));
+        let current = Arc::new(current.to_string());
+        self.current.store(current.clone());
+        let targets = current.parse().ok();
+        self.targets.store(Arc::new(targets));
         Ok(())
     }
 
@@ -144,7 +147,8 @@ impl ActiveLevel {
 
 impl fmt::Display for ActiveLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let current = self.current.to_string();
+        let current = self.current.load();
+        let current = current.as_str();
         match self.expiry.load().as_ref() {
             None => write!(f, "{current}"),
             Some(exp) => write!(f, "{current} until {exp}"),

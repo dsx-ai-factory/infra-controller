@@ -16,6 +16,7 @@
  */
 
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+use itertools::Itertools;
 use sqlx::PgPool;
 
 use super::*;
@@ -33,9 +34,9 @@ async fn remediation_requires_optional_columns_in_query_results(pool: PgPool) {
         let selected_columns = optional_columns
             .iter()
             .filter(|(column, _)| *column != omitted_column)
-            .map(|(column, value)| format!("{value} AS {column}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .format_with(", ", |(column, value), f| {
+                f(&format_args!("{value} AS {column}"))
+            });
         let query = format!(
             "SELECT
                 $1::uuid AS id,

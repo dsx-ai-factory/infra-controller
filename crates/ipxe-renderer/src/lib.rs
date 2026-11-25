@@ -1134,17 +1134,33 @@ mod tests {
         let renderer = DefaultIpxeScriptRenderer::new();
         let templates = renderer.list_templates();
 
-        assert!(templates.contains(&"qcow-image".to_string()));
-        assert!(templates.contains(&"ubuntu-autoinstall".to_string()));
-        assert!(templates.contains(&"dgx-os".to_string()));
-        assert!(templates.contains(&"discovery-scout-aarch64-dpu".to_string()));
-        assert!(templates.contains(&"discovery-scout-aarch64".to_string()));
-        assert!(templates.contains(&"discovery-scout-x86_64".to_string()));
-        assert!(templates.contains(&"error-instructions".to_string()));
-        assert!(templates.contains(&"exit-instructions".to_string()));
-        assert!(templates.contains(&"unknown-host".to_string()));
-        assert!(templates.contains(&"whoami".to_string()));
-        assert!(templates.contains(&"carbide-menu-static-ipxe".to_string()));
+        assert!(templates.iter().any(|value| value == "qcow-image"));
+        assert!(templates.iter().any(|value| value == "ubuntu-autoinstall"));
+        assert!(templates.iter().any(|value| value == "dgx-os"));
+        assert!(
+            templates
+                .iter()
+                .any(|value| value == "discovery-scout-aarch64-dpu")
+        );
+        assert!(
+            templates
+                .iter()
+                .any(|value| value == "discovery-scout-aarch64")
+        );
+        assert!(
+            templates
+                .iter()
+                .any(|value| value == "discovery-scout-x86_64")
+        );
+        assert!(templates.iter().any(|value| value == "error-instructions"));
+        assert!(templates.iter().any(|value| value == "exit-instructions"));
+        assert!(templates.iter().any(|value| value == "unknown-host"));
+        assert!(templates.iter().any(|value| value == "whoami"));
+        assert!(
+            templates
+                .iter()
+                .any(|value| value == "carbide-menu-static-ipxe")
+        );
         // Only assert minimum count (templates referenced in tests); new entries in templates.yaml are allowed
         assert!(templates.len() >= 11);
     }

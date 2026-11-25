@@ -235,7 +235,7 @@ async fn rack_health_history(
         .unwrap()
         .into_inner()
         .histories
-        .remove(&id.to_string())
+        .remove(id.as_str())
         .unwrap_or_default()
         .records
 }

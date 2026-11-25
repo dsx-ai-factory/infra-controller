@@ -111,7 +111,7 @@ impl K8sConfigRepository for MaintenanceHoldMock {
     ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError> {
         Ok(None)
     }
-    async fn apply_secret(
+    async fn create_secret_if_absent(
         &self,
         _: &str,
         _: &str,
@@ -173,8 +173,9 @@ async fn test_release_maintenance_hold_sets_annotation_false() {
             .annotations
             .as_ref()
             .unwrap()
-            .get(HOLD_ANNOTATION),
-        Some(&"true".to_string())
+            .get(HOLD_ANNOTATION)
+            .map(String::as_str),
+        Some("true")
     );
 
     // Release the maintenance hold
@@ -187,8 +188,9 @@ async fn test_release_maintenance_hold_sets_annotation_false() {
             .annotations
             .as_ref()
             .unwrap()
-            .get(HOLD_ANNOTATION),
-        Some(&"false".to_string())
+            .get(HOLD_ANNOTATION)
+            .map(String::as_str),
+        Some("false")
     );
 }
 
