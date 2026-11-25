@@ -72,7 +72,7 @@ compatibility parsing does not restore their former behavior.
 | `bmc_session_lockout_threshold` | `u32` | `3` | `security` | Consecutive BMC HTTP 401/403 responses before session-token login attempts stop for that BMC. |
 | `bmc_max_sessions_per_caller` | `usize` | `4` | `security` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Values below 1 are treated as 1. |
 | `bmc_proxy` | `Option<BmcProxyConfig>` | — | `security` | Routes this instance's ordinary BMC Redfish traffic — including established-endpoint credentialed exploration — through nico-bmc-proxy. Credential setup and rotation, session minting, exploration's anonymous vendor probes, and component-manager compute-tray power control (explicit per-endpoint credentials) always stay direct. |
-| `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. When `ib_config.enabled = true`, v2.4 accepts at most one fabric, named `default`. Each fabric accepts optional `backend` and `remote_pool` selectors with the [ResourcePoolConfig](#resourcepoolconfig) rules, using `ib_fabrics.<fabric>.pkey` as its logical pool name. When InfiniBand management is disabled, selectors are still validated, but fabric configuration alone creates no PKey binding; existing pool inventory can still receive a missing binding. |
+| `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. When `ib_config.enabled = true`, v2.4 accepts at most one fabric, named `default`. Each fabric accepts optional `backend` and `remote_pool` selectors with the [ResourcePoolConfig](#resourcepoolconfig) rules, using `ib_fabrics.<fabric>.pkey` as its logical pool name. The optional `auth` setting selects `"client_certificate"` or `"token"`; omission preserves credential-based selection. An `auth` change needs a Core restart. When InfiniBand management is disabled, selectors are still validated, but fabric configuration alone creates no PKey binding; existing pool inventory can still receive a missing binding. |
 | `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. Also the default NMX-C TLS authority; see [NvLinkConfig](#nvlinkconfig). |
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | `machines` | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
 | `max_concurrent_machine_updates` | `Option<i32>` | — | `machines` | **Deprecated.** Use `machine_updater` instead. |
@@ -642,6 +642,16 @@ disabled in v2.4.
 | `ca_cert_file` | `Option<PathBuf>` | — | Path to a PEM CA bundle. When supplied, only this bundle is trusted; omission uses the host's native root store and fails if it has no usable roots. The bundle must contain valid certificates. |
 | `client_cert_file` | `Option<PathBuf>` | — | Path to a PEM client certificate chain. Must be configured together with `client_key_file`. |
 | `client_key_file` | `Option<PathBuf>` | — | Path to a PEM client private key file. Must be configured together with `client_cert_file`. |
+
+### `IbFabricDefinition`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `endpoints` | `Vec<String>` | **required** | UFM endpoint URLs. |
+| `auth` | `Option<UfmAuthMode>` | — | UFM authentication mode. `"client_certificate"` uses the default SPIFFE client certificate files and reads no UFM credential. `"token"` requires a stored, nonblank UFM token. When omitted, an empty or whitespace-only password selects the client certificate, any other password is a token, and a missing credential is an error. |
+| `pkeys` | `Vec<Range>` | **required** | P_Key ranges available to the fabric. |
+| `backend` | `Option<String>` | — | Named resource-pool backend for this fabric's P_Keys. |
+| `remote_pool` | `Option<String>` | — | Provider lookup name for this fabric's P_Key pool. |
 
 ### `IBFabricConfig`
 
@@ -2183,9 +2193,11 @@ local environment and file sources before the configured persistent backends.
 | `file` | `Option<CredentialFileSourceConfig>` | — | Watched JSON or YAML static-credential file (see [CredentialFileSourceConfig](#credentialfilesourceconfig)). When present, it replaces the legacy file source selected by `CARBIDE_CREDENTIALS_FILE_*`; the environment source remains first when enabled. |
 
 When `ufm_source = "local"` and InfiniBand management is enabled, startup
-requires a local `ufm_auth_by_fabric` entry for every configured fabric. The
-mode is all-or-nothing: NICo does not fall back to Vault or Postgres for a
-missing fabric. When `ufm_source` is omitted, `local_first` preserves the
+requires a local `ufm_auth_by_fabric` entry for every configured fabric unless
+that fabric sets `auth = "client_certificate"`. For `auth = "token"`, the first
+local entry found must have a non-blank password. The mode is all-or-nothing:
+NICo does not fall back to Vault or Postgres for a missing or blank required
+fabric credential. When `ufm_source` is omitted, `local_first` preserves the
 pre-existing local-override behavior.
 
 When `bmc_site_wide_root_source = "local"`, readers report a missing local
@@ -2230,8 +2242,13 @@ UFM fabric using the default prefix:
 ```bash
 export CARBIDE_CREDENTIALS_ENV_ENABLED=true
 export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__USERNAME=ignored-for-token-or-certificate-auth
-export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-token-or-empty
+export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=ufm-token-or-empty
 ```
+
+With `auth = "token"`, the password must be a nonblank UFM token. With
+`auth` unset, an empty or whitespace-only password selects the default SPIFFE
+client certificate. A fabric with `auth = "client_certificate"` does not read
+these variables.
 
 Environment credentials are snapshotted at process startup. Changing them
 requires restarting `nico-api`; use the watched file source for supported
@@ -2239,7 +2256,8 @@ live-reload workflows. The site-wide BMC root version 0 has the bootstrap-only
 boundary described above. With `ufm_source = "local_first"`, an environment entry
 overrides the corresponding file and persistent-backend entries. With
 `ufm_source = "local"`, every configured fabric must be present in the enabled
-environment/file sources.
+environment/file sources unless it sets `auth = "client_certificate"`; an
+explicit token entry must have a non-blank password.
 
 For version 0 of the site-wide BMC root, the environment entry likewise
 precedes the file entry in `local_first` and `local` modes. Versioned roots do
@@ -2253,15 +2271,17 @@ not use either local source.
 | `poll_interval` | `Duration` | `60s` | Nonzero interval used in addition to filesystem events to detect projected-Secret replacements. Startup rejects zero. |
 
 The watcher keeps the last valid snapshot when a reload fails. A UFM-only YAML
-file has the following shape; both `username` and `password` are required. The
-password is the bearer token, while an empty password selects the default
-SPIFFE client certificate:
+file has the following shape; both `username` and `password` are required. With
+`auth = "token"`, the password is a nonblank UFM token. With `auth` unset, an
+empty or whitespace-only password selects the default SPIFFE client certificate
+and any other password is the UFM token. A fabric with
+`auth = "client_certificate"` does not read this credential:
 
 ```yaml
 ufm_auth_by_fabric:
   default:
     username: ignored-for-token-or-certificate-auth
-    password: bearer-token-or-empty
+    password: ufm-token-or-empty
 ```
 
 A sparse file may instead contain only version 0 of the site-wide BMC root:
