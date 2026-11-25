@@ -23,8 +23,8 @@ use carbide_uuid::machine_validation::{
 use chrono::{DateTime, Utc};
 use model::machine_validation::{
     MachineValidationAttempt, MachineValidationAttemptLogChunk, MachineValidationAttemptLogStream,
-    MachineValidationAttemptState, MachineValidationResult, MachineValidationRunItem,
-    MachineValidationRunItemState, MachineValidationTest,
+    MachineValidationAttemptState, MachineValidationPlugin, MachineValidationResult,
+    MachineValidationRunItem, MachineValidationRunItemState, MachineValidationTest,
 };
 use sqlx::PgConnection;
 
@@ -83,6 +83,47 @@ pub struct ValidationAttempt {
     pub ended_at: Option<DateTime<Utc>>,
     /// Persisted exit code, if recorded.
     pub exit_code: Option<i32>,
+}
+
+/// Immutable plugin settings for one active run item authorized before launch.
+pub struct PluginLaunchSnapshot {
+    /// Container configuration frozen in the run plan.
+    pub plugin: MachineValidationPlugin,
+    /// Full-host approval frozen in the run plan.
+    pub full_host_approved: bool,
+}
+
+/// Read only the targeted plugin and its latest active attempt. Missing,
+/// terminal, or non-plugin targets return None without changing liveness.
+pub async fn find_active_plugin_launch_snapshot(
+    txn: impl DbReader<'_>,
+    run_id: &MachineValidationId,
+    test_id: &str,
+) -> DatabaseResult<Option<PluginLaunchSnapshot>> {
+    const QUERY: &str = "
+        SELECT item.plugin, item.plugin_full_host_approved
+        FROM machine_validation_run_items item
+        JOIN machine_validation run ON run.id = item.run_id
+        JOIN LATERAL (
+            SELECT state FROM machine_validation_attempts
+            WHERE run_item_id = item.id
+            ORDER BY attempt_number DESC LIMIT 1
+        ) attempt ON attempt.state IN ('Pending', 'Running')
+        WHERE item.run_id = $1 AND item.test_id = $2
+          AND item.plugin IS NOT NULL AND item.state IN ('Pending', 'Running')
+          AND run.end_time IS NULL AND run.state IN ('Started', 'InProgress')";
+    let row = sqlx::query_as::<_, (sqlx::types::Json<MachineValidationPlugin>, bool)>(QUERY)
+        .bind(run_id)
+        .bind(test_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(QUERY, error))?;
+    Ok(
+        row.map(|(plugin, full_host_approved)| PluginLaunchSnapshot {
+            plugin: plugin.0,
+            full_host_approved,
+        }),
+    )
 }
 
 /// Returns every attempt for every item in the run, in unspecified order.
@@ -1203,6 +1244,7 @@ mod tests {
     use carbide_uuid::machine::MachineId;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     fn test_machine_id() -> MachineId {
         MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30").unwrap()
@@ -1320,7 +1362,7 @@ mod tests {
         use model::machine_validation::{MachineValidationState, MachineValidationStatus};
 
         let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let id = insert_active_validation(txn.as_mut(), observed_at).await?;
         assert_eq!(
             record_heartbeat(txn.as_mut(), &id, None, None, None, observed_at).await?,
@@ -1330,7 +1372,7 @@ mod tests {
         let run = crate::machine_validation::find_by_id(&pool, &id).await?;
         assert_eq!(run.last_heartbeat_at, Some(observed_at));
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let ConditionalWrite::Applied(_) = crate::machine_validation::update_end_time_if_active(
             txn.as_mut(),
             &id,
@@ -1367,7 +1409,7 @@ mod tests {
     async fn find_stale_active_attempts_respects_heartbeat_and_duration_fallback(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let now = chrono::Utc::now();
         let validation_id = insert_active_validation(txn.as_mut(), now).await?;
 
@@ -1454,7 +1496,7 @@ mod tests {
         ];
 
         for case in cases {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let validation_id = insert_active_validation(txn.as_mut(), case.started_at).await?;
             let attempt_id = insert_attempt(
                 txn.as_mut(),

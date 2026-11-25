@@ -21,6 +21,7 @@ use model::ib_partition::IBPartitionConfig;
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn ib_partition_queries_survive_added_columns(
@@ -31,7 +32,7 @@ async fn ib_partition_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection commits DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE ib_partitions ADD COLUMN test_added_column text;",
@@ -47,7 +48,7 @@ async fn ib_partition_queries_survive_added_columns(
 async fn exercise_ib_partition_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = IBPartitionId::new();
     let pkey = 42.try_into()?;
     let config = IBPartitionConfig {
@@ -79,6 +80,7 @@ async fn exercise_ib_partition_queries(
         txn.as_mut(),
         10,
         status.clone(),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     assert_eq!(created.version.version_nr(), 1);
@@ -116,9 +118,24 @@ async fn exercise_ib_partition_queries(
     expected.controller_state_outcome = Some(outcome);
 
     for found in [
-        for_tenant(txn.as_mut(), "projection-tenant".to_string()).await?,
-        find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id)).await?,
-        find_active_for_share(txn.as_mut(), &[id]).await?,
+        for_tenant(
+            txn.as_mut(),
+            "projection-tenant".to_string(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?,
+        find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &id),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?,
+        find_active_for_share(
+            txn.as_mut(),
+            &[id],
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?,
     ] {
         assert_eq!(found.len(), 1);
         assert_partition(&found[0], &expected);
@@ -128,8 +145,14 @@ async fn exercise_ib_partition_queries(
         description: "updated description".to_string(),
         labels: [("owner".to_string(), "updated-tenant".to_string())].into(),
     };
-    let ConditionalWrite::Applied(updated) =
-        update_metadata(id, expected.version, &metadata, txn.as_mut()).await?
+    let ConditionalWrite::Applied(updated) = update_metadata(
+        id,
+        expected.version,
+        &metadata,
+        txn.as_mut(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await?
     else {
         panic!("the current partition version must accept the metadata update");
     };
@@ -149,13 +172,29 @@ async fn exercise_ib_partition_queries(
         service_level: None,
         pkey: Some(pkey),
     });
-    let updated = update_status(id, &expected.status, txn.as_mut()).await?;
+    let updated = update_status(
+        id,
+        &expected.status,
+        txn.as_mut(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
     assert_partition(&updated, &expected);
-    let found = find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id)).await?;
+    let found = find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &id),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
     assert_eq!(found.len(), 1);
     assert_partition(&found[0], &expected);
 
-    let deleted = mark_as_deleted(&expected, txn.as_mut()).await?;
+    let deleted = mark_as_deleted(
+        &expected,
+        txn.as_mut(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
     expected.deleted = Some(
         sqlx::query_scalar("SELECT NOW()")
             .fetch_one(txn.as_mut())
@@ -178,7 +217,12 @@ async fn exercise_ib_partition_queries(
     expected.config.pkey = None;
     expected.status = None;
     expected.controller_state_outcome = None;
-    let found = for_tenant(txn.as_mut(), "projection-tenant".to_string()).await?;
+    let found = for_tenant(
+        txn.as_mut(),
+        "projection-tenant".to_string(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
     assert_eq!(found.len(), 1);
     assert_partition(&found[0], &expected);
 

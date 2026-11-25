@@ -26,8 +26,9 @@ use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
     NewNetworkSegment,
 };
+use model::site_prefix::SitePrefixLifecycleState;
 use model::vpc::VpcVirtualizationTypeCapabilities;
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
@@ -161,7 +162,32 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+
+    if new_network_segment.segment_type == NetworkSegmentType::Tenant
+        && !api.runtime_config.site_fabric_prefixes.is_empty()
+    {
+        // A rolling config change can retire a root still present in this
+        // replica's allowlist. Lock its persisted coverage through insertion.
+        db::site_prefix::lock_operator_managed_site_prefix_attachments(&mut txn).await?;
+        for prefix in &new_network_segment.prefixes {
+            let roots = db::site_prefix::find_legacy_operator_managed_for_vpc_prefix_attachment(
+                &mut txn,
+                prefix.prefix,
+            )
+            .await?;
+            if !roots
+                .iter()
+                .any(|root| root.status.lifecycle_state == SitePrefixLifecycleState::Ready)
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "the network prefix {} has no ready containing operator-managed SitePrefix",
+                    prefix.prefix
+                ))
+                .into());
+            }
+        }
+    }
 
     let allocate_svi_ip = if let Some(vpc_id) = new_network_segment.vpc_id {
         let vpcs = db::vpc::find_by(
@@ -304,7 +330,7 @@ pub(crate) async fn add_prefix(
     let mut txn = api.txn_begin().await?;
     // Read only after `lock_checks`: another prefix writer must not commit an
     // overlap between the probe and insert, or leave this request a stale family.
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let segment = db::network_segment::find_by(
         &mut txn,
         ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
@@ -429,7 +455,7 @@ pub(crate) async fn attach_to_vpc(
     let vpc_id = vpc_id.ok_or(CarbideError::MissingArgument("vpc_id"))?;
 
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     let vpcs = db::vpc::find_by_with_lock(
         txn.as_mut(),
@@ -505,7 +531,7 @@ pub(crate) async fn delete(
     // Read the prefix list after any append commits, so deletion removes every
     // reverse zone rather than acting on a pre-append snapshot. Reuse the
     // existing overlap lock/order; deletes also wait for its site-wide readers.
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     let mut segments = db::network_segment::find_by(
         &mut txn,
@@ -578,9 +604,8 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::NetworkSegment,
         &segment_ids,
     )
@@ -596,7 +621,6 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    txn.commit().await?;
     Ok(tonic::Response::new(response))
 }
 
@@ -614,7 +638,7 @@ pub(crate) async fn find_state_histories(
 /// set once before creating any missing zones.
 pub(crate) async fn save(
     api: &Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     ns: NewNetworkSegment,
     set_to_ready: bool,
     allocate_svi_ip: bool,
@@ -642,7 +666,7 @@ pub(crate) async fn save(
 /// Callers hold the overlap transaction lock through validation and persistence.
 pub(crate) async fn save_without_reverse_zones(
     api: &Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     mut ns: NewNetworkSegment,
     set_to_ready: bool,
     allocate_svi_ip: bool,

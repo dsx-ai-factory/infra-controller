@@ -33,7 +33,10 @@ use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::{expected_power_shelf as db_expected_power_shelf, power_shelf as db_power_shelf};
+use db::{
+    TransactionVending as _, expected_power_shelf as db_expected_power_shelf,
+    power_shelf as db_power_shelf,
+};
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -69,7 +72,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
         .create_rack(RackProfileId::new(TEST_RMS_RACK_PROFILE_ID))
         .await;
     let bmc_mac = seed_pmc_endpoint(&pool, shelf_id).await.unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     set_power_shelf_rack_and_bmc(&mut txn, &shelf_id, Some(&rack.id), Some(bmc_mac)).await;
     set_power_shelf_controller_state(&mut txn, &shelf_id, PowerShelfControllerState::Ready)
         .await
@@ -206,7 +209,7 @@ async fn legacy_maintenance_failure_repeats_pending_request_only_once(pool: PgPo
         .await
         .power_shelf_maintenance_requested
         .unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     set_power_shelf_controller_state(
         &mut txn,
         &shelf_id,
@@ -325,9 +328,7 @@ fn services_with_component_manager(
         })),
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         rack_firmware_reprovisioning_enabled: false,
-        redfish_client_pool: env.redfish_sim.clone(),
         bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
-        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,
         ),
@@ -358,7 +359,7 @@ async fn build_test_component_manager(
         Some(env.pool.clone()),
         None,
         None,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("test component manager should build");

@@ -89,7 +89,7 @@ pub(crate) async fn add_individual(
         ca_cert_id_response
             .id
             .map(|v| v.ca_cert_id.to_string())
-            .unwrap_or("*CA ID has not been returned*".to_string()),
+            .unwrap_or_else(|| "*CA ID has not been returned*".to_string()),
         ca_cert_id_response.matched_ek_certs
     );
 

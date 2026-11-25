@@ -416,6 +416,9 @@ async fn main() {
     let owned_txn = good_move_out().await;
     owned_txn.commit().await.unwrap();
     bad_takes_db_reader().await;
+    good_await_borrows_transaction_in_async_block().await;
+    bad_unrelated_await_after_using_borrowed_transaction_in_async_block().await;
+    bad_await_holds_uncaptured_transaction_in_async_block().await;
 }
 
 async fn good_nested_typeck_owner() {
@@ -471,4 +474,34 @@ pub mod db_read {
     pub trait DbReader<'c>: sqlx::PgExecutor<'c> {}
 
     impl<'c> DbReader<'c> for &'c mut sqlx::PgConnection {}
+}
+
+async fn good_await_borrows_transaction_in_async_block() {
+    let mut txn = make_transaction();
+    async {
+        good_outer_db_wrapper(&mut txn).await;
+    }
+    .await;
+    txn.commit().await.unwrap();
+}
+
+async fn bad_unrelated_await_after_using_borrowed_transaction_in_async_block() {
+    let mut txn = make_transaction();
+    async {
+        good_outer_db_wrapper(&mut txn).await;
+        unrelated_async_work("bad").await;
+    }
+    .await;
+    txn.commit().await.unwrap();
+}
+
+async fn bad_await_holds_uncaptured_transaction_in_async_block() {
+    let mut txn = make_transaction();
+    let uncaptured = make_transaction();
+    async {
+        good_outer_db_wrapper(&mut txn).await;
+    }
+    .await;
+    drop(uncaptured);
+    txn.commit().await.unwrap();
 }

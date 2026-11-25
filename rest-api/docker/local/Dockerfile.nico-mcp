@@ -32,9 +32,11 @@ COPY sdk/standard/go.mod ./sdk/standard/
 RUN go mod download
 
 # nico-mcp only needs the mcp service, the CLI package it reuses for the REST
-# client + OpenAPI parser, and the embedded spec.
+# client + OpenAPI parser, the URL redaction the CLI imports, and the embedded
+# spec.
 COPY mcp/ ./mcp/
 COPY cli/ ./cli/
+COPY common/pkg/util/redact/ ./common/pkg/util/redact/
 COPY openapi/ ./openapi/
 
 # Build the application

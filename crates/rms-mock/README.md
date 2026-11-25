@@ -16,10 +16,11 @@ rack passes on its way to ready and through maintenance:
 the V2 `ConfigureScaleUpFabricManager` with `GetJobStatus`,
 `GetScaleUpFabricStatus`, and `BatchGetScaleUpFabricServiceStatus`, power
 control with `BatchGetPowerState` and `BatchSetPowerState`, firmware with
-`ListFirmwareObjects`, `ApplyFirmwareObject`, and `GetFirmwareJobStatus`,
+`ListFirmwareObjects`, `ApplyFirmwareObject`, and `GetJobStatus`,
 NVLink switch operating system (NVOS) images with `ApplySwitchSystemImage` and
 `GetSwitchSystemImageJobStatus`, and the switch lifecycle with
 `UpdateSwitchSystemPassword` and `BatchResetSwitchFactoryDefault`.
+It also serves the legacy `GetFirmwareJobStatus` RPC.
 
 Power is read from and applied to the simulated BMC under the same rules as a
 Redfish request, so a device the BMC refuses is a per-node failure. `RESET` is

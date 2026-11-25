@@ -353,17 +353,21 @@ mod tests {
     use crate::proxy::test_support::SwitchCa;
     use crate::proxy::upstream::build_switch_http_client;
 
-    fn switch_client(config: &SwitchTlsConfig) -> Result<SwitchClient, String> {
+    fn switch_client(
+        config: &SwitchTlsConfig,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> Result<SwitchClient, String> {
+        let build_instrumentation = instrumentation.clone();
         SwitchClient::new(
             config,
-            |tls| {
+            move |tls| {
                 build_switch_http_client(
                     RedirectMode::FollowSameOrigin,
                     tls,
-                    carbide_instrument::Instrumentation::global(),
+                    build_instrumentation.clone(),
                 )
             },
-            carbide_instrument::Instrumentation::global(),
+            instrumentation.clone(),
         )
         .map_err(|error| error.to_string())
     }
@@ -395,11 +399,13 @@ mod tests {
                 std::fs::write(&config.client_key_path, key.serialize_pem()).expect("key writes");
             }
         }
-        switch_client(&config).map(drop).map_err(|error| {
-            ["ca_cert_path", "client_cert_path"]
-                .into_iter()
-                .find(|field| error.contains(&format!("tls.switch.{field}")))
-        })
+        switch_client(&config, &carbide_instrument::Instrumentation::noop())
+            .map(drop)
+            .map_err(|error| {
+                ["ca_cert_path", "client_cert_path"]
+                    .into_iter()
+                    .find(|field| error.contains(&format!("tls.switch.{field}")))
+            })
     }
 
     /// A profile that makes no client fails to load, naming the field at
@@ -424,10 +430,10 @@ mod tests {
     /// failed reload.
     #[tokio::test(start_paused = true)]
     async fn a_check_that_cannot_reload_the_files_is_counted() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let dir = tempfile::tempdir().expect("TLS files directory");
         let config = SwitchCa::new().switch_tls(dir.path(), None);
-        let client = switch_client(&config).expect("the profile loads");
+        let client = switch_client(&config, metrics.instrumentation()).expect("the profile loads");
 
         std::fs::write(&config.client_key_path, "not a key").expect("the key rewrites");
         tokio::time::advance(TLS_REFRESH_INTERVAL).await;
@@ -445,7 +451,7 @@ mod tests {
     /// it.
     #[tokio::test(start_paused = true)]
     async fn an_expired_client_certificate_is_reported_at_each_check() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let dir = tempfile::tempdir().expect("TLS files directory");
         let ca = SwitchCa::new();
         let config = ca.switch_tls(dir.path(), None);
@@ -463,7 +469,8 @@ mod tests {
             )
         };
 
-        let client = switch_client(&config).expect("an expired certificate loads");
+        let client = switch_client(&config, metrics.instrumentation())
+            .expect("an expired certificate loads");
         assert_eq!(reported(), 1.0, "reported when the files load");
 
         tokio::time::advance(TLS_REFRESH_INTERVAL).await;

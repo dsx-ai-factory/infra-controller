@@ -5,6 +5,61 @@ For complete boot-artifact images, including Scout, follow
 [Building the Boot Artifact Containers](manuals/building_nico_containers.md#building-the-boot-artifact-containers).
 The Bootstrap CA selection below applies to BFB builds.
 
+## Boot Image Hosting
+
+The container registry and the boot-image server serve different clients.
+Kubernetes pulls the boot-artifact **container images** from a registry;
+hosts and DPU provisioning paths fetch the **files** from their configured
+boot-image URLs. Publishing a container alone does not make those files
+available to a booting host.
+
+In the reference deployment, `nico-pxe` serves the static artifact tree.
+Set `nico-pxe.bootArtifactContainers` in the Core values to select the built
+artifact images. Their init containers copy the required architecture and
+repository directories into `/forge-boot-artifacts/blobs/internal`; PXE
+serves them under `/public/blobs/internal`. The
+[PXE Chart Values](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-pxe/values.yaml)
+define the copy commands and mount layout. A nonempty list mounts an
+`emptyDir` over that path, hiding the files bundled in the PXE image. The
+init containers must supply every required file, including DPU artifacts
+served from that path. If the list is empty, PXE serves its bundled files.
+A request for a missing file returns HTTP 404 and cannot complete network
+provisioning.
+
+Place this service on a path reachable from the managed hosts and DPU
+provisioning clients. Keep the service VIP, boot URLs, DHCP configuration,
+DNS aliases, and TLS names consistent with
+[IP and Network Configuration](provisioning/ip-and-network-configuration.md).
+Check the exact files for every architecture and provisioning path in use,
+including DPF's separately configured BFB source. Registry pull success
+does not test a device's boot-image path. When changing artifact images,
+roll out new PXE pods so their init containers copy the selected files.
+
+### Plan for Concurrent Downloads
+
+Size the image-serving path for a batch of simultaneous boots or recoveries,
+including repeated downloads after failures. A lower-bound bandwidth model is:
+
+```text
+required useful throughput (bytes/second)
+  = concurrent clients × bytes downloaded per client / target download time (seconds)
+```
+
+For mixed host and DPU images, sum each client's downloads before dividing
+by the target time. Convert bytes/second to bits/second by multiplying by
+eight. Add capacity for protocol overhead, retries, and other traffic on
+the same links. This is a planning calculation, not a measured NICo
+throughput guarantee.
+
+Measure a representative concurrent batch from the device networks. Check
+PXE pod CPU, file descriptors, local disk and node NIC throughput, service
+VIP ingress capacity, and rack uplinks. Include cold pod starts, when every
+PXE replica may need to pull and unpack its artifact images. With MetalLB
+L2, one node receives all traffic for a service VIP even when several PXE
+pods exist; review the [MetalLB Mode](getting-started/quick-start.md#3g-configure-metallb)
+when assessing that path. The [Scale FAQ](getting-started/sizing-and-scale.md#scale-faq)
+also covers placement of registries and OS repositories.
+
 ## 1. Install Build Tools
 
 For complete image builds, follow the dependency and submodule setup in

@@ -333,6 +333,7 @@ async fn component_reset_submission_rejects_unobservable_batches() {
                 expect: Yields((expected, candidate_job_id.map(str::to_owned))),
             }),
         |response| async move {
+            let instrumentation = carbide_instrument::Instrumentation::noop();
             let mock = MockRmsApi::new();
             mock.enqueue_batch_reset_switch_sdn_factory_default(response)
                 .await;
@@ -346,6 +347,7 @@ async fn component_reset_submission_rejects_unobservable_batches() {
                 )
             });
             let (result, logs) = capture_logs_async(rms_batch_reset_switch(
+                &instrumentation,
                 &mock,
                 switches.into(),
                 RmsJobKind::SwitchSdnFactoryReset,

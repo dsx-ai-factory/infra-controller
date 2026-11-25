@@ -111,12 +111,26 @@ pub struct MachineStateControllerConfig {
     /// retained for configuration compatibility.
     #[serde(default = "MachineStateControllerConfig::max_bios_config_retries_default")]
     pub max_bios_config_retries: u32,
-    /// Allow new Lenovo GB300 full-lockdown recovery states. Enable only after
+    /// Allow new full-lockdown recovery states on Lenovo GB300 (LenovoAMI
+    /// HG635N_V2) and Lenovo XCC ThinkSystem SR680a V3. Enable only after
     /// all state readers support RestoreFullLockdown. Disabling new entries
     /// does not stop recovery already in progress. See the host firmware guide
     /// for the additional state-drain requirements before an older-code rollback.
     #[serde(default)]
     pub full_lockdown_recovery_enabled: bool,
+    /// Queue ordinary instance reboots for the machine controller. Defaults to false,
+    /// preserving synchronous API reboots. Saved requests still reconcile when disabled.
+    /// Enable only after every reader supports `InstanceReboot`,
+    /// [guarded recovery](https://github.com/dsx-ai-factory/infra-controller/issues/8942) lands,
+    /// and [power coordination](https://github.com/dsx-ai-factory/infra-controller/issues/8940)
+    /// is implemented and qualified.
+    /// Attempted records missing the original worker reservation need intervention.
+    /// Before an older-code rollback, remove this key and restart every writer on
+    /// compatible Core to stop new requests. Then reconcile pending requests and remove
+    /// or replace every retained InstanceReboot record, including settled records.
+    /// Older strict config readers reject the key even when it is false.
+    #[serde(default)]
+    pub instance_reboot_queue_enabled: bool,
     /// How long PollingBiosSetup may sit on Ok(false) before escalating into
     /// HandleBiosJobFailure recovery.
     #[serde(
@@ -176,6 +190,7 @@ impl MachineStateControllerConfig {
             max_bios_config_retries: MachineStateControllerConfig::max_bios_config_retries_default(
             ),
             full_lockdown_recovery_enabled: false,
+            instance_reboot_queue_enabled: false,
             polling_bios_setup_stuck_threshold:
                 MachineStateControllerConfig::polling_bios_setup_stuck_threshold_default(),
             // Keep periodic Redfish reads out of unrelated controller tests.
@@ -243,6 +258,7 @@ impl Default for MachineStateControllerConfig {
             max_bios_config_retries: MachineStateControllerConfig::max_bios_config_retries_default(
             ),
             full_lockdown_recovery_enabled: false,
+            instance_reboot_queue_enabled: false,
             polling_bios_setup_stuck_threshold:
                 MachineStateControllerConfig::polling_bios_setup_stuck_threshold_default(),
             boot_interface_observation_interval:

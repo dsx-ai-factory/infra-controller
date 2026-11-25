@@ -22,10 +22,6 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-[lib]
-# TODO: rename to carbide_dpu_remediation in source
-name = "forge_dpu_remediation"
-
 [dependencies]
 eyre = { workspace = true }
 rand = { workspace = true }

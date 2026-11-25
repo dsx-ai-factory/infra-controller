@@ -28,23 +28,15 @@ use model::network_segment::NetworkSegment;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+/// Reads address allocations for a network segment.
 #[async_trait::async_trait]
-pub trait UsedIpResolver<DB>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
-    // used_ips is expected to return used (or allocated)
-    // IPs as reported by whoever implements this trait.
-    async fn used_ips(&self, txn: &mut DB) -> Result<Vec<IpAddr>, DatabaseError>;
+pub trait UsedIpResolver {
+    /// Returns the allocated or reserved addresses.
+    async fn used_ips(&self, conn: impl DbReader<'_>) -> Result<Vec<IpAddr>, DatabaseError>;
 
-    // Method to get used/allocated IPs for implementor.
-    // Since the allocated IPs may actually be allocated
-    // networks (like in the case of FNN), this returns
-    // IpNetworks (and, coincidentally, the Postgres `inet`
-    // type supports this, since `inet` supports the
-    // ability to set a prefix length (with /32 being the
-    // implied default).
-    async fn used_prefixes(&self, txn: &mut DB) -> Result<Vec<IpNetwork>, DatabaseError>;
+    /// Returns allocated or reserved prefixes, including host addresses as /32 or /128.
+    async fn used_prefixes(&self, conn: impl DbReader<'_>)
+    -> Result<Vec<IpNetwork>, DatabaseError>;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -144,16 +136,14 @@ impl AddressCount {
 }
 
 impl IpAllocator {
-    pub async fn new<DB>(
-        db: &mut DB,
+    /// Loads existing allocations and prepares the segment's address allocator.
+    pub async fn new(
+        conn: impl DbReader<'_>,
         segment: &NetworkSegment,
-        used_ip_resolver: Box<dyn UsedIpResolver<DB> + Send>,
+        used_ip_resolver: impl UsedIpResolver + Send,
         address_strategy: AddressSelectionStrategy,
-    ) -> DatabaseResult<Self>
-    where
-        for<'db> &'db mut DB: DbReader<'db>,
-    {
-        let used_ips = used_ip_resolver.used_prefixes(db).await?;
+    ) -> DatabaseResult<Self> {
+        let used_ips = used_ip_resolver.used_prefixes(conn).await?;
 
         Ok(IpAllocator {
             prefixes: segment

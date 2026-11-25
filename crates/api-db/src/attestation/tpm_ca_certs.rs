@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use model::attestation::TpmCaCert;
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[cfg(test)]
@@ -46,23 +47,23 @@ pub async fn insert(
 }
 
 pub async fn get_by_subject(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     cert_subject: &[u8],
 ) -> DatabaseResult<Option<TpmCaCert>> {
     let query = "SELECT id, not_valid_before, not_valid_after, ca_cert_der, cert_subject FROM tpm_ca_certs WHERE cert_subject = ($1)";
 
     sqlx::query_as(query)
         .bind(cert_subject)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-pub async fn get_all(txn: &mut PgConnection) -> DatabaseResult<Vec<TpmCaCert>> {
+pub async fn get_all(conn: impl DbReader<'_>) -> DatabaseResult<Vec<TpmCaCert>> {
     let query = "SELECT id, not_valid_before, not_valid_after, cert_subject FROM tpm_ca_certs";
 
     sqlx::query_as(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }

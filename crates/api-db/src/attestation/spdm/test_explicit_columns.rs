@@ -29,6 +29,7 @@ use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn spdm_snapshot_survives_added_columns(
@@ -39,7 +40,7 @@ async fn spdm_snapshot_survives_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection commits DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE spdm_machine_devices_attestation ADD COLUMN test_added_column text;",
@@ -60,7 +61,7 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
     // interface becomes unavailable, the attestation remains loadable without
     // falling back to another BMC. A topology without an ID still uses an
     // attached BMC.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let machine_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x70; 32],
@@ -229,7 +230,7 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
 async fn exercise_snapshot(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let machine_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x69; 32],

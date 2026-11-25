@@ -1,0 +1,219 @@
+# Implications and conflicts between register entries, read by the gate. `when.options` /
+# `between[].options` are option short names; `lacks: true` means the decision is answered
+# without that option (an unticked box of a multi-select). Edit here, with the register.
+rules:
+- when:
+    id: dpu-in-the-site-controllers
+    options:
+    - no DPU
+  set:
+  - id: smn
+    option: SMN on the ToR
+- when:
+    id: staging-host
+    options:
+    - Air-gapped with a transfer path
+    - Strictly air-gapped
+  set:
+  - id: registry-host
+    option: Provider-run
+  - id: external-registry-access
+    option: Not applicable
+- when:
+    id: source-of-the-nico-images
+    options:
+    - Pulled from a local registry
+  set:
+  - id: registry-host
+    option: Provider-run
+- when:
+    id: dpf
+    options:
+    - Skip
+  set:
+  - id: dpu-agent-bootstrap-ca-dpf-path
+    option: Not applicable
+  - id: dpu-os-login-password-dpf
+    option: Not applicable
+- when:
+    id: credential-store
+    options:
+    - Vault KV
+  set:
+  - id: key-wrapping-for-the-postgres-store
+    option: Not applicable
+- when:
+    id: optional-components
+    options:
+    - RMS
+    lacks: true
+  set:
+  - id: rms
+    option: Not applicable
+- when:
+    id: rms
+    options:
+    - Not applicable
+  set:
+  - id: rms-chart-source
+    option: Not applicable
+  - id: rack-profiles
+    option: Not applicable
+- when:
+    id: rms
+    options:
+    - External RMS
+  set:
+  - id: rms-chart-source
+    option: Not applicable
+- when:
+    id: optional-components
+    options:
+    - Observability stack
+  set:
+  - id: observability
+    option: Full local stack
+conflicts:
+- between:
+  - id: dpf
+    options:
+    - Skip
+  - id: managed-host-dpu-generation
+    options:
+    - BF4 generic
+  reason: BF4 is provisioned only through a DPF deployment; the non-DPF iPXE path installs a BFB and takes
+    BF3 only
+- between:
+  - id: dpf
+    options:
+    - Skip
+  - id: managed-host-dpu-generation
+    options:
+    - BF4 Astra
+  reason: BF4 is provisioned only through a DPF deployment; the non-DPF iPXE path installs a BFB and takes
+    BF3 only
+- between:
+  - id: dpu-in-the-site-controllers
+    options:
+    - BF3 DPU in DPU mode
+  - id: smn
+    options:
+    - SMN on the ToR
+  reason: with a DPU in DPU mode the control-plane DPU, not the ToR, terminates the SMN
+- between:
+  - id: staging-host
+    options:
+    - Air-gapped with a transfer path
+    - Strictly air-gapped
+  - id: source-of-the-nico-images
+    options:
+    - Pulled from NGC
+  reason: an air-gapped site cannot pull from NGC; the images have to be hosted in a local registry
+- between:
+  - id: optional-components
+    options:
+    - RMS
+    lacks: true
+  - id: rack-profiles
+    options:
+    - Built-in profiles
+  reason: a GB200 or GB300 NVL72 rack profile needs RMS to manage its trays, switches and power shelves
+- between:
+  - id: optional-components
+    options:
+    - Observability stack
+    lacks: true
+  - id: observability
+    options:
+    - Full local stack
+  reason: the full local stack is installed only by --with-observability; tick the observability box
+- between:
+  - id: optional-components
+    options:
+    - UFM
+    lacks: true
+  - id: certificate-issuance
+    options:
+    - cert-manager for UFM certificates
+  reason: UFM certificates exist only when InfiniBand fabric management through UFM is ticked
+- between:
+  - id: staging-host
+    options:
+    - Air-gapped with a transfer path
+    - Strictly air-gapped
+  - id: external-registry-access
+    options:
+    - Direct
+  reason: an air-gapped site has no direct external registry access
+- between:
+  - id: staging-host
+    options:
+    - Air-gapped with a transfer path
+    - Strictly air-gapped
+  - id: external-registry-access
+    options:
+    - Proxied
+  reason: an air-gapped site has no egress proxy to the internet
+- between:
+  - id: staging-host
+    options:
+    - Air-gapped with a transfer path
+    - Strictly air-gapped
+  - id: spdm-and-nras
+    options:
+    - 'On'
+  reason: SPDM evidence is verified by NVIDIA's remote attestation service over the internet, which an
+    air-gapped site cannot reach
+- between:
+  - id: dpf
+    options:
+    - Install
+  - id: autonomous-bmc-and-uefi-rotation
+    options:
+    - BMC rotation
+  reason: the pinned DPF v26.4.0 authenticates every DPU BMC with one shared Secret and cannot follow
+    a BMC rotation (issue 6147)
+- between:
+  - id: credential-store
+    options:
+    - Vault KV
+  - id: key-wrapping-for-the-postgres-store
+    options:
+    - Integrated
+  reason: a Vault KV credential store has no Postgres journal to wrap keys for
+- between:
+  - id: credential-store
+    options:
+    - Vault KV
+  - id: key-wrapping-for-the-postgres-store
+    options:
+    - Transit
+  reason: a Vault KV credential store has no Postgres journal to wrap keys for
+- between:
+  - id: credential-store
+    options:
+    - Vault KV
+  - id: key-wrapping-for-the-postgres-store
+    options:
+    - KMIP
+  reason: a Vault KV credential store has no Postgres journal to wrap keys for
+- between:
+  - id: credential-store
+    options:
+    - Postgres envelope-encrypted
+  - id: key-wrapping-for-the-postgres-store
+    options:
+    - Not applicable
+  reason: the Postgres store needs at least one KEK provider
+- between:
+  - id: credential-store
+    options:
+    - Postgres envelope-encrypted
+  - id: key-wrapping-for-the-postgres-store
+    options:
+    - Integrated
+    - Transit
+    - KMIP
+    - Not applicable
+    lacks: true
+  reason: the Postgres store needs at least one KEK provider; an empty list names none

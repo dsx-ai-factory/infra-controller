@@ -215,7 +215,6 @@ impl MachineCreator {
                                 .map(|x| x.to_string())
                                 .unwrap_or_default()
                         })
-                        .collect_vec()
                         .join(",");
 
                     tracing::error!(

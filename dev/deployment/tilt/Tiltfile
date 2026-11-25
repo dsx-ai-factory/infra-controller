@@ -428,8 +428,8 @@ k8s_resource(
 
 observability_values = tilt_values['observability']
 
-# Mirrors the chart's observability/dashboards/*.json glob, plus the two
-# dashboards that only exist outside the chart.
+# Mirrors the chart's observability/dashboards/*.json glob, plus dashboards
+# that only exist outside the chart.
 grafana_dashboard_paths = [
     'helm/observability/dashboards/nico-api-performance.json',
     'helm/observability/dashboards/nico-bmc-performance.json',
@@ -438,6 +438,7 @@ grafana_dashboard_paths = [
     'helm/observability/dashboards/nico-overview.json',
     'helm/observability/dashboards/nico-site-detail.json',
     'dev/deployment/tilt/dashboards/nico-site-explorer.json',
+    'dev/deployment/tilt/dashboards/tempo-overview.json',
     'helm-prereqs/observability/dashboards/nico-core-health.json',
 ]
 grafana_dashboard_data = {}
@@ -497,7 +498,7 @@ prerequisite(
     version='3.2.1',
     values=observability_values['tempo'],
     repo='repo-grafana-community',
-    resource_deps=['nico-observability-namespace'],
+    resource_deps=['nico-observability-namespace', 'prometheus'],
     labels=['observability'],
 )
 prerequisite(

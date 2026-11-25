@@ -53,7 +53,7 @@ pub(crate) async fn handle_delete_measurement_journal(
     .map_err(|e| CarbideError::Internal {
         message: format!("failed to delete journal: {e}"),
     })?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "journal",
         id: "unknown".into(),
     })?;
@@ -70,11 +70,10 @@ pub(crate) async fn handle_show_measurement_journal(
     api: &Api,
     req: ShowMeasurementJournalRequest,
 ) -> Result<ShowMeasurementJournalResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     let journal = match req.selector {
         Some(selector) => match selector {
             show_measurement_journal_request::Selector::JournalId(journal_id) => {
-                db::measured_boot::journal::from_id(&mut txn, journal_id)
+                db::measured_boot::journal::from_id(api.pg_pool(), journal_id)
                     .await
                     .map_err(|e| CarbideError::Internal {
                         message: format!("{e}"),
@@ -82,7 +81,7 @@ pub(crate) async fn handle_show_measurement_journal(
             }
             show_measurement_journal_request::Selector::LatestForMachineId(machine_id) => {
                 match db::measured_boot::journal::get_latest_journal_for_id(
-                    &mut txn,
+                    api.pg_pool(),
                     MachineId::from_str(&machine_id).map_err(|e| {
                         CarbideError::InvalidArgument(format!("could not parse MachineId: {e}"))
                     })?,
@@ -104,8 +103,6 @@ pub(crate) async fn handle_show_measurement_journal(
             );
         }
     };
-
-    txn.commit().await?;
 
     Ok(ShowMeasurementJournalResponse {
         journal: Some(journal.into()),
@@ -136,8 +133,6 @@ pub(crate) async fn handle_list_measurement_journal(
     api: &Api,
     req: ListMeasurementJournalRequest,
 ) -> Result<ListMeasurementJournalResponse, Status> {
-    let mut txn = api.txn_begin().await?;
-
     let journals: Vec<MeasurementJournalRecordPb> = match &req.selector {
         Some(list_measurement_journal_request::Selector::MachineId(machine_id)) => {
             let machine_id =
@@ -145,7 +140,7 @@ pub(crate) async fn handle_list_measurement_journal(
                     message: format!("failed to fetch journals for machine: {e}"),
                 })?;
 
-            get_measurement_journal_records_for_machine_id(&mut txn, machine_id)
+            get_measurement_journal_records_for_machine_id(api.pg_pool(), machine_id)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("failed to fetch journals for machine: {e}"),
@@ -154,7 +149,7 @@ pub(crate) async fn handle_list_measurement_journal(
                 .map(|journal| journal.into())
                 .collect()
         }
-        None => get_measurement_journal_records(&mut txn)
+        None => get_measurement_journal_records(api.pg_pool())
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("failed to fetch journals: {e}"),
@@ -163,8 +158,6 @@ pub(crate) async fn handle_list_measurement_journal(
             .map(|journal| journal.into())
             .collect(),
     };
-
-    txn.commit().await?;
 
     Ok(ListMeasurementJournalResponse { journals })
 }

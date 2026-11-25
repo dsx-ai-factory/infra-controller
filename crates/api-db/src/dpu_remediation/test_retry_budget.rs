@@ -19,11 +19,13 @@ use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSource, MachineTyp
 use model::dpu_remediation::{ApproveRemediation, EnableRemediation, NewRemediation};
 use sqlx::PgPool;
 
+use crate::TransactionVending as _;
+
 #[crate::sqlx_test]
 async fn maximum_retries_allows_initial_attempt(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let remediation = super::persist_remediation(
         NewRemediation {
             script: "echo repair-interface".to_string(),

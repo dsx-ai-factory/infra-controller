@@ -33,14 +33,14 @@ var version = "dev"
 // line, bad config or a refused lock.
 const exitNotRun = result.ExitNotRun
 
-const usage = "usage: scale-test version | scale-test fleet-up|ingestion|instance-create|instance-delete|instance-lifecycle [--config <path>]"
+const usage = "usage: scale-test version | scale-test fleet-up|ingestion|instance-create|instance-delete|instance-lifecycle|firmware [--config <path>]"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && (args[0] == "fleet-up" || args[0] == "ingestion" || args[0] == "instance-create" || args[0] == "instance-delete" || args[0] == "instance-lifecycle") {
+	if len(args) > 0 && (args[0] == "fleet-up" || args[0] == "ingestion" || args[0] == "instance-create" || args[0] == "instance-delete" || args[0] == "instance-lifecycle" || args[0] == "firmware") {
 		return command(args[0], args[1:], stdout, stderr)
 	}
 	switch command := strings.Join(args, " "); command {
@@ -93,10 +93,14 @@ func setUp(ctx context.Context, name, path string) (runner.Deps, runner.Test, er
 	}
 	var is ingestion.Settings
 	var instances ingestion.InstanceSettings
+	var firmware ingestion.FirmwareSettings
 	var s fleetup.Settings
 	switch name {
 	case "fleet-up":
 		s, err = fleetup.ParseSettings(cfg.Settings)
+	case "firmware":
+		firmware, err = ingestion.ParseFirmwareSettings(cfg.Settings)
+		s = firmware.Settings
 	case "ingestion":
 		is, err = ingestion.ParseSettings(cfg.Settings)
 		s = is.Settings
@@ -119,6 +123,10 @@ func setUp(ctx context.Context, name, path string) (runner.Deps, runner.Test, er
 	deps := runner.Deps{Config: cfg, Lock: site, CM: kube, Outside: ctx}
 	if name == "fleet-up" {
 		return deps, fleetup.New(cfg, d), nil
+	}
+	if name == "firmware" {
+		t, err := ingestion.ProductionFirmware(cfg, firmware, d)
+		return deps, t, err
 	}
 	if name == "instance-create" || name == "instance-delete" || name == "instance-lifecycle" {
 		t, err := ingestion.ProductionInstances(cfg, instances, d)

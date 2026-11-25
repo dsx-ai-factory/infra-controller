@@ -25,15 +25,15 @@ use crate::{Event, LogAt, MetricKind};
 
 const METER_NAME: &str = "carbide-instrument";
 
-/// A metric destination and its cache of declared Event instruments.
+/// A metric destination and its caches of Event and outbound-call instruments.
 ///
 /// Clones share the meter and cache. Independent providers and registries are
 /// required for isolation: constructing two handles from the same provider
 /// still records into the same destination. The owner must retain the meter
 /// provider for the lifetime of all recording tasks and scrapes.
 ///
-/// This handle routes Event metrics only. The RED helper and log-event counts
-/// remain process-global; observable instruments remain owned by their meter.
+/// Event and RED metrics use this destination. Log-event counts remain
+/// process-global; observable instruments remain owned by their meter.
 #[derive(Debug, Clone)]
 pub struct Instrumentation {
     source: Source,
@@ -48,6 +48,7 @@ enum Source {
 #[derive(Debug)]
 struct Instruments {
     meter: Meter,
+    red_histogram: OnceLock<Histogram<f64>>,
     // Identity belongs to the declaration, never to a runtime label set.
     cache: DashMap<MetricKey, CachedInstrument>,
 }
@@ -68,9 +69,15 @@ impl Instrumentation {
         Self {
             source: Source::Owned(Arc::new(Instruments {
                 meter,
+                red_histogram: OnceLock::new(),
                 cache: DashMap::new(),
             })),
         }
+    }
+
+    /// Creates an explicit destination that discards metrics and retains Event logging.
+    pub fn noop() -> Self {
+        Self::from_meter_provider(&opentelemetry::metrics::noop::NoopMeterProvider::new())
     }
 
     /// Returns a lazy alias for the process-global compatibility destination.
@@ -146,10 +153,18 @@ impl Instrumentation {
                 static GLOBAL: OnceLock<Instruments> = OnceLock::new();
                 GLOBAL.get_or_init(|| Instruments {
                     meter: opentelemetry::global::meter(METER_NAME),
+                    red_histogram: OnceLock::new(),
                     cache: DashMap::new(),
                 })
             }
         }
+    }
+
+    pub(crate) fn red_histogram(&self) -> &Histogram<f64> {
+        let instruments = self.instruments();
+        instruments
+            .red_histogram
+            .get_or_init(|| crate::red::histogram(&instruments.meter))
     }
 
     fn instrument<E: Event>(&self) -> CachedInstrument {

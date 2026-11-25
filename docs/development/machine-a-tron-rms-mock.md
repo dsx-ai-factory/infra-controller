@@ -26,7 +26,7 @@ disagree about a device.
 | --- | --- |
 | Inventory | `BatchGetNodeDeviceInfo` |
 | Power | `BatchGetPowerState`, `BatchSetPowerState` |
-| Firmware and NVOS | `ListFirmwareObjects`, `ApplyFirmwareObject`, `GetFirmwareJobStatus`, `ApplySwitchSystemImage`, `GetSwitchSystemImageJobStatus` |
+| Firmware and NVOS | `ListFirmwareObjects`, `ApplyFirmwareObject`, `GetJobStatus`, legacy `GetFirmwareJobStatus`, `ApplySwitchSystemImage`, `GetSwitchSystemImageJobStatus` |
 | Scale-up fabric | V2 `ConfigureScaleUpFabricManager`, `GetJobStatus`, `GetScaleUpFabricStatus`, `BatchGetScaleUpFabricServiceStatus` |
 | Switch lifecycle | `ConfigureSwitchCertificate`, `GetConfigureSwitchCertificateJobStatus`, `UpdateSwitchSystemPassword`, `BatchResetSwitchFactoryDefault` |
 

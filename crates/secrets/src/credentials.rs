@@ -446,6 +446,10 @@ pub enum BmcCredentialType {
     BmcRoot {
         bmc_mac_address: MacAddress,
     },
+    DpfBmcRotation {
+        operation_id: [u8; 16],
+        candidate: DpfBmcRotationCandidate,
+    },
     // BMC Specific Forge-Admin Credentials
     BmcForgeAdmin {
         bmc_mac_address: MacAddress,
@@ -471,6 +475,12 @@ pub enum BmcCredentialType {
     SiteWideDpuBmcServiceVersioned {
         version: u32,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum DpfBmcRotationCandidate {
+    Previous,
+    Target,
 }
 
 impl BmcCredentialType {
@@ -531,13 +541,37 @@ pub enum MqttCredentialType {
 impl<'de> Deserialize<'de> for MqttCredentialType {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         const VARIANTS: &[&str] = &["Dpa", "DsxExchangeEventBus", "DsxExchangeConsumer"];
-        let name = String::deserialize(deserializer)?;
-        match name.to_ascii_lowercase().as_str() {
-            "dpa" => Ok(Self::Dpa),
-            "dsxexchangeeventbus" => Ok(Self::DsxExchangeEventBus),
-            "dsxexchangeconsumer" => Ok(Self::DsxExchangeConsumer),
-            _ => Err(serde::de::Error::unknown_variant(&name, VARIANTS)),
+        struct MqttCredentialTypeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for MqttCredentialTypeVisitor {
+            type Value = Result<MqttCredentialType, String>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(if value.eq_ignore_ascii_case("Dpa") {
+                    Ok(MqttCredentialType::Dpa)
+                } else if value.eq_ignore_ascii_case("DsxExchangeEventBus") {
+                    Ok(MqttCredentialType::DsxExchangeEventBus)
+                } else if value.eq_ignore_ascii_case("DsxExchangeConsumer") {
+                    Ok(MqttCredentialType::DsxExchangeConsumer)
+                } else {
+                    Err(value.to_string())
+                })
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
         }
+
+        deserializer
+            .deserialize_string(MqttCredentialTypeVisitor)?
+            .map_err(|name| serde::de::Error::unknown_variant(&name, VARIANTS))
     }
 }
 
@@ -635,12 +669,8 @@ pub enum CredentialKey {
     },
 }
 
-/// The site-wide default credentials endpoint exploration requires before it
-/// can run (validated by `SiteExplorer::check_preconditions`).
-///
-/// Single source of truth: the explorer's precondition check and the admin UI's
-/// "default credentials not set" warning both iterate this list so the two
-/// cannot drift apart. Order matches the explorer's original check order.
+/// Site-wide default credentials checked by the admin UI's "default credentials
+/// not set" warning. Consumers load the credentials needed for their operation.
 pub const REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS: [CredentialKey; 3] = [
     CredentialKey::BmcCredentials {
         credential_type: BmcCredentialType::SiteWideRoot,
@@ -878,6 +908,19 @@ impl CredentialKey {
                 BmcCredentialType::BmcRoot { bmc_mac_address } => {
                     Cow::from(format!("machines/bmc/{bmc_mac_address}/root"))
                 }
+                BmcCredentialType::DpfBmcRotation {
+                    operation_id,
+                    candidate,
+                } => {
+                    let suffix = match candidate {
+                        DpfBmcRotationCandidate::Previous => "previous",
+                        DpfBmcRotationCandidate::Target => "target",
+                    };
+                    Cow::from(format!(
+                        "machines/bmc/dpf-rotation/{}/{suffix}",
+                        hex::encode(operation_id)
+                    ))
+                }
                 BmcCredentialType::BmcForgeAdmin { bmc_mac_address } => Cow::from(format!(
                     "machines/bmc/{bmc_mac_address}/forge-admin-account"
                 )),
@@ -948,6 +991,46 @@ mod tests {
     use carbide_test_support::{Check, check_values};
 
     use super::*;
+
+    #[test]
+    fn mqtt_credential_type_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "DPA";
+        let cases = [
+            (
+                "borrowed string",
+                MqttCredentialType::deserialize(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                MqttCredentialType::deserialize(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                MqttCredentialType::deserialize(StringDeserializer::<Error>::new(
+                    input.to_string(),
+                )),
+            ),
+            (
+                "bytes",
+                MqttCredentialType::deserialize(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert_eq!(value, MqttCredentialType::Dpa, "{scenario}");
+        }
+
+        let error = MqttCredentialType::deserialize(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
     use crate::test_support::credentials::TestCredentialManager;
 
     #[test]
@@ -1739,7 +1822,15 @@ mod tests {
             assert_eq!(parse(name).expect(name), want, "{name}");
         }
         assert!(parse("dsx_exchange_consumer").is_err());
-        assert!(parse("other").is_err());
+        let former_name = serde_json::from_str::<String>(r#""other""#).unwrap();
+        let former_error = <serde_json::Error as serde::de::Error>::unknown_variant(
+            &former_name,
+            &["Dpa", "DsxExchangeEventBus", "DsxExchangeConsumer"],
+        );
+        assert_eq!(
+            parse("other").unwrap_err().to_string(),
+            former_error.to_string()
+        );
         // Serialization keeps the PascalCase name stored records use.
         assert_eq!(
             serde_json::to_string(&MqttCredentialType::DsxExchangeConsumer).unwrap(),

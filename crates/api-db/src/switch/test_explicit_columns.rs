@@ -24,6 +24,7 @@ use model::switch::{SwitchConfig, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn switch_reader_survives_added_columns(
@@ -34,7 +35,7 @@ async fn switch_reader_survives_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection commits DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE switches ADD COLUMN test_added_column text;",
@@ -50,7 +51,7 @@ async fn switch_reader_survives_added_columns(
 async fn exercise_switch_reader(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let bmc_mac: MacAddress = "02:00:00:00:68:01".parse()?;
     sqlx::query(
         "INSERT INTO expected_switches (serial_number, bmc_mac_address, bmc_username, bmc_password)
@@ -94,6 +95,7 @@ async fn exercise_switch_reader(
         source_ref: None,
     });
     expected.switch_maintenance_requested = Some(SwitchMaintenanceRequest {
+        action_id: None,
         requested_at: timestamp,
         initiator: "projection-test".to_string(),
         operation: SwitchMaintenanceOperation::Reset { graceful: false },

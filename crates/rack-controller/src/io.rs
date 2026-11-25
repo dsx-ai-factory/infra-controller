@@ -21,6 +21,7 @@ use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::metrics::RackMetricsEmitter;
 use carbide_uuid::rack::RackId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::rack::IdColumn;
 use db::{
     ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter, rack as db_rack,
@@ -30,7 +31,7 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::rack::{
     Rack, RackMaintenanceState, RackSearchFilter, RackState, RackValidationState, state_sla,
 };
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 
 use crate as carbide_rack_controller;
@@ -52,20 +53,21 @@ impl StateControllerIO for RackStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "rack_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        db_rack::find_ids(txn, RackSearchFilter::default()).await
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        db_rack::find_ids(pool, RackSearchFilter::default()).await
     }
 
     /// Loads a state snapshot from the database
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         rack_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
-        let mut racks = db_rack::find_by(txn, ObjectColumnFilter::One(IdColumn, rack_id)).await?;
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        let mut racks = db_rack::find_by(db, ObjectColumnFilter::One(IdColumn, rack_id)).await?;
         if racks.is_empty() {
             return Ok(None);
         } else if racks.len() != 1 {
@@ -82,7 +84,6 @@ impl StateControllerIO for RackStateControllerIO {
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _rack_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

@@ -59,7 +59,7 @@ func runRuleGet(cmd *cobra.Command, args []string) error {
 		opTypeStr = "unknown"
 	}
 
-	fmt.Printf("ID:              %s\n", rule.ID.String())
+	fmt.Printf("ID:              %s\n", rule.ID)
 	fmt.Printf("Name:            %s\n", rule.Name)
 	fmt.Printf("Description:     %s\n", rule.Description)
 	fmt.Printf("Operation Type:  %s\n", opTypeStr)
@@ -78,7 +78,7 @@ func runRuleGet(cmd *cobra.Command, args []string) error {
 	var prettyJSON map[string]interface{}
 	if err := json.Unmarshal([]byte(rule.RuleDefinitionJSON), &prettyJSON); err == nil {
 		formatted, _ := json.MarshalIndent(prettyJSON, "", "  ")
-		fmt.Println(string(formatted))
+		fmt.Printf("%s\n", formatted)
 	} else {
 		fmt.Println(rule.RuleDefinitionJSON)
 	}

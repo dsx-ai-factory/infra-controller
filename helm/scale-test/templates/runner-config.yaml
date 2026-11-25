@@ -5,7 +5,8 @@
 {{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
 {{- $ingest := eq (toString $r.command) "ingestion" }}
 {{- $instances := has $r.command (list "instance-create" "instance-delete" "instance-lifecycle") }}
-{{- $writes := or $ingest $instances }}
+{{- $firmware := eq (toString $r.command) "firmware" }}
+{{- $writes := or $ingest $instances $firmware }}
 {{- $fixture := and $instances (ne (toString $r.fixture.name) "") }}
 {{- $resultMax := include "scale-test.count" (dict "key" "runner.resultMaxBytes" "value" $r.resultMaxBytes) }}
 {{- if or (lt (int64 $resultMax) 262144) (gt (int64 $resultMax) 16777216) }}
@@ -13,8 +14,8 @@
 {{- end }}
 {{- $probeTimeout := include "scale-test.positiveSeconds" (dict "key" "runner.probeRequestTimeoutSeconds" "value" $r.probeRequestTimeoutSeconds) }}
 {{- if gt (int64 $probeTimeout) 600 }}{{ fail "runner.probeRequestTimeoutSeconds must be at most 600" }}{{ end }}
-{{- if not (has $r.command (list "fleet-up" "ingestion" "instance-create" "instance-delete" "instance-lifecycle")) }}
-{{- fail "runner.command must be fleet-up, ingestion, instance-create, instance-delete or instance-lifecycle" }}
+{{- if not (has $r.command (list "fleet-up" "ingestion" "instance-create" "instance-delete" "instance-lifecycle" "firmware")) }}
+{{- fail "runner.command must be fleet-up, ingestion, instance-create, instance-delete, instance-lifecycle or firmware" }}
 {{- else if and $writes (not (kindIs "bool" $r.dryRun)) }}
 {{- fail (printf "runner.dryRun must be true or false for %s, which writes" $r.command) }}
 {{- else if and (not $writes) (not (kindIs "invalid" $r.dryRun)) }}
@@ -95,6 +96,25 @@ data:
         {{- if $s.caSecret }}
         caFile: /var/run/secrets/store-ca/ca.crt
         {{- end }}
+      {{- end }}
+      {{- if $firmware }}
+      {{- if not $r.checkStore }}{{ fail "firmware requires runner.checkStore" }}{{ end }}
+      firmware:
+        {{- $n := include "scale-test.count" (dict "key" "runner.firmware.n" "value" $r.firmware.n) }}
+        {{- if or (eq $n "0") (gt (int64 $n) 9007199254740992) }}{{ fail "runner.firmware.n must be 1 to 9007199254740992" }}{{ end }}
+        'n': {{ $n }}
+        {{- range $k := list "windowSeconds" "cleanupSeconds" "reportMaxAgeSeconds" "managerScrapeSeconds" }}
+        {{ $k | quote }}: {{ include "scale-test.positiveSeconds" (dict "key" (printf "runner.firmware.%s" $k) "value" (index $r.firmware $k)) }}
+        {{- end }}
+        component: {{ $r.firmware.component | quote }}
+        targetVersion: {{ required "runner.firmware.targetVersion is required" $r.firmware.targetVersion | quote }}
+        artifactURL: {{ $r.firmware.artifactURL | quote }}
+        artifactSHA256: {{ $r.firmware.artifactSHA256 | quote }}
+      nativeHealth:
+        apiPoolReplicas: {{ include "scale-test.positiveSeconds" (dict "key" "runner.instance.apiPoolReplicas" "value" $r.instance.apiPoolReplicas) }}
+        apiPoolSelector: {{ required "runner.instance.apiPoolSelector is required for firmware" $r.instance.apiPoolSelector | toJson }}
+      observation:
+        intervalSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.observation.intervalSeconds" "value" $r.observation.intervalSeconds) }}
       {{- end }}
       {{- if $ingest }}
       writes:

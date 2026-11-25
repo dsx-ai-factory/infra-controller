@@ -58,11 +58,8 @@ func (f *fakeForge) reply(ctx context.Context, name string) (*emptypb.Empty, err
 		_ = grpc.SetTrailer(ctx, metadata.Pairs("grpc-retry-pushback-ms", f.pushback))
 	}
 	if f.block != nil {
-		select {
-		case <-f.block:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+		// A stalled server sends no status: returning on its own deadline can race a CANCELLED status ahead of the client's deadline error.
+		<-f.block
 	}
 	return &emptypb.Empty{}, f.err
 }
@@ -119,7 +116,7 @@ func serverTLS(t *testing.T) (tls.Certificate, []byte) {
 
 // fixture serves fake over TLS and returns a dialed client and its cert dir. caPEM is what the client trusts (a wrong CA proves verification); the server accepts a
 // client with or without a certificate, as nico-api does.
-func fixture(t *testing.T, fake *fakeForge, caPEM []byte, serverName string) (*Client, string) {
+func fixture(t *testing.T, fake *fakeForge, caPEM []byte, serverName string, firmware ...bool) (*Client, string) {
 	t.Helper()
 	serverCert, realCA := serverTLS(t)
 	if caPEM == nil {
@@ -136,13 +133,23 @@ func fixture(t *testing.T, fake *fakeForge, caPEM []byte, serverName string) (*C
 	t.Cleanup(s.Stop)
 
 	dir := t.TempDir()
-	certPEM, keyPEM, _ := leaf(t, "spiffe://nico.local/ns/forge/sa/machine-a-tron", nil)
+	uri := "spiffe://nico.local/ns/forge/sa/" + WriteService
+	dial := Dial
+	if len(firmware) > 0 && firmware[0] {
+		uri = ""
+		dial = DialFirmware
+	}
+	certPEM, keyPEM, _ := leaf(t, uri, func(c *x509.Certificate) {
+		if uri == "" {
+			c.Subject.CommonName = "nico-admin-cli"
+		}
+	})
 	for name, data := range map[string][]byte{"tls.crt": certPEM, "tls.key": keyPEM, "ca.crt": caPEM} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	c, err := Dial("https://"+lis.Addr().String(), Settings{CertDir: dir, Spiffe: settings, ServerName: serverName})
+	c, err := dial("https://"+lis.Addr().String(), Settings{CertDir: dir, Spiffe: settings, ServerName: serverName})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -278,4 +285,44 @@ func TestForgeRPCs(t *testing.T) {
 			close(fake.block)
 		}
 	})
+}
+
+func (f *fakeForge) UpsertHostFirmwareConfig(ctx context.Context, _ *corev1.UpsertHostFirmwareConfigRequest) (*corev1.HostFirmwareConfigResponse, error) {
+	_, err := f.reply(ctx, "UpsertHostFirmwareConfig")
+	return &corev1.HostFirmwareConfigResponse{}, err
+}
+
+func (f *fakeForge) SetFirmwareUpdateTimeWindow(ctx context.Context, _ *corev1.SetFirmwareUpdateTimeWindowRequest) (*corev1.SetFirmwareUpdateTimeWindowResponse, error) {
+	_, err := f.reply(ctx, "SetFirmwareUpdateTimeWindow")
+	return &corev1.SetFirmwareUpdateTimeWindowResponse{}, err
+}
+
+func TestFirmwareTransport(t *testing.T) {
+	for _, mode := range []string{"valid", "reloaded admin", "server error"} {
+		t.Run(mode, func(t *testing.T) {
+			fake := &fakeForge{}
+			c, dir := fixture(t, fake, nil, "forge.test", true)
+			if mode == "reloaded admin" {
+				cert, key, _ := leaf(t, "", nil)
+				for name, data := range map[string][]byte{"tls.crt": cert, "tls.key": key} {
+					if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if mode == "server error" {
+				fake.err = status.Error(codes.PermissionDenied, "https://private.example/secret")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := c.UpsertHostFirmwareConfig(ctx, &corev1.UpsertHostFirmwareConfigRequest{})
+			if (err == nil) != (mode != "server error") || err != nil && strings.Contains(err.Error(), "private") {
+				t.Fatal("catalog transport", err)
+			}
+			err = c.SetFirmwareUpdateTimeWindow(ctx, &corev1.SetFirmwareUpdateTimeWindowRequest{})
+			if (err == nil) != (mode != "server error") || err != nil && strings.Contains(err.Error(), "private") {
+				t.Fatal(mode, err, fake.seen())
+			}
+		})
+	}
 }

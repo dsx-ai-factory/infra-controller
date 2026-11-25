@@ -367,6 +367,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
     };
 
     MachineSnapshotPgJson {
+        maintenance_action_id: None,
         hardware_dispatch: None,
         machine_maintenance_requested: None,
         spx_multiplane: None,

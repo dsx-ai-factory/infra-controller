@@ -57,12 +57,10 @@ async fn init(pool: PgPool) -> TestContext {
 async fn creates_and_updates_power_options(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let TestContext { env, mh } = init(pool).await;
 
-    let mut txn = env.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&env.api().database_connection).await?;
     assert_eq!(power_options.len(), 1);
     assert_eq!(power_options[0].host_id, mh.host.id);
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
-    txn.rollback().await?;
 
     env.api()
         .set_maintenance(Request::new(MaintenanceRequest {
@@ -79,12 +77,10 @@ async fn creates_and_updates_power_options(pool: PgPool) -> Result<(), Box<dyn s
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&env.api().database_connection).await?;
 
     assert_eq!(power_options.len(), 1);
     assert_eq!(power_options[0].desired_power_state, PowerState::Off);
-    txn.rollback().await?;
     Ok(())
 }
 
@@ -94,12 +90,10 @@ async fn rejects_update_without_maintenance(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let TestContext { env, mh } = init(pool).await;
 
-    let mut txn = env.db_txn().await;
-    let power_options = db::power_options::get_all(&mut txn).await?;
+    let power_options = db::power_options::get_all(&env.api().database_connection).await?;
     assert_eq!(power_options.len(), 1);
     assert_eq!(power_options[0].host_id, mh.host.id);
     assert_eq!(power_options[0].desired_power_state, PowerState::On);
-    txn.rollback().await?;
 
     let error = env
         .api()

@@ -90,26 +90,6 @@ var exactlyOneBodyFieldsByOperation = map[string][]string{
 	"create-vpc-prefix": {"prefix", "prefixLength"},
 }
 
-type queryParameterKey struct {
-	operationID string
-	name        string
-}
-
-// repeatableQueryParameters records legacy scalar OpenAPI parameters whose
-// handlers consume every repeated query value. Keep this operation-scoped so
-// generic names such as "type" and "name" remain scalar elsewhere.
-var repeatableQueryParameters = map[queryParameterKey]struct{}{
-	{operationID: "get-all-allocation", name: "tenantId"}:     {},
-	{operationID: "get-all-machine", name: "hwSkuDeviceType"}: {},
-	{operationID: "get-all-operating-system", name: "type"}:   {},
-	{operationID: "get-all-rack", name: "manufacturer"}:       {},
-	{operationID: "get-all-rack", name: "name"}:               {},
-	{operationID: "validate-racks", name: "manufacturer"}:     {},
-	{operationID: "validate-racks", name: "name"}:             {},
-	{operationID: "validate-trays", name: "manufacturer"}:     {},
-	{operationID: "validate-trays", name: "name"}:             {},
-}
-
 // GeneratedCommandFlag describes a flag accepted by an OpenAPI-generated
 // command. It is used by other nicocli interfaces that need to prepare the
 // same command line without duplicating the OpenAPI-to-CLI naming rules.
@@ -753,7 +733,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				FlagName:    flag.Names()[0],
 				Description: p.Description,
 				Required:    p.Required,
-				Repeatable:  isRepeatableQueryParameter(ro.op.OperationID, p),
+				Repeatable:  isRepeatableQueryParameter(p),
 			}
 			if schema := spec.ResolveSchema(p.Schema); schema != nil {
 				queryParameter.Type = schema.Type
@@ -1179,7 +1159,7 @@ func detectMisorderedFlagsInArgs(args, argParams []string, usageText string) err
 func readFlagValues(c *cli.Context, operationID string, p Parameter) []string {
 	flagName := toKebab(p.Name)
 	if p.Schema == nil {
-		if isRepeatableQueryParameter(operationID, p) {
+		if isRepeatableQueryParameter(p) {
 			return c.StringSlice(flagName)
 		}
 		return []string{c.String(flagName)}
@@ -1191,7 +1171,7 @@ func readFlagValues(c *cli.Context, operationID string, p Parameter) []string {
 	}
 	// Typed slice access keeps integer validation while preserving all repeats.
 	switch {
-	case isRepeatableQueryParameter(operationID, p) && schemaType == "integer":
+	case isRepeatableQueryParameter(p) && schemaType == "integer":
 		if !c.IsSet(flagName) {
 			return nil
 		}
@@ -1201,18 +1181,18 @@ func readFlagValues(c *cli.Context, operationID string, p Parameter) []string {
 			result = append(result, strconv.Itoa(value))
 		}
 		return result
-	case isRepeatableQueryParameter(operationID, p):
+	case isRepeatableQueryParameter(p):
 		return c.StringSlice(flagName)
 	}
 	switch schemaType {
 	case "integer":
 		if c.IsSet(flagName) {
-			return []string{fmt.Sprintf("%d", c.Int(flagName))}
+			return []string{strconv.Itoa(c.Int(flagName))}
 		}
 		return nil
 	case "boolean":
 		if c.IsSet(flagName) {
-			return []string{fmt.Sprintf("%t", c.Bool(flagName))}
+			return []string{strconv.FormatBool(c.Bool(flagName))}
 		}
 		return nil
 	default:
@@ -1509,11 +1489,15 @@ func paramToFlag(operationID string, p Parameter) cli.Flag {
 		}
 		usage = deprecatedUsage
 	}
-	if p.Schema != nil && len(p.Schema.Enum) > 0 {
-		usage += " [" + strings.Join(p.Schema.Enum, ", ") + "]"
+	valueSchema := p.Schema
+	if valueSchema != nil && valueSchema.Type == "array" {
+		valueSchema = valueSchema.Items
+	}
+	if valueSchema != nil && len(valueSchema.Enum) > 0 {
+		usage += " [" + strings.Join(valueSchema.Enum, ", ") + "]"
 	}
 
-	if isRepeatableQueryParameter(operationID, p) {
+	if isRepeatableQueryParameter(p) {
 		if p.Schema != nil {
 			schemaType := p.Schema.Type
 			if schemaType == "array" && p.Schema.Items != nil {
@@ -1550,32 +1534,9 @@ func paramToFlag(operationID string, p Parameter) cli.Flag {
 
 // isRepeatableQueryParameter identifies parameters whose API contract accepts
 // repeated query keys so generated flags can preserve every supplied value.
-func isRepeatableQueryParameter(operationID string, p Parameter) bool {
-	// Shared relation handlers consume includeRelation as a list even where
-	// older OpenAPI descriptions do not state the repeatability explicitly.
-	if p.Name == "includeRelation" {
-		return true
-	}
+func isRepeatableQueryParameter(p Parameter) bool {
 	if p.Schema != nil && p.Schema.Type == "array" {
 		return true
-	}
-	_, ok := repeatableQueryParameters[queryParameterKey{operationID: operationID, name: p.Name}]
-	if ok {
-		return true
-	}
-	// Legacy scalar schemas state repeatability in their descriptions.
-	description := strings.ToLower(p.Description)
-	for _, phrase := range []string{
-		"multiple times",
-		"multiple query parameters",
-		"repeat the parameter",
-		"repeated params",
-		"repeated values",
-		"may be repeated",
-	} {
-		if strings.Contains(description, phrase) {
-			return true
-		}
 	}
 	return false
 }

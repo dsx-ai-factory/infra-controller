@@ -4,7 +4,7 @@
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::MachineInterfaceId;
 use carbide_uuid::network::NetworkSegmentId;
-use db::ObjectColumnFilter;
+use db::{ObjectColumnFilter, TransactionVending as _};
 use model::network_segment::NetworkSegmentSearchConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{NetworkPrefix, NetworkSegmentCreationRequest, NetworkSegmentType};
@@ -249,7 +249,7 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
         .await
         .unwrap_err();
     assert_eq!(rejected.code(), Code::InvalidArgument);
-    let mut fixture_txn = env.pool.begin().await.unwrap();
+    let mut fixture_txn = env.pool.txn_begin().await.unwrap();
     let domain_id = db::dns::domain::persist(
         model::dns::NewDomain::new(domain_name.clone()),
         fixture_txn.as_mut(),
@@ -308,10 +308,9 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
         .unwrap();
     assert!(domain.deleted.is_some());
 
-    let mut txn = env.api.txn_begin().await.unwrap();
     assert!(
         db::network_segment::find_by(
-            &mut txn,
+            &mut env.api.db_reader(),
             ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -319,7 +318,6 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
         .unwrap()
         .is_empty()
     );
-    txn.rollback().await.unwrap();
 }
 
 async fn create_addressed_interface(

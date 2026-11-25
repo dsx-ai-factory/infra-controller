@@ -19,11 +19,12 @@
 
 use carbide_uuid::vpc::VpcPrefixId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::vpc_prefix::{self, VpcPrefix, VpcPrefixControllerState, VpcPrefixDeletionState};
 use model::{DeletedFilter, StateSla};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 use state_controller::metrics::NoopMetricsEmitter;
 
@@ -48,12 +49,9 @@ impl StateControllerIO for VpcPrefixStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "vpc_prefix_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
         db::vpc_prefix::search(
-            txn,
+            pool,
             vpc_prefix::VpcPrefixSearch {
                 site_prefix_id: None,
                 deleted_filter: DeletedFilter::Include,
@@ -63,14 +61,18 @@ impl StateControllerIO for VpcPrefixStateControllerIO {
         .await
     }
 
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         vpc_prefix_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         // Load the controller-visible row, including prefixes marked deleted.
         let mut prefixes = db::vpc_prefix::get_by_id(
-            txn,
+            db,
             ObjectColumnFilter::One(db::vpc_prefix::IdColumn, vpc_prefix_id),
             DeletedFilter::Include,
         )
@@ -97,7 +99,6 @@ impl StateControllerIO for VpcPrefixStateControllerIO {
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

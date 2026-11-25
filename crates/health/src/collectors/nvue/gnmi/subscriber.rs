@@ -270,14 +270,14 @@ fn request_path_names(paths: &[proto::Path]) -> Vec<String> {
     paths
         .iter()
         .map(|path| {
-            format!(
-                "/{}",
-                path.elem
-                    .iter()
-                    .map(|element| element.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("/")
-            )
+            let mut name = String::from("/");
+            for (index, element) in path.elem.iter().enumerate() {
+                if index > 0 {
+                    name.push('/');
+                }
+                name.push_str(&element.name);
+            }
+            name
         })
         .collect()
 }

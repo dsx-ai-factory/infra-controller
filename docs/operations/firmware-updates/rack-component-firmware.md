@@ -78,7 +78,9 @@ The request supports these controls in addition to `siteId`:
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
 | `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. Does not bypass readiness checks. |
-| `authenticationData` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
+| `downloadCredentials` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
+| `authenticationData` | Deprecated alias of `downloadCredentials`. Supply at most one non-null alias. |
+| `deviceCredentialOverrides` | Optional BMC/NVOS login pairs for direct tray firmware updates and status polling. Requires `overrideReadinessCheck: true`. See [Device login overrides](#device-login-overrides). |
 
 `version` carries the target firmware input. Its representation is a contract
 between the caller and the component backend selected for the target, so the
@@ -226,7 +228,7 @@ cross-component readiness checks in selected steps.
 
 ### Firmware authentication
 
-`authenticationData` accepts exactly one of `shared` (an opaque credential
+`downloadCredentials` accepts exactly one of `shared` (an opaque credential
 string) or `perComponent` (an object with optional `compute`, `nvswitch`, and
 `powershelf` credential strings). Unknown keys are rejected at both levels.
 Omission or `null` supplies no credentials; empty strings or an empty
@@ -239,6 +241,43 @@ For RMS-backed updates, the selected credential is the artifact access token.
 Without a token, Core sends `NOAUTH`. Non-empty credentials require Flow's
 [persisted firmware authentication](../../architecture/flow.md#persisted-firmware-authentication)
 encryption configuration. Keep credentials out of shell arguments and logs.
+
+### Device login overrides
+
+For single and batch tray firmware updates, `deviceCredentialOverrides` accepts
+`bmc` and `nvos` objects. Each supplied object requires nonempty `username` and
+`password` strings; at least one object is required. Unknown fields are rejected.
+`bmc` applies to compute/switch BMCs or power-shelf PMCs. `nvos` is supported only
+for switch trays. Every selected tray receives the same supplied login pairs.
+
+Omitting the field, supplying `null`, or omitting an individual pair retains the
+configured credential lookup for that pair. A failed login with a supplied pair
+does not fall back to stored credentials. These device logins are separate from
+`downloadCredentials`, which authenticates firmware file downloads.
+
+Device overrides require `overrideReadinessCheck: true` and a supported direct
+tray firmware path. Rack REST endpoints ignore `deviceCredentialOverrides` and
+do not forward it to Flow. Standalone compute reprovisioning, DPU updates,
+the Core compute backend, legacy compute controllers, schedules and operation-run
+templates do not support them. Devices targeted by BMC MAC must already be present in Flow
+inventory. An asynchronous task can fail if its resolved device or backend does
+not support the requested options. Power shelves also require an operation rule
+that includes their firmware step.
+
+Flow encrypts device overrides before persisting tasks or passing them through
+Temporal, and decrypts them inside firmware dispatch and status activities. Task
+reads and audit logs do not return the values. Core does not write overrides to
+its credential store; backend registration can persist them in its own store.
+The same Flow encryption key must remain available through retries and restarts.
+
+This protection begins at Flow. For the earlier REST API-to-site hop, refer to
+[proxy confidentiality limitations](../../architecture/flow.md#persisted-firmware-authentication).
+The shared proxy correction is tracked in [#9433](https://github.com/dsx-ai-factory/infra-controller/issues/9433).
+
+Deploy matching Core, Flow and REST versions, replacing older Flow workers before
+accepting tasks with device overrides. Existing clients can continue using
+`authenticationData`; sending both download-authentication aliases with non-null
+values is rejected.
 
 ## Submit an update
 
@@ -324,7 +363,7 @@ example, this request body selects only racks `A01` and `A02`:
 Replace the example site and rack names with the canary selection. Serialize
 the complete candidate document as described in
 [SOT firmware-object JSON](#sot-firmware-object-json); the placeholder above
-is not firmware input. Supply `ruleId` and `authenticationData` when required
+is not firmware input. Supply `ruleId` and `downloadCredentials` when required
 by the selected rule and artifact source. Keep readiness and version checks
 enabled unless a diagnosed condition requires an approved override.
 

@@ -301,6 +301,7 @@ pub async fn run_metrics_endpoint_with_cancellation(
 ) -> Result<(), std::io::Error> {
     let listener = bind_tcp_listener(config.address).await?;
 
+    // Preserve native string quoting for callers using tracing_subscriber::fmt.
     tracing::info!(
         metrics_address = config.address.to_string(),
         "Starting metrics listener"
@@ -603,7 +604,6 @@ async fn handle_metrics_request<B>(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::MetricsCapture;
     use opentelemetry::KeyValue;
     use opentelemetry_sdk::metrics;
@@ -618,9 +618,11 @@ mod tests {
     /// in the tests below.
     #[test]
     fn encode_failed_outcome_emits_counter() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
-        emit(MetricsScrapeFailed::EncodeFailed {});
+        metrics
+            .instrumentation()
+            .emit(MetricsScrapeFailed::EncodeFailed {});
 
         assert_eq!(
             metrics.counter_delta(

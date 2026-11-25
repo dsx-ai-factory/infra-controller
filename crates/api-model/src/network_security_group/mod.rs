@@ -256,8 +256,9 @@ impl NetworkSecurityGroupAttachments {
 /// NetworkSecurityGroupPropagationObjectStatus holds
 /// the propagation status of a single object (vpc, instance, etc)
 /// The status of propagation depends on the propagation of all
-/// underlying objects that do not have a more specific NSG applied.
-/// For example, for a VPC to be fully propagated, all interfaces
+/// underlying host interfaces that do not have a more specific NSG configured
+/// and, for VPCs, active service interfaces that always use their selected VPC's NSG.
+/// For example, for a VPC to be fully propagated, all of those interfaces
 /// of all instances under that VPC must be fully propagated.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetworkSecurityGroupPropagationObjectStatus {

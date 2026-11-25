@@ -1,0 +1,67 @@
+suite: Service VPC observer remote permissions
+templates:
+  - service-vpc-observer-rbac.yaml
+release:
+  name: agent-bf3
+  namespace: dpf-operator-system
+tests:
+  # List-only rules must not authorize changes to the remote network.
+  - it: grants only the three resource lists required by batched observations
+    asserts:
+      - hasDocuments:
+          count: 4
+      - documentIndex: 0
+        equal:
+          path: rules
+          value:
+            - apiGroups: ["svc.dpu.nvidia.com"]
+              resources: ["servicechainsets", "servicechains"]
+              verbs: ["list"]
+      - documentIndex: 2
+        equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["nodes"]
+              verbs: ["list"]
+
+  # Both grants must bind DPF's ServiceAccount in the workload namespace.
+  - it: binds both roles to the dedicated observer
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: nico-service-vpc-observer
+              namespace: dpf-operator-system
+      - documentIndex: 3
+        equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: nico-service-vpc-observer
+              namespace: dpf-operator-system
+      # The BF3 binding name must differ from the BF4 release's cluster-scoped binding.
+      - documentIndex: 3
+        equal:
+          path: metadata.name
+          value: nico-service-vpc-observer-8f4dd8b55969bcc7
+
+  # Separate BF3/BF4 Helm releases must not claim the same cluster-scoped objects.
+  - it: scopes cluster roles and their bindings to each release
+    release:
+      name: agent-bf4
+    asserts:
+      - documentIndex: 2
+        equal:
+          path: metadata.name
+          value: nico-service-vpc-observer-4bc0d24264767b2c
+      - documentIndex: 3
+        equal:
+          path: metadata.name
+          value: nico-service-vpc-observer-4bc0d24264767b2c
+      - documentIndex: 3
+        equal:
+          path: roleRef.name
+          value: nico-service-vpc-observer-4bc0d24264767b2c

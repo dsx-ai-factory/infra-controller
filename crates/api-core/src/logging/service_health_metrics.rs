@@ -31,35 +31,18 @@ pub(crate) struct ServiceHealthContext {
 pub(crate) fn start_export_service_health_metrics(health_context: ServiceHealthContext) {
     health_context
         .meter
-        .u64_observable_gauge("carbide_api_ready")
-        .with_description("Whether the NICo API is running")
-        .with_callback(|observer| {
-            observer.observe(1, &[]);
-        })
-        .build();
-    health_context
-        .meter
         .u64_observable_gauge("carbide_api_version")
         .with_description("Version (git sha, build date, etc) of this service")
         .with_callback(|observer| {
             observer.observe(
                 1,
                 &[
-                    KeyValue::new(
-                        "build_version",
-                        carbide_version::v!(build_version).to_string(),
-                    ),
-                    KeyValue::new("build_date", carbide_version::v!(build_date).to_string()),
-                    KeyValue::new("git_sha", carbide_version::v!(git_sha).to_string()),
-                    KeyValue::new(
-                        "rust_version",
-                        carbide_version::v!(rust_version).to_string(),
-                    ),
-                    KeyValue::new("build_user", carbide_version::v!(build_user).to_string()),
-                    KeyValue::new(
-                        "build_hostname",
-                        carbide_version::v!(build_hostname).to_string(),
-                    ),
+                    KeyValue::new("build_version", carbide_version::v!(build_version)),
+                    KeyValue::new("build_date", carbide_version::v!(build_date)),
+                    KeyValue::new("git_sha", carbide_version::v!(git_sha)),
+                    KeyValue::new("rust_version", carbide_version::v!(rust_version)),
+                    KeyValue::new("build_user", carbide_version::v!(build_user)),
+                    KeyValue::new("build_hostname", carbide_version::v!(build_hostname)),
                 ],
             );
         })

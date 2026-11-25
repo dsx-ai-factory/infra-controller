@@ -100,7 +100,7 @@ func RollSite(ctx context.Context, logger zerolog.Logger, siteID, siteName, url 
 	}
 	_, err = siteManagerClient.request(req, logger)
 	if err == nil {
-		logger.Info().Msg(fmt.Sprintf("Site Manager site %s/%s rolled", siteName, siteID))
+		logger.Info().Msgf("Site Manager site %s/%s rolled", siteName, siteID)
 	}
 	return err
 }
@@ -159,7 +159,7 @@ func CreateSite(ctx context.Context, logger zerolog.Logger, siteUUID, name, prov
 	}
 	_, err = siteManagerClient.request(req, logger)
 	if err == nil {
-		logger.Info().Msg(fmt.Sprintf("Site Manager Site: %s/%s created", name, siteUUID))
+		logger.Info().Msgf("Site Manager Site: %s/%s created", name, siteUUID)
 	}
 	return err
 }
@@ -175,7 +175,7 @@ func DeleteSite(ctx context.Context, logger zerolog.Logger, uuid, url string) er
 
 	_, err = siteManagerClient.request(req, logger)
 	if err == nil {
-		logger.Info().Msg(fmt.Sprintf("Site Manager Site: %s deleted", uuid))
+		logger.Info().Msgf("Site Manager Site: %s deleted", uuid)
 	}
 	return err
 }

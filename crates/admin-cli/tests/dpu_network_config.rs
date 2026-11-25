@@ -78,6 +78,7 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
         }),
         tenant_interfaces: vec![
             FlatInterfaceConfig {
+                vpc_peer_vnis: vec![200, 10],
                 // SLAAC leaves the host address empty even when an older
                 // sidecar contains one. The current entry must stay intact.
                 addresses: vec![InterfaceAddressConfig {
@@ -152,6 +153,7 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
             "IPv6-only SLAAC interface preserves empty current fields",
             tenants[0],
             &[
+                ("VPC Peer VNIs", "200, 10"),
                 ("IP", ""),
                 ("Gateway", ""),
                 ("Prefix", ""),
@@ -167,6 +169,7 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
             "legacy IPv6 sidecar",
             tenants[1],
             &[
+                ("VPC Peer VNIs", ""),
                 ("IPv6 IP", "2001:db8:3::10"),
                 ("IPv6 Interface Prefix", "2001:db8:3::10/128"),
                 ("IPv6 Prefix", ""),

@@ -17,7 +17,7 @@
 
 use std::net::SocketAddr;
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
@@ -27,16 +27,24 @@ use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, LockdownStatus,
 };
 
-use super::metrics::SiteExplorationMetrics;
+use super::{SiteWideBmcPassword, SiteWideBmcPasswordLoader};
 
 /// This trait defines how the `SiteExplorer` will query information about endpoints
 #[async_trait::async_trait]
 pub trait EndpointExplorer: Send + Sync + 'static {
+    /// Loads the site's current BMC root password and its rotation version once per pass.
+    async fn load_sitewide_bmc_password(
+        &self,
+    ) -> Result<SiteWideBmcPassword, EndpointExplorationError>;
+
     /// Query an endpoint for information
     ///
     /// The query carries the information `MachineInterface` information that is derived
     /// from DHCP requests as well as the information that might have been fetched in
     /// a previous exploration.
+    ///
+    /// The loader is called only when ingestion needs the site-wide password;
+    /// stored or retained BMC credentials do not require it for manual exploration.
     async fn explore_endpoint(
         &self,
         address: SocketAddr,
@@ -44,12 +52,30 @@ pub trait EndpointExplorer: Send + Sync + 'static {
         expected: Option<&ExpectedEntity>,
         last_exploration_error: Option<&EndpointExplorationError>,
         boot_interface: Option<&BootInterfaceTarget>,
+        load_sitewide_bmc_password: SiteWideBmcPasswordLoader<'_>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError>;
+}
 
-    async fn check_preconditions(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-    ) -> Result<(), EndpointExplorationError>;
+/// Core has prepared its client and any IPMI restart credential. When Redfish uses
+/// nico-bmc-proxy, the proxy authenticates upstream during forwarding. The selected
+/// backend may read live state or issue multiple requests when invoked.
+pub struct PreparedPowerControl {
+    /// The port to recheck if the selected driver can use IPMI for this action.
+    pub ipmi_port: Option<u16>,
+    /// Await to invoke the prepared backend. Dropping this future before polling suppresses the send.
+    pub send: futures_util::future::BoxFuture<'static, Result<(), EndpointExplorationError>>,
+}
+
+impl PreparedPowerControl {
+    /// An IPMI restart requires the effective port of the latest identifying report.
+    /// Unrelated exploration details cannot invalidate this socket.
+    pub fn matches_ipmi_report(&self, report: Option<&EndpointExplorationReport>) -> bool {
+        self.ipmi_port.is_none_or(|port| {
+            report
+                .filter(|report| report.service_root.is_some())
+                .is_some_and(|report| bmc_runtime::ipmi_port(report) == port)
+        })
+    }
 }
 
 /// Authenticated BMC operations, resolving stored credentials from the
@@ -87,13 +113,29 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         report: Option<&EndpointExplorationReport>,
     ) -> Result<Option<PowerState>, EndpointExplorationError>;
 
+    /// Select the configured backend and synchronously invoke the requested action.
     async fn redfish_power_control(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
         report: Option<&EndpointExplorationReport>,
         action: ResetType,
-    ) -> Result<(), EndpointExplorationError>;
+    ) -> Result<(), EndpointExplorationError> {
+        self.prepare_redfish_power_control(address, interface, report, action)
+            .await?
+            .send
+            .await
+    }
+
+    /// Resolve credentials and select the actual mutation client before the caller
+    /// checks whether this endpoint is still authorized to receive the command.
+    async fn prepare_redfish_power_control(
+        &self,
+        address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
+    ) -> Result<PreparedPowerControl, EndpointExplorationError>;
 
     /// Reset a Redfish Chassis (e.g. an HGX baseboard) out-of-band via the BMC at
     /// `address`, resolving credentials from `interface`. `chassis_id` is the
@@ -110,23 +152,33 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
 
     async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool;
 
+    /// Turns secure boot off for the next boot. `report` selects the drivers;
+    /// without one that identifies the BMC the drivers backend fails.
     async fn disable_secure_boot(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Moves the platform's full lockdown to `desired`. `report` selects the
+    /// drivers; without one that identifies the BMC the drivers backend
+    /// fails, as lockdown has no plain Redfish form.
     async fn lockdown(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        action: libredfish::EnabledDisabled,
+        report: Option<&EndpointExplorationReport>,
+        desired: LockdownDesiredState,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Reads the platform's lockdown. `report` selects the drivers as for
+    /// [`Self::lockdown`].
     async fn lockdown_status(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<LockdownStatus, EndpointExplorationError>;
 
     async fn enable_infinite_boot(
@@ -158,10 +210,13 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         boot_interface: &BootInterfaceTarget,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Moves the DPU to `mode`. `report` selects the drivers; without one that
+    /// identifies the BMC the drivers backend fails.
     async fn set_nic_mode(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         mode: BlueFieldOperatingMode,
     ) -> Result<(), EndpointExplorationError>;
 
@@ -175,12 +230,14 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError>;
 
     async fn create_bmc_user(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         username: &str,
         password: &str,
         role_id: RoleId,
@@ -190,18 +247,20 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         username: &str,
     ) -> Result<(), EndpointExplorationError>;
 
     // set_bmc_root_password authenticates with the endpoint's currently stored
-    // BMC root credentials, probes the vendor, sets `new_password` on the
-    // device, and records it as the device's per-BMC credential. This is an
-    // out-of-band set that does not update rotation convergence; the rotation
-    // engine will reassert the site-wide password on its next pass.
+    // BMC root credentials, sets `new_password` on the device, and records it
+    // as the device's per-BMC credential. This is an out-of-band set that does
+    // not update rotation convergence; the rotation engine will reassert the
+    // site-wide password on its next pass.
     async fn set_bmc_root_password(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         new_password: &str,
     ) -> Result<(), EndpointExplorationError>;
 

@@ -349,8 +349,7 @@ pub(crate) async fn update(
                 kind: "NetworkSecurityGroup",
                 id: format!(
                     "{} for tenant org `{}`",
-                    metadata.name.clone(),
-                    req.tenant_organization_id.clone(),
+                    metadata.name, req.tenant_organization_id,
                 ),
             }
             .into());
@@ -464,8 +463,7 @@ pub(crate) async fn delete(
     if nsg.tenant_organization_id != tenant_organization_id {
         return Err(CarbideError::InvalidArgument(format!(
             "NetworkSecurityGroup `{}` is not owned by tenant `{}`",
-            nsg.id.clone(),
-            tenant_organization_id.clone()
+            nsg.id, tenant_organization_id
         ))
         .into());
     }
@@ -543,11 +541,10 @@ pub(crate) async fn get_propagation_status(
         })?;
 
     // Prepare our txn to associate machines with the NetworkSecurityGroup
-    let mut txn = api.txn_begin().await?;
 
     // Query the DB for propagation status.
     let (vpcs, instances) = network_security_group::get_propagation_status(
-        &mut txn,
+        &mut api.db_reader(),
         req.network_security_group_ids
             .map(|nl| {
                 nl.ids
@@ -557,7 +554,9 @@ pub(crate) async fn get_propagation_status(
             })
             .transpose()
             .map_err(|e| {
-                CarbideError::from(RpcDataConversionError::InvalidInstanceId(e.to_string()))
+                CarbideError::from(RpcDataConversionError::InvalidNetworkSecurityGroupId(
+                    e.value(),
+                ))
             })?
             .as_deref(),
         None,
@@ -573,7 +572,6 @@ pub(crate) async fn get_propagation_status(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -612,11 +610,9 @@ pub(crate) async fn get_attachments(
             ))
         })?;
 
-    let mut txn = api.txn_begin().await?;
-
     // Query the DB for propagation status.
     let attachments = network_security_group::find_objects_with_attachments(
-        &mut txn,
+        api.pg_pool(),
         Some(&network_security_group_ids),
         None,
     )
@@ -628,7 +624,6 @@ pub(crate) async fn get_attachments(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -658,7 +653,7 @@ fn validate_expanded_rule_set(
 ) -> Result<(), CarbideError> {
     let mut total_rules = 0u32;
 
-    let mut ids = HashSet::<Option<String>>::new();
+    let mut ids = HashSet::<Option<&str>>::new();
 
     if rules.len() > limit {
         return Err(CarbideError::InvalidArgument(format!(
@@ -667,10 +662,10 @@ fn validate_expanded_rule_set(
     }
 
     for rule in rules {
-        if !ids.insert(rule.id.clone()) {
+        if !ids.insert(rule.id.as_deref()) {
             return Err(CarbideError::InvalidArgument(format!(
                 "duplicate rule ID `{}` found in rule set",
-                rule.id.clone().unwrap_or_default()
+                rule.id.as_deref().unwrap_or_default()
             )));
         }
 

@@ -271,7 +271,7 @@ exit 0
             }),
         },
         &mut access,
-        &carbide_instrument::Instrumentation::global(),
+        &carbide_instrument::Instrumentation::noop(),
     );
     let Some(mlx_device_pb::mlx_device_profile_sync_response::Reply::Error(error)) = response.reply
     else {

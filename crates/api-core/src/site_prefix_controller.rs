@@ -16,12 +16,13 @@
  */
 
 //! Makes tenant SitePrefixes usable after the required DPUs apply protection,
-//! and retires them after their exact children have been physically removed.
+//! and retires SitePrefixes after their children drain or transfer operator coverage.
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
-use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
+use db::db_read::DbReader;
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, TransactionVending as _};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::site_prefix::{
@@ -92,20 +93,20 @@ impl StateControllerIO for SitePrefixReadiness {
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "site_prefixes_controller_queued_objects";
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "site_prefix_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<SitePrefixId>, DatabaseError> {
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<SitePrefixId>, DatabaseError> {
         let mut ids = Vec::new();
-        for lifecycle_state in [
-            SitePrefixLifecycleState::Provisioning,
-            SitePrefixLifecycleState::Deleting,
+        for (authority, lifecycle_state) in [
+            (
+                Some(SitePrefixAuthority::TenantManaged),
+                SitePrefixLifecycleState::Provisioning,
+            ),
+            (None, SitePrefixLifecycleState::Deleting),
         ] {
             ids.extend(
                 db::site_prefix::find_ids(
-                    &mut *txn,
+                    pool,
                     SitePrefixSearchFilter {
-                        authority: Some(SitePrefixAuthority::TenantManaged),
+                        authority,
                         lifecycle_state: Some(lifecycle_state),
                         ..Default::default()
                     },
@@ -118,19 +119,20 @@ impl StateControllerIO for SitePrefixReadiness {
         Ok(ids)
     }
 
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         object_id: &SitePrefixId,
-    ) -> Result<Option<SitePrefix>, DatabaseError> {
-        Ok(db::site_prefix::find_by_ids(txn, &[*object_id])
-            .await?
-            .pop())
+    ) -> Result<Option<SitePrefix>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        Ok(db::site_prefix::find_by_ids(db, &[*object_id]).await?.pop())
     }
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &SitePrefixId,
         state: &SitePrefix,
     ) -> Result<Versioned<SitePrefixLifecycleState>, DatabaseError> {
@@ -218,8 +220,12 @@ impl StateHandler for SitePrefixReadiness {
         ) {
             return Ok(StateHandlerOutcome::do_nothing());
         }
-        let mut txn = ctx.services.begin().await?;
-        // Retirement only drains exact child references; it neither waits for
+        let mut txn = ctx
+            .services
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
+        // Retirement drains retained children; it neither waits for
         // another DPU acknowledgement nor generates a new isolation request.
         let requested_at = if state.status.lifecycle_state == SitePrefixLifecycleState::Provisioning
         {
@@ -245,9 +251,7 @@ impl StateHandler for SitePrefixReadiness {
         else {
             return Ok(StateHandlerOutcome::deleted().with_txn(txn));
         };
-        if current.status.authority != SitePrefixAuthority::TenantManaged
-            || current.status.lifecycle_state != state.status.lifecycle_state
-        {
+        if current.status.lifecycle_state != state.status.lifecycle_state {
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
         if current.version != state.version {
@@ -257,16 +261,33 @@ impl StateHandler for SitePrefixReadiness {
         }
 
         if current.status.lifecycle_state == SitePrefixLifecycleState::Deleting {
-            let vpc_prefix_count =
-                db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(&mut *txn, *object_id).await?;
-            if vpc_prefix_count > 0 {
-                return Ok(StateHandlerOutcome::wait(format!(
-                    "waiting for {vpc_prefix_count} VPC prefix references to be physically removed"
-                ))
-                .with_txn(txn));
+            if current.status.authority == SitePrefixAuthority::OperatorManaged {
+                if db::site_prefix::operator_managed_prefix_has_retained_children(
+                    &mut *txn, *object_id,
+                )
+                .await?
+                {
+                    return Ok(StateHandlerOutcome::wait(
+                        "waiting for retained VPC prefixes or direct network prefixes without ready operator coverage".to_string(),
+                    )
+                    .with_txn(txn));
+                }
+            } else {
+                let vpc_prefix_count =
+                    db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(&mut *txn, *object_id)
+                        .await?;
+                if vpc_prefix_count > 0 {
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "waiting for {vpc_prefix_count} VPC prefix references to be physically removed"
+                    ))
+                    .with_txn(txn));
+                }
             }
             db::site_prefix::final_delete(*object_id, &mut txn).await?;
             return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+        }
+        if current.status.authority != SitePrefixAuthority::TenantManaged {
+            return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
 
         let isolation_required = matches!(

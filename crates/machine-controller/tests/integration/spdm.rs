@@ -160,8 +160,7 @@ async fn spdm_selection_timeouts_preserve_state_and_retry(pool: PgPool) -> eyre:
 
         // Persisted error text proves a selection timer ran, rather than an unrelated error.
         // The first read's timer can expire on the same Tokio tick as the outer timer.
-        let mut txn = env.test_harness.db_txn().await;
-        let machine = mh.host.db_machine(&mut txn).await;
+        let machine = mh.host.machine().await;
         assert_eq!(machine.current_state(), &state, "{scenario}");
         assert!(
             matches!(
@@ -181,14 +180,13 @@ async fn spdm_selection_timeouts_preserve_state_and_retry(pool: PgPool) -> eyre:
             "SELECT job_id FROM spdm_machine_devices_attestation WHERE machine_id = $1",
         )
         .bind(machine_id)
-        .fetch_all(&mut *txn)
+        .fetch_all(&pool)
         .await?;
         assert_eq!(
             jobs_before,
             vec![job_id],
             "{scenario}: expiry must preserve jobs"
         );
-        txn.commit().await?;
 
         // Clear the injected latency and prove a later iteration retries successfully.
         env.redfish_sim.set_attester_selection_delays(
@@ -197,8 +195,7 @@ async fn spdm_selection_timeouts_preserve_state_and_retry(pool: PgPool) -> eyre:
             Duration::ZERO,
         );
         env.run_single_iteration().await;
-        let mut txn = env.test_harness.db_txn().await;
-        let machine = mh.host.db_machine(&mut txn).await;
+        let machine = mh.host.machine().await;
         if creates_job {
             let ManagedHostState::HostInit {
                 machine_state:
@@ -222,7 +219,6 @@ async fn spdm_selection_timeouts_preserve_state_and_retry(pool: PgPool) -> eyre:
                 "{scenario}"
             );
         }
-        txn.commit().await?;
     }
     Ok(())
 }
@@ -279,7 +275,7 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
             expected: Expected::Wait,
         },
     ];
-    let (mut env, mh) = setup_spdm_host(pool, true).await;
+    let (mut env, mh) = setup_spdm_host(pool.clone(), true).await;
     let machine_id: MachineId = mh.host.id.into();
 
     for case in cases {
@@ -380,13 +376,12 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
 
         env.run_single_iteration().await;
         // Reload the state and persisted outcome to distinguish waiting from a handler error.
-        let mut txn = env.test_harness.db_txn().await;
-        let machine = mh.host.db_machine(&mut txn).await;
+        let machine = mh.host.machine().await;
         let cancelled: bool = sqlx::query_scalar(
             "SELECT bool_or(cancelled_at IS NOT NULL) FROM spdm_machine_devices_attestation WHERE job_id = $1",
         )
         .bind(job_id)
-        .fetch_one(&mut *txn)
+        .fetch_one(&pool)
         .await?;
         assert!(
             !cancelled,
@@ -522,22 +517,20 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
     );
 
     // Reload both sides of the transaction: neither the transition nor job rows survive.
-    let mut txn = env.test_harness.db_txn().await;
-    let machine = mh.host.db_machine(&mut txn).await;
+    let machine = mh.host.machine().await;
     assert_eq!(machine.current_state(), &trigger_state);
     let counts: (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COUNT(DISTINCT job_id)
          FROM spdm_machine_devices_attestation WHERE machine_id = $1",
     )
     .bind(machine_id)
-    .fetch_one(&mut *txn)
+    .fetch_one(&pool)
     .await?;
     assert_eq!(
         counts,
         (0, 0),
         "a failed transition must not leave an orphan job"
     );
-    txn.commit().await?;
 
     // Remove the transient failure and let the same trigger state retry normally.
     sqlx::query("DROP TRIGGER reject_spdm_poll_state ON machines")
@@ -551,8 +544,7 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
         ),
         2.0,
     );
-    let mut txn = env.test_harness.db_txn().await;
-    let machine = mh.host.db_machine(&mut txn).await;
+    let machine = mh.host.machine().await;
     let ManagedHostState::HostInit {
         machine_state:
             MachineState::SpdmMeasuring {
@@ -570,7 +562,7 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
          FROM spdm_machine_devices_attestation WHERE machine_id = $1 ORDER BY device_id",
     )
     .bind(machine_id)
-    .fetch_all(&mut *txn)
+    .fetch_all(&pool)
     .await?;
     assert_eq!(
         rows,
@@ -580,7 +572,6 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
             .collect::<Vec<_>>(),
         "the retry must persist exactly one controller job for the selected devices",
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -775,11 +766,10 @@ async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
         .await?;
         env.run_single_iteration().await;
         // Reload the lifecycle restart and verify that the old job remains unchanged.
-        let mut txn = env.test_harness.db_txn().await;
-        let machine = mh.host.db_machine(&mut txn).await;
+        let machine = mh.host.machine().await;
         assert_eq!(machine.current_state(), &trigger_state, "{}", case.scenario);
         let old_attestations =
-            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+            db::attestation::spdm::get_attestations_for_job_id(&pool, &job_id).await?;
         assert_eq!(
             old_attestations.len(),
             case.job_devices.len(),
@@ -788,7 +778,7 @@ async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
         );
         for previous in previous_devices {
             let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &pool,
                 &machine_id,
                 &previous.device_id,
                 &job_id,
@@ -821,7 +811,7 @@ async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
             );
         }
         let other_attestations =
-            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &other_job_id).await?;
+            db::attestation::spdm::get_attestations_for_job_id(&pool, &other_job_id).await?;
         assert!(
             other_attestations
                 .iter()
@@ -830,12 +820,10 @@ async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
             "{}: unrelated jobs must remain unchanged",
             case.scenario
         );
-        txn.commit().await?;
 
         env.run_single_iteration().await;
         // The trigger creates a distinct job for the current selection, or follows its empty-selection skip path.
-        let mut txn = env.test_harness.db_txn().await;
-        let machine = mh.host.db_machine(&mut txn).await;
+        let machine = mh.host.machine().await;
         if case.selected_devices.is_empty() {
             assert_eq!(
                 machine.current_state(),
@@ -847,7 +835,7 @@ async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
             );
             let jobs: Vec<uuid::Uuid> = sqlx::query_scalar(
                 "SELECT DISTINCT job_id FROM spdm_machine_devices_attestation WHERE machine_id = $1",
-            ).bind(machine_id).fetch_all(&mut *txn).await?;
+            ).bind(machine_id).fetch_all(&pool).await?;
             assert_eq!(
                 jobs.into_iter().collect::<BTreeSet<_>>(),
                 BTreeSet::from([job_id, other_job_id]),
@@ -867,7 +855,7 @@ async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
             assert_ne!(*new_job_id, job_id, "{}", case.scenario);
             assert_ne!(*new_job_id, other_job_id, "{}", case.scenario);
             let new_attestations =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, new_job_id).await?;
+                db::attestation::spdm::get_attestations_for_job_id(&pool, new_job_id).await?;
             // The replacement is scheduled by the managed-host controller for every selected device.
             let origins: Vec<bool> = sqlx::query_scalar(
                 "SELECT triggered_by_mh_controller FROM spdm_machine_devices_attestation
@@ -875,7 +863,7 @@ async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
             )
             .bind(machine_id)
             .bind(new_job_id)
-            .fetch_all(&mut *txn)
+            .fetch_all(&pool)
             .await?;
             assert_eq!(
                 origins,
@@ -925,8 +913,7 @@ async fn missing_spdm_job_restarts_without_redfish(pool: PgPool) -> eyre::Result
     env.run_single_iteration().await;
     assert_eq!(env.redfish_sim.create_client_calls().len(), client_calls);
 
-    let mut txn = env.test_harness.db_txn().await;
-    let machine = mh.host.db_machine(&mut txn).await;
+    let machine = mh.host.machine().await;
     assert_eq!(
         machine.current_state(),
         &ManagedHostState::HostInit {
@@ -935,7 +922,6 @@ async fn missing_spdm_job_restarts_without_redfish(pool: PgPool) -> eyre::Result
             },
         }
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -960,7 +946,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
         selection_mode: AttesterSelectionMode::Allowlist,
         requests: &[],
     };
-    let (mut env, mh) = setup_spdm_host(pool, true).await;
+    let (mut env, mh) = setup_spdm_host(pool.clone(), true).await;
     let machine_id: MachineId = mh.host.id.into();
 
     for case in [
@@ -1131,8 +1117,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             case.scenario
         );
         // Reload state and outcome so an error cannot masquerade as blocked recovery.
-        let mut txn = env.test_harness.db_txn().await;
-        let machine = mh.host.db_machine(&mut txn).await;
+        let machine = mh.host.machine().await;
         assert_eq!(
             machine.current_state(),
             case.expected.as_ref().unwrap_or(&failed_state),
@@ -1161,7 +1146,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
              FROM spdm_machine_devices_attestation WHERE machine_id = $1",
         )
         .bind(machine_id)
-        .fetch_one(&mut *txn)
+        .fetch_one(&pool)
         .await?;
         assert_eq!(
             rows,
@@ -1177,7 +1162,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
 /// Disabling SPDM releases failed hosts even when evidence and the BMC are unavailable.
 #[sqlx_test]
 async fn disabled_spdm_recovery_skips_attestation(pool: PgPool) -> eyre::Result<()> {
-    let (mut env, mh) = setup_spdm_host(pool, false).await;
+    let (mut env, mh) = setup_spdm_host(pool.clone(), false).await;
     let machine_id: MachineId = mh.host.id.into();
     let mut txn = env.test_harness.db_txn().await;
     // No attestation evidence can satisfy recovery; only the site setting permits it.
@@ -1207,8 +1192,7 @@ async fn disabled_spdm_recovery_skips_attestation(pool: PgPool) -> eyre::Result<
 
     env.run_single_iteration().await;
     // Reload the persisted destination to prove recovery skipped scheduling entirely.
-    let mut txn = env.test_harness.db_txn().await;
-    let machine = mh.host.db_machine(&mut txn).await;
+    let machine = mh.host.machine().await;
     assert_eq!(
         machine.current_state(),
         &ManagedHostState::HostInit {
@@ -1219,7 +1203,7 @@ async fn disabled_spdm_recovery_skips_attestation(pool: PgPool) -> eyre::Result<
         "SELECT count(*) FROM spdm_machine_devices_attestation WHERE machine_id = $1",
     )
     .bind(machine_id)
-    .fetch_one(&mut *txn)
+    .fetch_one(&pool)
     .await?;
     assert_eq!(rows, 0);
     Ok(())

@@ -137,7 +137,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         Some(pool.clone()),
         None,
         None,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("test component manager should build");
@@ -248,7 +248,11 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
     );
     let cancel_token = CancellationToken::new();
     let controller = StateController::builder()
-        .database(pool.clone(), api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            api.work_lock_manager_handle(),
+            api.instrumentation(),
+        )
         .meter("carbide_racks", test_harness.test_meter.meter())
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(
@@ -299,12 +303,16 @@ fn services(
             rack_profiles: config.rack_profiles.clone(),
         }
         .into(),
-        nvos_update_manager: rms_sim
-            .as_rms_client()
-            .map(|client| Arc::new(component_manager::rms::rms_nvos_update_manager(client)) as _),
+        nvos_update_manager: rms_sim.as_rms_client().map(|client| {
+            Arc::new(component_manager::rms::rms_nvos_update_manager(
+                client,
+                carbide_instrument::Instrumentation::noop(),
+            )) as _
+        }),
         rack_firmware_update_manager: rms_sim.as_rms_client().map(|client| {
             Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
                 client,
+                carbide_instrument::Instrumentation::noop(),
             )) as _
         }),
         credential_manager: credentials.clone(),

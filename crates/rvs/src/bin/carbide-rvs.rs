@@ -95,7 +95,7 @@ async fn main() -> Result<(), RvsError> {
     let client_config =
         CarbideClientConfig::new(cfg.tls.root_cafile_path.clone(), Some(client_cert));
     let api_config = ApiConfig::new(&cfg.nico.url, &client_config);
-    let nico = client::NicoClient::new(&api_config);
+    let nico = client::NicoClient::new(&api_config, carbide_instrument::Instrumentation::noop());
 
     let ctx = RvsCtx {
         nico,

@@ -120,7 +120,7 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
 /// not its link-local address, without changing IPv4 or enabling IPv6 by default.
 #[test]
 fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
-    use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
+    use carbide_dpu_agent_utils::FMDS_IPV6_GATEWAY;
 
     let mut config = comparison_network_config();
     config.tenant_interfaces = vec![comparison_interface("metadata-host", 274, 1001)];
@@ -271,7 +271,7 @@ async fn record_network_status_before_deadline(
             status,
             &format!("https://{address}"),
             &client_config,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         ),
     )
     .await

@@ -489,7 +489,9 @@ mod tests {
     #[tokio::test]
     async fn forwarded_ip_target_resolves_without_lookup() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        let state = test_state_with_ip_cache(HashMap::new()).await;
+        let state =
+            test_state_with_ip_cache(HashMap::new(), &carbide_instrument::Instrumentation::noop())
+                .await;
 
         assert_eq!(
             ip_for_forwarded_target(&ForwardedTarget::Ip(ip), &state)
@@ -503,9 +505,11 @@ mod tests {
     async fn forwarded_mac_target_resolves_from_ip_cache() {
         let mac = MacAddress::from_str("00:11:22:33:44:55").unwrap();
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        let state =
-            test_state_with_ip_cache(HashMap::from([(LookupBy::MacAddress(mac.to_string()), ip)]))
-                .await;
+        let state = test_state_with_ip_cache(
+            HashMap::from([(LookupBy::MacAddress(mac.to_string()), ip)]),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
 
         assert_eq!(
             ip_for_forwarded_target(&ForwardedTarget::Mac(mac), &state)
@@ -519,9 +523,11 @@ mod tests {
     async fn forwarded_serial_target_resolves_from_ip_cache() {
         let serial = r#""FOO,BAR-123"\rack"#;
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        let state =
-            test_state_with_ip_cache(HashMap::from([(LookupBy::Serial(serial.to_string()), ip)]))
-                .await;
+        let state = test_state_with_ip_cache(
+            HashMap::from([(LookupBy::Serial(serial.to_string()), ip)]),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await;
 
         let headers = forwarded_headers(ForwardedHeaderCase::Value(
             r#"serial="\"FOO,BAR-123\"\\rack""#,

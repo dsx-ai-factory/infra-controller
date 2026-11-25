@@ -18,14 +18,18 @@ func TestObfuscateRequestBody(t *testing.T) {
 		{
 			name: "obfuscates authenticationData and preserves non-secret fields",
 			body: map[string]interface{}{
-				"siteId": "site-1",
+				"siteId":                    "site-1",
+				"downloadCredentials":       map[string]interface{}{"shared": "download-value"},
+				"deviceCredentialOverrides": map[string]interface{}{"bmc": map[string]interface{}{"username": "operator", "password": "device-value"}},
 				"authenticationData": map[string]interface{}{
 					"shared": "download-token",
 				},
 			},
 			want: map[string]interface{}{
-				"siteId":             "site-1",
-				"authenticationData": auditObfuscatedValue,
+				"siteId":                    "site-1",
+				"authenticationData":        auditObfuscatedValue,
+				"downloadCredentials":       auditObfuscatedValue,
+				"deviceCredentialOverrides": auditObfuscatedValue,
 			},
 		},
 		{
@@ -130,6 +134,64 @@ func TestObfuscateRequestBody(t *testing.T) {
 						"password": auditObfuscatedValue,
 					},
 				},
+			},
+		},
+		{
+			// Regression: host firmware artifact and upgrade script URLs can
+			// carry credentials, which must not reach the audit body.
+			name: "redacts credentials in firmware artifact and upgrade script URLs",
+			body: map[string]interface{}{
+				"components": []interface{}{
+					map[string]interface{}{
+						"type": "Drive",
+						"firmware": []interface{}{
+							map[string]interface{}{
+								"artifacts": []interface{}{
+									map[string]interface{}{
+										"url":    "https://user:synthetic-pass@fw.example.invalid/et07.lod?token=synthetic#frag",
+										"sha256": "abc",
+									},
+									map[string]interface{}{"url": "https://fw.example.invalid/plain.bin"},
+								},
+								"upgradeScript": map[string]interface{}{
+									"url":    "https://scripts.example.invalid/up.sh?X-Amz-Signature=synthetic",
+									"sha256": "def",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]interface{}{
+				"components": []interface{}{
+					map[string]interface{}{
+						"type": "Drive",
+						"firmware": []interface{}{
+							map[string]interface{}{
+								"artifacts": []interface{}{
+									map[string]interface{}{
+										"url":    "https://redacted@fw.example.invalid/et07.lod?" + auditObfuscatedValue,
+										"sha256": "abc",
+									},
+									map[string]interface{}{"url": "https://fw.example.invalid/plain.bin"},
+								},
+								"upgradeScript": map[string]interface{}{
+									"url":    "https://scripts.example.invalid/up.sh?" + auditObfuscatedValue,
+									"sha256": "def",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "hides a firmware URL that does not parse",
+			body: map[string]interface{}{
+				"upgradeScript": map[string]interface{}{"url": "https://fw.example.invalid/%zz?token=synthetic"},
+			},
+			want: map[string]interface{}{
+				"upgradeScript": map[string]interface{}{"url": auditObfuscatedValue},
 			},
 		},
 	}

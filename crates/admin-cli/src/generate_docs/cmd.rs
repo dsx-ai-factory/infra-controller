@@ -313,6 +313,10 @@ fn format_markdown_links(md: &str) -> String {
         "[Phone-home](../../../../configuration/tenant_management.md#phone-home)",
     )
     .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy",
+        "[UFM Ownership Policy](../../../../configuration/credential-sources.md#ufm-ownership-policy)",
+    )
+    .replace(
         "https://github.com/dsx-ai-factory/infra-controller/pull/3706",
         "[PR #3706](https://github.com/dsx-ai-factory/infra-controller/pull/3706)",
     )
@@ -421,6 +425,10 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
         (Some("machine-validation"), Some("logs"))
             | (Some("machine"), Some("states"))
             | (Some("network-segment"), Some("add-prefix"))
+            | (
+                Some("instance"),
+                Some("allocate" | "update-extension-services")
+            )
             | (Some("nvlink-domain"), Some("create" | "show"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
@@ -683,6 +691,11 @@ mod tests {
             "parenthesized issue URL" {
                 "(https://github.com/dsx-ai-factory/infra-controller/issues/6686)" =>
                     "([issue #6686](https://github.com/dsx-ai-factory/infra-controller/issues/6686))".to_string(),
+            }
+            // A repository docs URL becomes a relative link, so the page has no bare URL.
+            "UFM ownership policy" {
+                "https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy" =>
+                    "[UFM Ownership Policy](../../../../configuration/credential-sources.md#ufm-ownership-policy)".to_string(),
             }
         );
     }

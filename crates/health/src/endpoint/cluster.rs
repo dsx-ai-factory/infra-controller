@@ -697,10 +697,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
@@ -760,10 +757,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
 
         let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
@@ -818,10 +812,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
         let load = || async {
             let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
@@ -917,10 +908,7 @@ mod tests {
             &reqwest(),
             None,
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         );
         let password = || async {
             let endpoints: Vec<Arc<BmcEndpoint>> =

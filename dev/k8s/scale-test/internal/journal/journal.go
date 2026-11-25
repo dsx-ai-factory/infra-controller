@@ -225,12 +225,21 @@ func (j *Journal) Path() string { return j.path }
 func (j *Journal) Freeze() { j.frozen.Store(true) }
 
 // Unsettled is true when any op this run lacks a proven clean outcome (one
-// stays open) or a journal write has failed. A site released while Unsettled
-// must stay needsCleanup: a write it recorded may still land on the fleet.
+// stays open) or a journal write has failed. A persistent catalog target has
+// no restoration obligation, so its unclear receipt alone does not require
+// cleanup. Counts still reports it, and in-flight operations remain unsettled.
 func (j *Journal) Unsettled() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.broken != nil || j.pending || len(j.open) > 0
+	if j.broken != nil || j.pending {
+		return true
+	}
+	for _, t := range j.open {
+		if t.kind != "firmware-catalog-persistent" || t.status != unclear {
+			return true
+		}
+	}
+	return false
 }
 
 // Counts is a snapshot of the journal's records, from what is already tracked.
@@ -513,16 +522,30 @@ func (j *Journal) Pending(pending bool) error {
 // SettleLabel persists probe proof before closing an unclear label operation.
 // It never settles another write kind or clears the run-level pending marker.
 func (j *Journal) SettleLabel(op uint64, proof any) error {
+	return j.settleReadBack(op, proof, "labelSettled")
+}
+
+// SettleFirmwareCatalog records effective-target proof, without inventing a receipt.
+func (j *Journal) SettleFirmwareCatalog(op uint64, proof any) error {
+	return j.settleReadBack(op, proof, "firmwareCatalogSettled")
+}
+
+// SettleFirmwareWindow settles only an unclear firmware-window setter.
+func (j *Journal) SettleFirmwareWindow(op uint64, proof any) error {
+	return j.settleReadBack(op, proof, "firmwareWindowSettled")
+}
+
+func (j *Journal) settleReadBack(op uint64, proof any, entry string) error {
 	return j.locked(func() (any, error) {
 		key, t := j.openOp(op)
-		if t == nil || t.kind != "labels" || t.status != unclear || !t.lostReply {
-			return nil, errors.New("operation is not an unclear label write")
+		if t == nil || t.status != unclear || !t.lostReply || (entry == "labelSettled" && t.kind != "labels") || (entry == "firmwareWindowSettled" && t.kind != "firmware-window-open" && t.kind != "firmware-window-close") || (entry == "firmwareCatalogSettled" && t.kind != "firmware-catalog-persistent") {
+			return nil, errors.New("operation is not an unclear write of the requested kind")
 		}
 		e := struct {
 			Entry string `json:"entry"`
 			Op    uint64 `json:"op"`
 			Data  any    `json:"data"`
-		}{"labelSettled", op, proof}
+		}{entry, op, proof}
 		if err := j.write(e, j.reserved); err != nil {
 			return nil, err
 		}

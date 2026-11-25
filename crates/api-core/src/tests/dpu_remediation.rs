@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use db::TransactionVending as _;
 use model::dpu_remediation::{
     ApproveRemediation, EnableRemediation, NewRemediation, RemediationApplicationStatus, Reviewer,
     RevokeRemediation,
@@ -63,14 +64,13 @@ fn test_try_from_rpc() -> Result<(), Box<dyn std::error::Error>> {
 async fn test_dpu_remediations(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let test_managed_host = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.begin().await?;
-    let mut all_dpus = test_managed_host.dpu_db_machines(&mut txn).await;
+    let mut all_dpus = test_managed_host.dpu_db_machines(&env.pool).await;
     let test_dpu_1 = all_dpus.pop().expect("missing first dpu?");
     let test_dpu_2 = all_dpus.pop().expect("missing second dpu?");
 
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
 
@@ -327,7 +327,7 @@ async fn test_dpu_remediations(pool: sqlx::PgPool) -> Result<(), Box<dyn std::er
 async fn test_enable_rechecks_approval_after_concurrent_revoke(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut setup = pool.begin().await?;
+    let mut setup = pool.txn_begin().await?;
     let remediation = db::dpu_remediation::persist_remediation(
         NewRemediation {
             script: "echo remediation".to_string(),
@@ -353,7 +353,7 @@ async fn test_enable_rechecks_approval_after_concurrent_revoke(
     .await?;
     setup.commit().await?;
 
-    let mut revoke_txn = pool.begin().await?;
+    let mut revoke_txn = pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(revoke_txn.as_mut())
         .await?;
@@ -363,7 +363,7 @@ async fn test_enable_rechecks_approval_after_concurrent_revoke(
     )
     .await?;
 
-    let mut enable_txn = pool.begin().await?;
+    let mut enable_txn = pool.txn_begin().await?;
     let enable = db::dpu_remediation::persist_enable_remediation(
         EnableRemediation { id: remediation.id },
         &mut enable_txn,
@@ -382,8 +382,7 @@ async fn test_enable_rechecks_approval_after_concurrent_revoke(
         enable_txn.rollback().await?;
     }
 
-    let mut read = pool.begin().await?;
-    let persisted = db::dpu_remediation::find_remediations_by_ids(&mut read, &[remediation.id])
+    let persisted = db::dpu_remediation::find_remediations_by_ids(&pool, &[remediation.id])
         .await?
         .pop()
         .expect("revoked remediation should remain stored");
@@ -397,7 +396,6 @@ async fn test_enable_rechecks_approval_after_concurrent_revoke(
         ),
         "{result:?}"
     );
-    read.rollback().await?;
 
     Ok(())
 }
@@ -406,7 +404,7 @@ async fn test_enable_rechecks_approval_after_concurrent_revoke(
 async fn test_competing_approval_preserves_first_reviewer(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut setup = pool.begin().await?;
+    let mut setup = pool.txn_begin().await?;
     let remediation = db::dpu_remediation::persist_remediation(
         NewRemediation {
             script: "echo remediation".to_string(),
@@ -419,7 +417,7 @@ async fn test_competing_approval_preserves_first_reviewer(
     .await?;
     setup.commit().await?;
 
-    let mut first_approval_txn = pool.begin().await?;
+    let mut first_approval_txn = pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(first_approval_txn.as_mut())
         .await?;
@@ -432,7 +430,7 @@ async fn test_competing_approval_preserves_first_reviewer(
     )
     .await?;
 
-    let mut second_approval_txn = pool.begin().await?;
+    let mut second_approval_txn = pool.txn_begin().await?;
     let second_approval = db::dpu_remediation::persist_approve_remediation(
         ApproveRemediation {
             id: remediation.id,
@@ -454,8 +452,7 @@ async fn test_competing_approval_preserves_first_reviewer(
         second_approval_txn.rollback().await?;
     }
 
-    let mut read = pool.begin().await?;
-    let persisted = db::dpu_remediation::find_remediations_by_ids(&mut read, &[remediation.id])
+    let persisted = db::dpu_remediation::find_remediations_by_ids(&pool, &[remediation.id])
         .await?
         .pop()
         .expect("approved remediation should remain stored");
@@ -471,7 +468,6 @@ async fn test_competing_approval_preserves_first_reviewer(
         ),
         "{result:?}"
     );
-    read.rollback().await?;
 
     Ok(())
 }

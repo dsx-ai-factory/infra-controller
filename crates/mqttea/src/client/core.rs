@@ -736,16 +736,16 @@ impl SuperBasicBackoff {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
 
     use super::{HandlerDispatchDropped, MqttReconnected, should_replay_subscriptions};
 
     #[test]
     fn dispatch_dropped_event_logs_error_and_ticks_counter() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(HandlerDispatchDropped {
+            metrics.instrumentation().emit(HandlerDispatchDropped {
                 message_type: "mqttea::tests::Demo",
                 error: "semaphore closed".to_string(),
             });
@@ -774,8 +774,8 @@ mod tests {
 
     #[test]
     fn reconnect_event_is_metric_only() {
-        let metrics = MetricsCapture::start();
-        let logs = capture_logs(|| emit(MqttReconnected {}));
+        let metrics = MetricsCapture::owned();
+        let logs = capture_logs(|| metrics.instrumentation().emit(MqttReconnected {}));
 
         assert!(logs.is_empty());
         assert_eq!(

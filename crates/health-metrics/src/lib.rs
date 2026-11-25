@@ -163,7 +163,7 @@ pub fn register_health_gauges<T, D, F>(
                                 .get(&(healthy, dimension.clone()))
                                 .copied()
                                 .unwrap_or_default();
-                            let mut labels = vec![KeyValue::new("healthy", healthy.to_string())];
+                            let mut labels = vec![KeyValue::new("healthy", if healthy { "true" } else { "false" })];
                             labels.extend(dimension.key_values());
                             observer.observe(count as u64, &[attrs, &labels].concat());
                         }
@@ -190,8 +190,7 @@ pub fn register_health_gauges<T, D, F>(
                                 .get(&(override_type, dimension.clone()))
                                 .copied()
                                 .unwrap_or_default();
-                            let mut labels =
-                                vec![KeyValue::new("override_type", override_type.to_string())];
+                            let mut labels = vec![KeyValue::new("override_type", override_type)];
                             labels.extend(dimension.key_values());
                             observer.observe(count as u64, &[attrs, &labels].concat());
                         }

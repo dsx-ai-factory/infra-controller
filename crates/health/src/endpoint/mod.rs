@@ -63,7 +63,7 @@ pub(crate) mod test_support {
                 10,
                 std::num::NonZeroUsize::MIN,
                 crate::bmc::BmcInstrumentation::new(
-                    carbide_instrument::Instrumentation::global(),
+                    carbide_instrument::Instrumentation::noop(),
                     None,
                 ),
             )

@@ -123,6 +123,7 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
             api_config.client_cert,
             api_config.client_key,
             &api_config.api_url,
+            instrumentation.clone(),
         ));
         let health_updater = HealthUpdater::new(
             config.mqtt.topic_prefix,

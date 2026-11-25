@@ -21,6 +21,8 @@ default = []
 driver = ["dep:clap", "dep:tracing-subscriber", "dep:libredfish"]
 
 [dependencies]
+chrono = { workspace = true }
+config-version = { path = "../config-version", default-features = false }
 hex = { workspace = true }
 indoc = { workspace = true }
 kube = { default-features = false, features = [
@@ -51,6 +53,7 @@ tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+url = { workspace = true }
 
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-libmlx-model = { path = "../libmlx-model" }

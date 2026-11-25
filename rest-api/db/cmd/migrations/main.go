@@ -16,6 +16,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/migrations"
 )
@@ -74,7 +75,25 @@ func main() {
 		log.Print("Using PGSSLROOTCERT from environment variable")
 	}
 
-	dbSession, err := db.NewSession(context.Background(), dbHost, dbPort, dbName, dbUser, dbPassword, dbCACertPath)
+	dbSSLMode := os.Getenv("PGSSLMODE")
+	if dbSSLMode == "" {
+		log.Print("PGSSLMODE is not set, using `prefer` as default")
+		dbSSLMode = "prefer"
+	}
+
+	err = db.ValidateSSLMode(dbSSLMode)
+	if err != nil {
+		log.Fatal(fmt.Errorf("failed to validate PGSSLMODE value: %w", err))
+	}
+
+	dbSession, err := db.NewSessionFromConfig(context.Background(), db.Config{
+		Host:              dbHost,
+		Port:              dbPort,
+		DBName:            dbName,
+		Credential:        credential.New(dbUser, dbPassword),
+		CACertificatePath: dbCACertPath,
+		SSLMode:           dbSSLMode,
+	})
 	if err != nil {
 		panic(err)
 	}

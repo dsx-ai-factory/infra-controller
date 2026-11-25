@@ -24,6 +24,7 @@ type ExpectedMachine struct {
 	MachineID                *string                    `json:"machineId"`
 	Machine                  *standard.MachineSummary   `json:"machine,omitempty"`
 	Labels                   map[string]string          `json:"labels"`
+	RetainBmcCredentials     bool                       `json:"retainBmcCredentials"`
 	Created                  time.Time                  `json:"created"`
 	Updated                  time.Time                  `json:"updated"`
 }
@@ -67,6 +68,7 @@ type ExpectedMachineCreateRequest struct {
 	FallbackDPUSerialNumbers []string                   `json:"fallbackDPUSerialNumbers"`
 	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
 	Labels                   map[string]string          `json:"labels"`
+	RetainBmcCredentials     *bool                      `json:"retainBmcCredentials"`
 }
 
 // ExpectedMachineUpdateRequest represents a request to update an Expected Machine
@@ -82,6 +84,7 @@ type ExpectedMachineUpdateRequest struct {
 	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
 	SkuID                    *string                    `json:"skuId"`
 	Labels                   map[string]string          `json:"labels"`
+	RetainBmcCredentials     *bool                      `json:"retainBmcCredentials"`
 }
 
 func expectedMachineInterfacesFromStandard(interfaces []standard.ExpectedMachineInterface) []ExpectedMachineInterface {
@@ -184,6 +187,7 @@ func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 		Labels:                   api.Labels,
 		Sku:                      api.Sku,
 		Machine:                  api.Machine,
+		RetainBmcCredentials:     api.GetRetainBmcCredentials(),
 	}
 	if api.Id != nil {
 		em.ID = *api.Id
@@ -224,6 +228,9 @@ func toStandardExpectedMachineCreateRequest(request ExpectedMachineCreateRequest
 	if request.BmcPassword != nil {
 		apiReq.DefaultBmcPassword.Set(request.BmcPassword)
 	}
+	if request.RetainBmcCredentials != nil {
+		apiReq.RetainBmcCredentials.Set(request.RetainBmcCredentials)
+	}
 	return apiReq
 }
 
@@ -251,6 +258,9 @@ func toStandardExpectedMachineUpdateRequest(request ExpectedMachineUpdateRequest
 	if request.SkuID != nil {
 		apiReq.SkuId.Set(request.SkuID)
 	}
+	if request.RetainBmcCredentials != nil {
+		apiReq.RetainBmcCredentials.Set(request.RetainBmcCredentials)
+	}
 	return apiReq
 }
 
@@ -276,7 +286,7 @@ func (emm ExpectedMachineManager) Get(ctx context.Context, id string) (*Expected
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, emm.client.Config.Token)
 
 	apiEM, resp, err := emm.client.apiClient.ExpectedMachineAPI.GetExpectedMachine(ctx, emm.client.apiMetadata.Organization, id).
-		IncludeRelation("Sku").IncludeRelation("Machine").Execute()
+		IncludeRelation([]string{"Sku", "Machine"}).Execute()
 	apiErr := HandleResponseError(resp, err)
 	if apiErr != nil {
 		return nil, apiErr
@@ -291,7 +301,7 @@ func (emm ExpectedMachineManager) GetExpectedMachines(ctx context.Context, pagin
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, emm.client.Config.Token)
 
 	gmr := emm.client.apiClient.ExpectedMachineAPI.GetAllExpectedMachine(ctx, emm.client.apiMetadata.Organization).
-		SiteId(emm.client.apiMetadata.SiteID).IncludeRelation("Sku").IncludeRelation("Machine")
+		SiteId(emm.client.apiMetadata.SiteID).IncludeRelation([]string{"Sku", "Machine"})
 	if paginationFilter != nil {
 		if paginationFilter.PageNumber != nil {
 			gmr = gmr.PageNumber(int32(*paginationFilter.PageNumber))

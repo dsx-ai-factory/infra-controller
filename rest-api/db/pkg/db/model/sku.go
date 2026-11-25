@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -238,15 +239,19 @@ type SkuDAO interface {
 	Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (*SKU, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, skuID string) error
-	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
-	// It returns false if the row changed or no longer exists.
-	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, updated time.Time) (bool, error)
+	// DeleteIfUnchanged deletes only the observed Site and version. False combines
+	// missing rows, rows on another Site, and changed rows without distinguishing them.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, siteID uuid.UUID, updated time.Time) (bool, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) ([]SKU, int, error)
 	// GetForAttachment locks requested SKUs on a Site until tx completes.
 	GetForAttachment(ctx context.Context, tx *db.Tx, siteID uuid.UUID, skuIDs []string) ([]SKU, error)
-	// Get returns row for specified ID
-	Get(ctx context.Context, tx *db.Tx, skuID string) (*SKU, error)
+	// HasExpectedMachineReferences checks public and pending references globally.
+	// TODO: Replace this with ExpectedMachineDAO.GetAll in DeleteSkuHandler
+	// after pending_expected_machine is retired.
+	HasExpectedMachineReferences(ctx context.Context, tx *db.Tx, skuID string) (bool, error)
+	// Get returns the SKU by ID. forUpdate requires a transaction and locks the row.
+	Get(ctx context.Context, tx *db.Tx, skuID string, forUpdate bool) (*SKU, error)
 }
 
 // SkuSQLDAO is an implementation of the SkuDAO interface
@@ -280,12 +285,17 @@ func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput
 		return nil, err
 	}
 
-	return ssd.Get(ctx, tx, sk.ID)
+	return ssd.Get(ctx, tx, sk.ID, false)
 }
 
-// Get returns a SKU by ID
-// returns db.ErrDoesNotExist error if the record is not found
-func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (_ *SKU, retErr error) {
+// Get returns a SKU by ID, or db.ErrDoesNotExist if it is missing.
+// With forUpdate, it holds an UPDATE lock until tx completes, excluding
+// attachments that acquire KEY SHARE before writing their SKU reference.
+// Locking without a transaction returns db.ErrInvalidValue.
+func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string, forUpdate bool) (_ *SKU, retErr error) {
+	if forUpdate && tx == nil {
+		return nil, fmt.Errorf("%w: locking a SKU requires a transaction", db.ErrInvalidValue)
+	}
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Get")
 	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
@@ -294,6 +304,9 @@ func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (_ *SKU, ret
 	sk := &SKU{}
 
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(sk).Where("sk.id = ?", id)
+	if forUpdate {
+		query = query.For("UPDATE")
+	}
 
 	err := query.Scan(ctx)
 	if err != nil {
@@ -449,7 +462,7 @@ func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput
 		}
 	}
 
-	return ssd.Get(ctx, tx, sk.ID)
+	return ssd.Get(ctx, tx, sk.ID, false)
 }
 
 // Delete deletes a SKU by ID
@@ -469,20 +482,32 @@ func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) (retErr e
 	return nil
 }
 
-// DeleteIfUnchanged deletes a row only if its `Updated` timestamp matches `updated`.
-// It returns false if the row changed or no longer exists.
-func (ssd SkuSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, updated time.Time) (_ bool, retErr error) {
+// DeleteIfUnchanged deletes only the observed Site and Updated timestamp.
+// False combines missing rows, rows on another Site, and changed rows.
+func (ssd SkuSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, siteID uuid.UUID, updated time.Time) (_ bool, retErr error) {
 	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.DeleteIfUnchanged")
 	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
 	cotel.SetAttribute(skuDAOSpan, attribute.String("id", skuID))
 
 	result, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*SKU)(nil)).
-		Where("id = ?", skuID).Where("updated = ?", updated).Exec(ctx)
+		Where("id = ?", skuID).Where("site_id = ?", siteID).Where("updated = ?", updated).Exec(ctx)
 	if err != nil {
 		return false, err
 	}
 	count, err := result.RowsAffected()
 	return count > 0, err
+}
+
+// HasExpectedMachineReferences checks public and pending Expected Machines for
+// the SKU ID, regardless of their Site. Their foreign keys protect the local row.
+func (ssd SkuSQLDAO) HasExpectedMachineReferences(ctx context.Context, tx *db.Tx, skuID string) (_ bool, retErr error) {
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.HasExpectedMachineReferences")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", skuID))
+
+	var referenced bool
+	err := db.GetIDB(tx, ssd.dbSession).NewRaw(`SELECT EXISTS (SELECT 1 FROM expected_machine WHERE sku_id = ?) OR EXISTS (SELECT 1 FROM pending_expected_machine WHERE sku_id = ?)`, skuID, skuID).Scan(ctx, &referenced)
+	return referenced, err
 }
 
 // NewSkuDAO returns a new SkuDAO

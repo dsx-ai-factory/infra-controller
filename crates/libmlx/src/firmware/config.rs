@@ -366,7 +366,7 @@ fn normalize_submission_source(
         };
         *source = format!("ssh://{}@{host}:{}", ssh.username, ssh.remote_path);
         if credentials.is_none() {
-            // Match forge_ssh's default authentication, not an agent fallback.
+            // Match carbide_ssh's default authentication, not an agent fallback.
             let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
             let key = Path::new(&home).join(".ssh/id_rsa");
             *credentials = Some(Credentials::ssh_key(key.to_string_lossy()));

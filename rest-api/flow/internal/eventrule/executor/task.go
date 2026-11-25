@@ -11,7 +11,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 )
 
@@ -20,9 +22,15 @@ type TaskManager interface {
 	SubmitTask(context.Context, *operation.Request) ([]uuid.UUID, error)
 }
 
+// EventTypeReader supplies immutable event provenance for an accepted execution.
+type EventTypeReader interface {
+	GetEventTypeForExecution(context.Context, uuid.UUID) (eventrule.Type, error)
+}
+
 // TaskExecutor submits one idempotent task per persisted rack target.
 type TaskExecutor struct {
 	manager TaskManager
+	events  EventTypeReader
 }
 
 // Execute submits every rack target from the immutable plan. The task manager
@@ -40,8 +48,33 @@ func (e *TaskExecutor) Execute(ctx context.Context, request ExecutionRequest) er
 		))
 	}
 
+	err := request.Validate()
+	if err != nil {
+		return terminalError(err)
+	}
+
+	strategy := plan.ConflictStrategy
+	if plan.Operation.Type == taskcommon.TaskTypePowerControl {
+		var info operations.PowerControlTaskInfo
+		err := info.Unmarshal(plan.Operation.Info)
+		if err != nil {
+			return terminalError(err)
+		}
+		if info.Operation == operations.PowerOperationForcePowerOff && info.OverrideReadinessCheck {
+			if e.events == nil {
+				return terminalError(fmt.Errorf("event type reader is required"))
+			}
+			kind, err := e.events.GetEventTypeForExecution(ctx, request.ExecutionID)
+			if err != nil {
+				return retryableError("read parent event type", err)
+			}
+			if kind == leakage.TypeHardwareLeakDetected {
+				strategy = operation.ConflictStrategyPreempt
+			}
+		}
+	}
 	for _, target := range plan.Targets {
-		if err := e.submitTarget(ctx, request.ExecutionID, plan, target); err != nil {
+		if err := e.submitTarget(ctx, request.ExecutionID, plan, target, strategy); err != nil {
 			return err
 		}
 	}
@@ -54,12 +87,17 @@ func (e *TaskExecutor) submitTarget(
 	executionID uuid.UUID,
 	plan *eventrule.SubmitTaskPlan,
 	target operation.RackExecutionTarget,
+	strategy operation.ConflictStrategy,
 ) error {
 	request, err := operationRequest(executionID, plan, target)
 	if err != nil {
 		return terminalError(err)
 	}
 
+	request.ConflictStrategy = strategy
+	if strategy == operation.ConflictStrategyPreempt {
+		request.SubmitOptions.PreserveConflictingTask = leakage.PreserveShutdownTask
+	}
 	taskIDs, err := e.manager.SubmitTask(ctx, request)
 	if err != nil {
 		return retryableError("submit task", err)

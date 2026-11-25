@@ -126,7 +126,7 @@ async fn validate_zero_dpu_auto_vpc(
     .next()
     .ok_or_else(|| CarbideError::FailedPrecondition(format!("VPC `{vpc_id}` does not exist")))?;
 
-    if vpc.config.tenant_organization_id != tenant_organization_id.to_string() {
+    if vpc.config.tenant_organization_id != tenant_organization_id.as_str() {
         return Err(CarbideError::FailedPrecondition(format!(
             "VPC `{}` is not owned by tenant `{}`",
             vpc.id, tenant_organization_id
@@ -444,7 +444,7 @@ fn dpf_topology_vf_ids(config: &CarbideConfig) -> Option<BTreeSet<u8>> {
 /// and has status READY.  Returns `Ok(())` when the OS variant is not
 /// `OperatingSystemId` (inline iPXE / OS image variants need no lookup).
 pub(crate) async fn validate_os_definition_usable(
-    txn: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    txn: impl db::db_read::DbReader<'_>,
     os: &model::os::OperatingSystem,
 ) -> Result<(), CarbideError> {
     let os_id = match os.variant {
@@ -1058,7 +1058,7 @@ async fn load_prefix_allocation_context(
     let explicit_prefixes = if explicit_prefix_ids.is_empty() {
         Vec::new()
     } else {
-        db::vpc_prefix::get_for_allocation_by_ids(txn, &explicit_prefix_ids).await?
+        db::vpc_prefix::get_for_allocation_by_ids(&mut *txn, &explicit_prefix_ids).await?
     };
     let explicit_prefixes: HashMap<VpcPrefixId, VpcPrefix> = explicit_prefixes
         .into_iter()
@@ -1084,7 +1084,7 @@ async fn load_prefix_allocation_context(
     let automatic_prefixes = if automatic_candidate_vpc_ids.is_empty() {
         Vec::new()
     } else {
-        db::vpc_prefix::find_allocation_candidates(txn, &automatic_candidate_vpc_ids).await?
+        db::vpc_prefix::find_allocation_candidates(&mut *txn, &automatic_candidate_vpc_ids).await?
     };
 
     // Load every referenced VPC once for capability validation.
@@ -1697,6 +1697,7 @@ pub(crate) fn allocate_ib_port_guid(
 pub(crate) async fn load_ib_partition_pkeys(
     txn: &mut PgConnection,
     configs: &[&InstanceInfinibandConfig],
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<HashMap<IBPartitionId, PartitionKey>> {
     let partition_ids = configs
         .iter()
@@ -1717,6 +1718,7 @@ pub(crate) async fn load_ib_partition_pkeys(
     Ok(db::ib_partition::find_by(
         &mut *txn,
         ObjectColumnFilter::List(ib_partition::IdColumn, &partition_ids),
+        instrumentation,
     )
     .await?
     .into_iter()
@@ -1825,7 +1827,7 @@ pub(crate) async fn load_extension_services(
     ),
     CarbideError,
 > {
-    let services = extension_service::find_by_ids(txn, service_ids, true, true)
+    let services = extension_service::find_by_ids_for_update(txn, service_ids, true)
         .await?
         .into_iter()
         .map(|service| (service.id, service))
@@ -2061,7 +2063,7 @@ pub(crate) async fn batch_allocate_instances(
     {
         // Take the overlap lock before Machine, NSG, or prefix locks so a
         // waiting allocation reads the policy committed by the prior writer.
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     }
 
     // Preserve unsupported-preparation error precedence before allocation work.
@@ -2231,12 +2233,13 @@ pub(crate) async fn batch_allocate_instances(
     // Verify all snapshots were loaded and validate usability
     for request in &requests {
         let machine_id = request.machine_id;
-        let mh_snapshot = snapshot_map
-            .get(&machine_id)
-            .ok_or(CarbideError::NotFoundError {
-                kind: "machine",
-                id: machine_id.to_string(),
-            })?;
+        let mh_snapshot =
+            snapshot_map
+                .get(&machine_id)
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                })?;
 
         if let Err(e) = mh_snapshot.is_usable_as_instance(request.allow_unhealthy_machine) {
             if matches!(
@@ -2289,6 +2292,37 @@ pub(crate) async fn batch_allocate_instances(
             return Err(CarbideError::FailedPrecondition(format!(
                 "NetworkSecurityGroup `{}` does not exist or is not owned by tenant `{}`",
                 nsg_id, tenant_org_id
+            )));
+        }
+    }
+
+    let mut dhcp_option_set_validations: Vec<_> = requests
+        .iter()
+        .filter_map(|r| {
+            r.config
+                .dhcp_option_set_id
+                .as_ref()
+                .map(|id| (id, &r.config.tenant.tenant_organization_id))
+        })
+        .collect();
+    // Lock the sets in ID order so concurrent batches cannot deadlock.
+    dhcp_option_set_validations.sort_by_key(|(id, _)| **id);
+    dhcp_option_set_validations.dedup();
+
+    for (id, tenant_org_id) in &dhcp_option_set_validations {
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(tenant_org_id),
+            true,
+        )
+        .await?
+        .pop()
+        .is_none()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org_id}`"
             )));
         }
     }
@@ -2385,7 +2419,12 @@ pub(crate) async fn batch_allocate_instances(
         })
         .collect();
 
-    batch_validate_ib_partition_ownership(&mut txn, &ib_partition_validations).await?;
+    batch_validate_ib_partition_ownership(
+        &mut txn,
+        &ib_partition_validations,
+        &api.instrumentation,
+    )
+    .await?;
 
     let spx_partition_validations: Vec<_> = requests
         .iter()
@@ -2427,12 +2466,13 @@ pub(crate) async fn batch_allocate_instances(
 
     for mut request in requests {
         let machine_id = request.machine_id;
-        let mh_snapshot = snapshot_map
-            .remove(&machine_id)
-            .ok_or(CarbideError::NotFoundError {
-                kind: "machine",
-                id: machine_id.to_string(),
-            })?;
+        let mh_snapshot =
+            snapshot_map
+                .remove(&machine_id)
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                })?;
         let expected_machine = mh_snapshot
             .host_snapshot
             .status
@@ -2771,7 +2811,8 @@ pub(crate) async fn batch_allocate_instances(
         .iter()
         .map(|(_, _, config)| config)
         .collect::<Vec<_>>();
-    let ib_partition_pkeys = load_ib_partition_pkeys(txn.as_mut(), &ib_configs).await?;
+    let ib_partition_pkeys =
+        load_ib_partition_pkeys(txn.as_mut(), &ib_configs, &api.instrumentation).await?;
     let assigned_ib_memberships = ib_configs
         .into_iter()
         .flat_map(|config| ib_memberships_from_config(config, &ib_partition_pkeys))
@@ -2910,6 +2951,7 @@ pub(crate) async fn batch_validate_spx_partition_ownership(
 pub(crate) async fn batch_validate_ib_partition_ownership(
     txn: &mut PgConnection,
     validations: &[(IBPartitionId, &TenantOrganizationId)],
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<()> {
     if validations.is_empty() {
         return Ok(());
@@ -2917,7 +2959,8 @@ pub(crate) async fn batch_validate_ib_partition_ownership(
 
     let partition_ids: Vec<_> = validations.iter().map(|(id, _)| *id).collect();
 
-    let partitions = db::ib_partition::find_active_for_share(txn, &partition_ids).await?;
+    let partitions =
+        db::ib_partition::find_active_for_share(txn, &partition_ids, instrumentation).await?;
 
     let partition_map: HashMap<_, _> = partitions.into_iter().map(|p| (p.id, p)).collect();
 
@@ -2947,20 +2990,21 @@ pub(crate) async fn validate_ib_partition_ownership(
     txn: &mut PgConnection,
     instance_tenant: &TenantOrganizationId,
     ib_config: &InstanceInfinibandConfig,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<()> {
     let validations: Vec<_> = ib_config
         .ib_interfaces
         .iter()
         .map(|iface| (iface.ib_partition_id, instance_tenant))
         .collect();
-    batch_validate_ib_partition_ownership(txn, &validations).await
+    batch_validate_ib_partition_ownership(txn, &validations, instrumentation).await
 }
 
 /// Validates SPX ownership while holding admission locks through this transaction.
 /// The caller must persist the instance configuration before committing it.
 /// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {

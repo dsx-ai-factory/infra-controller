@@ -132,6 +132,28 @@ impl DataSink for TracingSink {
             }
             CollectorEvent::ResourceStatusObservation(_) => {}
             CollectorEvent::ResourceStatus(info) => {
+                const MAX_TRACED_RESOURCE_SUMMARIES: usize = 16;
+                let resource_summaries = info
+                    .resources
+                    .iter()
+                    .take(MAX_TRACED_RESOURCE_SUMMARIES)
+                    .map(|resource| {
+                        let health = resource
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.health.as_deref())
+                            .unwrap_or("unavailable");
+                        let health_rollup = resource
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.health_rollup.as_deref())
+                            .unwrap_or("unavailable");
+                        format!(
+                            "{} health={health} health_rollup={health_rollup}",
+                            resource.id
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
@@ -139,10 +161,11 @@ impl DataSink for TracingSink {
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     resource_type = info.resource_type.as_str(),
-                    resource_id = %info.id,
-                    resource_name = %info.name,
-                    status = ?info.status,
-                    "Redfish resource status event"
+                    resource_count = info.resources.len(),
+                    aggregate_health = info.aggregate_health().as_str(),
+                    resource_summaries = ?resource_summaries,
+                    resource_summaries_dropped = info.resources.len().saturating_sub(resource_summaries.len()),
+                    "Redfish resource status report"
                 );
             }
             CollectorEvent::HealthReport(report) => {
@@ -176,7 +199,10 @@ mod tests {
 
     use super::*;
     use crate::endpoint::test_support::{mac, test_endpoint};
-    use crate::sink::{LogRecord, LogSeverity};
+    use crate::sink::{
+        LogRecord, LogSeverity, RedfishCondition, RedfishResourceType, RedfishStatus,
+        ResourceStatusInfo, ResourceStatusReport,
+    };
 
     #[test]
     fn decoded_protobuf_payload_is_not_emitted_by_tracing_sink() {
@@ -269,5 +295,51 @@ mod tests {
         }));
 
         assert_eq!(capture_logs(|| sink.handle_event(&context, &log)).len(), 1);
+    }
+
+    #[test]
+    fn resource_status_trace_includes_aggregate_from_beyond_bounded_summaries() {
+        let sink = TracingSink::new(&TracingSinkConfig {
+            include_diagnostics: false,
+        });
+        let endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+        let context = EventContext::from_endpoint(&endpoint, "firmware_collector");
+        let mut resources = (0..16)
+            .map(|index| ResourceStatusInfo {
+                id: format!("resource-{index}"),
+                name: format!("Resource {index}"),
+                status: Some(RedfishStatus {
+                    state: None,
+                    health: Some("OK".to_string()),
+                    health_rollup: None,
+                    conditions: None,
+                }),
+            })
+            .collect::<Vec<_>>();
+        resources.push(ResourceStatusInfo {
+            id: "critical-resource".to_string(),
+            name: "Critical Resource".to_string(),
+            status: Some(RedfishStatus {
+                state: None,
+                health: Some("OK".to_string()),
+                health_rollup: None,
+                conditions: Some(vec![RedfishCondition {
+                    timestamp: None,
+                    message_id: "ResourceEvent.1.0.Critical".to_string(),
+                    severity: Some("Critical".to_string()),
+                    condition_type: None,
+                }]),
+            }),
+        });
+        let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
+            resource_type: RedfishResourceType::Firmware,
+            resources,
+        }));
+
+        let logs = capture_logs(|| sink.handle_event(&context, &event));
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].field("aggregate_health"), Some("Critical"));
+        assert_eq!(logs[0].field("resource_summaries_dropped"), Some("1"));
     }
 }

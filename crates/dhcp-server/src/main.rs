@@ -2798,7 +2798,6 @@ mod test {
         use tracing_subscriber::layer::SubscriberExt;
 
         // Serialize the live OFFER producer and observe both real IPv4 listener binds on this runtime thread.
-        let _metrics_guard = MetricsCapture::start();
         let listener_ready = Arc::new(Notify::new());
         let subscriber = tracing_subscriber::registry().with(Ipv4ListenerReady {
             ready: Arc::clone(&listener_ready),
@@ -3027,9 +3026,6 @@ mod test {
     /// the survivor, preventing the removed identity from responding after replacement.
     #[tokio::test]
     async fn service_replacement_retires_removed_client_and_keeps_survivor() {
-        // Serialize this live OFFER producer with process-global metric-delta assertions in the binary.
-        let _metrics_guard = MetricsCapture::start();
-
         // Reserve loopback transport while keeping files and interfaces unchanged so only service replacement triggers restart.
         let directory = TempDir::new().unwrap();
         let listener_reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -4088,8 +4084,6 @@ mod test {
     #[tokio::test]
     async fn host_activity_survives_generation_initialization() {
         let _timestamp_file_guard = TEST_TIMESTAMP_FILE_LOCK.lock().await;
-        // Serialize this host OFFER with zero-delta assertions over the process-global reply metric.
-        let _metrics_guard = MetricsCapture::start();
         let byte_stream =
             get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Discover, None);
         let handler: Box<dyn DhcpMode> = Box::new(Test {});

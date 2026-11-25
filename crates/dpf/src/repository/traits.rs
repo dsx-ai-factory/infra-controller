@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::ServiceVpcClusterReader;
 use crate::crds::bfbs_generated::BFB;
 use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
 use crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig;
@@ -42,7 +43,7 @@ use crate::crds::dpuservices_generated::DPUService;
 use crate::crds::dpuservicetemplates_generated::DPUServiceTemplate;
 use crate::crds::dpusets_generated::DPUSet;
 use crate::error::DpfError;
-use crate::types::DpfDeletePreconditions;
+use crate::types::{DpfDeletePreconditions, DpuClusterIdentity};
 
 /// Repository for BFB (BlueField Bundle) resources.
 #[async_trait]
@@ -71,6 +72,7 @@ pub trait BlueFieldSoftwareRepository: Send + Sync {
 #[async_trait]
 pub trait DpuRepository: Send + Sync {
     async fn get(&self, name: &str, namespace: &str) -> Result<Option<DPU>, DpfError>;
+    /// Returns every matching DPU, rejecting an incomplete namespace read.
     async fn list(
         &self,
         namespace: &str,
@@ -182,6 +184,19 @@ pub trait DpuSetRepository: Send + Sync {
 pub trait DpuClusterRepository: Send + Sync {
     async fn get(&self, name: &str, namespace: &str) -> Result<Option<DPUCluster>, DpfError>;
     async fn list(&self, namespace: &str) -> Result<Vec<DPUCluster>, DpfError>;
+}
+
+/// Opens read-only service-chain access with credentials issued for the current DPUCluster.
+#[async_trait]
+pub trait ServiceVpcClusterRepository: Send + Sync {
+    /// Reads the named observer credential request and Secret, rejecting stale cluster identity.
+    ///
+    /// Each call reloads credentials so token rotation is observed. Management lookup and client
+    /// construction share a ten-second deadline. No administrator credential fallback is allowed.
+    async fn service_vpc_cluster_reader(
+        &self,
+        cluster: &DpuClusterIdentity,
+    ) -> Result<ServiceVpcClusterReader, DpfError>;
 }
 
 /// Repository for DPUDeployment resources.
@@ -373,11 +388,8 @@ pub trait K8sConfigRepository: Send + Sync {
         name: &str,
         namespace: &str,
     ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError>;
-    /// Create the Secret, or overwrite the data of an existing one. Callers
-    /// rewrite this Secret when the underlying credential rotates, so an
-    /// implementation that skips existing objects would silently pin the
-    /// cluster to the first value ever written.
-    async fn apply_secret(
+    /// Create a Secret once, retaining the existing value when it already exists.
+    async fn create_secret_if_absent(
         &self,
         name: &str,
         namespace: &str,
@@ -388,6 +400,13 @@ pub trait K8sConfigRepository: Send + Sync {
 /// Immutable per-device BMC credential Secrets.
 #[async_trait]
 pub trait BmcCredentialRepository: Send + Sync {
+    /// List credential Secrets matching a label selector in the namespace.
+    async fn list_bmc_credential_secrets(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> Result<Vec<k8s_openapi::api::core::v1::Secret>, DpfError>;
+
     /// Fetch the named Secret, returning `None` when it is absent from the namespace.
     async fn get_bmc_credential_secret(
         &self,

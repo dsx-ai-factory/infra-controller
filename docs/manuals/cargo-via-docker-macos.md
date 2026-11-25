@@ -248,7 +248,7 @@ Output binaries appear under `target/` in your repo as usual.
 
 **When to use:** Day-to-day builds and checks on macOS when you don’t need the full API test stack (PostgreSQL, TSS, etc.).
 
-**What it uses:** The image `nico-build-minimal` (Rust 1.97 + `protoc`). You must build it once with `build-cargo-docker-image-minimal` (~2–5 min). The `nico-rpc` crate needs `protoc` and the Google well-known proto files (`libprotobuf-dev`), so the bare `rust:1.97.1-slim-bookworm` image is not enough for workspace builds.
+**What it uses:** The image `nico-build-minimal` (Rust 1.97 + `protoc`). You must build it once with `build-cargo-docker-image-minimal` (~2–5 min). The `nico-rpc` crate needs `protoc` and the Google well-known proto files (`libprotobuf-dev`), so the bare `rust:1.100.0-slim-bookworm` image is not enough for workspace builds.
 
 ### Usage
 

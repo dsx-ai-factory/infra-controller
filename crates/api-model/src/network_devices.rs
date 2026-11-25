@@ -88,17 +88,19 @@ impl Display for NetworkDeviceType {
     }
 }
 
+impl AsRef<str> for DpuLocalPorts {
+    fn as_ref(&self) -> &str {
+        match self {
+            DpuLocalPorts::OobNet0 => "oob_net0",
+            DpuLocalPorts::P0 => "p0",
+            DpuLocalPorts::P1 => "p1",
+        }
+    }
+}
+
 impl Display for DpuLocalPorts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                DpuLocalPorts::OobNet0 => "oob_net0",
-                DpuLocalPorts::P0 => "p0",
-                DpuLocalPorts::P1 => "p1",
-            }
-        )
+        f.write_str(self.as_ref())
     }
 }
 

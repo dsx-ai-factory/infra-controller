@@ -203,9 +203,8 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             .exhausted_reprovision_retries
             .store(exhausted_retries as u64, Ordering::Relaxed);
 
-        let mut txn = db::Transaction::begin(pool).await?;
         match db::host_machine_update::find_upgrade_needed(
-            &mut txn,
+            pool,
             self.config.firmware_global.autoupdate,
             self.config.firmware_global.instance_updates_manual_tagging,
         )
@@ -218,7 +217,7 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             }
             Err(e) => tracing::warn!(error=%e, "Error geting host upgrade needed for metrics"),
         };
-        match db::host_machine_update::find_upgrade_in_progress(&mut txn).await {
+        match db::host_machine_update::find_upgrade_in_progress(pool).await {
             Ok(upgrade_in_progress) => {
                 self.metrics
                     .active_firmware_updates
@@ -226,7 +225,6 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             }
             Err(e) => tracing::warn!(error=%e, "Error geting host upgrade in progress for metrics"),
         };
-        txn.commit().await?;
         Ok(())
     }
 }

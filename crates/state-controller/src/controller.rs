@@ -36,6 +36,19 @@ pub use enqueuer::Enqueuer;
 pub mod periodic_enqueuer;
 pub mod processor;
 
+#[derive(Clone)]
+struct ControllerDatabase {
+    pool: sqlx::PgPool,
+    instrumentation: carbide_instrument::Instrumentation,
+}
+
+impl ::db::TransactionVending for ControllerDatabase {
+    #[track_caller]
+    fn txn_begin(&self) -> impl Future<Output = Result<::db::Transaction<'static>, DatabaseError>> {
+        ::db::Transaction::begin_instrumented(&self.pool, &self.instrumentation)
+    }
+}
+
 /// The latest complete set of object IDs read from the database by this controller replica.
 pub(super) type ObjectIdsFromDatabase<Id> = Arc<HashSet<Id>>;
 
@@ -196,4 +209,13 @@ enum IterationError {
     Panic(#[from] tokio::task::JoinError),
     #[error("state handler error: {0}")]
     StateHandlerError(#[from] StateHandlerError),
+}
+
+impl IterationError {
+    fn from_transaction(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::Sqlx(error) => Self::TransactionError(error.source),
+            error => Self::from(error),
+        }
+    }
 }

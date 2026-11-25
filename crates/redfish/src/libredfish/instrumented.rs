@@ -77,6 +77,7 @@ pub(super) const REDFISH_BACKEND: &str = "redfish";
 
 /// A [`Redfish`] client whose every call records the RED triad.
 pub(super) struct InstrumentedRedfish {
+    instrumentation: carbide_instrument::Instrumentation,
     inner: Box<dyn Redfish>,
     /// Retained to scrub known secrets from an untrusted BMC error before returning it.
     authentication_sensitive_values: Vec<String>,
@@ -86,8 +87,10 @@ impl InstrumentedRedfish {
     pub(super) fn new(
         inner: Box<dyn Redfish>,
         authentication_sensitive_values: Vec<String>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
         Self {
+            instrumentation,
             inner,
             authentication_sensitive_values: authentication_sensitive_values
                 .into_iter()
@@ -107,6 +110,7 @@ impl InstrumentedRedfish {
         call: impl Future<Output = Result<T, RedfishError>> + 'a,
     ) -> Result<T, RedfishError> {
         instrumented_redfish_call(
+            &self.instrumentation,
             operation,
             true,
             self.authentication_sensitive_values
@@ -122,11 +126,12 @@ impl InstrumentedRedfish {
 /// Instruments client creation without changing its existing outcome contract:
 /// every initialization error remains an `error`, including `NotSupported`.
 pub(super) async fn instrumented_redfish_initialization<'a, T>(
+    instrumentation: &carbide_instrument::Instrumentation,
     operation: &'static str,
     sensitive_values: impl IntoIterator<Item = &'a str>,
     call: impl Future<Output = Result<T, RedfishError>>,
 ) -> Result<T, RedfishError> {
-    instrumented_redfish_call(operation, false, sensitive_values, call).await
+    instrumented_redfish_call(instrumentation, operation, false, sensitive_values, call).await
 }
 
 /// Records `NotSupported` as an expected `unsupported` outcome for ordinary
@@ -138,6 +143,7 @@ pub(super) async fn instrumented_redfish_initialization<'a, T>(
     fields(backend = REDFISH_BACKEND, operation = operation, outcome = tracing::field::Empty)
 )]
 async fn instrumented_redfish_call<'a, T>(
+    instrumentation: &carbide_instrument::Instrumentation,
     operation: &'static str,
     not_supported_is_expected: bool,
     sensitive_values: impl IntoIterator<Item = &'a str>,
@@ -170,6 +176,7 @@ async fn instrumented_redfish_call<'a, T>(
     };
     tracing::Span::current().record("outcome", outcome);
     red::record(
+        instrumentation,
         REDFISH_BACKEND,
         operation,
         outcome,
@@ -508,7 +515,10 @@ mod tests {
     use crate::libredfish::test_support::RedfishSim;
     use crate::libredfish::{RedfishAuth, RedfishClientPool};
 
-    async fn sim_client(sim: &RedfishSim) -> InstrumentedRedfish {
+    async fn sim_client(
+        sim: &RedfishSim,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> InstrumentedRedfish {
         let client = sim
             .create_client(
                 "localhost",
@@ -520,14 +530,14 @@ mod tests {
             )
             .await
             .expect("sim client");
-        InstrumentedRedfish::new(client, Vec::new())
+        InstrumentedRedfish::new(client, Vec::new(), instrumentation)
     }
 
     #[tokio::test]
     async fn task_cancellation_delegates_and_records_metrics() {
         let sim = RedfishSim::default();
-        let client = sim_client(&sim).await;
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
+        let client = sim_client(&sim, metrics.instrumentation().clone()).await;
 
         // Protocol cases belong in libredfish; this proves the adapter forwards
         // the task ID and meters cancellation through the same path as other calls.
@@ -555,7 +565,7 @@ mod tests {
     async fn ipmi_account_access_is_delegated() {
         let sim = RedfishSim::default();
         sim.seed_user("1", "site_pass");
-        let client = sim_client(&sim).await;
+        let client = sim_client(&sim, carbide_instrument::Instrumentation::noop()).await;
         client
             .enable_ipmi_account_access("1", "site_pass")
             .await
@@ -566,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn onboard_nics_methods_delegate_to_vendor_client() {
         let sim = RedfishSim::default();
-        let client = sim_client(&sim).await;
+        let client = sim_client(&sim, carbide_instrument::Instrumentation::noop()).await;
         assert_eq!(client.are_onboard_nics_enabled().await.unwrap(), None);
         let timepoint = sim.timepoint();
         for target in [EnabledDisabled::Enabled, EnabledDisabled::Disabled] {
@@ -592,9 +602,9 @@ mod tests {
     #[tokio::test]
     async fn ok_call_records_the_external_call_histogram() {
         let sim = RedfishSim::default();
-        let client = sim_client(&sim).await;
+        let metrics = MetricsCapture::owned();
+        let client = sim_client(&sim, metrics.instrumentation().clone()).await;
 
-        let metrics = MetricsCapture::start();
         assert_eq!(
             client.get_power_state().await.expect("sim power state"),
             PowerState::On,
@@ -616,12 +626,12 @@ mod tests {
     #[tokio::test]
     async fn failed_call_records_the_error_outcome_and_returns_the_error() {
         let sim = RedfishSim::default();
-        let client = sim_client(&sim).await;
+        let metrics = MetricsCapture::owned();
+        let client = sim_client(&sim, metrics.instrumentation().clone()).await;
 
         // The simulator echoes the missing account ID in a non-HTTP error.
         // Preserve that returned error while the owned diagnostic stays categorical.
         const PRIVATE_ACCOUNT: &str = "private-non-http-account";
-        let metrics = MetricsCapture::start();
 
         let (result, logs) =
             capture_logs_async(client.change_password_by_id(PRIVATE_ACCOUNT, "site_pass")).await;
@@ -655,10 +665,11 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("current-thread runtime");
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut result = None;
         let logs = carbide_instrument::testing::capture_logs(|| {
             result = Some(rt.block_on(instrumented_redfish_initialization::<()>(
+                metrics.instrumentation(),
                 "create_client",
                 ["secret"],
                 std::future::ready(Err(RedfishError::HTTPErrorCode {
@@ -725,10 +736,11 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("current-thread runtime");
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = carbide_instrument::testing::capture_logs(|| {
             rt.block_on(async {
                 instrumented_redfish_call::<()>(
+                    metrics.instrumentation(),
                     "lockdown_status",
                     true,
                     [],
@@ -740,6 +752,7 @@ mod tests {
                 .expect_err("the refusal still propagates");
 
                 let error = instrumented_redfish_call::<()>(
+                    metrics.instrumentation(),
                     "lockdown_status",
                     true,
                     [],
@@ -831,7 +844,11 @@ mod tests {
         let (basic_authorization, sensitive_values) =
             redfish_basic_authorization_context("root", Some("secret"));
         let basic_payload = sensitive_values[1].clone();
-        let client = InstrumentedRedfish::new(inner, sensitive_values);
+        let client = InstrumentedRedfish::new(
+            inner,
+            sensitive_values,
+            carbide_instrument::Instrumentation::noop(),
+        );
 
         // Return an untrusted BMC body that echoes each credential form,
         // including case-normalized schemes and a bare payload.

@@ -332,27 +332,25 @@ async fn late_tenant_nic_firmware_selection_rolls_back_spx_batch(pool: sqlx::PgP
     assert!(error.message().contains("NIC firmware preparation"));
     assert!(!error.message().contains(profile_id));
 
-    let mut txn = env.db_txn().await;
     for (instance_id, segment_id) in [
         (unselected_id, unselected_segment_id),
         (selected_id, selected_segment_id),
     ] {
         assert!(
-            db::instance::find_by_id(txn.as_mut(), instance_id)
+            db::instance::find_by_id(&env.pool, instance_id)
                 .await
                 .unwrap()
                 .is_none(),
             "instance {instance_id} and its firmware snapshot must roll back"
         );
         assert_eq!(
-            db::instance_address::count_by_segment_id(txn.as_mut(), &segment_id)
+            db::instance_address::count_by_segment_id(&env.pool, &segment_id)
                 .await
                 .unwrap(),
             0,
             "addresses allocated before the late guard must roll back"
         );
     }
-    txn.commit().await.unwrap();
 
     set_tenant_nic_firmware_profile(&env, None).await;
     let allocated = env
@@ -362,17 +360,15 @@ async fn late_tenant_nic_firmware_selection_rolls_back_spx_batch(pool: sqlx::PgP
         .expect("the same instances and resources remain available after rollback")
         .into_inner();
     assert_eq!(allocated.instances.len(), 2);
-    let mut txn = env.db_txn().await;
     for segment_id in [unselected_segment_id, selected_segment_id] {
         assert!(
-            db::instance_address::count_by_segment_id(txn.as_mut(), &segment_id)
+            db::instance_address::count_by_segment_id(&env.pool, &segment_id)
                 .await
                 .unwrap()
                 > 0,
             "the successful retry must allocate addresses in {segment_id}"
         );
     }
-    txn.commit().await.unwrap();
 }
 
 /// Allocate 3 instances in a single batch request.
@@ -409,11 +405,10 @@ async fn test_batch_allocate_instances_success(_: PgPoolOptions, options: PgConn
     assert_eq!(response.instances.len(), 3);
 
     // Verify all instances are in the database
-    let mut txn = env.db_txn().await;
     for instance in &response.instances {
         let machine_id = *instance.machine_id.as_ref().unwrap();
         let snapshot = db::managed_host::load_snapshot(
-            txn.as_mut(),
+            &mut env.db_reader(),
             &machine_id,
             model::machine::LoadSnapshotOptions::default(),
         )
@@ -462,6 +457,7 @@ async fn test_batch_allocate_instances_rollback_on_failure(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -496,9 +492,9 @@ async fn test_batch_allocate_instances_rollback_on_failure(
     );
 
     // Verify that the first instance was NOT created (transaction rolled back)
-    let mut txn = env.db_txn().await;
+    let mut db_reader = env.db_reader();
     let snapshot1 = db::managed_host::load_snapshot(
-        txn.as_mut(),
+        &mut db_reader,
         &mh1.host().id,
         model::machine::LoadSnapshotOptions::default(),
     )
@@ -513,7 +509,7 @@ async fn test_batch_allocate_instances_rollback_on_failure(
 
     // Verify that the third instance was also NOT created
     let snapshot2 = db::managed_host::load_snapshot(
-        txn.as_mut(),
+        &mut db_reader,
         &mh2.host().id,
         model::machine::LoadSnapshotOptions::default(),
     )
@@ -703,10 +699,9 @@ async fn test_batch_allocate_instances_mixed_instance_type_id_rolls_back_on_enfo
 
     // Verify the failed batch rolled back both instance creations.
     // Expect no persisted instances on either host.
-    let mut txn = env.db_txn().await;
     for host_id in [mh1.host().id, mh2.host().id] {
         let snapshot = db::managed_host::load_snapshot(
-            txn.as_mut(),
+            &mut env.db_reader(),
             &host_id,
             model::machine::LoadSnapshotOptions::default(),
         )
@@ -732,6 +727,7 @@ fn build_test_instance_allocation_request(
             network: Some(single_interface_network_config(segment_id)),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,

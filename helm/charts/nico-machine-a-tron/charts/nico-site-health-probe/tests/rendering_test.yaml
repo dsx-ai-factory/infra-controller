@@ -1397,3 +1397,42 @@ tests:
     set: {state: {enabled: true, siteId: site-1, readers: {devices: {enabled: false}, nicoConfig: {enabled: true}}}}
     asserts:
       - failedTemplate: {errorPattern: nicoApiClientCert.existingSecret is required while a nico-api state reader is on}
+
+  - it: rejects firmware vendor as a selector label
+    template: templates/deployment.yaml
+    set: &firmwareSelectorBase
+      serviceMonitor.enabled: true
+      state.enabled: true
+      state.siteId: site-1
+      state.metrics.selector: {job: probe, vendor: value}
+      nicoApiClientCert.existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector must not set vendor'
+
+  - it: rejects firmware component as a selector label
+    template: templates/deployment.yaml
+    set:
+      <<: *firmwareSelectorBase
+      state.metrics.selector: {job: probe, component: value}
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector must not set component'
+
+  - it: rejects firmware phase as a selector label
+    template: templates/deployment.yaml
+    set:
+      <<: *firmwareSelectorBase
+      state.metrics.selector: {job: probe, phase: value}
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector must not set phase'
+
+  - it: rejects firmware ready as a selector label
+    template: templates/deployment.yaml
+    set:
+      <<: *firmwareSelectorBase
+      state.metrics.selector: {job: probe, ready: value}
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector must not set ready'

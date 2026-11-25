@@ -66,9 +66,9 @@ const DOCA_XPLANE_IMAGE_REGISTRY: &str = "nvcr.io/nvstaging/doca";
 
 /// HBN service Definitions
 pub(crate) const DOCA_HBN_SERVICE_HELM_NAME: &str = "doca-hbn";
-pub(crate) const DOCA_HBN_SERVICE_HELM_VERSION: &str = "3.5.0";
+pub(crate) const DOCA_HBN_SERVICE_HELM_VERSION: &str = "3.6.0";
 pub(crate) const DOCA_HBN_SERVICE_IMAGE_NAME: &str = "doca_hbn";
-pub(crate) const DOCA_HBN_SERVICE_IMAGE_TAG: &str = "3.5.0-doca3.5.0";
+pub(crate) const DOCA_HBN_SERVICE_IMAGE_TAG: &str = "3.6.0-doca3.6.0";
 
 /// DHCP Service Definitions
 pub(crate) const DHCP_SERVER_SERVICE_HELM_NAME: &str = "nico-dhcp-server";
@@ -89,7 +89,7 @@ pub(crate) const PLATFORM_SERVICE_OWNER_VALUE: &str = "service-vpc";
 /// DTS service definitions
 /// (DTS_SERVICE_NAME lives in carbide_dpf::types so the DPF SDK can wire its dependencies.)
 pub(crate) const DTS_SERVICE_HELM_NAME: &str = "doca-telemetry";
-pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.26.5";
+pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.27.8";
 
 // DPU Agent Service Definitions
 pub(crate) const DPU_AGENT_SERVICE_HELM_NAME: &str = "nico-dpu-agent";
@@ -1217,14 +1217,26 @@ pub(crate) fn mandatory_services(
                 .expect("naming values are an object"),
         );
     }
-    let mut service_vec = vec![
-        dts_service(&resolved.base.dts),
-        doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
-        dhcp,
-        agent,
-        fmds,
-        otel,
-    ];
+    let mut hbn = doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots);
+    let mut dts = dts_service(&resolved.base.dts);
+    let external_naming_values = serde_json::json!({
+        "service": {
+            "nameSource": if multi_cluster_support { "dpuService" } else { "release" }
+        }
+    });
+    for service in [&mut hbn, &mut dts] {
+        merge_helm_values(
+            service
+                .helm_values
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("HBN and DTS services have generated Helm values"),
+            external_naming_values
+                .as_object()
+                .expect("external naming values are an object"),
+        );
+    }
+    let mut service_vec = vec![dts, hbn, dhcp, agent, fmds, otel];
 
     for (service, cfg) in &resolved.extra {
         match service {
@@ -2733,8 +2745,8 @@ mod tests {
             11
         );
         let underlay = &config["weaveFlowController"]["underlayConfigMapData"];
-        assert_eq!(underlay["softwarePlaneIDBitLength"], 8);
-        assert_eq!(underlay["railIDBitLength"], 4);
+        assert_eq!(underlay["softwarePlaneIDBitLength"], 2);
+        assert_eq!(underlay["railIDBitLength"], 3);
 
         let interfaces = config["weaveFlowController"]["underlayConfigMapData"]["interfaces"]
             .as_array()

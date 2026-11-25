@@ -20,6 +20,9 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
+use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::machine::DpuMachineId;
+use config_version::ConfigVersion;
 use derive_builder::Builder;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -29,6 +32,17 @@ use crate::crds::dpus_generated::{
     DpuStatus, DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
 };
 
+/// Identifies the physical DPU on management resources and remote DPU-cluster Nodes.
+pub const DPU_MACHINE_ID_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
+
+/// Correlates generated sets and chains with the management DPUServiceChain that created them.
+pub(crate) const SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL: &str =
+    "nico/service-vpc-chain-registration-uid";
+
+/// Correlates generated chain specifications with the durable exclusion version.
+pub(crate) const SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION: &str =
+    "nico/service-vpc-chain-selector-version";
+
 /// IPv4 route prefix lengths used to build Astra DPUDevice underlay values.
 #[derive(Debug, Clone, Copy)]
 pub struct AstraRoutePrefixes {
@@ -36,15 +50,15 @@ pub struct AstraRoutePrefixes {
     pub software_plane_route_prefix_len: u8,
 }
 
-/// Async provider for BMC passwords used to create and refresh the K8s BMC
+/// Async provider for the initial password used to create the shared K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
 /// a vault or credential manager). Return
 /// [`crate::DpfError::BmcPasswordSourceUnavailable`] when the configured source
 /// cannot supply the credential. Return
 /// [`crate::DpfError::LocalBmcPasswordSourceUnavailable`] for an authoritative
 /// local version 0 miss so the SDK can reject source-policy activation before
-/// startup. After a value has been published, source-unavailable and ordinary
-/// transient lookup failures retain the last published value and are retried.
+/// startup. When startup retries are enabled, lookup errors can be retried
+/// in the background until the shared Secret is published.
 #[async_trait::async_trait]
 pub trait BmcPasswordProvider: Send + Sync {
     async fn get_bmc_password(&self) -> Result<String, crate::DpfError>;
@@ -175,6 +189,12 @@ pub struct InitDpfResourcesConfig {
 
     #[builder(setter(strip_option))]
     pub(crate) proxy: Option<DpfProxyDetails>,
+    /// Containerd registry mirrors written into the flavor, one `hosts.toml` per upstream
+    /// registry. Empty leaves the flavor unchanged.
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
+    /// DPUs.
+    pub(crate) registry_mirrors: Vec<DpfRegistryMirror>,
     /// Operator-supplied bf.cfg lines appended to the flavor's built-in `bfcfgParameters`.
     ///
     /// Passed through verbatim; the SDK applies no quoting or interpretation. Entries containing
@@ -186,6 +206,8 @@ pub struct InitDpfResourcesConfig {
     pub(crate) extra_bfcfg_parameters: Vec<String>,
     /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
     pub(crate) enable_delay_host_init: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage during provisioning.
+    pub(crate) enable_pci_switch_emulation: bool,
     /// Omit partial-multiplane maintenance initialization from Astra provisioning when true.
     pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
@@ -229,8 +251,10 @@ impl Default for InitDpfResourcesConfig {
             intercept_bridging: None,
             interfaces: Vec::new(),
             proxy: None,
+            registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
+            enable_pci_switch_emulation: false,
             partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
@@ -257,6 +281,43 @@ pub struct DpfProxyDetails {
     pub https_proxy: String,
     #[serde(default)]
     pub no_proxy: Vec<String>,
+}
+
+/// A containerd registry mirror for one upstream registry.
+///
+/// The flavor carries it as `/etc/containerd/certs.d/<upstream>/hosts.toml`. containerd on the
+/// DPU then tries `mirror` first and falls back to the upstream registry, provided its registry
+/// `config_path` includes `/etc/containerd/certs.d` (the default from containerd 2.2).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DpfRegistryMirror {
+    /// Registry host exactly as it appears in image references, with the port when the
+    /// references carry one (`nvcr.io`, `registry.example.com:5000`). Docker Hub is `docker.io`.
+    pub upstream: String,
+    /// `http://` or `https://` URL of the mirror, without userinfo, query, or fragment.
+    /// containerd offers the upstream registry's pull secret to a mirror that asks for
+    /// credentials, so the mirror is trusted with it.
+    pub mirror: String,
+    /// Treats the path of `mirror` as the registry API root instead of appending `/v2`
+    /// (containerd `override_path`). Needed when the mirror serves the upstream under a path
+    /// prefix.
+    #[serde(default)]
+    pub override_path: bool,
+    /// Fallback registry URL (containerd `server`). Unset keeps containerd's default, which is
+    /// the upstream registry itself.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// PEM certificates that sign the mirror's TLS certificate. Unset uses the DPU's system
+    /// trust store. Must hold at least one certificate that parses: containerd fails every pull
+    /// for the upstream when it cannot load the file.
+    #[serde(default)]
+    pub ca_pem: Option<String>,
+    /// Longest time containerd waits for a connection to the mirror before it moves on to the
+    /// fallback (containerd `dial_timeout`): a positive whole number of seconds or milliseconds
+    /// with at most six digits, such as `5s` or `500ms`. Unset keeps containerd's default of 30
+    /// seconds. Takes effect from containerd 2.1; earlier versions ignore the key.
+    #[serde(default)]
+    pub dial_timeout: Option<String>,
 }
 
 /// A DPU CR whose installed BFB, BlueFieldSoftware, or `spec.dpuFlavor` does
@@ -798,6 +859,11 @@ pub struct DetachedDpuServiceChainDefinition {
     pub labels: BTreeMap<String, String>,
     /// Exact labels selecting the DPU nodes where the chain is instantiated.
     pub node_selector_labels: BTreeMap<String, String>,
+    /// DPUs excluded even when cached placement labels still select them.
+    pub excluded_dpu_ids: Vec<DpuMachineId>,
+    /// Durable exclusion version propagated to set and child template annotations.
+    /// `None` omits both annotations.
+    pub selector_version: Option<ConfigVersion>,
     /// Labels propagated to each generated chain object.
     pub template_labels: BTreeMap<String, String>,
     /// Ordered interface-label selectors forming the chain's ports.
@@ -806,14 +872,157 @@ pub struct DetachedDpuServiceChainDefinition {
     pub service_mtu: i64,
 }
 
-/// Kubernetes identity required to delete exactly the resource that was observed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DpfDeletePreconditions {
-    /// UID of the exact Kubernetes object generation that may be deleted.
+/// Correlates remote observations with one management DPUCluster UID.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DpuClusterIdentity {
+    /// Management namespace containing the DPUCluster.
+    pub namespace: String,
+    /// Management DPUCluster name.
+    pub name: String,
+    /// UID of the DPUCluster whose remote resources may be observed.
     pub uid: String,
-    /// Resource version of the exact Kubernetes object generation that may be deleted.
+}
+
+/// Records the remote Node incarnation that callers retain before enabling per-DPU ServiceChain creation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVpcNodeIdentity {
+    /// Management DPUCluster incarnation serving this Node.
+    pub cluster: DpuClusterIdentity,
+    /// Remote Node name established from the management DPU mapping.
+    pub name: String,
+    /// Remote Node UID that subsequent convergence and withdrawal observations must match.
+    pub uid: String,
+}
+
+/// Selects whether an observation checks current ServiceChain configuration or acknowledged withdrawal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceVpcChainIntent {
+    /// Requires one current, reconciled ServiceChain on the retained Node.
+    Active,
+    /// Requires an acknowledged exclusion followed by authoritative ServiceChain absence.
+    Retiring,
+}
+
+/// Correlates chain evidence with the caller's persisted attachment, endpoint and configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVpcChainRequestContext {
+    /// Server-owned attachment identity retained through termination.
+    pub attachment_id: uuid::Uuid,
+    /// InstanceServiceInterfaceConfig.internal_uuid for the endpoint being observed.
+    pub internal_uuid: uuid::Uuid,
+    /// Registered extension service that owns the chain.
+    pub service_id: ExtensionServiceId,
+    /// Zero-based registered service-interface ordinal.
+    pub interface_ordinal: u32,
+    /// Fixed local service-VPC slot selected for this endpoint.
+    pub slot_index: u32,
+    /// Persisted DPU identity for this endpoint.
+    pub dpu_id: DpuMachineId,
+    /// Version of the instance's complete extension-services configuration.
+    pub extension_services_config_version: ConfigVersion,
+    /// Version of the instance network configuration containing this endpoint.
+    pub network_config_version: ConfigVersion,
+    /// Committed extension_service_chain_selectors.version used by the requested definition.
+    pub selector_version: ConfigVersion,
+    /// Persisted activation or retirement desire for this observation.
+    pub intent: ServiceVpcChainIntent,
+}
+
+/// Supplies committed selector desire and a retained Node identity for one chain observation.
+#[derive(Debug, Clone)]
+pub struct ServiceVpcChainRequest {
+    /// Caller-provided identities and versions returned unchanged with the evidence.
+    pub request_context: ServiceVpcChainRequestContext,
+    /// Canonical registration definition populated from current durable selector desire.
+    pub definition: DetachedDpuServiceChainDefinition,
+    /// Node identity retained before enabling ServiceChain creation; never recapture it for retirement.
+    pub node: ServiceVpcNodeIdentity,
+    /// Previously observed cleanup bypass, retained by the caller until administrative recovery.
+    pub cleanup_bypass_observed: bool,
+}
+
+/// Records the identity and generation used by a chain observation without retaining a raw spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVpcResourceObservation {
+    /// Namespace containing the observed resource.
+    pub namespace: String,
+    /// Observed Kubernetes name.
+    pub name: String,
+    /// Observed Kubernetes UID.
+    pub uid: String,
+    /// Current metadata.generation used when checking condition acknowledgements.
+    pub generation: i64,
+    /// Resource version of this exact API observation.
+    pub resource_version: String,
+    /// Whether Kubernetes has accepted deletion of this resource.
+    pub is_deleting: bool,
+}
+
+/// Distinguishes usable chain evidence from pending, stale and failed observations without changing lifecycle state.
+#[derive(Debug, Clone)]
+pub enum ServiceVpcChainState {
+    /// Required resources are absent or have not finished reconciling.
+    PendingCreation,
+    /// Observed identity, specification or configuration no longer matches the request.
+    StaleIdentity,
+    /// The current ServiceChain acknowledges the requested configuration on the retained Node.
+    Converged,
+    /// The requested exclusion has not reached or been acknowledged by the ServiceChainSet.
+    ExclusionPending,
+    /// A required resource is deleting or relevant ServiceChains still remain during withdrawal.
+    Deleting,
+    /// Current exclusion acknowledgement is followed by authoritative absence of relevant ServiceChains on the retained Node.
+    Isolated,
+    /// An incomplete or failed read prevents evidence from being established.
+    ReadFailure(
+        /// Original read failure shared by requests affected by the same batch failure.
+        std::sync::Arc<crate::DpfError>,
+    ),
+}
+
+/// Carries chain configuration evidence and caller request context for subsequent attachment decisions.
+#[derive(Debug, Clone)]
+pub struct ServiceVpcChainObservation {
+    /// Caller-provided request context copied unchanged from the request.
+    pub request_context: ServiceVpcChainRequestContext,
+    /// Remote Node identity, when a unique, non-deleting mapping was observed.
+    pub node: Option<ServiceVpcNodeIdentity>,
+    /// Whether this or an earlier request observed a reconciled resource without its cleanup finalizer.
+    /// Callers must retain and resubmit this fact; a later empty list does not clear it.
+    pub cleanup_bypass_observed: bool,
+    /// Initial management `DPUServiceChain` registration, revalidated before returning `Converged` or `Isolated`.
+    pub registration: Option<ServiceVpcResourceObservation>,
+    /// Metadata for the remote `ServiceChainSet` with the requested `DPUServiceChain` name.
+    /// `Converged` and `Isolated` retain the read preceding the `ServiceChain` list.
+    /// Presence alone does not establish successful validation.
+    pub set: Option<ServiceVpcResourceObservation>,
+    /// Identity, generation, and deletion metadata for relevant remote `ServiceChain` candidates,
+    /// ordered by name and UID. Each candidate's `spec.node` is the retained Node name, omitted, or empty.
+    /// Stale, deleting, and mismatched candidates are included. Any incomplete candidate identity
+    /// leaves this vector empty, so emptiness alone does not prove isolation.
+    pub chains: Vec<ServiceVpcResourceObservation>,
+    /// Resource version of the complete remote `ServiceChain` list taken after `ServiceChainSet` inspection.
+    /// `Retiring` observations require the current exclusion acknowledgement before this read.
+    /// `None` means this request did not reach a complete list.
+    pub chain_list_resource_version: Option<String>,
+    /// Current configuration evidence or the reason it is unavailable.
+    pub state: ServiceVpcChainState,
+    /// Static diagnostic for a non-`ReadFailure` state, when applicable.
+    /// `ReadFailure` retains its original error in `state` instead.
+    pub reason: Option<&'static str>,
+}
+
+/// Fences a Kubernetes write to the exact observed object and resource version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpfResourcePreconditions {
+    /// UID of the exact Kubernetes object that may be changed.
+    pub uid: String,
+    /// Resource version of the exact observation the write must match.
     pub resource_version: String,
 }
+
+/// Supplies UID and resource-version preconditions for deleting an observed resource.
+pub type DpfDeletePreconditions = DpfResourcePreconditions;
 
 /// Captures DPUServiceInterface and DPUServiceChain observations for ownership checks,
 /// drift detection, and fenced patches or deletions.
@@ -828,9 +1037,9 @@ pub struct DetachedDpfResourceObservation {
     /// Complete observed spec used to validate immutable DPUServiceInterface fields
     /// and detect mutable interface or chain drift.
     pub spec: serde_json::Value,
-    /// Kubernetes UID used to fence deletion.
+    /// Kubernetes UID used to fence deletion and repair.
     pub uid: Option<String>,
-    /// Kubernetes resource version used to fence deletion.
+    /// Kubernetes resource version used to fence deletion and repair.
     pub resource_version: Option<String>,
     /// Whether Kubernetes has accepted deletion and is waiting for finalizers.
     pub is_deleting: bool,
@@ -1136,6 +1345,7 @@ impl From<DpuStatusPhase> for DpuPhase {
             DpuStatusPhase::PerformArmForceRestart => {
                 Self::Provisioning("PerformArmForceRestart".into())
             }
+            DpuStatusPhase::BmcForceRestart => Self::Provisioning("BmcForceRestart".into()),
             DpuStatusPhase::UpdateFirmware => Self::Provisioning("UpdateFirmware".into()),
             DpuStatusPhase::ServiceReadiness => Self::Provisioning("ServiceReadiness".into()),
         }
@@ -1590,6 +1800,10 @@ mod tests {
 
             "PerformArmForceRestart -> Provisioning" {
                 DpuStatusPhase::PerformArmForceRestart => DpuPhase::Provisioning("PerformArmForceRestart".into()),
+            }
+
+            "BmcForceRestart -> Provisioning" {
+                DpuStatusPhase::BmcForceRestart => DpuPhase::Provisioning("BmcForceRestart".into()),
             }
 
             "NodeEffect -> NodeEffect" {

@@ -144,6 +144,7 @@ fn build_exploration_report(
             manufacturer: Some(vendor.to_string()),
             part_number: None,
             serial_number: None,
+            assemblies: Vec::new(),
             network_adapters: vec![],
             compute_tray_index: None,
             physical_slot_number: None,

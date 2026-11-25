@@ -31,7 +31,10 @@ use crate::tests::{
 
 fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
     StateProcessor {
-        pool,
+        database: crate::controller::ControllerDatabase {
+            pool,
+            instrumentation: carbide_instrument::Instrumentation::noop(),
+        },
         handler_services: Arc::new(()),
         io: Arc::new(TestStateControllerIO::default()),
         state_handler: Arc::new(NoopStateHandler::default()),
@@ -268,7 +271,7 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
     pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -296,7 +299,7 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
     )
     .execute(&pool)
     .await?;
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(6778)")
         .execute(&mut *blocker)
         .await?;
@@ -408,16 +411,20 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
 
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("identity-change-test".to_string())
@@ -455,7 +462,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     // Action: rename the same persisted object and give B a distinguishable
     // state before processing it under the still-current database list containing A.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("UPDATE test_objects SET id=$1, controller_state=$2::json WHERE id=$3")
         .bind(RENAMED_ID)
         .bind(sqlx::types::Json(TestObjectControllerState::B))
@@ -538,7 +545,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     // Action: remove the deliberately unprocessed B queue row, then process a
     // stale queued A after the database ID list contains B.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("DELETE FROM test_state_controller_queued_objects WHERE object_id=$1")
         .bind(RENAMED_ID)
         .execute(&mut *txn)
@@ -599,15 +606,19 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("late-result-test".to_string())
@@ -639,7 +650,7 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
 
     // Action: rename the persisted object and publish B before accepting the
     // already completed A result.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("UPDATE test_objects SET id=$1 WHERE id=$2")
         .bind(RENAMED_ID)
         .bind(ORIGINAL_ID)
@@ -739,16 +750,20 @@ async fn failed_object_id_read_preserves_existing_object_error_metrics(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let io = Arc::new(TestStateControllerIO::default());
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool, work_lock_manager_handle)
+        .database(
+            pool,
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("failed-object-id-read-test".to_string())
@@ -848,10 +863,10 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let locked_iteration = db::lock_and_start_iteration(
@@ -861,7 +876,11 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
     )
     .await?;
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool, work_lock_manager_handle)
+        .database(
+            pool,
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .filter_metrics_by_existing_object_ids()
         .processor_id("non-lock-winner-test".to_string())
         .services(Arc::new(()))
@@ -910,6 +929,7 @@ async fn expired_task_does_not_start_object_io() {
 #[derive(Debug)]
 struct WaitingHandler {
     started: Semaphore,
+    expected_deadline: tokio::time::Instant,
 }
 
 #[async_trait::async_trait]
@@ -924,8 +944,9 @@ impl StateHandler for WaitingHandler {
         _object_id: &String,
         _state: &mut TestObject,
         _controller_state: &TestObjectControllerState,
-        _ctx: &mut StateHandlerContext<Self::ContextObjects>,
+        ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<TestObjectControllerState>, StateHandlerError> {
+        assert_eq!(ctx.deadline, self.expected_deadline);
         self.started.add_permits(1);
         std::future::pending().await
     }
@@ -964,7 +985,7 @@ async fn immediate_requeue_wait_preserves_state_version_and_history(
 ) -> eyre::Result<()> {
     // Create and queue one object so the processor owns the complete claim and finalization path.
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -1026,7 +1047,7 @@ async fn immediate_requeue_wait_preserves_state_version_and_history(
 async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -> eyre::Result<()> {
     // Create and queue one object before installing the commit-time failure used by this case.
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -1092,17 +1113,18 @@ async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -
 #[carbide_macros::sqlx_test]
 async fn dispatched_handler_keeps_the_claim_deadline(pool: sqlx::PgPool) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     txn.commit().await?;
     let mut processor = processor(pool);
+    // Five seconds remain from the claim's original 180-second budget. The handler
+    // must receive that exact deadline rather than start a fresh budget for substeps.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let handler = Arc::new(WaitingHandler {
         started: Semaphore::new(0),
+        expected_deadline: deadline,
     });
     processor.state_handler = handler.clone();
-
-    // Five seconds remain from the claim's original 180-second budget.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     processor.dispatch_object_handling_task("host".to_string(), deadline);
     tokio::time::timeout(Duration::from_secs(5), handler.started.acquire())
         .await??

@@ -149,7 +149,7 @@ pub fn get_sys_image_version(services: &[Service]) -> Result<&String, String> {
     image
         .version
         .as_ref()
-        .ok_or("Missing DPU_SYS_IMAGE version".to_string())
+        .ok_or_else(|| "Missing DPU_SYS_IMAGE version".to_string())
 }
 
 /// get_base_mac_from_sys_image_version returns a base MAC address
@@ -232,8 +232,7 @@ const BF3_ETH0_TO_BASE_MAC_OFFSET: u64 = 0x25; // measured: BlueField-3, see abo
 fn bmc_eth0_to_base_mac_offset(report: &EndpointExplorationReport) -> Option<u64> {
     match report.identify_dpu()? {
         DpuModel::BlueField3 => Some(BF3_ETH0_TO_BASE_MAC_OFFSET),
-        // BlueField-2 is not supported by the BMC eth0 offset fallback.
-        DpuModel::BlueField2 | DpuModel::Unknown => None,
+        DpuModel::BlueField2 | DpuModel::BlueField4 | DpuModel::Unknown => None,
     }
 }
 
@@ -332,9 +331,8 @@ mod tests {
 
     const BF3_MODEL_VARIANTS: [&str; 2] = ["NVIDIA BlueField 3 DPU", "BlueField-3 DPU"];
 
-    // Minimal BlueField-3 report with a single manager eth0 interface carrying
-    // `eth0_mac`. Classifies as BF3 (system id "Bluefield" + Card1 BF3 chassis).
-    fn bf3_report_with_eth0(model: &str, eth0_mac: &str) -> EndpointExplorationReport {
+    // BlueField report using the legacy system and chassis IDs.
+    fn report_with_card1_and_eth0(model: &str, eth0_mac: &str) -> EndpointExplorationReport {
         use model::site_explorer::{Chassis, ComputerSystem, EthernetInterface, Manager};
         EndpointExplorationReport {
             systems: vec![ComputerSystem {
@@ -426,7 +424,7 @@ mod tests {
                 input: model,
                 expect: false,
             }),
-            |model| is_bf4_dpu_report(&bf3_report_with_eth0(model, "5c:25:73:9e:ac:eb")),
+            |model| is_bf4_dpu_report(&report_with_card1_and_eth0(model, "5c:25:73:9e:ac:eb")),
         );
     }
 
@@ -456,7 +454,7 @@ mod tests {
                 },
             ],
             |(model, eth0_mac)| {
-                let report = bf3_report_with_eth0(model, eth0_mac);
+                let report = report_with_card1_and_eth0(model, eth0_mac);
                 assert_eq!(bmc_eth0_to_base_mac_offset(&report), Some(0x25));
                 derive_base_mac_from_bmc_eth0(&report)
             },
@@ -475,6 +473,18 @@ mod tests {
         }
         assert!(bmc_eth0_to_base_mac_offset(&report).is_none());
         assert!(derive_base_mac_from_bmc_eth0(&report).is_none());
+    }
+
+    #[test]
+    fn bf4_with_legacy_ids_skips_bmc_eth0_offset() {
+        // This BF4 has a usable eth0 MAC and predates the BF4-specific topology IDs.
+        let report = report_with_card1_and_eth0("B4240", "5c:25:73:9e:ac:eb");
+        assert_eq!(report.identify_dpu(), Some(DpuModel::BlueField4));
+        assert!(
+            explored_endpoint(report)
+                .find_host_pf_mac_address()
+                .is_err()
+        );
     }
 
     #[test]
@@ -516,7 +526,7 @@ mod tests {
         };
 
         let bf3_with_empty_sys_image = |model| {
-            let mut ep = explored_endpoint(bf3_report_with_eth0(model, "5c:25:73:9e:ac:eb"));
+            let mut ep = explored_endpoint(report_with_card1_and_eth0(model, "5c:25:73:9e:ac:eb"));
             ep.report.service = with_sys_image("").report.service;
             ep
         };

@@ -40,7 +40,7 @@ func checkResponse(resp *http.Response) error {
 	if readErr != nil {
 		return fmt.Errorf("HTTP %d %s (could not read response body: %v)", resp.StatusCode, resp.Status, readErr)
 	}
-	return fmt.Errorf("HTTP %d %s: %s", resp.StatusCode, resp.Status, string(body))
+	return fmt.Errorf("HTTP %d %s: %s", resp.StatusCode, resp.Status, body)
 }
 
 // RedfishClient manages a gofish API client and PMC context to perform typed Redfish operations against a device.
@@ -51,12 +51,13 @@ type RedfishClient struct {
 }
 
 func buildEndpoint(ip net.IP) string {
+	address := ip.String()
 	port := "443"
 	// TODO: remove this--hack for running the service from my macbook
-	if ip.String() == "127.0.0.1" {
+	if address == "127.0.0.1" {
 		port = "8443"
 	}
-	return "https://" + net.JoinHostPort(ip.String(), port)
+	return "https://" + net.JoinHostPort(address, port)
 }
 
 // New creates a RedfishClient for the given PMC and context.

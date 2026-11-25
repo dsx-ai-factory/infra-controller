@@ -26,9 +26,11 @@ pub enum FirmwareJobReadError {
     /// An RPC or connection failed before a usable observation was obtained.
     #[error("firmware job poll failed")]
     PollFailed,
+
     /// The protocol is unimplemented or unconfigured, or its response has an
-    /// unspecified status, missing/mismatched success ID, contradictory failure
-    /// ID, or unrecognized state. None establishes a backend job's state.
+    /// unspecified status, missing/mismatched or duplicate job records,
+    /// contradictory failure ID, or unrecognized state. None establishes a
+    /// backend job's state.
     #[error("firmware job status is unavailable")]
     StatusUnavailable,
     /// The shared request deadline expired before this read completed.

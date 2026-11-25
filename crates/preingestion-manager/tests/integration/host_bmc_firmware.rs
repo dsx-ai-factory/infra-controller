@@ -27,6 +27,7 @@ use carbide_preingestion_manager::PreingestionManager;
 use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
+use db::TransactionVending as _;
 use libredfish::{PowerState, SystemPowerControl};
 use model::DpuModel;
 use model::firmware::{
@@ -137,7 +138,7 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
 
     for case in cases {
         // The helper only builds complete reports: store the incomplete one via try_update.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::explored_endpoints::delete(&mut txn, address).await?;
         common::insert_endpoint_version(
             &mut txn,
@@ -180,7 +181,7 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
         mgr.run_single_iteration().await?;
         mgr.run_single_iteration().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let deferred = db::explored_endpoints::find_all_by_ip(address, &mut txn)
             .await?
             .remove(0);
@@ -253,8 +254,7 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
         );
         restarted.run_single_iteration().await?;
 
-        let mut txn = pool.begin().await?;
-        let after = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        let after = db::explored_endpoints::find_all_by_ip(address, &pool)
             .await?
             .remove(0);
         if case.expect_upgrade {
@@ -275,7 +275,6 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
                 case.scenario
             );
         }
-        txn.commit().await?;
     }
     Ok(())
 }
@@ -322,7 +321,7 @@ async fn test_preingestion_does_not_defer_when_autoupdate_is_off(
 
     // A known model whose BMC entry reports no version: the case the check
     // would defer with autoupdate on.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     common::insert_endpoint_version(&mut txn, addr, "4.9", "1.13.2", false).await?;
     let inserted = db::explored_endpoints::find_all_by_ip(address, &mut txn)
         .await?
@@ -346,8 +345,7 @@ async fn test_preingestion_does_not_defer_when_autoupdate_is_off(
     mgr.run_single_iteration().await?;
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await?;
-    let after = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+    let after = db::explored_endpoints::find_all_by_ip(address, &pool)
         .await?
         .remove(0);
     assert_eq!(
@@ -359,7 +357,6 @@ async fn test_preingestion_does_not_defer_when_autoupdate_is_off(
         !after.waiting_for_explorer_refresh,
         "autoupdate off must not ask the explorer for a refresh"
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -405,7 +402,7 @@ async fn lenovo_preingestion_releases_firmware_lockdown(
         .unwrap();
     bmc.preingest_upgrade_when_below = Some("2.97".to_string());
     bmc.known_firmware = vec![FirmwareEntry::standard("2.97")];
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     common::insert_endpoint_version(&mut txn, &response.address, "2.03", "1.13.2", false).await?;
     let mut endpoint = db::explored_endpoints::find_all_by_ip(address, &mut txn)
         .await?
@@ -433,8 +430,7 @@ async fn lenovo_preingestion_releases_firmware_lockdown(
     let mut uploaded = false;
     for _ in 0..4 {
         manager.run_single_iteration().await?;
-        let mut txn = pool.begin().await?;
-        let endpoints = db::explored_endpoints::find_all_by_ip(address, &mut txn).await?;
+        let endpoints = db::explored_endpoints::find_all_by_ip(address, &pool).await?;
         if matches!(
             endpoints[0].preingestion_state,
             PreingestionState::UpgradeFirmwareWait { .. }
@@ -499,7 +495,7 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
 
     // First, a host where it's already up to date; it should go to complete
     // after passing through the explicit NTP setup state.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let addr = response.address.as_str();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
     txn.commit().await?;
@@ -507,7 +503,7 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     mgr.run_single_iteration().await?;
 
     mgr.run_single_iteration().await?;
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert!(
         db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
             .await?
@@ -528,7 +524,7 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     mgr.run_single_iteration().await?;
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert!(
         db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
             .await?
@@ -551,10 +547,8 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     // The "upload" is synchronous now and will be complete at this point.
 
     // At this point, we expect that it shows as having completed upload
-    let mut txn = pool.begin().await.unwrap();
 
-    let endpoints =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
     assert!(endpoints.len() == 1);
     let endpoint = endpoints.first().unwrap();
     match &endpoint.preingestion_state {
@@ -571,15 +565,13 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
             panic!("Bad preingestion state: {endpoint:?}");
         }
     }
-    txn.commit().await?;
 
     assert_eq!(completed_tasks(), 0.0);
 
     // Second firmware upload
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_all(&pool).await?;
     assert!(endpoints.len() == 1);
     let endpoint = endpoints.first().unwrap();
     if let PreingestionState::UpgradeFirmwareWait {
@@ -590,28 +582,25 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     } else {
         panic!("Bad preingestion state: {endpoint:?}");
     };
-    txn.commit().await?;
 
     assert_eq!(completed_tasks(), 1.0);
 
     // Let it go to NewFirmwareReportedWait
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_all(&pool).await?;
     assert!(endpoints.len() == 1);
     let endpoint = endpoints.first().unwrap();
     let PreingestionState::NewFirmwareReportedWait { .. } = endpoint.preingestion_state else {
         panic!("Bad preingestion state: {endpoint:?}");
     };
-    txn.commit().await?;
 
     assert_eq!(completed_tasks(), 2.0);
 
     // One more, to make sure noething is weird with retrying resets
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
     assert!(endpoints.len() == 1);
     let mut endpoint = endpoints.into_iter().next().unwrap();
@@ -635,8 +624,7 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     // The next run of the state machine should see that the task shows as complete and move us back to checking again
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_all(&pool).await?;
     assert!(endpoints.len() == 1);
     let endpoint = endpoints.first().unwrap();
     match &endpoint.preingestion_state {
@@ -647,24 +635,21 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
             panic!("Bad preingestion state: {endpoint:?}");
         }
     }
-    txn.commit().await?;
 
     // Now it should go to completion
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
     assert!(
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+        db::explored_endpoints::find_preingest_not_waiting_not_error(&pool)
             .await?
             .is_empty()
     );
     assert!(
-        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+        db::explored_endpoints::find_all_preingestion_complete(&pool)
             .await?
             .len()
             == 1
     );
-    txn.commit().await?;
 
     assert_eq!(
         completed_tasks(),
@@ -744,7 +729,7 @@ async fn test_preingestion_uefi_activation_powers_on_an_off_host(
     for case in cases {
         // BMC up to date, UEFI below the pre-ingestion minimum: the UEFI
         // upload runs first and its completion lands in ResetForNewFirmware.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::explored_endpoints::delete(&mut txn, ip_addr).await?;
         common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.0", false).await?;
         txn.commit().await?;
@@ -756,9 +741,7 @@ async fn test_preingestion_uefi_activation_powers_on_an_off_host(
         let mut uploaded = false;
         for _ in 0..4 {
             mgr.run_single_iteration().await?;
-            let mut txn = pool.begin().await?;
-            let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
-            txn.commit().await?;
+            let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &pool).await?;
             if let PreingestionState::UpgradeFirmwareWait { upgrade_type, .. } =
                 &endpoints[0].preingestion_state
             {
@@ -800,9 +783,7 @@ async fn test_preingestion_uefi_activation_powers_on_an_off_host(
             "{}",
             case.scenario
         );
-        let mut txn = pool.begin().await?;
-        let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
-        txn.commit().await?;
+        let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &pool).await?;
         assert!(
             matches!(
                 endpoints[0].preingestion_state,
@@ -858,7 +839,7 @@ async fn test_preingestion_bmc_upgrade_uses_runtime_host_firmware_config(
     bmc_component.preingest_upgrade_when_below = Some("6.50.00.00".to_string());
     bmc_component.known_firmware = vec![FirmwareEntry::standard("6.50.00.00")];
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let addr = response.address.as_str();
     common::insert_endpoint_version(&mut txn, addr, "5.1", "1.13.2", false).await?;
     db::host_firmware_config::upsert(&mut txn, &runtime_config).await?;
@@ -867,9 +848,7 @@ async fn test_preingestion_bmc_upgrade_uses_runtime_host_firmware_config(
     mgr.run_single_iteration().await?;
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
     assert_eq!(endpoints.len(), 1);
     let endpoint = endpoints.first().unwrap();
     match &endpoint.preingestion_state {
@@ -885,7 +864,6 @@ async fn test_preingestion_bmc_upgrade_uses_runtime_host_firmware_config(
             panic!("Bad preingestion state: {endpoint:?}");
         }
     }
-    txn.commit().await?;
 
     Ok(())
 }
@@ -957,7 +935,7 @@ async fn test_preingestion_bmc_upgrade_with_url_only_files_artifacts(
         .await?
         .into_inner();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let addr = response.address.as_str();
     common::insert_endpoint_version(&mut txn, addr, "4.9", "1.13.2", false).await?;
     txn.commit().await?;
@@ -1003,7 +981,7 @@ async fn test_preingestion_preupdate_powercycling(
         .await?
         .into_inner();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let addr = response.address.as_str();
     common::insert_endpoint_version(&mut txn, addr, "4.9", "1.1", true).await?;
     txn.commit().await?;
@@ -1013,9 +991,7 @@ async fn test_preingestion_preupdate_powercycling(
     // The "upload" is synchronous now and will be complete at this point.
 
     // Expect "reset" the BMC
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
     let endpoint = endpoints.first().unwrap();
     match &endpoint.preingestion_state {
         PreingestionState::InitialReset { phase, .. } => {
@@ -1025,11 +1001,10 @@ async fn test_preingestion_preupdate_powercycling(
             panic!("Bad preingestion state: {:?}", endpoint.preingestion_state);
         }
     }
-    txn.commit().await?;
     mgr.run_single_iteration().await?;
 
     // Expect WaitHostBoot
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints =
         db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
     let endpoint = endpoints.first().unwrap();
@@ -1051,19 +1026,16 @@ async fn test_preingestion_preupdate_powercycling(
     mgr.run_single_iteration().await?;
 
     // Recheck versions
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
     let endpoint = endpoints.first().unwrap();
     assert_eq!(
         endpoint.preingestion_state,
         PreingestionState::RecheckVersions
     );
-    txn.commit().await?;
     mgr.run_single_iteration().await?;
 
     // At this point, we expect that it shows as having completed upload
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
 
     let endpoints =
         db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
@@ -1110,7 +1082,7 @@ async fn test_preingestion_preupdate_powercycling(
     ] {
         mgr.run_single_iteration().await?;
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
         assert!(endpoints.len() == 1);
         let mut endpoint = endpoints.into_iter().next().unwrap();
@@ -1151,9 +1123,7 @@ async fn test_preingestion_preupdate_powercycling(
     }
 
     mgr.run_single_iteration().await?;
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
-    txn.commit().await?;
+    let endpoints = db::explored_endpoints::find_all(&pool).await?;
     assert!(endpoints.len() == 1);
     let endpoint = endpoints.first().unwrap();
     let PreingestionState::RecheckVersions = endpoint.preingestion_state else {
@@ -1162,19 +1132,17 @@ async fn test_preingestion_preupdate_powercycling(
 
     // Now it should go to completion
     mgr.run_single_iteration().await?;
-    let mut txn = pool.begin().await.unwrap();
     assert!(
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+        db::explored_endpoints::find_preingest_not_waiting_not_error(&pool)
             .await?
             .is_empty()
     );
     assert!(
-        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+        db::explored_endpoints::find_all_preingestion_complete(&pool)
             .await?
             .len()
             == 1
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1216,7 +1184,7 @@ async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restar
         .into_inner();
     let ip_addr = IpAddr::from_str(&response.address)?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
     common::mark_endpoint_bluefield3(&mut txn, ip_addr).await?;
     let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
@@ -1228,8 +1196,7 @@ async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restar
 
     mgr.run_single_iteration().await?;
     mgr.run_single_iteration().await?;
-    let mut txn = pool.begin().await?;
-    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
         .await?
         .pop()
         .expect("endpoint should exist");
@@ -1240,15 +1207,13 @@ async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restar
             ..
         }
     ));
-    txn.commit().await?;
 
     let restart_timepoint = redfish_sim.timepoint();
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
     txn.commit().await?;
     mgr.run_single_iteration().await?;
-    let mut txn = pool.begin().await?;
-    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
         .await?
         .pop()
         .expect("endpoint should exist");
@@ -1259,7 +1224,6 @@ async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restar
             ..
         }
     ));
-    txn.commit().await?;
     assert!(
         redfish_sim
             .actions_since(&restart_timepoint)
@@ -1268,18 +1232,16 @@ async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restar
         "the simulator should accept ForceRestart while leaving the DPU paused"
     );
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
     txn.commit().await?;
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await?;
-    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
         .await?
         .pop()
         .expect("endpoint should exist")
         .preingestion_state;
-    txn.commit().await?;
     assert_ne!(state, PreingestionState::RecheckVersions);
     match state {
         PreingestionState::Failed { reason } => assert_eq!(
@@ -1330,19 +1292,17 @@ async fn test_preingestion_preupdate_fails_if_host_never_powers_on_after_bmc_res
         .into_inner();
     let ip_addr = IpAddr::from_str(&response.address)?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
     txn.commit().await?;
 
     let timepoint = redfish_sim.timepoint();
     mgr.run_single_iteration().await?;
     mgr.run_single_iteration().await?;
-    let mut txn = pool.begin().await?;
-    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
         .await?
         .pop()
         .expect("endpoint should exist");
-    txn.commit().await?;
     assert!(matches!(
         endpoint.preingestion_state,
         PreingestionState::InitialReset {
@@ -1351,18 +1311,16 @@ async fn test_preingestion_preupdate_fails_if_host_never_powers_on_after_bmc_res
         }
     ));
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
     txn.commit().await?;
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await?;
-    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
         .await?
         .pop()
         .expect("endpoint should exist")
         .preingestion_state;
-    txn.commit().await?;
     match state {
         PreingestionState::Failed { reason } => assert_eq!(
             reason,
@@ -1418,7 +1376,7 @@ async fn test_preingestion_preupdate_rechecks_host_still_powering_on(
         .into_inner();
     let ip_addr = IpAddr::from_str(&response.address)?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
     txn.commit().await?;
 
@@ -1426,13 +1384,11 @@ async fn test_preingestion_preupdate_rechecks_host_still_powering_on(
         pool: &sqlx::PgPool,
         ip_addr: IpAddr,
     ) -> Result<PreingestionState, Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
-        let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        let state = db::explored_endpoints::find_all_by_ip(ip_addr, pool)
             .await?
             .pop()
             .expect("endpoint should exist")
             .preingestion_state;
-        txn.commit().await?;
         Ok(state)
     }
 
@@ -1456,7 +1412,7 @@ async fn test_preingestion_preupdate_rechecks_host_still_powering_on(
 
     for transient in [PowerState::PoweringOn, PowerState::Reset] {
         redfish_sim.set_power_state(&ip_addr.to_string(), transient);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
         txn.commit().await?;
         mgr.run_single_iteration().await?;
@@ -1473,7 +1429,7 @@ async fn test_preingestion_preupdate_rechecks_host_still_powering_on(
     }
 
     redfish_sim.set_power_state(&ip_addr.to_string(), PowerState::On);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
     txn.commit().await?;
     mgr.run_single_iteration().await?;
@@ -1499,9 +1455,7 @@ async fn run_until_firmware_number(
         mgr.run_single_iteration().await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut txn = pool.begin().await?;
-        let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
-        txn.commit().await?;
+        let endpoints = db::explored_endpoints::find_all(pool).await?;
         let Some(endpoint) = endpoints.first() else {
             continue;
         };
@@ -1558,7 +1512,7 @@ async fn test_preingestion_upgrade_script(
         .into_inner();
 
     let addr = response.address.as_str();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::explored_endpoints::delete(&mut txn, IpAddr::from_str(addr).unwrap()).await?;
     common::insert_endpoint_version(&mut txn, addr, "0", "0", false).await?;
     txn.commit().await?;
@@ -1566,9 +1520,7 @@ async fn test_preingestion_upgrade_script(
     mgr.run_single_iteration().await?;
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
     assert!(endpoints.len() == 1);
     let endpoint = endpoints.first().unwrap();
     match &endpoint.preingestion_state {
@@ -1578,15 +1530,12 @@ async fn test_preingestion_upgrade_script(
             panic!("Bad preingestion state: {endpoint:?}");
         }
     }
-    txn.commit().await?;
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
-    let endpoints =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoints = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
     assert!(endpoints.len() == 1);
     let endpoint = endpoints.first().unwrap();
     match &endpoint.preingestion_state {
@@ -1596,7 +1545,6 @@ async fn test_preingestion_upgrade_script(
             panic!("Bad preingestion state: {endpoint:?}");
         }
     }
-    txn.commit().await?;
 
     Ok(())
 }

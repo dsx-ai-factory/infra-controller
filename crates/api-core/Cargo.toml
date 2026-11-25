@@ -58,11 +58,13 @@ carbide-kms-provider = { path = "../kms-provider" }
 carbide-libmlx = { path = "../libmlx" }
 carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-machine-controller = { path = "../machine-controller" }
+carbide-machine-validation-adapters = { path = "../machine-validation-adapters" }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
 carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-mqtt-common = { path = "../mqtt-common" }
 carbide-network = { path = "../network", features = ["sqlx"] }
 carbide-network-segment-controller = { path = "../network-segment-controller" }
+carbide-nvlink-domain-controller = { path = "../nvlink-domain-controller" }
 carbide-nvlink-manager = { path = "../nvlink-manager" }
 carbide-power-shelf-controller = { path = "../power-shelf-controller" }
 carbide-preingestion-manager = { path = "../preingestion-manager" }
@@ -217,13 +219,13 @@ carbide-version = { path = "../version" }
 
 [dev-dependencies]
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
-carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
@@ -239,6 +241,7 @@ carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-resource-pool-api = { path = "../resource-pool-api", features = [
   "test-support",
 ] }
+carbide-rms-mock = { path = "../rms-mock", features = ["test-support"] }
 carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }

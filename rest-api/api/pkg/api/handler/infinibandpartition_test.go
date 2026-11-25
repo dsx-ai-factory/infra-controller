@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,12 +12,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
+	"strconv"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -225,7 +227,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 		fields             fields
 		name               string
 		reqOrgName         string
-		reqBody            string
+		reqBody            []byte
 		reqBodyModel       *model.APIInfiniBandPartitionCreateRequest
 		user               *cdbm.User
 		expectedStatus     int
@@ -240,7 +242,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &ibpObj,
 			user:           nil,
 			expectedStatus: http.StatusInternalServerError,
@@ -253,7 +255,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &ibpObj,
 			user:           tnu1,
 			expectedStatus: http.StatusForbidden,
@@ -266,7 +268,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when org tenant is not admin",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			reqBodyModel:   &ibpObj,
 			user:           tnu2,
 			expectedStatus: http.StatusForbidden,
@@ -279,7 +281,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when request body doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -291,7 +293,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when request doesnt validate",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -303,7 +305,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when tenant doesnt exist for org",
 			reqOrgName:     tnOrg3,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu3,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -315,7 +317,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when site id not specified in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyMissingSite),
+			reqBody:        errBodyMissingSite,
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -327,7 +329,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error when site id is invalid specified in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyInvalidSite),
+			reqBody:        errBodyInvalidSite,
 			user:           tnu1,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -339,7 +341,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:               "error when a tenant has no allocations at a site",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(errNoAllocations),
+			reqBody:            errNoAllocations,
 			reqBodyModel:       &ibpObj5,
 			user:               tnu1,
 			expectedStatus:     http.StatusForbidden,
@@ -353,7 +355,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:               "success case with CreateInfiniBandPartitionV2 workflow",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody),
+			reqBody:            okBody,
 			reqBodyModel:       &ibpObj,
 			user:               tnu1,
 			expectedStatus:     http.StatusCreated,
@@ -367,7 +369,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:               "timeout case with CreateInfiniBandPartitionV2 workflow",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody2),
+			reqBody:            okBody2,
 			reqBodyModel:       &ibpObj6,
 			user:               tnu1,
 			expectedStatus:     http.StatusInternalServerError,
@@ -381,7 +383,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:           "error due to name clash in same site",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu1,
 			expectedStatus: http.StatusConflict,
 		},
@@ -393,7 +395,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 			},
 			name:               "partition created successfully with same name with different site",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(noNameClashBody),
+			reqBody:            noNameClashBody,
 			reqBodyModel:       &ibpObj7,
 			user:               tnu1,
 			expectedStatus:     http.StatusCreated,
@@ -405,7 +407,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -619,7 +621,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			reqOrgName:             tnOrg1,
 			user:                   tnu1,
 			querySiteID:            cutil.GetPtr(site1.ID.String()),
-			queryIncludeRelations1: cutil.GetPtr(cdbm.SiteRelationName),
+			queryIncludeRelations3: cutil.GetPtr(cdbm.SiteRelationName),
 			expectedErr:            false,
 			expectedStatus:         http.StatusOK,
 			expectedCnt:            paginator.DefaultLimit,
@@ -646,7 +648,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			expectedErr:        false,
 			expectedStatus:     http.StatusOK,
 			expectedCnt:        10,
-			expectedTotal:      cutil.GetPtr(totalCount / 2),
+			expectedTotal:      &totalCount,
 			expectedFirstEntry: &ibps[29],
 		},
 		{
@@ -750,14 +752,14 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			if tc.queryIncludeRelations2 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
-			if tc.queryIncludeRelations2 != nil {
+			if tc.queryIncludeRelations3 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -799,6 +801,30 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedCnt, len(rsp))
+				header := rec.Header().Get(pagination.ResponseHeaderName)
+				require.NotEmpty(t, header)
+				page := &pagination.PageResponse{}
+				require.NoError(t, json.Unmarshal([]byte(header), page))
+				expectedPageNumber, expectedPageSize := 1, paginator.DefaultLimit
+				if tc.pageNumber != nil {
+					expectedPageNumber = *tc.pageNumber
+				}
+				if tc.pageSize != nil {
+					expectedPageSize = *tc.pageSize
+				}
+				assert.Equal(t, expectedPageNumber, page.PageNumber)
+				assert.Equal(t, expectedPageSize, page.PageSize)
+				assert.Equal(t, tc.orderBy, page.OrderBy)
+				if tc.expectedTotal != nil {
+					assert.Equal(t, *tc.expectedTotal, page.Total)
+				} else if tc.expectedCnt == 0 {
+					assert.Zero(t, page.Total)
+				}
+				if tc.expectedFirstEntry != nil {
+					require.NotEmpty(t, rsp)
+					assert.Equal(t, tc.expectedFirstEntry.Name, rsp[0].Name)
+				}
+
 				for i := 0; i < tc.expectedCnt; i++ {
 					assert.Equal(t, tn1.ID.String(), rsp[i].TenantID)
 				}
@@ -808,6 +834,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 						assert.Equal(t, *tc.expectedTenantOrg, rsp[0].Tenant.Org)
 					}
 					if tc.expectedSite != nil {
+						require.NotNil(t, rsp[0].Site)
 						assert.Equal(t, tc.expectedSite.Name, rsp[0].Site.Name)
 					}
 				} else {
@@ -1190,7 +1217,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 		reqOrgName               string
 		user                     *cdbm.User
 		ibpID                    string
-		reqBody                  string
+		reqBody                  []byte
 		expectedStatus           int
 		expectedName             *string
 		expectedSiteAssociations bool
@@ -1242,7 +1269,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 		{
 			name:           "error when body does not bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "badbody",
+			reqBody:        []byte("badbody"),
 			user:           tnu1,
 			ibpID:          ibp1.ID.String(),
 			expectedStatus: http.StatusBadRequest,
@@ -1250,7 +1277,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 		{
 			name:           "error when name clashes",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu1,
 			ibpID:          ibp1.ID.String(),
 			expectedStatus: http.StatusConflict,
@@ -1258,7 +1285,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 		{
 			name:           "error when tenant has no allocations at site",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errNoAllocations),
+			reqBody:        errNoAllocations,
 			user:           tnu5,
 			ibpID:          ibp1.ID.String(),
 			expectedStatus: http.StatusForbidden,
@@ -1266,7 +1293,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 		{
 			name:               "success case when only name updated",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okNameUpdateBody1),
+			reqBody:            okNameUpdateBody1,
 			user:               tnu1,
 			ibpID:              ibp1.ID.String(),
 			expectedStatus:     http.StatusOK,
@@ -1276,7 +1303,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 		{
 			name:               "success case when same name updated but exists on different site",
 			reqOrgName:         tnOrg5,
-			reqBody:            string(okNameUpdateBody1DifferentSite),
+			reqBody:            okNameUpdateBody1DifferentSite,
 			user:               tnu6,
 			ibpID:              ibp5.ID.String(),
 			expectedStatus:     http.StatusOK,
@@ -1286,7 +1313,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 		{
 			name:               "success case when name and description updated",
 			reqOrgName:         tnOrg4,
-			reqBody:            string(okNameUpdateBody3),
+			reqBody:            okNameUpdateBody3,
 			user:               tnu4,
 			ibpID:              ibp2.ID.String(),
 			expectedStatus:     http.StatusOK,
@@ -1299,7 +1326,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

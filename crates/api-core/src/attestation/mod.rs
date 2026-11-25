@@ -19,13 +19,14 @@
 // instance of it.
 #![cfg_attr(not(feature = "linux-build"), allow(dead_code, unused_imports))]
 
+use db::TransactionVending as _;
 pub(crate) mod measured_boot;
 
 mod digest_crate_shim;
 pub(crate) mod tpm_ca_cert;
 
 use carbide_uuid::machine::MachineId;
-use db::{ObjectFilter, Transaction};
+use db::ObjectFilter;
 #[cfg(any(feature = "linux-build", test))]
 pub(crate) use measured_boot::*;
 use model::hardware_info::TpmEkCertificate;
@@ -72,7 +73,7 @@ pub(crate) async fn backfill_ek_cert_status_for_existing_machines(
     // - get hardware info and extract tpm ek cert
     // - call match_insert_new_ek_cert_status_against_ca()
 
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
 
     let machines: Vec<::carbide_uuid::machine::MachineId> = db::machine::find(
         &mut txn,

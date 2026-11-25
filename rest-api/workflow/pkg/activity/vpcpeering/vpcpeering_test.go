@@ -806,10 +806,40 @@ func TestManageVpcPeering_CreateOrUpdateVpcPeeringFromSite(t *testing.T) {
 		prepare           func(*testing.T, *fixture)
 		request           func(*fixture) *corev1.VpcPeering
 		expectedRecovered bool
+		retainDeleted     bool
 		reportedState     corev1.VpcPeeringState
 		expectedStatus    string
 		expectedMessage   string
 	}{
+		{
+			name: "Pending parent does not authorize peering import",
+			prepare: func(t *testing.T, f *fixture) {
+				_, err := cdbm.NewVpcDAO(f.dbSession).Update(f.ctx, nil, cdbm.VpcUpdateInput{VpcID: f.vpc1.ID, Status: cutil.GetPtr(cdbm.VpcStatusPending)})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:          "rejected parent does not authorize peering restore",
+			retainDeleted: true,
+			prepare: func(t *testing.T, f *fixture) {
+				prepareDeletedPeering(t, f)
+				dao := cdbm.NewVpcDAO(f.dbSession)
+				_, err := dao.Update(f.ctx, nil, cdbm.VpcUpdateInput{VpcID: f.vpc2.ID, Status: cutil.GetPtr(cdbm.VpcStatusPending)})
+				require.NoError(t, err)
+				_, err = dao.RejectCreation(f.ctx, f.vpc2.ID)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "legacy Error parent retains peering ownership",
+			prepare: func(t *testing.T, f *fixture) {
+				_, err := cdbm.NewVpcDAO(f.dbSession).Update(f.ctx, nil, cdbm.VpcUpdateInput{VpcID: f.vpc1.ID, Status: cutil.GetPtr(cdbm.VpcStatusError)})
+				require.NoError(t, err)
+			},
+			expectedRecovered: true,
+			expectedStatus:    cdbm.VpcPeeringStatusReady,
+			expectedMessage:   "VPC Peering was found on Site",
+		},
 		{
 			name: "skips VPC Peering with missing VPC",
 			request: func(f *fixture) *corev1.VpcPeering {
@@ -908,6 +938,14 @@ func TestManageVpcPeering_CreateOrUpdateVpcPeeringFromSite(t *testing.T) {
 			recovered := f.manager.createOrUpdateVpcPeeringFromSite(f.ctx, f.site, request)
 			if !test.expectedRecovered {
 				assert.Nil(t, recovered)
+				if test.retainDeleted {
+					rows, _, err := cdbm.NewVpcPeeringDAO(f.dbSession).GetAll(f.ctx, nil,
+						cdbm.VpcPeeringFilterInput{IDs: []uuid.UUID{f.vpcPeeringID}, IncludeDeleted: true}, cdbp.PageInput{}, nil)
+					require.NoError(t, err)
+					require.Len(t, rows, 1)
+					assert.NotNil(t, rows[0].Deleted)
+					assert.Equal(t, cdbm.VpcPeeringStatusDeleting, rows[0].Status)
+				}
 				return
 			}
 

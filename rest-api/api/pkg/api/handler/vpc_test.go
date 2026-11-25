@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -138,14 +140,8 @@ func testVPCSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create Allocation table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Allocation)(nil))
 	assert.Nil(t, err)
-	// create VPC Prefix table
-	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.VpcPrefix)(nil))
-	assert.Nil(t, err)
 	// create IP Block table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.IPBlock)(nil))
-	assert.Nil(t, err)
-	// create Subnet table
-	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Subnet)(nil))
 	assert.Nil(t, err)
 	// create Status Details table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.StatusDetail)(nil))
@@ -158,6 +154,15 @@ func testVPCSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	assert.Nil(t, err)
 	// create VPC table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Vpc)(nil))
+	assert.Nil(t, err)
+	// Create the referenced VPC, IP block and Domain before their dependent tables.
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Domain)(nil))
+	assert.Nil(t, err)
+	// create VPC Prefix table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.VpcPrefix)(nil))
+	assert.Nil(t, err)
+	// create Subnet table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Subnet)(nil))
 	assert.Nil(t, err)
 }
 
@@ -563,6 +568,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		mock.AnythingOfType("uuid.UUID")).Return(wrun, nil)
 
 	unavailableVpcID := uuid.New()
+	timeoutVpcID := uuid.New()
 	unavailableVpcName := "Test VPC unavailable after dispatch"
 	unavailableErr := errors.New("Core unavailable after VPC create dispatch")
 	unavailableRun := &tmocks.WorkflowRun{}
@@ -605,7 +611,59 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		"CreateVPCV2", mock.Anything).Return(wruntimeout, nil)
 	tst3.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", mock.Anything).Return(wrun, nil)
 
-	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	var dispatchedVpc *corev1.VpcCreationRequest
+	var dispatchTest *testing.T
+	for _, siteClient := range []*tmocks.Client{tsc, tst3} {
+		for _, call := range siteClient.ExpectedCalls {
+			if call.Method != "ExecuteWorkflow" || call.Arguments.Get(2) != "CreateVPCV2" {
+				continue
+			}
+			call.Run(func(args mock.Arguments) {
+				dispatchedVpc = args.Get(3).(*corev1.VpcCreationRequest)
+				saved, saveErr := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(dispatchedVpc.GetId().GetValue()), nil)
+				require.NoError(dispatchTest, saveErr, "creation intent commits before dispatch")
+				assert.Equal(dispatchTest, cdbm.VpcStatusPending, saved.Status)
+				assert.Equal(dispatchTest, tnu.ID, saved.CreatedBy)
+				options := args.Get(1).(temporalClient.StartWorkflowOptions)
+				assert.Equal(dispatchTest, "vpc-create-"+saved.ID.String(), options.ID)
+				assert.Equal(dispatchTest, enums.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE, options.WorkflowIDReusePolicy)
+				assert.True(dispatchTest, options.WorkflowExecutionErrorWhenAlreadyStarted)
+				assert.Equal(dispatchTest, enums.WORKFLOW_ID_CONFLICT_POLICY_FAIL, options.WorkflowIDConflictPolicy)
+			})
+		}
+	}
+	for _, run := range []*tmocks.WorkflowRun{wrun, wrunWithAllocatedVni, wrunWithEffectiveProfile, wrunWithResolvedRoutingProfile} {
+		for _, call := range run.ExpectedCalls {
+			if call.Method != "Get" {
+				continue
+			}
+			populateResult := call.RunFn
+			call.Run(func(args mock.Arguments) {
+				if populateResult != nil {
+					populateResult(args)
+				}
+				result, ok := args.Get(1).(*corev1.Vpc)
+				if !ok {
+					return
+				}
+				result.Id = dispatchedVpc.Id
+				if result.Config == nil {
+					result.Config = &corev1.VpcConfig{}
+				}
+				result.Config.TenantOrganizationId = dispatchedVpc.TenantOrganizationId
+				result.Config.NetworkVirtualizationType = dispatchedVpc.NetworkVirtualizationType
+				result.Config.SlaacEnabled = dispatchedVpc.SlaacEnabled
+				result.Config.NetworkSecurityGroupId = dispatchedVpc.NetworkSecurityGroupId
+				result.Config.PowerResourceGroup = dispatchedVpc.PowerResourceGroup
+				result.Config.Vni = dispatchedVpc.Vni
+				if result.Config.RoutingProfileType == nil {
+					result.Config.RoutingProfileType = dispatchedVpc.RoutingProfileType
+				}
+				result.Config.RoutingProfileOverrides = dispatchedVpc.RoutingProfileOverrides
+				result.Metadata = dispatchedVpc.Metadata
+			})
+		}
+	}
 
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
@@ -623,7 +681,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		wantErr            bool
 		verifyChildSpanner bool
 		expectNoMutation   bool
-		expectRolledBack   bool
+		expectPending      bool
 		omitRoutingProfile bool
 	}{
 		{
@@ -742,7 +800,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			omitRoutingProfile: true,
 		},
 		{
-			name: "test VPC create API endpoint rolls back when Core-resolved routing profile cannot be persisted",
+			name: "test VPC create API endpoint retains Pending when Core-resolved routing profile cannot be persisted",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -759,11 +817,11 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg,
 				reqUser:     tnu,
 				respCode:    http.StatusInternalServerError,
-				respMessage: "Failed to persist Core-resolved VPC routing profile",
+				respMessage: "Failed to complete VPC creation",
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
-			expectRolledBack:   true,
+			expectPending:      true,
 		},
 		{
 			name: "test VPC create API endpoint rejects SLAAC when Site config inventory stores false",
@@ -810,7 +868,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			expectNoMutation: true,
 		},
 		{
-			name: "test VPC create API endpoint rolls back when Core is unavailable after dispatch",
+			name: "test VPC create API endpoint retains Pending when Core is unavailable after dispatch",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -829,8 +887,8 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				respCode:    http.StatusServiceUnavailable,
 				respMessage: unavailableErr.Error(),
 			},
-			wantErr:          false,
-			expectRolledBack: true,
+			wantErr:       false,
+			expectPending: true,
 		},
 		{
 			name: "test VPC create API endpoint rejects SLAAC for explicit ethernet virtualization",
@@ -1293,6 +1351,43 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			wantErr:            false,
 			verifyChildSpanner: true,
 		},
+		// An older REST row can have a different ID from its Site's Core VPC.
+		// Reject that alias before inserting Pending or dispatching another create.
+		{
+			name:   "test VPC create rejects an existing controller ID on the same Site",
+			fields: fields{dbSession: dbSession, tc: tc, cfg: cfg},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					ID:     existingVPCSt1.ControllerVpcID,
+					Name:   "Test VPC duplicate controller ID",
+					SiteID: st1.ID.String(),
+				},
+				reqOrg: tnOrg, reqUser: tnu,
+				respCode:    http.StatusConflict,
+				respMessage: "A VPC with specified ID already exists",
+			},
+			expectNoMutation: true,
+		},
+		// A different Site has its own Core namespace, so this ID remains available.
+		{
+			name:   "test VPC create accepts a controller ID used on another Site",
+			fields: fields{dbSession: dbSession, tc: tc, cfg: cfg},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					ID:                        existingVPCSt1.ControllerVpcID,
+					Name:                      "Test VPC controller ID on another Site",
+					SiteID:                    st2.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+				},
+				reqOrg: tnOrg, reqUser: tnu,
+				respCode:       http.StatusCreated,
+				expectedStatus: cdbm.VpcStatusProvisioning,
+				expectedStatusDetails: []expectedStatusDetail{
+					{status: cdbm.VpcStatusProvisioning, message: "VPC provisioning has been initiated on Site"},
+				},
+			},
+		},
+
 		{
 			name: "test VPC create API endpoint NSG not owned by tenant - fail",
 			fields: fields{
@@ -1508,6 +1603,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIVpcCreateRequest{
+					ID:          &timeoutVpcID,
 					Name:        "Test VPC 3",
 					Description: cutil.GetPtr("Test VPC Description 3"),
 					SiteID:      st3.ID.String(),
@@ -1518,10 +1614,11 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				},
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
-				respCode: http.StatusInternalServerError,
+				respCode: http.StatusGatewayTimeout,
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+			expectPending:      true,
 		},
 		{
 			name: "test VPC create API endpoint failure, invalid label key",
@@ -1550,6 +1647,8 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			dispatchTest = t
+			dispatchedVpc = nil
 			tsc.Calls = nil
 			tst3.Calls = nil
 
@@ -1572,7 +1671,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			}
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1592,6 +1691,11 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.args.respCode, rec.Code)
+			tsc.AssertNotCalled(t, "TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			tst3.AssertNotCalled(t, "TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			if rec.Code >= http.StatusInternalServerError && dispatchedVpc != nil && dispatchedVpc.Name == tt.args.reqData.Name {
+				assert.Contains(t, rec.Body.String(), dispatchedVpc.GetId().GetValue(), "uncertain responses identify the retained VPC")
+			}
 			if tt.args.respMessage != "" {
 				assert.Contains(t, rec.Body.String(), tt.args.respMessage)
 			}
@@ -1610,22 +1714,73 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				tsc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", requestMatcher)
 				tst3.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", requestMatcher)
 			}
-			if tt.expectRolledBack {
+			if tt.expectPending {
 				persistedVpcs, total, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetAll(ctx, nil, cdbm.VpcFilterInput{Name: &tt.args.reqData.Name}, paginator.PageInput{}, nil)
 				require.NoError(t, gerr)
-				assert.Zero(t, total)
-				assert.Empty(t, persistedVpcs)
+				require.Equal(t, 1, total)
+				require.Len(t, persistedVpcs, 1)
+				assert.Equal(t, cdbm.VpcStatusPending, persistedVpcs[0].Status)
+				assert.Equal(t, tnu.ID, persistedVpcs[0].CreatedBy)
 
 				require.NotNil(t, tt.args.reqData.ID)
 				statusDetails, total, gerr := cdbm.NewStatusDetailDAO(tt.fields.dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{tt.args.reqData.ID.String()}}, paginator.PageInput{})
 				require.NoError(t, gerr)
-				assert.Zero(t, total)
-				assert.Empty(t, statusDetails)
+				require.Equal(t, 1, total)
+				require.Len(t, statusDetails, 1)
+				assert.Equal(t, cdbm.VpcStatusPending, statusDetails[0].Status)
 
 				forwardedRequestMatcher := mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
-					return req != nil && req.Name == tt.args.reqData.Name && req.SlaacEnabled != nil && *req.SlaacEnabled
+					return req != nil && req.Name == tt.args.reqData.Name && req.GetSlaacEnabled() == persistedVpcs[0].SlaacEnabled
 				})
-				tsc.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", forwardedRequestMatcher)
+				// Each Site dispatches through its own client, including the timeout case.
+				siteClient := tsc
+				if tt.args.reqData.SiteID == st3.ID.String() {
+					siteClient = tst3
+				}
+				siteClient.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", forwardedRequestMatcher)
+			}
+			if tt.expectPending && tt.args.reqData.ID != nil && *tt.args.reqData.ID == unavailableVpcID {
+				retry := *tt.args.reqData
+				retry.Name = "changed inputs for the same pending identity"
+				body, marshalErr := json.Marshal(retry)
+				require.NoError(t, marshalErr)
+				retryReq := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+				retryReq.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+				retryRec := httptest.NewRecorder()
+				retryContext := e.NewContext(retryReq, retryRec)
+				retryContext.SetParamNames("orgName")
+				retryContext.SetParamValues(tnOrg)
+				retryContext.Set("user", tnu)
+				require.NoError(t, csh.Handle(retryContext))
+				assert.Equal(t, http.StatusConflict, retryRec.Code, retryRec.Body.String())
+
+				patchReq := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"name":"changed"}`))
+				patchReq.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+				patchRec := httptest.NewRecorder()
+				patchContext := e.NewContext(patchReq, patchRec)
+				patchContext.SetParamNames("orgName", "id")
+				patchContext.SetParamValues(tnOrg, unavailableVpcID.String())
+				patchContext.Set("user", tnu)
+				update := NewUpdateVPCHandler(dbSession, tc, scp, cfg, nil)
+				require.NoError(t, update.Handle(patchContext))
+				assert.Equal(t, http.StatusConflict, patchRec.Code, patchRec.Body.String())
+
+				pendingForDeletion, pendingErr := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, unavailableVpcID, nil)
+				require.NoError(t, pendingErr)
+				mockVpcCreationCancellation(t, tsc, pendingForDeletion, &corev1.CancelVpcCreationResponse{}, swe.ErrTypeNICoUnavailable)
+				deleteReq := httptest.NewRequest(http.MethodDelete, "/", nil)
+				deleteRec := httptest.NewRecorder()
+				deleteContext := e.NewContext(deleteReq, deleteRec)
+				deleteContext.SetParamNames("orgName", "id")
+				deleteContext.SetParamValues(tnOrg, unavailableVpcID.String())
+				deleteContext.Set("user", tnu)
+				remove := NewDeleteVPCHandler(dbSession, tc, scp, cfg, nil)
+				require.NoError(t, remove.Handle(deleteContext))
+				assert.Equal(t, http.StatusServiceUnavailable, deleteRec.Code, deleteRec.Body.String())
+				unchanged, readErr := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, unavailableVpcID, nil)
+				require.NoError(t, readErr)
+				assert.Equal(t, unavailableVpcName, unchanged.Name)
+				assert.Equal(t, cdbm.VpcStatusPending, unchanged.Status)
 			}
 			if tt.args.respCode != http.StatusCreated {
 				return
@@ -1673,8 +1828,15 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			require.NotNil(t, rst.NetworkVirtualizationType)
 			assert.Equal(t, expectedVirtualizationType, *rst.NetworkVirtualizationType)
 			assert.Equal(t, tt.args.expectedStatus, rst.Status)
-			require.Len(t, rst.StatusHistory, len(tt.args.expectedStatusDetails))
-			for i, expectedStatusDetail := range tt.args.expectedStatusDetails {
+			expectedHistory := []expectedStatusDetail{{status: cdbm.VpcStatusPending, message: "VPC creation is awaiting its original Site result"}}
+			for _, detail := range tt.args.expectedStatusDetails {
+				if rst.Status == cdbm.VpcStatusReady && detail.status == cdbm.VpcStatusProvisioning {
+					continue
+				}
+				expectedHistory = append(expectedHistory, detail)
+			}
+			require.Len(t, rst.StatusHistory, len(expectedHistory))
+			for i, expectedStatusDetail := range expectedHistory {
 				assert.Equal(t, expectedStatusDetail.status, rst.StatusHistory[i].Status)
 				require.NotNil(t, rst.StatusHistory[i].Message)
 				assert.Equal(t, expectedStatusDetail.message, *rst.StatusHistory[i].Message)
@@ -1779,6 +1941,8 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+	t.Run("creation lifecycle", testVpcCreationLifecycle)
+	t.Run("live Core completion", testVPCCompletionIntegration)
 }
 
 func TestUpdateVPCHandler_Handle(t *testing.T) {
@@ -1793,7 +1957,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 		reqOrg      string
 		reqUser     *cdbm.User
 		reqVPCID    string
-		reqVPC      *cdbm.Vpc
 		respCode    int
 		respMessage string
 	}
@@ -1980,7 +2143,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					PowerResourceGroup: cutil.GetPtr("resource-group"),
 				},
 				reqVPCID:    vpc.ID.String(),
-				reqVPC:      vpc,
 				reqOrg:      tnOrg,
 				reqUser:     tnu,
 				respCode:    http.StatusPreconditionFailed,
@@ -2000,7 +2162,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					RoutingProfileOverrides: updateRoutingProfileOverrides,
 				},
 				reqVPCID: vpcFNN.ID.String(),
-				reqVPC:   vpcFNN,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2020,7 +2181,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					RoutingProfileOverrides: updateRoutingProfileOverrides,
 				},
 				reqVPCID:    vpcFNNUnprivileged.ID.String(),
-				reqVPC:      vpcFNNUnprivileged,
 				reqOrg:      tnOrg3,
 				reqUser:     tnu3,
 				respCode:    http.StatusForbidden,
@@ -2041,7 +2201,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					RoutingProfileOverrides: updateRoutingProfileOverrides,
 				},
 				reqVPCID:    vpc2.ID.String(),
-				reqVPC:      vpc2,
 				reqOrg:      tnOrg,
 				reqUser:     tnu,
 				respCode:    http.StatusBadRequest,
@@ -2065,7 +2224,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NVLinkLogicalPartitionID: cutil.GetPtr(nvllp1.ID.String()),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2085,7 +2243,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NetworkSecurityGroupID: &nsgTenant1Site1.ID,
 				},
 				reqVPCID: vpcForNSGSet.ID.String(),
-				reqVPC:   vpcForNSGSet,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2111,7 +2268,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					},
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusForbidden,
@@ -2136,7 +2292,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					},
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusForbidden,
@@ -2161,7 +2316,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					},
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusBadRequest,
@@ -2181,7 +2335,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NetworkSecurityGroupID: cutil.GetPtr(""),
 				},
 				reqVPCID: vpcWithNSG.ID.String(),
-				reqVPC:   vpcWithNSG,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2204,7 +2357,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusConflict,
@@ -2224,7 +2376,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc2.ID.String(),
-				reqVPC:   vpc2,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2244,7 +2395,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   ipOrg,
 				reqUser:  ipu,
 				respCode: http.StatusForbidden,
@@ -2263,7 +2413,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Name:        cutil.GetPtr("test-vpc"),
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
-				reqVPC:   vpc,
 				reqVPCID: "",
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
@@ -2284,7 +2433,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc4.ID.String(),
-				reqVPC:   vpc4,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusForbidden,
@@ -2309,7 +2457,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				},
 				reqOrg:      tnOrg,
 				reqVPCID:    vpc3.ID.String(),
-				reqVPC:      vpc3,
 				reqUser:     tnu,
 				respCode:    http.StatusInternalServerError,
 				respMessage: "Failed to perform VPC Update - timeout occurred executing workflow on Site",
@@ -2334,7 +2481,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				},
 				reqOrg:      tnOrg,
 				reqVPCID:    vpc.ID.String(),
-				reqVPC:      vpc,
 				reqUser:     tnu,
 				respCode:    http.StatusBadRequest,
 				respMessage: "label key must contain at least 1 character and a maximum of 255 characters",
@@ -2356,7 +2502,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NVLinkLogicalPartitionID: cutil.GetPtr(""),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2378,7 +2523,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NVLinkLogicalPartitionID: cutil.GetPtr(nvllp2.ID.String()),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2399,7 +2543,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2411,6 +2555,12 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
+			var previousUpdated time.Time
+			if tt.args.respCode == http.StatusOK {
+				predecessor, getErr := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPCID), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateVPCHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -2453,7 +2603,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				require.NotNil(t, rst.Description)
 				assert.Equal(t, *tt.args.reqData.Description, *rst.Description)
 			}
-			assert.NotEqual(t, rst.Updated.String(), tt.args.reqVPC.Updated.String())
+			assert.False(t, rst.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rst.Updated)
 
 			if tt.args.reqData.NVLinkLogicalPartitionID != nil {
 				if *tt.args.reqData.NVLinkLogicalPartitionID == "" {
@@ -2577,7 +2727,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 		}
 		requestBody, err := json.Marshal(model.APIVpcUpdateRequest{PowerResourceGroup: cutil.GetPtr("replacement-group")})
 		require.NoError(t, err)
-		request := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(requestBody)))
+		request := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(requestBody))
 		request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		response := httptest.NewRecorder()
 		echoContext := echo.New().NewContext(request, response)
@@ -2989,7 +3139,7 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -3033,6 +3183,7 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+	t.Run("Pending creation blocks virtualization", testVpcVirtualizationPending)
 }
 
 func TestGetVPCHandler_Handle(t *testing.T) {
@@ -4520,6 +4671,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 	}
 	peeringSiteClient.AssertExpectations(t)
 	peeringWorkflowRun.AssertExpectations(t)
+	t.Run("creation decisions", testVpcDeletionCreationDecisions)
 }
 
 func TestNewCreateVPCHandler(t *testing.T) {

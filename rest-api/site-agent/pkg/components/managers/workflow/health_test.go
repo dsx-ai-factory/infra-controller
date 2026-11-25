@@ -185,6 +185,7 @@ func TestStopWorker(t *testing.T) {
 }
 
 func TestOrchestrator(t *testing.T) {
+	t.Run("SitePrefix registration failure fails liveness", checkSitePrefixRegistrationFailure)
 	t.Run("failed reconnect fails liveness", func(t *testing.T) {
 		// No client certificate exists under TemporalCertPath, so the attempt
 		// fails before dialing Temporal.

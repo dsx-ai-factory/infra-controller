@@ -143,10 +143,10 @@ pub async fn get_all_measurement_profile_records(
 /// MeasurementSystemProfileRecord for the given `profile_id`,
 /// if it exists.
 pub async fn get_measurement_profile_record_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     profile_id: MeasurementSystemProfileId,
 ) -> Result<Option<MeasurementSystemProfileRecord>, DatabaseError> {
-    common::get_object_for_id(txn, profile_id)
+    common::get_object_for_id(conn, profile_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_profile_record_by_id"))
 }
@@ -155,10 +155,10 @@ pub async fn get_measurement_profile_record_by_id(
 /// MeasurementSystemProfileRecord for the given `name`,
 /// if it exists.
 pub async fn get_measurement_profile_record_by_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     val: String,
 ) -> Result<Option<MeasurementSystemProfileRecord>, DatabaseError> {
-    common::get_object_for_unique_column(txn, "name", val)
+    common::get_object_for_unique_column(conn, "name", val)
         .await
         .map_err(|e| e.with_op_name("get_measurement_profile_record_by_name"))
 }
@@ -187,12 +187,15 @@ pub async fn delete_profile_attr_records_for_id(
 
 /// get_measurement_profile_record_by_attrs will attempt to get a single
 /// MeasurementSystemProfileRecord for the given attrs.
-pub async fn get_measurement_profile_record_by_attrs(
-    txn: &mut PgConnection,
+pub async fn get_measurement_profile_record_by_attrs<DB>(
+    conn: &mut DB,
     attrs: &HashMap<String, String>,
-) -> Result<Option<MeasurementSystemProfileRecord>, DatabaseError> {
-    match get_measurement_profile_id_by_attrs(txn, attrs).await? {
-        Some(profile_id) => get_measurement_profile_record_by_id(txn, profile_id).await,
+) -> Result<Option<MeasurementSystemProfileRecord>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match get_measurement_profile_id_by_attrs(&mut *conn, attrs).await? {
+        Some(profile_id) => get_measurement_profile_record_by_id(conn, profile_id).await,
         None => Ok(None),
     }
 }
@@ -217,7 +220,7 @@ pub async fn get_measurement_profile_record_by_attrs(
 /// GROUP BY {t1}}.{join_id}
 /// HAVING COUNT(*) = {attrs_len}"
 pub async fn get_measurement_profile_id_by_attrs(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     attrs: &HashMap<String, String>,
 ) -> Result<Option<MeasurementSystemProfileId>, DatabaseError> {
     let t1 = "measurement_system_profiles_attrs";
@@ -260,7 +263,7 @@ pub async fn get_measurement_profile_id_by_attrs(
 
     let query = query.build_query_as();
     let ids = query
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::new("get_measurement_profile_id_by_attrs", e))?;
 
@@ -271,9 +274,9 @@ fn where_attr_pairs(query: &mut QueryBuilder<Postgres>, values: &HashMap<String,
     query.push("where (key, value) in (");
     for (index, (key, value)) in values.iter().enumerate() {
         query.push("(");
-        query.push_bind(key.clone());
+        query.push_bind(key);
         query.push(",");
-        query.push_bind(value.clone());
+        query.push_bind(value);
         query.push(")");
         if index < values.len() - 1 {
             query.push(", ");
@@ -298,13 +301,13 @@ pub async fn get_measurement_profile_attrs_for_profile_id(
 ///
 /// This is specifically used by the `profile list bundles for-id` CLI call.
 pub async fn get_bundles_for_profile_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     profile_id: MeasurementSystemProfileId,
 ) -> Result<Vec<MeasurementBundleId>, DatabaseError> {
     let query = "select distinct bundle_id from measurement_bundles where profile_id = $1 order by bundle_id";
     sqlx::query_as(query)
         .bind(profile_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("get_bundles_for_profile_id", e))
 }
@@ -314,14 +317,14 @@ pub async fn get_bundles_for_profile_id(
 ///
 /// This is specifically used by the `profile list bundles for-name` CLI call.
 pub async fn get_bundles_for_profile_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     profile_name: String,
 ) -> Result<Vec<MeasurementBundleId>, DatabaseError> {
     let query =
         "select distinct bundle_id from measurement_bundles where name = $1 order by bundle_id";
     sqlx::query_as(query)
         .bind(profile_name)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("get_bundles_for_profile_name", e))
 }
@@ -331,13 +334,13 @@ pub async fn get_bundles_for_profile_name(
 ///
 /// This is specifically used by the `profile list machines by-id` CLI call.
 pub async fn get_machines_for_profile_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     profile_id: MeasurementSystemProfileId,
 ) -> Result<Vec<MachineId>, DatabaseError> {
     let query = "select distinct machine_id from measurement_journal where profile_id = $1 order by machine_id";
     sqlx::query_as(query)
         .bind(profile_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("get_machines_for_profile_id", e))
 }
@@ -347,13 +350,13 @@ pub async fn get_machines_for_profile_id(
 ///
 /// This is specifically used by the `profile list machines by-name` CLI call.
 pub async fn get_machines_for_profile_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     profile_name: String,
 ) -> Result<Vec<MachineId>, DatabaseError> {
     let query = "select distinct machine_id from measurement_journal,measurement_system_profiles where measurement_journal.profile_id=measurement_system_profiles.profile_id and measurement_system_profiles.name = $1 order by machine_id";
     sqlx::query_as(query)
         .bind(profile_name)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("get_machines_for_profile_name", e))
 }
@@ -470,9 +473,9 @@ pub async fn export_measurement_system_profiles_attrs(
 /// get_all_measurement_profile_attr_records gets all system profile
 /// attribute records.
 pub async fn get_all_measurement_profile_attr_records(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<MeasurementSystemProfileAttrRecord>, DatabaseError> {
-    common::get_all_objects(txn)
+    common::get_all_objects(conn)
         .await
         .map_err(|e| e.with_op_name("get_all_measurement_profile_attr_records"))
 }

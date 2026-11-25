@@ -42,6 +42,6 @@ impl Run for Args {
             .api_client
             .get_power_shelf_health_history(self.power_shelf_id)
             .await?;
-        display_health_history(&self.power_shelf_id.to_string(), history, ctx.config.format)
+        display_health_history(self.power_shelf_id, history, ctx.config.format)
     }
 }

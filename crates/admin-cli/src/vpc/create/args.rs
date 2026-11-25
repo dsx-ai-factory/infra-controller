@@ -83,6 +83,7 @@ impl From<Args> for forge::VpcCreationRequest {
                 ..Default::default()
             }),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             vni: None,
             routing_profile_type: None,

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use carbide_utils::SCOUT_FIRMWARE_SCRIPTS_DIR;
 use eyre::{WrapErr, bail};
+use itertools::Itertools;
 use model::firmware::{FirmwareComponentType, ScoutConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -65,6 +66,22 @@ pub(crate) fn find_scout_script(
         component_type,
         scout,
     )
+}
+
+pub fn has_packaged_scout_script(
+    vendor: bmc_vendor::BMCVendor,
+    model: &str,
+    component_type: FirmwareComponentType,
+) -> eyre::Result<bool> {
+    // The URL base only shapes the returned task URL, which is discarded.
+    find_scout_script_in(
+        Path::new(SCOUT_FIRMWARE_SCRIPTS_DIR),
+        "",
+        vendor,
+        model,
+        component_type,
+    )
+    .map(|script| script.is_some())
 }
 
 fn resolve_scout_script_in(
@@ -229,7 +246,6 @@ impl ScoutFirmwareScriptSelector {
 fn safe_lookup_key(value: &str) -> Option<String> {
     let value = value
         .split_ascii_whitespace()
-        .collect::<Vec<_>>()
         .join("_")
         .to_ascii_lowercase();
     let mut key = String::with_capacity(value.len());

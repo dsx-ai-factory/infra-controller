@@ -98,6 +98,7 @@ const ESCAPES: &str = "Ünïcödé ✓ 🚀 \"quoted\" back\\slash\nline\ttab\r\
 
 fn sweep_info() -> SweepInfo {
     SweepInfo {
+        firmware_config: None,
         last_attempt_succeeded: None,
         last_attempt_error: None,
         snapshot_id: "s-7".to_string(),
@@ -144,6 +145,10 @@ fn host_unit() -> Unit {
         bmc_ip: s("10.0.0.5"),
         state: "HostInitializing".to_string(),
         host: Some(HostFields {
+            firmware_window: None,
+            firmware_policy_eligible: None,
+            firmware_policy_blocking_reason: None,
+            firmware: None,
             vendor: s("NVIDIA"),
             model: s("GB200 NVL"),
             instance_type: None,
@@ -178,6 +183,10 @@ fn full_host_unit() -> Unit {
         done: true,
         state: "Ready".to_string(),
         host: Some(HostFields {
+            firmware_window: None,
+            firmware_policy_eligible: None,
+            firmware_policy_blocking_reason: None,
+            firmware: None,
             vendor: s("Dell Inc."),
             model: s("PowerEdge R750"),
             instance_type: s("it-1"),
@@ -208,6 +217,90 @@ fn full_host_unit() -> Unit {
 #[test]
 fn wire_vectors_match_the_files() {
     let mut written = BTreeSet::new();
+    check_vector(
+        &mut written,
+        "config-response.firmware.json",
+        &ConfigResponse {
+            nico_api: Some(ConfigNicoApi {
+                revision: Some(1),
+                read: read_info(),
+                firmware_targets: vec![FirmwareTarget {
+                    vendor: "nvidia".into(),
+                    model: "GB200 NVL".into(),
+                    component: Component::Bmc,
+                    component_name: s("bmc"),
+                    inventory_name_regex: s("^BMC.*$"),
+                    version: "new".into(),
+                    explicit_start: true,
+                }],
+                runtime: RuntimeSettings {
+                    machine_update_run_interval_seconds: Some(300),
+                    requires_manual_upgrade: Some(true),
+                    max_concurrent_machine_updates_absolute: Some(0),
+                    max_concurrent_machine_updates_percent: None,
+                    auto_host_firmware_update: Some(false),
+                },
+                site_explorer: None,
+            }),
+            rest: None,
+            rest_site: None,
+            metrics: None,
+        },
+    );
+    let mut host = full_host_unit();
+    let fields = host.host.as_mut().unwrap();
+    fields.firmware_window = Some(FirmwareWindow {
+        start: None,
+        end: None,
+    });
+    fields.firmware_policy_eligible = Some(true);
+    fields.firmware = Some(HostFirmware {
+        report_version: s("report-1"),
+        waiting_for_refresh: Some(false),
+        components: vec![FirmwareComponentInventory {
+            component_name: "bmc".into(),
+            entries: vec![FirmwareInventoryEntry {
+                service_id: "Redfish".into(),
+                inventory_id: "BMC".into(),
+                version: s("new"),
+            }],
+            phase: FirmwarePhase::Current,
+        }],
+    });
+    check_vector(
+        &mut written,
+        "units-response.firmware.json",
+        &UnitsResponse {
+            sweep: SweepInfo {
+                firmware_config: Some(FirmwareConfigEvidence {
+                    revision: 1,
+                    read_start: t("2026-10-23T10:00:00Z"),
+                    read_at: t("2026-10-23T10:00:01Z"),
+                }),
+                ..sweep_info()
+            },
+            units: vec![host],
+            missing_ids: vec![],
+            next_cursor: None,
+        },
+    );
+    let mut filter = Filter::new(UnitType::Host);
+    filter.vendor = s("nvidia");
+    filter.model = s("GB200 NVL");
+    filter.firmware_component = Some(Component::Bmc);
+    filter.firmware_phase = Some(FirmwarePhase::Current);
+    filter.firmware_ready = Some(true);
+    check_vector(
+        &mut written,
+        "units-query.firmware.json",
+        &UnitsQuery {
+            filter,
+            name: None,
+            ids: vec![],
+            limit: None,
+            cursor: None,
+        },
+    );
 
     check_vector(
         &mut written,
@@ -348,6 +441,7 @@ fn wire_vectors_match_the_files() {
         "config-response.full.json",
         &ConfigResponse {
             nico_api: Some(ConfigNicoApi {
+                revision: None,
                 read: ReadInfo {
                     last_attempt_error: s("rpc: deadline exceeded"),
                     ..read_info()
@@ -361,6 +455,8 @@ fn wire_vectors_match_the_files() {
                 .into_iter()
                 .enumerate()
                 .map(|(i, component)| FirmwareTarget {
+                    component_name: None,
+                    inventory_name_regex: None,
                     vendor: "NVIDIA".to_string(),
                     model: "GB200 NVL".to_string(),
                     component,
@@ -369,6 +465,8 @@ fn wire_vectors_match_the_files() {
                 })
                 .collect(),
                 runtime: RuntimeSettings {
+                    machine_update_run_interval_seconds: None,
+                    requires_manual_upgrade: None,
                     max_concurrent_machine_updates_absolute: Some(i64::MAX),
                     max_concurrent_machine_updates_percent: Some(0),
                     auto_host_firmware_update: Some(false),
@@ -523,6 +621,10 @@ where
 fn enum_names_match_the_file() {
     let enums: BTreeMap<&str, Vec<String>> = BTreeMap::from([
         (
+            "FirmwarePhase",
+            wire_names(variants!(FirmwarePhase: Unknown, Behind, Updating, Failed, Current)),
+        ),
+        (
             "UnitType",
             wire_names(variants!(UnitType: Rack, Host, Dpu, Switch, PowerShelf,
                 Instance, ExpectedRecord, IdentityMismatch, HostFirmwareRequest, RestTotal)),
@@ -628,6 +730,7 @@ const INVALID: &[&str] = &[
     "units-query.null-ids.json => invalid type: null",
     "units-query.string-bool.json => expected a boolean",
     "units-query.unknown-field.json => unknown field `bogus`",
+    "units-query.unknown-firmware-phase.json => unknown variant `future`",
     "units-query.unknown-stage.json => unknown variant `done`",
     "units-response.missing-missing-ids.json => missing field `missingIds`",
     "units-response.missing-update-complete.json => missing field `updateComplete`",

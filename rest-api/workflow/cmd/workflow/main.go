@@ -224,9 +224,10 @@ func run(ctx context.Context) error {
 	defer tc.Close()
 
 	w := tsdkWorker.New(tc, tcfg.Queue, tsdkWorker.Options{
-		WorkflowPanicPolicy:              tsdkWorker.FailWorkflow,
-		MaxConcurrentActivityTaskPollers: cfg.GetMaxConcurrentActivityPollers(),
-		MaxConcurrentWorkflowTaskPollers: 10,
+		WorkflowPanicPolicy:                tsdkWorker.FailWorkflow,
+		MaxConcurrentActivityExecutionSize: cfg.GetMaxConcurrentActivityExecutionSize(),
+		MaxConcurrentActivityTaskPollers:   cfg.GetMaxConcurrentActivityPollers(),
+		MaxConcurrentWorkflowTaskPollers:   10,
 	})
 
 	siteClientPool := sc.NewClientPool(tcfg)

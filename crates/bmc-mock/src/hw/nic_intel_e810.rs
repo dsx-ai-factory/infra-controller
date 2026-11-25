@@ -27,7 +27,8 @@ pub(crate) struct NicIntelE810 {
 impl NicIntelE810 {
     pub(super) fn ethernet_nics(&self) -> [hw::nic::Nic<'static>; 2] {
         // Real serial numbers are MAC address of port0 without ':'.
-        let serial_number = self.mac_addresses[0].to_string().replace(":", "");
+        let [a, b, c, d, e, f] = self.mac_addresses[0].bytes();
+        let serial_number = format!("{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}");
         self.mac_addresses.map(|mac| hw::nic::Nic {
             mac_address: mac,
             serial_number: Some(serial_number.clone().into()),

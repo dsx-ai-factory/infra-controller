@@ -539,7 +539,7 @@ mod tests {
                 ],
                 |url| {
                     runtime.block_on(async {
-                        FirmwareStaging::new(carbide_instrument::Instrumentation::global())
+                        FirmwareStaging::new(carbide_instrument::Instrumentation::noop())
                             .unwrap()
                             .stage(
                                 &reqwest::Client::new(),
@@ -706,7 +706,7 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
             }),
         );
         let (base, server) = start_server(app).await;
-        let mut staging = FirmwareStaging::new(carbide_instrument::Instrumentation::global())
+        let mut staging = FirmwareStaging::new(carbide_instrument::Instrumentation::noop())
             .unwrap()
             .with_retry_backoff(Duration::from_millis(10));
         let path = staging
@@ -736,7 +736,7 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
         let (base, server) = start_server(app).await;
         let client = reqwest::Client::new();
         let mut staging =
-            FirmwareStaging::new(carbide_instrument::Instrumentation::global()).unwrap();
+            FirmwareStaging::new(carbide_instrument::Instrumentation::noop()).unwrap();
         let work_dir = staging.work_dir().to_path_buf();
         let image = staging
             .stage(
@@ -803,7 +803,7 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
             let (base, server) = start_server(app).await;
             let client = reqwest::Client::new();
             let mut staging =
-                FirmwareStaging::new(carbide_instrument::Instrumentation::global()).unwrap();
+                FirmwareStaging::new(carbide_instrument::Instrumentation::noop()).unwrap();
             let work_dir = staging.work_dir().to_path_buf();
             let destination = staging.download_dir().join("image.bin");
             let url = format!("{base}/image.bin");
@@ -873,7 +873,7 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
         let (base, server) = start_server(app).await;
         let client = reqwest::Client::new();
         let mut staging =
-            FirmwareStaging::new(carbide_instrument::Instrumentation::global()).unwrap();
+            FirmwareStaging::new(carbide_instrument::Instrumentation::noop()).unwrap();
         let work_dir = staging.work_dir().to_path_buf();
         let url = format!("{base}/image.bin");
         // One subscriber must remain attached throughout the future, since

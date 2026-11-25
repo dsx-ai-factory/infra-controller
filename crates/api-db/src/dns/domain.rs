@@ -344,7 +344,7 @@ pub async fn find_by_uuid_for_delete(
 /// Reports whether a live network segment or machine interface references the
 /// domain. The caller must first hold the delete lock for this domain.
 pub async fn has_live_references(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     uuid: DomainId,
 ) -> Result<bool, DatabaseError> {
     let query = "SELECT EXISTS (
@@ -358,7 +358,7 @@ pub async fn has_live_references(
                  )";
     sqlx::query_scalar(query)
         .bind(uuid)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
@@ -544,10 +544,11 @@ mod test_find_longest_live_zone {
     use model::dns::NewDomain;
 
     use crate as db;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn finds_the_longest_live_site_zone(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.expect("begin");
+        let mut txn = pool.txn_begin().await.expect("begin");
         for name in ["example.com", "mysite.example.com."] {
             db::dns::domain::persist(NewDomain::new(name), &mut txn)
                 .await
@@ -592,13 +593,14 @@ mod test_find_by_uuids {
     use model::dns::NewDomain;
 
     use crate as db;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn find_by_uuids_collapses_n_plus_one(pool: sqlx::PgPool) {
         const N: usize = 8;
 
         // Seed N distinct domains.
-        let mut txn = pool.begin().await.expect("begin");
+        let mut txn = pool.txn_begin().await.expect("begin");
         let mut ids = Vec::with_capacity(N);
         for i in 0..N {
             let domain =

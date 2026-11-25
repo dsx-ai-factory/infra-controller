@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -560,8 +561,11 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 			w := getRRW(rw)
 			defer func() {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
-				for _, count := range counts {
-					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
+				if len(counts) > 0 {
+					statusCode := strconv.Itoa(w.statusCode)
+					for _, count := range counts {
+						count.WithLabelValues(r.URL.Path, r.Method, statusCode).Inc()
+					}
 				}
 				// Return the writer back to the pool
 				putRRW(w)

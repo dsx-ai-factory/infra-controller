@@ -1033,10 +1033,9 @@ pub(crate) async fn discover_dhcp(
     // Permit from the top of discover_dhcp is still held here; the earlier
     // transaction committed, but the allocation path below takes the same
     // segment locks, so one permit covers the whole request.
-    let mut txn = api.txn_begin().await?;
 
     let record = db::dhcp_record::find_by_mac_address(
-        &mut txn,
+        api.pg_pool(),
         &parsed_mac,
         &machine_interface.segment_id,
         address_family,
@@ -1050,8 +1049,6 @@ pub(crate) async fn discover_dhcp(
         ),
     })?;
     let mut record: rpc::DhcpRecord = record.into();
-
-    txn.commit().await?;
 
     record.ntp_servers = api
         .runtime_config

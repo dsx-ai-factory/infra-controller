@@ -203,7 +203,6 @@ impl RemediationClientCreationFailed {
 mod tests {
     use std::str::FromStr as _;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 
@@ -243,33 +242,33 @@ mod tests {
             run = |case| {
                 let dpu_machine_id = MachineId::from_str(DPU_MACHINE_ID).unwrap();
                 let remediation_id = RemediationId::nil();
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| match case {
                     FailureCase::StatusDecode => {
-                        emit(RemediationStatusOutputDecodeFailed::new(
+                        metrics.instrumentation().emit(RemediationStatusOutputDecodeFailed::new(
                             dpu_machine_id,
                             remediation_id,
                             "expected value at line 1 column 1".to_string(),
                         ));
                     }
                     FailureCase::Apply => {
-                        emit(RemediationApplyFailed::new(
+                        metrics.instrumentation().emit(RemediationApplyFailed::new(
                             dpu_machine_id,
                             remediation_id,
                             "transport error".to_string(),
                         ));
                     }
                     FailureCase::ResponseValidation => {
-                        emit(RemediationResponseInvalid::new(dpu_machine_id, true, false));
+                        metrics.instrumentation().emit(RemediationResponseInvalid::new(dpu_machine_id, true, false));
                     }
                     FailureCase::Fetch => {
-                        emit(RemediationFetchFailed::new(
+                        metrics.instrumentation().emit(RemediationFetchFailed::new(
                             dpu_machine_id,
                             "service unavailable".to_string(),
                         ));
                     }
                     FailureCase::ClientCreation => {
-                        emit(RemediationClientCreationFailed::new(
+                        metrics.instrumentation().emit(RemediationClientCreationFailed::new(
                             dpu_machine_id,
                             "invalid endpoint".to_string(),
                         ));

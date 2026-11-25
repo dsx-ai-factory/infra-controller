@@ -17,6 +17,7 @@ type Registry struct {
 // Config contains the dependencies used to assemble the supported executors.
 type Config struct {
 	TaskManager TaskManager
+	EventTypes  EventTypeReader
 	AlertSender AlertSender
 }
 
@@ -43,7 +44,7 @@ func New(config Config) (*Registry, error) {
 		return nil, err
 	}
 
-	taskExecutor := &TaskExecutor{manager: config.TaskManager}
+	taskExecutor := &TaskExecutor{manager: config.TaskManager, events: config.EventTypes}
 	if err := registry.register(eventrule.ActionTypeSubmitTask, taskExecutor); err != nil {
 		return nil, err
 	}

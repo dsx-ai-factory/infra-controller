@@ -216,6 +216,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	ethernetInterfacesToDelete := []*cdbm.Interface{}
 	infiniBandInterfacesToDelete := []*cdbm.InfiniBandInterface{}
 	spectrumXAttachmentsToDelete := []*cdbm.SpectrumXAttachment{}
+	nvlifcDAO := cdbm.NewNVLinkInterfaceDAO(mi.dbSession)
 	nvLinkInterfacesToDelete := []*cdbm.NVLinkInterface{}
 
 	// Iterate through Instances in the inventory and update them in DB
@@ -709,7 +710,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				// Construct a map of InfiniBand Interface ID to InfiniBand Interface
 				// using the InfiniBand Partition ID, device and device Instance
 				// as the key
-				ibifcKey := fmt.Sprintf("%s-%s-%d", ibifc.InfiniBandPartition.ControllerIBPartitionID.String(), ibifc.Device, ibifc.DeviceInstance)
+				ibifcKey := fmt.Sprintf("%s-%s-%d", *ibifc.InfiniBandPartition.ControllerIBPartitionID, ibifc.Device, ibifc.DeviceInstance)
 				infiniBandInterfaceMap[ibifcKey] = &curIbIfc
 			}
 		}
@@ -735,6 +736,10 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
+				if idx >= len(controllerInstance.Status.Infiniband.IbInterfaces) {
+					slogger.Warn().Int("InfiniBand Interface Index", idx).Msg("Site Controller Instance is missing matching InfiniBand Interface status")
+					continue
+				}
 				interfaceStatus := controllerInstance.Status.Infiniband.IbInterfaces[idx]
 				if interfaceStatus != nil {
 
@@ -968,12 +973,10 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
-				// A synced config and an aged row do not show that this attachment is gone,
-				// only that some attachment synced and that the row has not changed
-				// recently. Deleting a row the Site still reports would also drop the last
-				// link its Partition has to a live Instance, which is what the REST
-				// deletion guard counts.
-				if reportedSxaKeys[sxa.Key()] {
+				// A reported identity keeps its lone Deleting row because the Site may still
+				// be retiring it. When an active row has the same identity, that row owns the
+				// report and the older Deleting duplicate is safe to remove.
+				if reportedSxaKeys[sxa.Key()] && spectrumXAttachmentMap[sxa.Key()] == nil {
 					continue
 				}
 
@@ -997,7 +1000,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 		for _, desd := range desds {
 			curDesd := desd
-			desvID := fmt.Sprintf("%s-%s", curDesd.DpuExtensionServiceID.String(), curDesd.Version)
+			desvID := fmt.Sprintf("%s-%s", curDesd.DpuExtensionServiceID, curDesd.Version)
 			desdMap[desvID] = &curDesd
 		}
 
@@ -1091,38 +1094,32 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			}
 		}
 
-		// Process/update NVLink Interfaces in DB
-		nvlifcDAO := cdbm.NewNVLinkInterfaceDAO(mi.dbSession)
-		nvLinkInterfaces, _, serr := nvlifcDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.NVLinkInterfaceFilterInput{
-				InstanceIDs: []uuid.UUID{instance.ID},
-			},
-			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
-			[]string{cdbm.NVLinkLogicalPartitionRelationName},
-		)
-
-		if serr != nil {
-			slogger.Error().Err(serr).Msg("failed to get NVLink Interfaces for Instance from DB")
+		existingNvlIfcs, _, err := nvlifcDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			slogger.Error().Err(err).Msg("failed to get NVLink Interfaces for Instance from DB")
 			continue
 		}
 
-		nvLinkInterfaceMap := map[string]*cdbm.NVLinkInterface{}
+		// Process/update NVLink Interfaces in DB
+		type nvLinkBinding struct {
+			partitionID    string
+			deviceInstance int
+		}
+		// Match Site observations to live bindings only. A replacement has its own row ID.
+		nvLinkInterfaceMap := map[nvLinkBinding]*cdbm.NVLinkInterface{}
 		deletingNVLinkInterfaces := []*cdbm.NVLinkInterface{}
-		for _, nvlifc := range nvLinkInterfaces {
-			curNvlifc := nvlifc
-			if curNvlifc.Status == cdbm.NVLinkInterfaceStatusDeleting {
-				deletingNVLinkInterfaces = append(deletingNVLinkInterfaces, &curNvlifc)
+		for _, nvlifc := range existingNvlIfcs {
+			if nvlifc.Status == cdbm.NVLinkInterfaceStatusDeleting {
+				deletingNVLinkInterfaces = append(deletingNVLinkInterfaces, &nvlifc)
 				continue
 			}
-			// Construct a map of NVLink Interface ID to NVLink Interface using Logical Partition ID and DeviceInstance as the key
-			nvlifcKey := fmt.Sprintf("%s-%d", nvlifc.NVLinkLogicalPartitionID.String(), nvlifc.DeviceInstance)
-			nvLinkInterfaceMap[nvlifcKey] = &curNvlifc
+			nvlifcKey := nvLinkBinding{nvlifc.NVLinkLogicalPartitionID.String(), nvlifc.DeviceInstance}
+			nvLinkInterfaceMap[nvlifcKey] = &nvlifc
 		}
 
 		isNVLinkConfigStatusEmpty := true
 		isNVLinkConfigSynced := false
+		reportedWithoutLiveRow := map[nvLinkBinding]bool{}
 		if controllerInstance.Config.Nvlink != nil {
 			// Check an update DB cache for each NVLink Interface based on the GPU Config and Status
 			configStatusMismatch := false
@@ -1135,9 +1132,10 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
-				nvlifcKey := fmt.Sprintf("%s-%d", nvLinkGpuConfig.LogicalPartitionId.GetValue(), nvLinkGpuConfig.DeviceInstance)
+				nvlifcKey := nvLinkBinding{nvLinkGpuConfig.LogicalPartitionId.GetValue(), int(nvLinkGpuConfig.DeviceInstance)}
 				nvlifc, ok := nvLinkInterfaceMap[nvlifcKey]
 				if !ok {
+					reportedWithoutLiveRow[nvlifcKey] = true
 					continue
 				}
 
@@ -1200,28 +1198,33 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
-				_, serr = nvlifcDAO.Update(ctx, nil, cdbm.NVLinkInterfaceUpdateInput{
-					NVLinkInterfaceID: nvlifc.ID,
-					GpuGUID:           gpuGuid,
-					NVLinkDomainID:    nvLinkDomainID,
-					Status:            status,
-				})
-
+				_, serr = nvlifcDAO.Update(
+					ctx,
+					nil,
+					cdbm.NVLinkInterfaceUpdateInput{
+						NVLinkInterfaceID: nvlifc.ID,
+						GpuGUID:           gpuGuid,
+						NVLinkDomainID:    nvLinkDomainID,
+						Status:            status,
+					},
+				)
 				if serr != nil {
 					slogger.Error().Err(serr).Str("NVLink Interface ID", nvlifc.ID.String()).Msg("Failed to update NVLink Interface, DB error")
 				}
 			}
 		}
 
-		// Delete NVLink Interfaces that are not present in the controller Instance
+		// With an empty or synced NVLink config, queue a Deleting row after the stale-inventory
+		// window if Site no longer lists its GPU and partition or a live row already represents that pair.
 		if isNVLinkConfigStatusEmpty || isNVLinkConfigSynced {
 			for _, nvlifc := range deletingNVLinkInterfaces {
 				if site.IsTimeWithinStaleInventoryThreshold(nvlifc.Updated) {
-					// If the NVLink Interface was modified within stale inventory threshold, defer to next inventory update
 					continue
 				}
 
-				// Continue with deletion
+				if reportedWithoutLiveRow[nvLinkBinding{nvlifc.NVLinkLogicalPartitionID.String(), nvlifc.DeviceInstance}] {
+					continue
+				}
 				nvLinkInterfacesToDelete = append(nvLinkInterfacesToDelete, nvlifc)
 			}
 		}
@@ -1310,6 +1313,12 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	for _, instance := range instancesToTerminate {
 		slogger := logger.With().Str("Instance ID", instance.ID.String()).Logger()
 
+		// An Instance created within the inventory interval can be absent from an inventory the Site
+		// collected before it existed. Created, unlike Updated, is not refreshed by repeated requests.
+		if site.IsTimeWithinStaleInventoryThreshold(instance.Created) {
+			continue
+		}
+
 		// If the Instance was terminating, we can proceed with removing it from the DB
 		if instance.Status == cdbm.InstanceStatusTerminating {
 			tx, err := cdb.BeginTx(ctx, mi.dbSession, &sql.TxOptions{})
@@ -1336,11 +1345,6 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				}
 			}
 		} else if instance.ControllerInstanceID != nil {
-			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-			if site.IsTimeWithinStaleInventoryThreshold(instance.Created) {
-				continue
-			}
-
 			status := cdbm.InstanceStatusError
 			statusMessage := "Instance is missing on Site"
 
@@ -1408,7 +1412,6 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	// Delete eligible NVLink Interfaces which are in Deleting state
 	if len(nvLinkInterfacesToDelete) > 0 {
-		nvlifcDAO := cdbm.NewNVLinkInterfaceDAO(mi.dbSession)
 		for _, nvlifc := range nvLinkInterfacesToDelete {
 			serr := nvlifcDAO.Delete(ctx, nil, nvlifc.ID)
 			if serr != nil {
@@ -1580,7 +1583,7 @@ func (mi ManageInstance) deleteInstanceFromDB(ctx context.Context, tx *cdb.Tx, i
 	// Delete interface(s) corresponding to instance
 	isDAO := cdbm.NewInterfaceDAO(mi.dbSession)
 
-	iss, _, err := isDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, nil)
+	iss, _, err := isDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve interfaces from DB")
 		terr := tx.Rollback()

@@ -18,7 +18,7 @@
 //! Handler for PowerShelfControllerState::Deleting.
 
 use carbide_uuid::power_shelf::PowerShelfId;
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use model::power_shelf::{PowerShelf, PowerShelfControllerState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -37,7 +37,12 @@ pub async fn handle_deleting(
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
     tracing::info!(%power_shelf_id, "Deleting PowerShelf");
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db_power_shelf::final_delete(*power_shelf_id, &mut txn).await?;
     Ok(StateHandlerOutcome::deleted().with_txn(txn))
 }

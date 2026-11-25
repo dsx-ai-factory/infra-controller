@@ -65,8 +65,13 @@ impl fmt::Display for Fraction {
         if frac == 0 {
             return write!(f, "{whole}");
         }
-        let digits = format!("{frac:04}");
-        write!(f, "{whole}.{}", digits.trim_end_matches('0'))
+        let mut digits = frac;
+        let mut width = 4;
+        while digits.is_multiple_of(10) {
+            digits /= 10;
+            width -= 1;
+        }
+        write!(f, "{whole}.{digits:0width$}")
     }
 }
 
@@ -136,6 +141,7 @@ mod tests {
         CountResponse {
             count: 10,
             sweep: SweepInfo {
+                firmware_config: None,
                 snapshot_id: "s1".to_string(),
                 family: Family::Host,
                 sweep_start: at,

@@ -215,7 +215,7 @@ pub(crate) struct PxeSnippetDirectoryUnreadable {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
@@ -303,21 +303,21 @@ mod tests {
     /// subscriber, `log = off` constructs no record for these quiet paths.
     #[test]
     fn boot_outcomes_count_per_label_without_logging() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(PxeBootOutcome {
+            metrics.instrumentation().emit(PxeBootOutcome {
                 endpoint: BootEndpoint::Whoami,
                 reason: OutcomeReason::Ok,
             });
-            emit(PxeBootOutcome {
+            metrics.instrumentation().emit(PxeBootOutcome {
                 endpoint: BootEndpoint::Boot,
                 reason: OutcomeReason::UpstreamApiError,
             });
-            emit(PxeBootOutcome {
+            metrics.instrumentation().emit(PxeBootOutcome {
                 endpoint: BootEndpoint::Boot,
                 reason: OutcomeReason::UpstreamApiError,
             });
-            emit(PxeBootOutcome {
+            metrics.instrumentation().emit(PxeBootOutcome {
                 endpoint: BootEndpoint::CloudInit(CloudInitConsumer::Tenant),
                 reason: OutcomeReason::MetadataNotFound,
             });
@@ -419,13 +419,13 @@ mod tests {
                 },
             ],
             |failure| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let (endpoint, reason, logs) = match failure {
                     FailureEvent::CloudInit => {
                         let endpoint = BootEndpoint::CloudInit(CloudInitConsumer::Tenant);
                         let reason = OutcomeReason::MetadataNotFound;
                         let logs = capture_logs(|| {
-                            emit(PxeCloudInitRequestFailed {
+                            metrics.instrumentation().emit(PxeCloudInitRequestFailed {
                                 endpoint,
                                 reason,
                                 error: "metadata is missing".to_string(),
@@ -437,7 +437,7 @@ mod tests {
                         let endpoint = BootEndpoint::Boot;
                         let reason = OutcomeReason::UpstreamApiError;
                         let logs = capture_logs(|| {
-                            emit(PxeCustomIpxeFetchFailed {
+                            metrics.instrumentation().emit(PxeCustomIpxeFetchFailed {
                                 endpoint,
                                 reason,
                                 error: "API unavailable".to_string(),

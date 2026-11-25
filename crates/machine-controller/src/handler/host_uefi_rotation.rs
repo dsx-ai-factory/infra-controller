@@ -45,13 +45,12 @@
 //! several DPUs -- distinct enough from the host flow to keep the two states
 //! separate rather than overloading this one.
 
-use bmc_platform::ResetType;
-use carbide_redfish::libredfish::CredentialOpError;
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use bmc_platform::{LockdownDesiredState, LockdownScope, OperationStatus, ResetType};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
+use db::TransactionVending as _;
 use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
-use libredfish::Redfish;
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot, UefiSetupInfo, UefiSetupState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -59,6 +58,9 @@ use state_controller::state_handler::{
 
 use super::{current_site_uefi_target, handler_host_power_control, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
+use crate::platform_config;
+use crate::redfish::poll_idrac_job;
+use crate::uefi_password::rotate_uefi_password_candidates;
 
 /// Whether a Ready host should enter `ManagedHostState::RotatingHostUefi` now.
 ///
@@ -212,14 +214,10 @@ pub(crate) async fn handle_rotating_host_uefi(
     match &uefi_setup_info.uefi_setup_state {
         UefiSetupState::UnlockHost => {
             if state.host_snapshot.needs_bmc_unlock_for_uefi_setup() {
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
-                redfish_client
-                    .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
+                let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+                bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
                     .await
-                    .map_err(|e| redfish_error("lockdown", e))?;
+                    .map_err(|e| platform_error("lockdown", e))?;
             }
             Ok(rotating_host_uefi_step(
                 None,
@@ -231,17 +229,10 @@ pub(crate) async fn handle_rotating_host_uefi(
         }
         UefiSetupState::WaitForPasswordJobScheduled => {
             if let Some(job_id) = uefi_setup_info.uefi_password_jid.as_ref() {
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
-                let job_state = redfish_client
-                    .get_job_state(job_id)
-                    .await
-                    .map_err(|e| redfish_error("get_job_state", e))?;
-                if !matches!(job_state, libredfish::JobState::Scheduled) {
+                let status = poll_idrac_job(ctx.services, &state.host_snapshot, job_id).await?;
+                if !matches!(status, OperationStatus::AwaitingReset) {
                     return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for UEFI rotation job {job_id:#?} to be scheduled; current state: {job_state:#?}"
+                        "waiting for UEFI rotation job {job_id} to be scheduled; current state: {status:?}"
                     )));
                 }
             }
@@ -258,35 +249,24 @@ pub(crate) async fn handle_rotating_host_uefi(
             ))
         }
         UefiSetupState::WaitForPasswordJobCompletion => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
             if let Some(job_id) = uefi_setup_info.uefi_password_jid.as_ref() {
-                let job_state = redfish_client
-                    .get_job_state(job_id)
-                    .await
-                    .map_err(|e| redfish_error("get_job_state", e))?;
-                if !matches!(job_state, libredfish::JobState::Completed) {
+                let status = poll_idrac_job(ctx.services, &state.host_snapshot, job_id).await?;
+                if !matches!(status, OperationStatus::Completed) {
                     return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for UEFI rotation job {job_id:#?} to complete; current state: {job_state:#?}"
+                        "waiting for UEFI rotation job {job_id} to complete; current state: {status:?}"
                     )));
                 }
             }
-            finish_rotating_host_uefi(ctx, state, host_bmc_mac, redfish_client.as_ref()).await
+            finish_rotating_host_uefi(ctx, state, host_bmc_mac).await
         }
         // Lenovo failure cleanup retries only the re-lock. The failed rotation
         // is already quarantined; do not promote its credential version.
         UefiSetupState::LockdownHost => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
             if state.host_snapshot.bmc_vendor().is_lenovo() {
-                reenable_host_bmc_lockdown_after_rotation(state, redfish_client.as_ref()).await?;
+                reenable_host_bmc_lockdown_after_rotation(ctx.services, state).await?;
                 Ok(StateHandlerOutcome::transition(ManagedHostState::Ready))
             } else {
-                finish_rotating_host_uefi(ctx, state, host_bmc_mac, redfish_client.as_ref()).await
+                finish_rotating_host_uefi(ctx, state, host_bmc_mac).await
             }
         }
     }
@@ -304,15 +284,14 @@ async fn set_rotating_host_uefi_password(
     use db::credential_rotation::CredentialRotationType::HostUefi;
 
     let db_pool = &ctx.services.db_pool;
-    let reader = ctx.services.bmc_credential_ops.credential_reader();
+    let reader = ctx.services.credential_manager.as_ref();
 
     let target = current_site_uefi_target(db_pool, HostUefi).await?;
 
     // The device's tracked current version selects the first authentication
     // candidate; its prior attempt count sizes the backoff on failure.
-    let (current_version, prior_attempts) = {
-        let mut conn = db_pool.acquire().await?;
-        match db::credential_rotation::device_rotation_status(&mut conn, HostUefi, host_bmc_mac)
+    let (current_version, prior_attempts) =
+        match db::credential_rotation::device_rotation_status(db_pool, HostUefi, host_bmc_mac)
             .await
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre!("read host uefi rotation status: {e}"))
@@ -322,8 +301,7 @@ async fn set_rotating_host_uefi_password(
                 status.rotate_attempts,
             ),
             None => (None, 0),
-        }
-    };
+        };
 
     let candidates = host_uefi_current_candidates(reader, current_version, target).await?;
     let Credentials::UsernamePassword {
@@ -347,29 +325,22 @@ async fn set_rotating_host_uefi_password(
         })?;
     }
 
-    let access = ctx
-        .services
-        .bmc_access_info_for_machine(&state.host_snapshot)
-        .await?;
-    match ctx
-        .services
-        .bmc_credential_ops
-        .rotate_uefi_password(&access, &candidates, new_password)
-        .await
-    {
-        Ok(job_id) => Ok(rotating_host_uefi_step(
-            job_id,
-            UefiSetupState::WaitForPasswordJobScheduled,
-        )),
-        // Client creation failed (credential store, TCP, or the vendor
-        // probe): return Err so the state framework retries; quarantine is
-        // reserved for the operation itself failing on the device.
-        Err(CredentialOpError::ClientCreation(e)) => Err(e.into()),
-        Err(CredentialOpError::Operation(e)) => {
+    // Connection failures return Err so the state framework retries; quarantine
+    // is reserved for the password-change operation itself failing on the device.
+    let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+    match rotate_uefi_password_candidates(&bmc, &candidates, &new_password).await {
+        Ok(outcome) => {
+            let job_id = platform_config::vendor_job_id(&outcome).map(|id| id.to_string());
+            Ok(rotating_host_uefi_step(
+                job_id,
+                UefiSetupState::WaitForPasswordJobScheduled,
+            ))
+        }
+        Err(e) => {
             // Device-level failure (all current-password candidates rejected, or
-            // the vendor refused the change). The pool already redacted the
-            // password out of the error. Quarantine with backoff and return to
-            // Ready so the host never wedges in the state.
+            // the vendor refused the change). Passwords are already redacted out
+            // of the error. Quarantine with backoff and return to Ready so the
+            // host never wedges in the state.
             let redacted = e.to_string();
             let quarantined_until =
                 db::credential_rotation::backoff_until(prior_attempts, chrono::Utc::now());
@@ -378,16 +349,8 @@ async fn set_rotating_host_uefi_password(
             // rotation failed. Keep the network call outside the quarantine txn.
             // A Lenovo re-lock failure persists a cleanup step with the failed
             // rotation record, so retries cannot repeat the password change.
-            let relock = async {
-                let client = ctx
-                    .services
-                    .redfish_client_pool
-                    .client_by_info(&access)
-                    .await
-                    .map_err(StateHandlerError::from)?;
-                reenable_host_bmc_lockdown_after_rotation(state, client.as_ref()).await
-            };
-            let relock_result = relock.await;
+            let relock_result =
+                reenable_host_bmc_lockdown_after_rotation(ctx.services, state).await;
             if let Err(relock_err) = &relock_result {
                 tracing::warn!(
                     mac = %host_bmc_mac,
@@ -395,7 +358,10 @@ async fn set_rotating_host_uefi_password(
                     "failed to re-enable BMC lockdown after a failed host UEFI rotation"
                 );
             }
-            let mut txn = db_pool.begin().await?;
+            let mut txn = db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::credential_rotation::increment_rotate_attempt(
                 &mut txn,
                 host_bmc_mac,
@@ -440,16 +406,16 @@ async fn set_rotating_host_uefi_password(
 /// host profile (a host configured to stay unlocked is left unlocked, matching the ingestion
 /// `WaitingForLockdown`/`SetLockdown` guard).
 async fn reenable_host_bmc_lockdown_after_rotation(
+    services: &MachineStateHandlerServices,
     state: &ManagedHostStateSnapshot,
-    redfish_client: &dyn Redfish,
 ) -> Result<(), StateHandlerError> {
     if state.host_snapshot.needs_bmc_unlock_for_uefi_setup()
         && !state.host_snapshot.host_profile.disable_lockdown
     {
-        redfish_client
-            .lockdown_bmc(libredfish::EnabledDisabled::Enabled)
+        let bmc = services.connect_bmc(&state.host_snapshot).await?;
+        bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Enabled)
             .await
-            .map_err(|e| redfish_error("lockdown", e))?;
+            .map_err(|e| platform_error("lockdown", e))?;
     }
     Ok(())
 }
@@ -464,13 +430,17 @@ async fn finish_rotating_host_uefi(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &ManagedHostStateSnapshot,
     host_bmc_mac: mac_address::MacAddress,
-    redfish_client: &dyn Redfish,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     use db::credential_rotation::CredentialRotationType::HostUefi;
 
-    reenable_host_bmc_lockdown_after_rotation(state, redfish_client).await?;
+    reenable_host_bmc_lockdown_after_rotation(ctx.services, state).await?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let promoted =
         db::credential_rotation::promote_rotating_to_current(&mut txn, host_bmc_mac, HostUefi)
             .await
@@ -500,8 +470,25 @@ async fn finish_rotating_host_uefi(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use arc_swap::ArcSwap;
+    use axum::http::StatusCode;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use bmc_backend::BackendBmc;
+    use bmc_mock::test_support::serve_https;
+    use bmc_platform::{DriverOutcome, OperationReference, VendorJobId};
+    use bmc_runtime::{DriverConnector, DriverPools};
+    use carbide_redfish::nv_redfish::new_pool;
     use carbide_secrets::MemoryCredentialStore;
     use carbide_secrets::credentials::CredentialWriter;
+    use carbide_utils::redfish::BmcAccessInfo;
+    use mac_address::MacAddress;
+    use model::site_explorer::{
+        ComputerSystem, EndpointExplorationReport, Manager, ServiceRoot as ModelServiceRoot,
+    };
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -568,5 +555,377 @@ mod tests {
             .expect("resolving candidates should succeed");
 
         assert_eq!(candidates, vec!["v3".to_string(), String::new()]);
+    }
+
+    async fn connect_drivers_mock(
+        name: &str,
+        router: Router,
+        report: EndpointExplorationReport,
+    ) -> (bmc_mock::CombinedServer, BackendBmc) {
+        let (server, base_url) = serve_https(name, router);
+        let pool = new_pool(Arc::new(ArcSwap::from_pointee(None)));
+        let store = Arc::new(MemoryCredentialStore::default());
+        let mac = MacAddress::new([2, 0, 0, 0, 0, 42]);
+        store
+            .set_credentials(
+                &CredentialKey::BmcCredentials {
+                    credential_type: carbide_secrets::credentials::BmcCredentialType::BmcRoot {
+                        bmc_mac_address: mac,
+                    },
+                },
+                &Credentials::new("root", "bmc-secret"),
+            )
+            .await
+            .expect("seed bmc root");
+        let drivers = DriverConnector::new(
+            DriverPools {
+                routed: pool.clone(),
+                direct: pool,
+            },
+            store,
+            "uefi-rotation-test",
+            bmc_drivers::built_in_rules(),
+            carbide_ipmi::test_support(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("driver connector builds");
+        let access = BmcAccessInfo {
+            host: "127.0.0.1".to_string(),
+            port: base_url.port(),
+            mac_address: mac,
+        };
+        let connected = drivers
+            .connect(&access, &report)
+            .await
+            .expect("drivers backend connects");
+        (server, BackendBmc::from(connected))
+    }
+
+    /// Host UEFI rotation through `Bios::change_uefi_password` walks
+    /// candidates in order on the drivers backend, skips rejected candidates,
+    /// returns the vendor job reference from `DriverOutcome`, and redacts all
+    /// passwords when every candidate fails.
+    #[tokio::test]
+    async fn host_uefi_candidate_walk_uses_bios_driver_and_redacts_failures() {
+        let attempts: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempts_for_route = attempts.clone();
+
+        let router = Router::new()
+            .route(
+                "/redfish/v1",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1",
+                        "Id": "RootService",
+                        "Name": "Root Service",
+                        "Vendor": "Dell",
+                        "Systems": {"@odata.id": "/redfish/v1/Systems"},
+                        "Managers": {"@odata.id": "/redfish/v1/Managers"},
+                        "Links": {"Sessions": {"@odata.id": "/redfish/v1/SessionService/Sessions"}},
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Systems",
+                        "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
+                        "Name": "Systems",
+                        "Members": [{"@odata.id": "/redfish/v1/Systems/System.Embedded.1"}],
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems/System.Embedded.1",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Systems/System.Embedded.1",
+                        "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
+                        "Id": "System.Embedded.1",
+                        "Name": "System",
+                        "Bios": {"@odata.id": "/redfish/v1/Systems/System.Embedded.1/Bios"},
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems/System.Embedded.1/Bios",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Systems/System.Embedded.1/Bios",
+                        "@odata.type": "#Bios.v1_2_0.Bios",
+                        "Id": "Bios",
+                        "Name": "BIOS",
+                        "@Redfish.Settings": {
+                            "SettingsObject": {"@odata.id": "/redfish/v1/Systems/System.Embedded.1/Bios/Settings"}
+                        },
+                        "Actions": {
+                            "#Bios.ChangePassword": {
+                                "target": "/redfish/v1/Systems/System.Embedded.1/Bios/Actions/Bios.ChangePassword"
+                            }
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems/System.Embedded.1/Bios/Actions/Bios.ChangePassword",
+                post({
+                    let attempts = attempts_for_route;
+                    move |Json(body): Json<Value>| {
+                        let attempts = attempts.clone();
+                        async move {
+                            let old = body["OldPassword"].as_str().unwrap_or_default().to_string();
+                            let new = body["NewPassword"].as_str().unwrap_or_default().to_string();
+                            attempts.lock().unwrap().push((old.clone(), new.clone()));
+                            if old == "current-v1" {
+                                (StatusCode::NO_CONTENT, Json(json!({})))
+                            } else {
+                                (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(json!({
+                                        "error": {
+                                            "code": "Base.1.12.GeneralError",
+                                            "message": format!("bad password old={old} new={new}")
+                                        }
+                                    })),
+                                )
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/redfish/v1/Managers",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Managers",
+                        "@odata.type": "#ManagerCollection.ManagerCollection",
+                        "Name": "Managers",
+                        "Members": [{"@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1"}],
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Managers/iDRAC.Embedded.1",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1",
+                        "@odata.type": "#Manager.v1_18_0.Manager",
+                        "Id": "iDRAC.Embedded.1",
+                        "Name": "Manager",
+                        "Links": {"Oem": {"Dell": {
+                            "DellAttributes": [{"@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1"}],
+                            "DellJobService": {"@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService"},
+                            "Jobs": {"@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs"},
+                        }}}
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1",
+                        "Id": "iDRAC.Embedded.1",
+                        "Name": "Manager Attributes",
+                        "Attributes": {"Lockdown.1.SystemLockdown": "Disabled"},
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService",
+                        "@odata.type": "#DellJobService.v1_2_0.DellJobService",
+                        "Id": "DellJobService",
+                        "Name": "DellJobService",
+                        "Actions": {
+                            "#DellJobService.DeleteJobQueue": {
+                                "target": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService/Actions/DellJobService.DeleteJobQueue"
+                            }
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService/Actions/DellJobService.DeleteJobQueue",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs",
+                post(|| async {
+                    (
+                        StatusCode::ACCEPTED,
+                        [(
+                            axum::http::header::LOCATION,
+                            "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/JID_999",
+                        )],
+                        Json(json!({})),
+                    )
+                }),
+            );
+
+        let report = EndpointExplorationReport {
+            service_root: Some(ModelServiceRoot {
+                vendor: Some("Dell".to_string()),
+                ..Default::default()
+            }),
+            systems: vec![ComputerSystem {
+                id: "System.Embedded.1".to_string(),
+                ..Default::default()
+            }],
+            managers: vec![Manager {
+                id: "iDRAC.Embedded.1".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_server, bmc) = connect_drivers_mock("host-uefi-drivers", router, report).await;
+
+        // First candidate fails, second succeeds and yields the iDRAC job.
+        let outcome = rotate_uefi_password_candidates(
+            &bmc,
+            &["stale-v0".to_string(), "current-v1".to_string()],
+            "target-v2",
+        )
+        .await
+        .expect("second candidate succeeds");
+        assert_eq!(
+            platform_config::vendor_job_id(&outcome),
+            Some(VendorJobId::new("JID_999".to_string()).unwrap())
+        );
+        assert!(matches!(
+            outcome.references().next(),
+            Some(OperationReference::VendorJob { .. })
+        ));
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![
+                ("stale-v0".to_string(), "target-v2".to_string()),
+                ("current-v1".to_string(), "target-v2".to_string()),
+            ]
+        );
+
+        // When every candidate fails, neither candidate nor new password leaks.
+        let err = rotate_uefi_password_candidates(&bmc, &["wrong-pw".to_string()], "secret-new")
+            .await
+            .expect_err("all candidates rejected");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("wrong-pw"),
+            "candidate leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("secret-new"),
+            "new password leaked: {rendered}"
+        );
+    }
+
+    /// DPU UEFI rotation through `Bios::change_uefi_password` walks candidates
+    /// against `Bios/Settings` on the BlueField driver and completes without a job.
+    #[tokio::test]
+    async fn dpu_uefi_candidate_walk_uses_bluefield_bios_driver() {
+        let router = Router::new()
+            .route(
+                "/redfish/v1",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1",
+                        "Id": "RootService",
+                        "Name": "Root Service",
+                        "Vendor": "Nvidia",
+                        "Product": "BlueField-3 DPU",
+                        "Systems": {"@odata.id": "/redfish/v1/Systems"},
+                        "Managers": {"@odata.id": "/redfish/v1/Managers"},
+                        "Links": {"Sessions": {"@odata.id": "/redfish/v1/SessionService/Sessions"}},
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Systems",
+                        "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
+                        "Name": "Systems",
+                        "Members": [{"@odata.id": "/redfish/v1/Systems/Bluefield"}],
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems/Bluefield",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Systems/Bluefield",
+                        "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
+                        "Id": "Bluefield",
+                        "Name": "Bluefield",
+                        "Bios": {"@odata.id": "/redfish/v1/Systems/Bluefield/Bios"},
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems/Bluefield/Bios",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Systems/Bluefield/Bios",
+                        "@odata.type": "#Bios.v1_2_0.Bios",
+                        "Id": "BIOS",
+                        "Name": "BIOS",
+                        "@Redfish.Settings": {
+                            "SettingsObject": {"@odata.id": "/redfish/v1/Systems/Bluefield/Bios/Settings"}
+                        },
+                        "Attributes": {}
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/Systems/Bluefield/Bios/Settings",
+                get(|| async {
+                    Json(json!({
+                        "@odata.id": "/redfish/v1/Systems/Bluefield/Bios/Settings",
+                        "@odata.type": "#Bios.v1_2_0.Bios",
+                        "Id": "BIOS_Settings",
+                        "Name": "BIOS Settings",
+                        "Attributes": {}
+                    }))
+                })
+                .patch(|Json(body): Json<Value>| async move {
+                    if body["Attributes"]["CurrentUefiPassword"] == json!("bluefield") {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    }
+                }),
+            );
+
+        let report = EndpointExplorationReport {
+            service_root: Some(ModelServiceRoot {
+                vendor: Some("Nvidia".to_string()),
+                product: Some("BlueField-3 DPU".to_string()),
+                ..Default::default()
+            }),
+            systems: vec![ComputerSystem {
+                id: "Bluefield".to_string(),
+                ..Default::default()
+            }],
+            managers: vec![Manager {
+                id: "Bluefield_BMC".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_server, bmc) = connect_drivers_mock("dpu-uefi-drivers", router, report).await;
+        let outcome = rotate_uefi_password_candidates(
+            &bmc,
+            &["stale-v1".to_string(), "bluefield".to_string()],
+            "dpu-v2",
+        )
+        .await
+        .expect("BlueField factory fallback succeeds");
+        assert_eq!(outcome, DriverOutcome::complete());
     }
 }

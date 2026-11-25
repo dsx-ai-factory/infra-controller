@@ -147,10 +147,12 @@ async fn resolve_mac_owner(
     txn: &mut PgConnection,
     mac: MacAddress,
 ) -> Result<DeviceId, CarbideError> {
-    if let Some(machine_id) = db::machine_topology::find_machine_id_by_bmc_mac(txn, mac).await? {
+    if let Some(machine_id) =
+        db::machine_topology::find_machine_id_by_bmc_mac(&mut *txn, mac).await?
+    {
         return Ok(DeviceId::Machine(machine_id));
     }
-    if let Some(switch_id) = db::switch::find_switch_id_by_bmc_mac(txn, mac).await? {
+    if let Some(switch_id) = db::switch::find_switch_id_by_bmc_mac(&mut *txn, mac).await? {
         return Ok(DeviceId::Switch(switch_id));
     }
     if let Some(power_shelf) = db::power_shelf::find_by_bmc_mac_address(txn, mac).await? {

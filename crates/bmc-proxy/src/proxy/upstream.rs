@@ -799,7 +799,7 @@ mod tests {
 
         let response = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("HTTP client builds")
         .get(format!("http://{source}/start"))
@@ -849,7 +849,7 @@ mod tests {
         let address = spawn_http(app, &mut servers, shutdown.clone()).await;
         let response = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("HTTP client builds")
         .get(format!("http://{address}/start"))
@@ -897,7 +897,7 @@ mod tests {
 
         build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("HTTP client builds")
         .get(format!("http://{chain}/0"))
@@ -1011,17 +1011,18 @@ mod tests {
             .await;
         let client_config = CarbideClientConfig::default();
         let api_config = ApiConfig::new("https://example.com", &client_config);
-        let api_client = CarbideApiClient::new(&api_config);
+        let api_client =
+            CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop());
 
         create_client(
             ip,
             &api_client,
             &credential_cache,
-            &SwitchProbe::new(carbide_instrument::Instrumentation::global()),
+            &SwitchProbe::new(carbide_instrument::Instrumentation::noop()),
             &UpstreamClients::new(
                 RedirectMode::FollowSameOrigin,
                 None,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .expect("test HTTP clients build"),
             &proxy_override(case),
@@ -1300,14 +1301,14 @@ mod tests {
     ) -> Result<AttachedBodySummary, String> {
         let client = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .map_err(|e| e.to_string())?;
         let mut headers = HeaderMap::new();
         if let Some(length) = declared_length {
             headers.insert(
                 axum::http::header::CONTENT_LENGTH,
-                HeaderValue::from_str(&length.to_string()).expect("valid header value"),
+                HeaderValue::from(length),
             );
         }
 
@@ -1408,8 +1409,7 @@ mod tests {
                 let mut headers = HeaderMap::new();
                 headers.insert(
                     axum::http::header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&declared_length.to_string())
-                        .expect("valid header value"),
+                    HeaderValue::from(declared_length),
                 );
                 let body = UpstreamBody::prepare(&headers, Body::from("payload"))
                     .await
@@ -1454,7 +1454,7 @@ mod tests {
     async fn only_buffered_or_absent_bodies_are_replayable() {
         let client = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("http client");
         let post = || client.post("https://bmc.invalid/redfish/v1/Systems");
@@ -1478,7 +1478,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_LENGTH,
-            HeaderValue::from_str(&(MAX_BUFFERED_BODY_SIZE as u64 + 1).to_string()).unwrap(),
+            HeaderValue::from(MAX_BUFFERED_BODY_SIZE as u64 + 1),
         );
         let mut streamed = UpstreamBody::prepare(&headers, Body::from("payload"))
             .await

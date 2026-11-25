@@ -154,7 +154,9 @@ impl Serialize for HostPortPair {
     where
         S: Serializer,
     {
-        serializer.serialize_str(self.to_string().as_str())
+        // serde_yaml's collect_str tag detection can consume a leading `!`
+        // from a singleton map key when Display writes the host in pieces.
+        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -300,6 +302,19 @@ mod tests {
             ],
             HostPortPair::from_str,
         );
+    }
+
+    #[test]
+    fn singleton_yaml_map_preserves_bang_hostname() {
+        let address: HostPortPair = "!:80".parse().unwrap();
+        assert_eq!(address, HostPortPair::HostAndPort("!".to_string(), 80));
+        let expected = std::collections::HashMap::from([(address, 1)]);
+
+        let yaml = serde_yaml::to_string(&expected).unwrap();
+        let actual: std::collections::HashMap<HostPortPair, i32> =
+            serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     /// An IPv6 host must survive a `Display` -> `from_str` round trip. Before

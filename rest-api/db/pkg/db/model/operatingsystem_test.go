@@ -1169,8 +1169,9 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		desc string
-		os   *OperatingSystem
+		desc                string
+		os                  *OperatingSystem
+		wantTimestampChange bool
 
 		paramName                        *string
 		paramDescription                 *string
@@ -1222,8 +1223,9 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 		verifyChildSpanner                  bool
 	}{
 		{
-			desc: "can update string fields: name, description, org, version, imageurl, imageSHA, imageAuthType, imageAuthToken, imageDisk, rootFsID, rootFsLabel, ipxescript, userdata, status",
-			os:   os1tenant1,
+			desc:                "can update string fields: name, description, org, version, imageurl, imageSHA, imageAuthType, imageAuthToken, imageDisk, rootFsID, rootFsLabel, ipxescript, userdata, status",
+			wantTimestampChange: true,
+			os:                  os1tenant1,
 
 			paramName:                        cutil.GetPtr("updatedName"),
 			paramDescription:                 cutil.GetPtr("updatedDescription"),
@@ -1271,8 +1273,9 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 			verifyChildSpanner:                  true,
 		},
 		{
-			desc: "can update uuid fields: infrastructureproviderid, tenantid, controlleroperatingsystemid",
-			os:   os1tenant1,
+			desc:                "can update uuid fields: infrastructureproviderid, tenantid, controlleroperatingsystemid",
+			wantTimestampChange: true,
+			os:                  os1tenant1,
 
 			paramName:                        nil,
 			paramDescription:                 nil,
@@ -1319,8 +1322,9 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 			expectedStatus:                      cutil.GetPtr(OperatingSystemStatusProvisioning),
 		},
 		{
-			desc: "can update bool fields: allowoverride, isblockstorage",
-			os:   os1tenant1,
+			desc:                "can update bool fields: allowoverride, isblockstorage",
+			wantTimestampChange: true,
+			os:                  os1tenant1,
 
 			paramName:                        nil,
 			paramDescription:                 nil,
@@ -1367,8 +1371,9 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 			expectedStatus:                      cutil.GetPtr(OperatingSystemStatusProvisioning),
 		},
 		{
-			desc: "ok when no fields are updated",
-			os:   os1tenant1,
+			desc:                "ok when no fields are updated",
+			wantTimestampChange: false,
+			os:                  os1tenant1,
 
 			expectedName:                        cutil.GetPtr("updatedName"),
 			expectedDescription:                 cutil.GetPtr("updatedDescription"),
@@ -1394,6 +1399,7 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                  "can update isActive from true to false",
+			wantTimestampChange:   true,
 			os:                    os1tenant1,
 			paramIsActive:         &updatedIsActive,
 			paramDeactivationNote: &updatedDeactivationNote,
@@ -1451,6 +1457,9 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 				DeactivationNote:            tc.paramDeactivationNote,
 				Status:                      tc.paramStatus,
 			}
+			predecessor, getErr := ossd.GetByID(ctx, nil, tc.os.ID, nil)
+			require.NoError(t, getErr)
+			previousUpdated := predecessor.Updated
 			got, err := ossd.Update(ctx, nil, input)
 			assert.Nil(t, err)
 			assert.NotNil(t, got)
@@ -1526,9 +1535,7 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedDeactivationNote, *got.DeactivationNote)
 			}
 
-			if got.Updated.String() == tc.os.Updated.String() {
-				t.Errorf("got.Updated = %v, want different value", got.Updated)
-			}
+			assert.Equal(t, tc.wantTimestampChange, !got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())

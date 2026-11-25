@@ -1,0 +1,21 @@
+---
+tags: ["unreleased", "deployment", "rack-level-administration", "telemetry"]
+---
+
+## Upcoming: RMS firmware polling uses GetJobStatus
+
+Builds containing [PR #9265](https://github.com/dsx-ai-factory/infra-controller/pull/9265)
+poll firmware-object jobs through `GetJobStatus` instead of `GetFirmwareJobStatus`.
+This applies to rack firmware maintenance, power-shelf, NVSwitch, and compute-tray
+status polling, including passive firmware-job reads.
+
+Trace `GetJobStatus` RPCs for these firmware reads and update RED filters from
+`operation="get_firmware_job_status"` to `operation="get_job_status"`.
+
+NICo does not fall back to `GetFirmwareJobStatus` when the generic status RPC
+is unavailable. NVOS system-image jobs use `GetSwitchSystemImageJobStatus`.
+
+NICo accepts exactly one response record matching the tracked job ID. Missing,
+duplicate, mismatched, or unrecognized status evidence cannot establish job
+completion. See [RMS firmware-job polling](../../docs/architecture/backends/rms.md#rms-apis-nico-calls)
+for response validation and each caller's missing-job behavior.

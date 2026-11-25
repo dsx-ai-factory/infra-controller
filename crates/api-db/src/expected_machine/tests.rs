@@ -11,6 +11,80 @@ use model::metadata::Metadata;
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
+
+#[crate::sqlx_test]
+async fn expected_machine_queries_survive_alter_bmc_password_and_bmc_username_columns(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    crate::migrations::migrate_before(&pool, 20261117120322).await;
+
+    sqlx::raw_sql(
+        "INSERT INTO expected_machines (id, serial_number, bmc_mac_address, bmc_username, bmc_password)
+         VALUES (gen_random_uuid(), 'existing-machine', '01:00:00:03:02:01', repeat('u', 16), repeat('p', 20));",
+    )
+    .execute(&pool)
+    .await?;
+
+    let snapshot = "SELECT to_jsonb(expected_machines) FROM expected_machines ORDER BY id";
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(snapshot).fetch_all(&pool).await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261117120322_expected_machine_bmc_password_length.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    let after: Vec<serde_json::Value> = sqlx::query_scalar(snapshot).fetch_all(&pool).await?;
+    assert_eq!(after, before);
+
+    let interface_mac: MacAddress = "01:00:00:03:02:01".parse()?;
+    let mut txn = pool.txn_begin().await?;
+
+    let mut expected_machine = find_by_bmc_mac_address(&mut *txn, interface_mac)
+        .await?
+        .unwrap();
+    update_bmc_credentials(
+        &mut expected_machine,
+        &mut txn,
+        "u".repeat(255),
+        "p".repeat(255),
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut txn = pool.txn_begin().await?;
+    let expected_machine_check = find_by_bmc_mac_address(&mut *txn, interface_mac)
+        .await?
+        .unwrap();
+    txn.commit().await?;
+
+    assert_eq!(expected_machine_check.data.bmc_username, "u".repeat(255));
+    assert_eq!(expected_machine_check.data.bmc_password, "p".repeat(255));
+
+    for (username, password) in [
+        ("u".repeat(256), "p".repeat(255)),
+        ("u".repeat(255), "p".repeat(256)),
+    ] {
+        let mut txn = pool.txn_begin().await?;
+        let err = update_bmc_credentials(&mut expected_machine, &mut txn, username, password).await;
+        assert!(err.is_err());
+        let Err(err) = err else {
+            panic!("Should be an Err")
+        };
+        let crate::DatabaseError::Sqlx(err) = err else {
+            panic!("Should be DatabaseError::Sqlx")
+        };
+        assert_eq!(
+            err.source
+                .as_database_error()
+                .and_then(|e| e.code())
+                .as_deref(),
+            Some("22001")
+        );
+        txn.commit().await?;
+    }
+
+    Ok(())
+}
 
 #[crate::sqlx_test]
 async fn expected_machine_queries_survive_added_columns(
@@ -21,7 +95,7 @@ async fn expected_machine_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection applies DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_machines ADD COLUMN test_added_column text;",
@@ -37,7 +111,7 @@ async fn expected_machine_queries_survive_added_columns(
 async fn exercise_expected_machine_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = Uuid::new_v4();
     let rack_id = RackId::new("projection-rack");
     let interface_mac: MacAddress = "02:00:00:00:01:02".parse()?;

@@ -29,7 +29,10 @@
 </form>
 
 {% if endpoint.exploration_paused_for_dpf %}
-<p role="status" class="detail-notice">Exploration paused during DPU provisioning. Periodic exploration and queued refresh requests run after all Site Explorer suppressions are cleared. Re-exploration requests are rejected and must be retried after suppression clears.</p>
+<section class="entity-summary entity-summary-notice" role="status">
+	<h3 class="entity-summary-notice-title">Exploration paused during DPU provisioning</h3>
+	<p>Periodic exploration and queued refresh requests run after all Site Explorer suppressions are cleared. Re-exploration requests are rejected and must be retried after suppression clears.</p>
+</section>
 {% endif %}
 
 <div class="tab-nav">

@@ -24,6 +24,7 @@ mod poll;
 mod power;
 mod work;
 
+use std::fmt::Write;
 use std::time::Instant;
 
 pub(in crate::checks) use bmc::{
@@ -50,9 +51,12 @@ pub(in crate::checks) fn took(started: Instant) -> String {
 }
 
 pub(in crate::checks) fn uris(outcome: &DriverOutcome) -> String {
-    outcome
-        .references()
-        .map(|reference| reference.uri().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut uris = String::new();
+    for (index, reference) in outcome.references().enumerate() {
+        if index != 0 {
+            uris.push_str(", ");
+        }
+        write!(uris, "{}", reference.uri()).expect("writing to a String cannot fail");
+    }
+    uris
 }

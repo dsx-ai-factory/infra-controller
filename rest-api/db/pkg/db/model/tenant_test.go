@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -376,6 +377,12 @@ func TestTenantSQLDAO_Update(t *testing.T) {
 			ipsd := TenantSQLDAO{
 				dbSession: tt.fields.dbSession,
 			}
+			var previousUpdated time.Time
+			if !tt.wantErr {
+				predecessor, getErr := ipsd.GetByID(tt.args.ctx, nil, tt.args.input.TenantID, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := ipsd.Update(tt.args.ctx, nil, tt.args.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("TenantSQLDAO.Update() error = %v, wantErr %v", err, tt.wantErr)
@@ -386,7 +393,7 @@ func TestTenantSQLDAO_Update(t *testing.T) {
 			assert.Equal(t, *tt.want.DisplayName, *got.DisplayName)
 			assert.Equal(t, tt.want.Org, got.Org)
 			assert.Equal(t, *tt.want.OrgDisplayName, *got.OrgDisplayName)
-			assert.NotEqual(t, tt.want.Updated.String(), got.Updated.String())
+			assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

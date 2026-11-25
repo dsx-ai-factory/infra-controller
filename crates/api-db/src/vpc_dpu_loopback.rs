@@ -25,6 +25,7 @@ use model::resource_pool::OwnerType;
 use model::vpc::VpcDpuLoopback;
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::resource_pool::ResourcePoolAllocationNotOwned;
 use crate::{ConditionalWrite, DatabaseError};
 
@@ -61,7 +62,7 @@ pub async fn delete_and_deallocate(
     query.push_bind(dpu_id);
 
     if !delete_admin_loopback_also {
-        let admin_segments = crate::network_segment::admin(txn).await?;
+        let admin_segments = crate::network_segment::admin(&mut *txn).await?;
         let admin_vpcs = admin_segments
             .iter()
             .filter_map(|s| s.config.vpc_id)
@@ -192,7 +193,7 @@ pub async fn release_unretained_instance_loopbacks(
 }
 
 pub async fn find(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
 ) -> Result<Option<VpcDpuLoopback>, DatabaseError> {
@@ -204,7 +205,7 @@ pub async fn find(
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(dpu_id)
         .bind(vpc_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -219,7 +220,7 @@ pub async fn get_or_allocate_loopback_ip_for_vpc(
     vpc_id: &VpcId,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IpAddr, DatabaseError> {
-    let loopback_ip = match find(txn, dpu_id, vpc_id).await? {
+    let loopback_ip = match find(&mut *txn, dpu_id, vpc_id).await? {
         Some(x) => x.loopback_ip,
         None => {
             let loopback_ip = crate::machine::allocate_vpc_dpu_loopback(

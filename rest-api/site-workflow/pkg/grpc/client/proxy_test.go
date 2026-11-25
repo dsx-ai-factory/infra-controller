@@ -191,6 +191,35 @@ func TestInvokeProxyJSONConn(t *testing.T) {
 		})
 	}
 
+	t.Run("firmware details preserve Core evidence and task target presence", func(t *testing.T) {
+		reply := &flowv1.GetTrayFirmwareDetailsResponse{Details: &flowv1.TrayFirmwareDetails{
+			ComponentId: proto.String("inventory-compute"), RackExternalId: proto.String("inventory-rack"),
+			Actual:  &flowv1.FirmwareActualDetails{Result: &flowv1.FirmwareActualDetails_Value{Value: &corev1.ComponentFirmwareInstalled{Result: &corev1.ComponentFirmwareInstalled_Inventory{Inventory: &corev1.ComponentFirmwareInventory{}}}}},
+			Desired: &flowv1.FirmwareDesiredDetails{Result: &flowv1.FirmwareDesiredDetails_Value{Value: &corev1.ComponentFirmwareExpected{Result: &corev1.ComponentFirmwareExpected_Host{Host: &corev1.ComponentHostFirmwareExpectations{Vendor: "vendor", Entries: []*corev1.ComponentHostFirmwareExpectation{{Component: "BIOS", Version: "expected"}}}}}}},
+			Operations: &flowv1.FirmwareOperations{Actions: &flowv1.FirmwareActionDetails{Result: &flowv1.FirmwareActionDetails_Value{Value: &corev1.ComponentFirmwareActions{Stored: &corev1.ComponentStoredFirmwareActions{}, Backend: &corev1.ComponentFirmwareBackendWork{}}}}, Tasks: &flowv1.FirmwareTaskDetailsList{Entries: []*flowv1.FirmwareTaskDetails{{
+				RequestedTargets: &flowv1.FirmwareRequestedTargets{Selection: &flowv1.FirmwareRequestedTargets_Shared{Shared: &flowv1.FirmwareTargetMetadata{Kind: flowv1.FirmwareTargetKind_FIRMWARE_TARGET_KIND_CONFIGURED_DEFAULT}}},
+				WaitingContext:   &flowv1.FirmwareTaskWaitingContext{Error: flowv1.FirmwareDetailsReadError_FIRMWARE_DETAILS_READ_ERROR_LIMIT_EXCEEDED.Enum()},
+				ExternalTargets:  &flowv1.FirmwareTaskExternalTargets{RackId: "inventory-rack"},
+			}}}},
+		}}
+		binaryReply, err := proto.Marshal(reply)
+		require.NoError(t, err)
+		conn := &fakeProxyConn{replyBytes: binaryReply}
+
+		response, err := invokeProxyJSONConn(t.Context(), conn, grpcproxy.Flow, "GetTrayFirmwareDetails", []byte(`{"id":"inventory-compute"}`))
+
+		require.NoError(t, err)
+		require.Equal(t, "/v1.Flow/GetTrayFirmwareDetails", conn.lastMethod)
+		descriptor := conn.lastRequest.ProtoReflect()
+		require.Equal(t, "inventory-compute", descriptor.Get(descriptor.Descriptor().Fields().ByName("id")).String())
+		require.Contains(t, string(response), `"componentId"`)
+		require.Contains(t, string(response), `"rackExternalId"`)
+		var decoded flowv1.GetTrayFirmwareDetailsResponse
+		err = (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(response, &decoded)
+		require.NoError(t, err)
+		require.True(t, proto.Equal(reply, &decoded), "firmware fields disappeared across generated proxy descriptors")
+	})
+
 	for _, tc := range proxyBackendCases {
 		t.Run(tc.name+" round trips request and response", func(t *testing.T) {
 			conn := &fakeProxyConn{setValue: "proxy-test-value"}

@@ -15,12 +15,12 @@
  * limitations under the License.
  */
 
-use sqlx::PgPool;
+use crate::db_read::DbReader;
 
 /// Returns the current number of rows exposed by the `dns_records` view.
-pub async fn record_count(pool: &PgPool) -> i64 {
+pub async fn record_count(conn: impl DbReader<'_>) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM dns_records")
-        .fetch_one(pool)
+        .fetch_one(conn)
         .await
         .expect("dns_records row count query should succeed")
 }

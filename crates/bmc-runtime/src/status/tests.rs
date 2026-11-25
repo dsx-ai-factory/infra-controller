@@ -284,7 +284,13 @@ async fn finished_task_bmc() -> ConnectedBmc<TestBmc> {
     let root = ServiceRoot::new(bmc.clone())
         .await
         .expect("test BMC serves a service root");
-    ConnectedBmc::new(endpoint(BTreeSet::new()), bmc, Arc::new(root), None)
+    ConnectedBmc::new(
+        endpoint(BTreeSet::new()),
+        bmc,
+        Arc::new(root),
+        None,
+        carbide_instrument::Instrumentation::noop(),
+    )
 }
 
 /// A removed monitor is read through the Task its `202` named; without one,

@@ -112,12 +112,9 @@ impl fmt::Display for MlxValueError {
                 write!(f, "Type mismatch: expected {expected}, got {got}")
             }
             Self::InvalidEnumOption { value, allowed } => {
-                write!(
-                    f,
-                    "Invalid enum option '{}', allowed: [{}]",
-                    value,
-                    allowed.join(", ")
-                )
+                write!(f, "Invalid enum option '{value}', allowed: [")?;
+                crate::write_joined(f, allowed, ", ")?;
+                f.write_str("]")
             }
             Self::PresetOutOfRange { value, max_allowed } => {
                 write!(f, "Preset value {value} exceeds maximum {max_allowed}")
@@ -132,9 +129,10 @@ impl fmt::Display for MlxValueError {
             } => {
                 write!(
                     f,
-                    "Invalid enum option '{value}' at position {position}, allowed: [{}]",
-                    allowed.join(", ")
-                )
+                    "Invalid enum option '{value}' at position {position}, allowed: ["
+                )?;
+                crate::write_joined(f, allowed, ", ")?;
+                f.write_str("]")
             }
             Self::ReadOnlyVariable { variable_name } => {
                 write!(f, "Variable '{variable_name}' is read-only")
@@ -292,58 +290,59 @@ impl MlxConfigValue {
         &self.variable.spec
     }
 
-    // to_display_string converts the value to something
-    // that's human-readable; make it so this is used
-    // by impl Display for MlxConfigValue.
+    /// Returns the value's text representation using [`fmt::Display`].
     pub fn to_display_string(&self) -> String {
-        match &self.value {
-            MlxValueType::Boolean(b) => b.to_string(),
-            MlxValueType::Integer(i) => i.to_string(),
-            MlxValueType::String(s) => s.clone(),
-            MlxValueType::Binary(bytes) => format!("0x{}", hex::encode(bytes)),
-            MlxValueType::Bytes(bytes) => format!("{} bytes", bytes.len()),
-            MlxValueType::Array(arr) => format!("[{}]", arr.join(", ")),
-            MlxValueType::Enum(option) => option.clone(),
-            MlxValueType::Preset(preset) => format!("preset_{preset}"),
-            // Sparse array display: show None values as "-" or similar
-            MlxValueType::BooleanArray(arr) => format!(
-                "[{}]",
-                arr.iter()
-                    .map(|opt| opt
-                        .map(|b| b.to_string())
-                        .unwrap_or_else(|| "-".to_string()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            MlxValueType::IntegerArray(arr) => format!(
-                "[{}]",
-                arr.iter()
-                    .map(|opt| opt
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "-".to_string()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            MlxValueType::EnumArray(arr) => format!(
-                "[{}]",
-                arr.iter()
-                    .map(|opt| opt.as_ref().map(|s| s.as_str()).unwrap_or("-"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            MlxValueType::BinaryArray(arr) => {
-                let set_count = arr.iter().filter(|opt| opt.is_some()).count();
-                format!("[{} binary values, {} set]", arr.len(), set_count)
-            }
-            MlxValueType::Opaque(bytes) => format!("opaque({} bytes)", bytes.len()),
-        }
+        self.to_string()
     }
 }
 
 impl fmt::Display for MlxConfigValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_display_string())
+        match &self.value {
+            MlxValueType::Boolean(value) => write!(f, "{value}"),
+            MlxValueType::Integer(value) => write!(f, "{value}"),
+            MlxValueType::String(value) | MlxValueType::Enum(value) => f.write_str(value),
+            MlxValueType::Binary(bytes) => {
+                f.write_str("0x")?;
+                for byte in bytes {
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+            MlxValueType::Bytes(bytes) => write!(f, "{} bytes", bytes.len()),
+            MlxValueType::Array(values) => {
+                f.write_str("[")?;
+                crate::write_joined(f, values, ", ")?;
+                f.write_str("]")
+            }
+            MlxValueType::Preset(preset) => write!(f, "preset_{preset}"),
+            MlxValueType::BooleanArray(values) => write_sparse_array(f, values),
+            MlxValueType::IntegerArray(values) => write_sparse_array(f, values),
+            MlxValueType::EnumArray(values) => write_sparse_array(f, values),
+            MlxValueType::BinaryArray(values) => {
+                let set_count = values.iter().filter(|value| value.is_some()).count();
+                write!(f, "[{} binary values, {} set]", values.len(), set_count)
+            }
+            MlxValueType::Opaque(bytes) => write!(f, "opaque({} bytes)", bytes.len()),
+        }
     }
+}
+
+fn write_sparse_array<T: fmt::Display>(
+    formatter: &mut fmt::Formatter<'_>,
+    values: &[Option<T>],
+) -> fmt::Result {
+    formatter.write_str("[")?;
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            formatter.write_str(", ")?;
+        }
+        match value {
+            Some(value) => write!(formatter, "{value}")?,
+            None => formatter.write_str("-")?,
+        }
+    }
+    formatter.write_str("]")
 }
 
 // IntoMlxValue is the trait used for creating new MlxValueTypes
@@ -454,7 +453,7 @@ impl IntoMlxValue for u8 {
     }
 }
 
-// Implement IntoMlxValue for Strings, which, depending on
+// Implement IntoMlxValue for string slices, which, depending on
 // the backing variable spec, will give us either an
 // MlxValueType::String or MlxValueType::Enum (with validation
 // that the input enum option is valid for the spec).
@@ -465,22 +464,22 @@ impl IntoMlxValue for u8 {
 // if the backing value type is anything else, we'll
 // attempt to convert the string into the expected
 // type.
-impl IntoMlxValue for String {
+impl IntoMlxValue for &str {
     fn into_mlx_value_for_spec(
         self,
         spec: &MlxVariableSpec,
     ) -> Result<MlxValueType, MlxValueError> {
-        let trimmed = self.trim().to_string();
+        let trimmed = self.trim();
 
         match spec {
-            MlxVariableSpec::String => Ok(MlxValueType::String(trimmed)),
+            MlxVariableSpec::String => Ok(MlxValueType::String(trimmed.to_owned())),
 
             MlxVariableSpec::Enum { options } => {
-                if options.contains(&trimmed) {
-                    Ok(MlxValueType::Enum(trimmed))
+                if options.iter().any(|option| option == trimmed) {
+                    Ok(MlxValueType::Enum(trimmed.to_owned()))
                 } else {
                     Err(MlxValueError::InvalidEnumOption {
-                        value: trimmed,
+                        value: trimmed.to_owned(),
                         allowed: options.clone(),
                     })
                 }
@@ -532,7 +531,7 @@ impl IntoMlxValue for String {
                 let hex_str = if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
                     &trimmed[2..]
                 } else {
-                    &trimmed
+                    trimmed
                 };
 
                 hex::decode(hex_str).map(MlxValueType::Binary).map_err(|_| {
@@ -547,7 +546,7 @@ impl IntoMlxValue for String {
                 let hex_str = if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
                     &trimmed[2..]
                 } else {
-                    &trimmed
+                    trimmed
                 };
 
                 hex::decode(hex_str).map(MlxValueType::Bytes).map_err(|_| {
@@ -562,7 +561,7 @@ impl IntoMlxValue for String {
                 let hex_str = if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
                     &trimmed[2..]
                 } else {
-                    &trimmed
+                    trimmed
                 };
 
                 hex::decode(hex_str).map(MlxValueType::Opaque).map_err(|_| {
@@ -582,25 +581,40 @@ impl IntoMlxValue for String {
     }
 }
 
-// Implement IntoMlxValue for &str, which just wraps
-// around the trait implementation for String.
-impl IntoMlxValue for &str {
+// Owned strings use the same parser as borrowed input.
+impl IntoMlxValue for String {
     fn into_mlx_value_for_spec(
         self,
         spec: &MlxVariableSpec,
     ) -> Result<MlxValueType, MlxValueError> {
-        self.to_string().into_mlx_value_for_spec(spec)
+        if self.trim().len() != self.len() {
+            return self.as_str().into_mlx_value_for_spec(spec);
+        }
+        match spec {
+            MlxVariableSpec::String => Ok(MlxValueType::String(self)),
+            MlxVariableSpec::Enum { options } => {
+                if options.contains(&self) {
+                    Ok(MlxValueType::Enum(self))
+                } else {
+                    Err(MlxValueError::InvalidEnumOption {
+                        value: self,
+                        allowed: options.clone(),
+                    })
+                }
+            }
+            _ => self.as_str().into_mlx_value_for_spec(spec),
+        }
     }
 }
 
 // Implement IntoMlxValue for &String, which just wraps
-// around the trait implementation for String.
+// around the borrowed string parser.
 impl IntoMlxValue for &String {
     fn into_mlx_value_for_spec(
         self,
         spec: &MlxVariableSpec,
     ) -> Result<MlxValueType, MlxValueError> {
-        self.clone().into_mlx_value_for_spec(spec)
+        self.as_str().into_mlx_value_for_spec(spec)
     }
 }
 
@@ -1368,11 +1382,9 @@ mod coverage_tests {
         }
     }
 
-    // ----- MlxValueType::to_display_string for scalar (non-array) variants -----
-    // The array variants are already covered by the sibling tests/ file; here we
-    // pin every scalar arm of `to_display_string`.
+    // Scalar representations and array formatting boundaries.
     #[test]
-    fn display_string_for_scalar_value_types() {
+    fn display_string_preserves_scalar_and_array_formats() {
         // We build the value directly, wrapping in an MlxConfigValue via a matching
         // spec, then read back to_display_string.
         check_values(
@@ -1399,8 +1411,8 @@ mod coverage_tests {
                 },
                 Check {
                     scenario: "binary hex-encoded",
-                    input: MlxValueType::Binary(vec![0x1a, 0x2b]),
-                    expect: "0x1a2b".to_string(),
+                    input: MlxValueType::Binary(vec![0x0a, 0x00, 0xff]),
+                    expect: "0x0a00ff".to_string(),
                 },
                 Check {
                     scenario: "bytes reports length",
@@ -1427,6 +1439,11 @@ mod coverage_tests {
                     input: MlxValueType::Opaque(vec![0x01, 0x02, 0x03]),
                     expect: "opaque(3 bytes)".to_string(),
                 },
+                Check {
+                    scenario: "empty sparse array",
+                    input: MlxValueType::BooleanArray(vec![]),
+                    expect: "[]".to_string(),
+                },
                 // Binary array with all-None still reports total/set counts.
                 Check {
                     scenario: "binary array all unset",
@@ -1444,14 +1461,12 @@ mod coverage_tests {
         );
     }
 
-    // The Display impl just forwards to to_display_string; confirm parity once.
     #[test]
-    fn display_impl_matches_to_display_string() {
+    fn display_formats_integer_value() {
         let value = MlxConfigValue {
             variable: var("v", MlxVariableSpec::Integer),
             value: MlxValueType::Integer(99),
         };
-        assert_eq!(format!("{value}"), value.to_display_string());
         assert_eq!(format!("{value}"), "99");
     }
 
@@ -1764,13 +1779,26 @@ mod coverage_tests {
         );
     }
 
-    // ----- String IntoMlxValue: the spec branches not in the sibling file -----
-    // Binary/Bytes/Opaque hex parsing (bare + 0x prefix), and the catch-all array
-    // rejection.
+    // Owned strings retain scalar text and enum validation, and delegate other specs.
     #[test]
     fn string_into_value_hex_and_array_rejection() {
         scenarios!(
             run = |(spec, s)| s.into_mlx_value_for_spec(&spec);
+            "owned text is preserved" {
+                (MlxVariableSpec::String, "héllo".to_string()) => Yields(MlxValueType::String("héllo".to_string())),
+            }
+
+            "owned enum option is validated" {
+                (MlxVariableSpec::Enum { options: vec!["on".to_string()] }, "on".to_string()) => Yields(MlxValueType::Enum("on".to_string())),
+            }
+
+            "owned invalid enum preserves its diagnostic" {
+                (MlxVariableSpec::Enum { options: vec!["on".to_string()] }, "off".to_string()) => FailsWith(MlxValueError::InvalidEnumOption {
+                    value: "off".to_string(),
+                    allowed: vec!["on".to_string()],
+                }),
+            }
+
             "binary bare hex" {
                 (MlxVariableSpec::Binary, "1a2b".to_string()) => Yields(MlxValueType::Binary(vec![0x1a, 0x2b])),
             }
@@ -1789,7 +1817,6 @@ mod coverage_tests {
         );
     }
 
-    // &str and &String both wrap the String impl.
     #[test]
     fn str_and_string_ref_delegate() {
         let s = "hello".to_string();

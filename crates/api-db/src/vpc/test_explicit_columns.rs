@@ -25,6 +25,7 @@ use model::vpc::routing_profile::VpcRoutingProfileOverrides;
 use sqlx::{Connection, PgPool};
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn vpc_queries_survive_added_columns(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -44,7 +45,7 @@ async fn vpc_queries_survive_added_columns(pool: PgPool) -> Result<(), Box<dyn s
 
     // Keep the API connection's prepared statements while a migration
     // adds an unrelated column to the populated table.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE vpcs ADD COLUMN test_added_column text;",
@@ -61,7 +62,7 @@ async fn exercise_vpc_queries(
     connection: &mut PgConnection,
     vni: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = VpcId::new();
     let nsg_id = NetworkSecurityGroupId::from(uuid::Uuid::new_v4());
     sqlx::query(
@@ -88,6 +89,7 @@ async fn exercise_vpc_queries(
             network_virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
             metadata: metadata.clone(),
             network_security_group_id: Some(nsg_id.clone()),
+            dhcp_option_set_id: None,
             routing_profile_type: Some("initial".to_string()),
             routing_profile_overrides: Some(overrides.clone()),
             power_resource_group: Some("rack-a".to_string()),
@@ -107,6 +109,7 @@ async fn exercise_vpc_queries(
             tenant_keyset_id: None,
             network_virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
             network_security_group_id: Some(nsg_id),
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             vni: Some(vni),
             routing_profile_type: Some("initial".to_string()),
@@ -160,6 +163,7 @@ async fn exercise_vpc_queries(
     let update_request = UpdateVpc {
         id,
         network_security_group_id: vpc.config.network_security_group_id.clone(),
+        dhcp_option_set_id: None,
         routing_profile_overrides: Some(VpcRoutingProfileOverrides {
             leak_tenant_host_routes_to_underlay: Some(false),
             ..Default::default()

@@ -35,6 +35,8 @@ use model::instance::config::network::{
 };
 use sqlx::PgPool;
 
+use crate::TransactionVending as _;
+
 const SEGMENT_ID: &str = "20000000-0000-0000-0000-000000000002";
 /// Fixed VPC ids in ascending order, so the query's ordered answer needs no sorting.
 const VPC_IDS: [&str; 3] = [
@@ -362,7 +364,7 @@ async fn reclamation_defers_while_a_vpc_local_record_names_the_attachment(pool: 
         .expect("seeded instance");
     // Terminating, and the expected endpoints match: without the VPC-local
     // record this reclamation would apply.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert!(matches!(
         super::reclaim_service_vpc_attachment(
             txn.as_mut(),

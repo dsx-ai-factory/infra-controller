@@ -2302,7 +2302,7 @@ mod tests {
             cache_size,
             TEST_REQUEST_CONCURRENCY,
             BmcInstrumentation {
-                events: carbide_instrument::Instrumentation::global(),
+                events: carbide_instrument::Instrumentation::noop(),
                 latency: bmc_latency_instrumentation,
             },
         )
@@ -2526,7 +2526,7 @@ mod tests {
                 10,
                 NonZeroUsize::MIN,
                 BmcInstrumentation {
-                    events: carbide_instrument::Instrumentation::global(),
+                    events: carbide_instrument::Instrumentation::noop(),
                     latency: None,
                 },
             )

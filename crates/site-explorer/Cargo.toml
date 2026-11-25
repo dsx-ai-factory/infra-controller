@@ -26,8 +26,10 @@ bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-credential-rotation = { path = "../credential-rotation" }
 carbide-firmware = { path = "../firmware" }
 carbide-health-report = { path = "../health-report" }
+carbide-hw-identification = { path = "../hw-identification" }
 carbide-instrument = { path = "../instrument" }
 carbide-ipmi = { path = "../ipmi" }
 carbide-metrics-utils = { path = "../metrics-utils" }
@@ -52,7 +54,14 @@ itertools = { workspace = true }
 http = { workspace = true }
 libredfish = { workspace = true }
 mac_address = { workspace = true }
-nv-redfish = { workspace = true, features = ["computer-systems", "managers"] }
+nv-redfish = { workspace = true, features = [
+  "accounts",
+  "computer-systems",
+  "managers",
+  "oem-nvidia",
+  "secure-boot",
+  "update-service",
+] }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 rand = { workspace = true }
@@ -67,10 +76,12 @@ thiserror = { workspace = true }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+figment = { workspace = true, features = ["toml"] }
 axum = { workspace = true }
 bmc-drivers = { path = "../bmc-drivers" }
 bmc-explorer = { path = "../bmc-explorer", features = ["test-support"] }
 bmc-mock = { path = "../bmc-mock" }
+eyre = { workspace = true }
 opentelemetry-prometheus = { workspace = true }
 prometheus = { workspace = true }
 
@@ -91,7 +102,7 @@ component-manager = { path = "../component-manager", features = [
   "test-support",
 ] }
 
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 tonic = { workspace = true }
 uuid = { workspace = true }
 

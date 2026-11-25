@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -1078,12 +1079,12 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.AlwaysBootWithCustomIpxe != nil {
 		proto.AlwaysBootWithCustomIpxe = *c.AlwaysBootWithCustomIpxe
 		columns = append(columns, "always_boot_with_custom_ipxe")
-		trace("always_boot_with_custom_ipxe", fmt.Sprintf("%t", *c.AlwaysBootWithCustomIpxe))
+		trace("always_boot_with_custom_ipxe", strconv.FormatBool(*c.AlwaysBootWithCustomIpxe))
 	}
 	if c.PhoneHomeEnabled != nil {
 		proto.PhoneHomeEnabled = *c.PhoneHomeEnabled
 		columns = append(columns, "phone_home_enabled")
-		trace("phone_home_enabled", fmt.Sprintf("%t", *c.PhoneHomeEnabled))
+		trace("phone_home_enabled", strconv.FormatBool(*c.PhoneHomeEnabled))
 	}
 	if c.UserData != nil {
 		proto.UserData = c.UserData
@@ -1093,7 +1094,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.AutoNetwork != nil {
 		proto.AutoNetwork = *c.AutoNetwork
 		columns = append(columns, "auto_network")
-		trace("auto_network", fmt.Sprintf("%t", *c.AutoNetwork))
+		trace("auto_network", strconv.FormatBool(*c.AutoNetwork))
 	}
 	if c.Labels != nil {
 		proto.Labels = c.Labels
@@ -1102,7 +1103,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.IsUpdatePending != nil {
 		proto.IsUpdatePending = *c.IsUpdatePending
 		columns = append(columns, "is_update_pending")
-		trace("is_update_pending", fmt.Sprintf("%t", *c.IsUpdatePending))
+		trace("is_update_pending", strconv.FormatBool(*c.IsUpdatePending))
 	}
 	if c.InfinityRCRStatus != nil {
 		proto.InfinityRCRStatus = c.InfinityRCRStatus
@@ -1127,7 +1128,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.IsMissingOnSite != nil {
 		proto.IsMissingOnSite = *c.IsMissingOnSite
 		columns = append(columns, "is_missing_on_site")
-		trace("is_missing_on_site", fmt.Sprintf("%t", *c.IsMissingOnSite))
+		trace("is_missing_on_site", strconv.FormatBool(*c.IsMissingOnSite))
 	}
 	if c.NetworkSecurityGroupPropagationDetails != nil {
 		proto.NetworkSecurityGroupPropagationDetails = c.NetworkSecurityGroupPropagationDetails

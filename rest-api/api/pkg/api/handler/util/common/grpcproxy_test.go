@@ -56,8 +56,12 @@ func newTimingOutProxyClient() (*tmocks.Client, *startedProxyWorkflow) {
 // newProxyClient returns a Temporal client whose start fails with startErr, or,
 // when that is nil, whose workflow result is getErr.
 func newProxyClient(getErr, startErr error) (*tmocks.Client, *startedProxyWorkflow) {
-	workflowRun := &tmocks.WorkflowRun{}
-	workflowRun.On("Get", mock.Anything, mock.Anything).Return(getErr)
+	var workflowRun tclient.WorkflowRun
+	if startErr == nil {
+		run := &tmocks.WorkflowRun{}
+		run.On("Get", mock.Anything, mock.Anything).Return(getErr)
+		workflowRun = run
+	}
 
 	started := &startedProxyWorkflow{}
 	temporalClient := &tmocks.Client{}
@@ -301,198 +305,52 @@ func TestExecuteCoreGRPC(t *testing.T) {
 	}
 }
 
-func TestExecuteCoreGRPCWithWorkflowID(t *testing.T) {
-	activityFailure := func(activityName string, cause error) error {
-		converter := tp.GetDefaultFailureConverter()
-		return converter.FailureToError(&temporalFailure.Failure{
-			Message: "activity failed",
-			Cause:   converter.ErrorToFailure(cause),
-			FailureInfo: &temporalFailure.Failure_ActivityFailureInfo{
-				ActivityFailureInfo: &temporalFailure.ActivityFailureInfo{
-					ActivityType: &temporalCommon.ActivityType{Name: activityName},
-				},
-			},
-		})
-	}
-	coreFailure := func(code codes.Code) error {
-		return activityFailure("InvokeCoreGRPCOnSite", swe.WrapErr(status.Error(code, "Core reply")))
-	}
-	cases := []struct {
-		name             string
-		startNewAttempt  bool
-		startErr         error
-		lookupRunID      *string
-		getErr           error
-		responseJSON     string
-		cancelCaller     bool
-		emptyWorkflowID  bool
-		expectedCode     int
-		expectedObserved bool
-		expectedAllDone  bool
+func TestExecuteCoreGRPCWithConflictPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		workflowID string
+		policy     temporalEnums.WorkflowIdConflictPolicy
+		getErr     error
+		startErr   error
+		wantCode   int
 	}{
-		{
-			name: "new attempt returns completed cleanup", startNewAttempt: true,
-			responseJSON: `{"allDone":true}`, expectedObserved: true, expectedAllDone: true,
-		},
-		{
-			name: "new attempt returns incomplete cleanup", startNewAttempt: true,
-			responseJSON: `{}`, expectedObserved: true,
-		},
-		{
-			name: "duplicate running attempt joins its execution", startNewAttempt: true,
-			startErr:    serviceerror.NewWorkflowExecutionAlreadyStarted("running", "request-1", "running-run"),
-			lookupRunID: cutil.GetPtr("running-run"), responseJSON: `{}`, expectedObserved: true,
-		},
-		{
-			name: "duplicate completed attempt reads its result", startNewAttempt: true,
-			startErr:    serviceerror.NewWorkflowExecutionAlreadyStarted("completed", "request-1", "completed-run"),
-			lookupRunID: cutil.GetPtr("completed-run"), responseJSON: `{"allDone":true}`,
-			expectedObserved: true, expectedAllDone: true,
-		},
-		{
-			name:        "persisted attempt retrieves completed result without starting",
-			lookupRunID: cutil.GetPtr(""), responseJSON: `{"allDone":true}`,
-			expectedObserved: true, expectedAllDone: true,
-		},
-		{
-			name:        "expired workflow history never restarts a persisted attempt",
-			lookupRunID: cutil.GetPtr(""), getErr: serviceerror.NewNotFound("workflow history expired"),
-			expectedCode: http.StatusServiceUnavailable,
-		},
-		{
-			name: "missing namespace while starting is not Core NotFound", startNewAttempt: true,
-			startErr: serviceerror.NewNamespaceNotFound("missing-site"), expectedCode: http.StatusInternalServerError,
-		},
-		{
-			name: "start deadline preserves unknown execution", startNewAttempt: true,
-			startErr: serviceerror.NewDeadlineExceeded("start acknowledgement lost"), expectedCode: http.StatusGatewayTimeout,
-		},
-		{
-			name:        "caller timeout while recovering leaves execution alone",
-			lookupRunID: cutil.GetPtr(""), getErr: context.Canceled, cancelCaller: true,
-			expectedCode: http.StatusGatewayTimeout,
-		},
-		{
-			name:        "activity timeout is not a Core completion result",
-			lookupRunID: cutil.GetPtr(""), getErr: tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil),
-			expectedCode: http.StatusGatewayTimeout,
-		},
-		{
-			name:        "Core NotFound is a definitive reply",
-			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.NotFound),
-			expectedCode: http.StatusNotFound, expectedObserved: true,
-		},
-		{
-			name:         "legacy Core NotFound is a definitive reply",
-			lookupRunID:  cutil.GetPtr(""),
-			getErr:       activityFailure("InvokeCoreGRPCOnSite", tp.NewNonRetryableApplicationError("absent", swe.ErrTypeCarbideObjectNotFound, nil)),
-			expectedCode: http.StatusNotFound, expectedObserved: true,
-		},
-		{
-			name:        "Core precondition rejection is observed but not success",
-			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.FailedPrecondition),
-			expectedCode: http.StatusPreconditionFailed, expectedObserved: true,
-		},
-		{
-			name:        "Core transport unavailability remains ambiguous",
-			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.Unavailable),
-			expectedCode: http.StatusServiceUnavailable,
-		},
-		{
-			name:        "client response size exhaustion remains ambiguous",
-			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.ResourceExhausted),
-			expectedCode: http.StatusTooManyRequests,
-		},
-		{
-			name:         "unrecognized activity failure is not a definitive Core reply",
-			lookupRunID:  cutil.GetPtr(""),
-			getErr:       activityFailure("InvokeCoreGRPCOnSite", tp.NewApplicationError("connection failed", "unknown")),
-			expectedCode: http.StatusInternalServerError,
-		},
-		{
-			name:         "NotFound from another activity is not Core completion",
-			lookupRunID:  cutil.GetPtr(""),
-			getErr:       activityFailure("OtherActivity", swe.WrapErr(status.Error(codes.NotFound, "absent"))),
-			expectedCode: http.StatusServiceUnavailable,
-		},
-		{
-			name:        "unattributed gRPC NotFound is not Core completion",
-			lookupRunID: cutil.GetPtr(""), getErr: status.Error(codes.NotFound, "workflow lookup failed"),
-			expectedCode: http.StatusServiceUnavailable,
-		},
-		{
-			name: "absent result payload remains unknown", lookupRunID: cutil.GetPtr(""),
-			expectedCode: http.StatusInternalServerError,
-		},
-		{
-			name: "malformed JSON result remains unknown", lookupRunID: cutil.GetPtr(""), responseJSON: `{`,
-			expectedCode: http.StatusInternalServerError,
-		},
-		{
-			name: "malformed typed result remains unknown", lookupRunID: cutil.GetPtr(""), responseJSON: `{"allDone":"yes"}`,
-			expectedCode: http.StatusInternalServerError,
-		},
-		{
-			name: "missing attempt ID never dispatches", emptyWorkflowID: true, startNewAttempt: true,
-			expectedCode: http.StatusInternalServerError,
-		},
-	}
-	for _, tc := range cases {
+		{name: "forwards the caller ID, running conflict policy, and closed execution reuse policy", workflowID: "core-grpc-DeleteSku-site-sku", policy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL},
+		{name: "rejects an empty workflow ID"},
+		{name: "missing Temporal history is not a missing Core SKU", workflowID: "core-grpc-DeleteSku-site-sku", getErr: serviceerror.NewNotFound("history unavailable"), wantCode: http.StatusServiceUnavailable},
+		{name: "missing Temporal namespace is not a missing Core SKU", workflowID: "core-grpc-DeleteSku-site-sku", getErr: serviceerror.NewNamespaceNotFound("namespace unavailable"), wantCode: http.StatusServiceUnavailable},
+		{name: "namespace missing during workflow start", workflowID: "core-grpc-DeleteSku-site-sku", startErr: serviceerror.NewNamespaceNotFound("namespace unavailable"), wantCode: http.StatusServiceUnavailable},
+		{name: "raw gRPC NotFound is not a typed Core reply", workflowID: "core-grpc-DeleteSku-site-sku", getErr: status.Error(codes.NotFound, "missing"), wantCode: http.StatusServiceUnavailable},
+		{name: "typed Core NotFound preserves cleanup status", workflowID: "core-grpc-DeleteSku-site-sku", getErr: tp.NewApplicationError("SKU missing", swe.ErrTypeNICoObjectNotFound), wantCode: http.StatusNotFound},
+		{name: "legacy typed Core NotFound preserves cleanup status", workflowID: "core-grpc-DeleteSku-site-sku", getErr: tp.NewApplicationError("SKU missing", swe.ErrTypeCarbideObjectNotFound), wantCode: http.StatusNotFound},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			temporalClient := &tmocks.Client{}
-			workflowRun := &tmocks.WorkflowRun{}
-			workflowID := "force-delete-attempt-1"
-			if tc.emptyWorkflowID {
-				workflowID = ""
-			} else {
-				if tc.startNewAttempt {
-					temporalClient.On("ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(options tclient.StartWorkflowOptions) bool {
-						assert.Equal(t, workflowID, options.ID)
-						assert.Equal(t, temporalEnums.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE, options.WorkflowIDReusePolicy)
-						assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL, options.WorkflowIDConflictPolicy)
-						assert.True(t, options.WorkflowExecutionErrorWhenAlreadyStarted)
-						assert.Equal(t, grpcproxy.WorkflowExecutionTimeout, options.WorkflowExecutionTimeout)
-						return true
-					}), grpcproxy.Core.WorkflowName, mock.MatchedBy(func(req grpcproxy.Request) bool {
-						assert.Equal(t, corev1.Forge_AdminForceDeleteMachine_FullMethodName, req.FullMethod)
-						assert.JSONEq(t, `{"hostQuery":"machine-1"}`, string(req.RequestJSON))
-						return true
-					})).Return(workflowRun, tc.startErr).Once()
-				}
-				if tc.lookupRunID != nil {
-					temporalClient.On("GetWorkflow", mock.Anything, workflowID, *tc.lookupRunID).Return(workflowRun).Once()
-				}
-				if tc.startErr == nil || tc.lookupRunID != nil {
-					workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-						args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte(tc.responseJSON)
-					}).Return(tc.getErr).Once()
-				}
+			client, started := newProxyClient(tc.getErr, tc.startErr)
+			apiErr := ExecuteCoreGRPCWithConflictPolicy(context.Background(), client,
+				corev1.Forge_DeleteSku_FullMethodName, &corev1.SkuIdList{Ids: []string{"sku"}}, nil,
+				tc.workflowID, tc.policy, "")
+			if tc.workflowID == "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+				client.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				return
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tc.cancelCaller {
-				cancel()
-			}
-			response := &corev1.AdminForceDeleteMachineResponse{}
-			apiErr, observed := ExecuteCoreGRPCWithWorkflowID(ctx, temporalClient,
-				corev1.Forge_AdminForceDeleteMachine_FullMethodName,
-				&corev1.AdminForceDeleteMachineRequest{HostQuery: "machine-1"}, response,
-				workflowID, tc.startNewAttempt, "")
-
-			if tc.expectedCode == 0 {
+			if tc.wantCode == 0 {
 				require.Nil(t, apiErr)
 			} else {
 				require.NotNil(t, apiErr)
-				assert.Equal(t, tc.expectedCode, apiErr.Code)
+				assert.Equal(t, tc.wantCode, apiErr.Code)
+				cause := tc.getErr
+				if tc.startErr != nil {
+					cause = tc.startErr
+				}
+				assert.ErrorIs(t, apiErr, cause)
 			}
-			assert.Equal(t, tc.expectedObserved, observed)
-			assert.Equal(t, tc.expectedAllDone, response.AllDone)
-			assertNoTermination(t, temporalClient)
-			if !tc.startNewAttempt || tc.emptyWorkflowID {
-				temporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
-			}
-			temporalClient.AssertExpectations(t)
-			workflowRun.AssertExpectations(t)
+			assert.Equal(t, tc.workflowID, started.options.ID)
+			assert.Equal(t, grpcproxy.Core.WorkflowName, started.workflowName)
+			assert.Equal(t, tc.policy, started.options.WorkflowIDConflictPolicy)
+			assert.Equal(t, temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE, started.options.WorkflowIDReusePolicy)
+			assert.False(t, started.options.WorkflowExecutionErrorWhenAlreadyStarted)
+			assertNoTermination(t, client)
 		})
 	}
 }

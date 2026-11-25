@@ -4,11 +4,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -27,15 +29,18 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 type machinePowerHandlerFixture struct {
-	dbSession  *cdb.Session
-	org        string
-	machineID  string
-	user       interface{}
-	handler    echo.HandlerFunc
-	proxiedReq *grpcproxy.Request
+	dbSession      *cdb.Session
+	org            string
+	machineID      string
+	user           interface{}
+	handler        echo.HandlerFunc
+	proxiedReq     *grpcproxy.Request
+	workflowResult *mock.Call
 }
 
 func newMachinePowerHandlerFixture(t *testing.T, response *corev1.AdminPowerControlResponse) machinePowerHandlerFixture {
@@ -60,7 +65,7 @@ func newMachinePowerHandlerFixture(t *testing.T, response *corev1.AdminPowerCont
 
 	proxiedReq := &grpcproxy.Request{}
 	wrun := &tmocks.WorkflowRun{}
-	wrun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+	workflowResult := wrun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		if response == nil {
 			return
 		}
@@ -87,27 +92,28 @@ func newMachinePowerHandlerFixture(t *testing.T, response *corev1.AdminPowerCont
 
 	h := NewMachinePowerControlHandler(dbSession, scp, common.GetTestConfig())
 	return machinePowerHandlerFixture{
-		dbSession:  dbSession,
-		org:        org,
-		machineID:  machine.ID,
-		user:       user,
-		handler:    h.Handle,
-		proxiedReq: proxiedReq,
+		dbSession:      dbSession,
+		org:            org,
+		machineID:      machine.ID,
+		user:           user,
+		handler:        h.Handle,
+		proxiedReq:     proxiedReq,
+		workflowResult: workflowResult,
 	}
 }
 
 func (f machinePowerHandlerFixture) request(t *testing.T, method, target string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 
-	var reqBody string
+	var reqBody []byte
 	if body != nil {
 		bodyBytes, err := json.Marshal(body)
 		require.NoError(t, err)
-		reqBody = string(bodyBytes)
+		reqBody = bodyBytes
 	}
 
 	e := echo.New()
-	req := httptest.NewRequest(method, target, strings.NewReader(reqBody))
+	req := httptest.NewRequest(method, target, bytes.NewReader(reqBody))
 	if body != nil {
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	}
@@ -139,6 +145,36 @@ func TestMachinePowerControlHandlerProxiesRequest(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiResp))
 	assert.Equal(t, "power control accepted", apiResp.Message)
 	assert.NotContains(t, rec.Body.String(), "password")
+}
+
+// A refusal from Core must reach the REST client as the documented 412.
+func TestMachinePowerControlHandlerReturnsCorePrecondition(t *testing.T) {
+	fixture := newMachinePowerHandlerFixture(t, nil)
+	const reason = "NIC firmware work already owns this host"
+	cause := status.Error(codes.FailedPrecondition, reason)
+	fixture.workflowResult.Return(swe.WrapErr(cause))
+
+	router := echo.New()
+	router.PATCH("/v2/org/:orgName/nico/machine/:id/power", func(c echo.Context) error {
+		c.Set("user", fixture.user)
+		return fixture.handler(c)
+	})
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+	cfg := standard.NewConfiguration()
+	cfg.Servers = standard.ServerConfigurations{{URL: server.URL}}
+	client := standard.NewAPIClient(cfg)
+
+	_, resp, err := client.MachineAPI.MachinePowerControlMachine(t.Context(), fixture.org, fixture.machineID).
+		MachinePowerControlRequest(standard.MachinePowerControlRequest{Action: "ForceRestart"}).Execute()
+	require.NotNil(t, resp)
+	require.Equal(t, http.StatusPreconditionFailed, resp.StatusCode)
+	var apiError *standard.GenericOpenAPIError
+	require.ErrorAs(t, err, &apiError)
+	diagnostic, ok := apiError.Model().(standard.NICoAPIError)
+	require.True(t, ok, "the machine power client must decode the 412 response")
+	assert.Contains(t, diagnostic.GetMessage(), reason)
+	assert.Equal(t, corev1.Forge_AdminPowerControl_FullMethodName, fixture.proxiedReq.FullMethod)
 }
 
 func TestMachinePowerControlHandlerRejectsInvalidAction(t *testing.T) {

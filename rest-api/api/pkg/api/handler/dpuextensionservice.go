@@ -373,7 +373,7 @@ func NewGetAllDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Clie
 // @Param siteId query string false "Filter by Site ID"
 // @Param status query string false "Filter by Status"
 // @Param query query string false "Search query for name, description and status"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -445,7 +445,7 @@ func (gadesh GetAllDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	if statusQuery != "" {
 		_, ok := cdbm.DpuExtensionServiceStatusMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		filterInput.Statuses = []string{statusQuery}
@@ -569,7 +569,7 @@ func NewGetDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client,
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param dpuExtensionServiceId path string true "ID of DPU Extension Service"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Success 200 {object} model.APIDpuExtensionService
 // @Router /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} [get]
 func (gdesh GetDpuExtensionServiceHandler) Handle(c echo.Context) error {
@@ -625,7 +625,7 @@ func (gdesh GetDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	dpuExtensionService, err := desDAO.GetByID(ctx, nil, dpuExtensionServiceID, qIncludeRelations)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving DPU Extension Service from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve DPU Extension Service, DB error", nil)
@@ -744,7 +744,7 @@ func (udesh UpdateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	dpuExtensionService, err := desDAO.GetByID(ctx, nil, dpuExtensionServiceID, []string{cdbm.SiteRelationName})
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving DPU Extension Service from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve DPU Extension Service, DB error", nil)
@@ -1033,7 +1033,7 @@ func (ddesh DeleteDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	dpuExtensionService, err := desDAO.GetByID(ctx, nil, dpuExtensionServiceID, nil)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving DPU Extension Service from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve DPU Extension Service, DB error", nil)
@@ -1257,7 +1257,7 @@ func (gdesvh GetDpuExtensionServiceVersionHandler) Handle(c echo.Context) error 
 	dpuExtensionService, err := desDAO.GetByID(ctx, nil, dpuExtensionServiceID, nil)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving DPU Extension Service from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve DPU Extension Service, DB error", nil)
@@ -1419,7 +1419,7 @@ func (ddesvh DeleteDpuExtensionServiceVersionHandler) Handle(c echo.Context) err
 	dpuExtensionService, err := desDAO.GetByID(ctx, nil, dpuExtensionServiceID, nil)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find DPU Extension Service with ID: %s", dpuExtensionServiceID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving DPU Extension Service from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve DPU Extension Service, DB error", nil)
@@ -1442,7 +1442,7 @@ func (ddesvh DeleteDpuExtensionServiceVersionHandler) Handle(c echo.Context) err
 			}
 		}
 		if !versionFound {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Version: %s not found for DPU Extension Service: %s", versionID, dpuExtensionServiceID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Version: %s not found for DPU Extension Service: %s", versionID, dpuExtensionServiceID), nil)
 		}
 	}
 
@@ -1506,7 +1506,7 @@ func (ddesvh DeleteDpuExtensionServiceVersionHandler) Handle(c echo.Context) err
 			remainingVersions = append(remainingVersions, version)
 		}
 		if !versionFound {
-			return cutil.NewAPIError(http.StatusNotFound, fmt.Sprintf("Version: %s not found for DPU Extension Service: %s", versionID, dpuExtensionServiceID.String()), nil)
+			return cutil.NewAPIError(http.StatusNotFound, fmt.Sprintf("Version: %s not found for DPU Extension Service: %s", versionID, dpuExtensionServiceID), nil)
 		}
 
 		// Check if this was the last version

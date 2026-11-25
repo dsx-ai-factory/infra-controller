@@ -16,12 +16,13 @@
  */
 use std::panic::Location;
 
+use ::db::TransactionVending as _;
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use db::DatabaseError;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::ManagedHostState;
 use model::resource_pool::ResourcePoolError;
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 
 use crate::db_write_batch::DbWriteBatch;
 
@@ -42,6 +43,8 @@ pub trait StateHandlerContextObjects: Send + Sync + 'static {
 
 /// Context parameter passed to `StateHandler`
 pub struct StateHandlerContext<'a, T: StateHandlerContextObjects> {
+    /// Absolute deadline shared with queue claiming, snapshot loading and outcome persistence.
+    pub deadline: tokio::time::Instant,
     /// Services that are available to the `StateHandler`
     pub services: &'a mut T::Services,
     /// Metrics that are produced as a result of acting on an object
@@ -157,32 +160,32 @@ pub enum StateHandlerOutcome<S> {
         /// Schedules the committed Wait again without waiting for a periodic scan when true.
         requeue_immediately: bool,
         source_ref: &'static Location<'static>,
-        txn: Option<PgTransaction<'static>>,
+        txn: Option<::db::Transaction<'static>>,
     },
     Transition {
         /// The state we are transitioning to
         next_state: S,
         source_ref: &'static Location<'static>,
-        txn: Option<PgTransaction<'static>>,
+        txn: Option<::db::Transaction<'static>>,
     },
     DoNothing {
         source_ref: &'static Location<'static>,
-        txn: Option<PgTransaction<'static>>,
+        txn: Option<::db::Transaction<'static>>,
     }, // Nothing to do. Typically in Ready or Assigned/Ready
     Deleted {
         _source_ref: &'static Location<'static>,
-        txn: Option<PgTransaction<'static>>,
+        txn: Option<::db::Transaction<'static>>,
     }, // The object was removed from the database
 }
 
 impl<S> StateHandlerOutcome<S> {
-    pub fn with_txn(self, transaction: PgTransaction<'static>) -> StateHandlerOutcome<S> {
+    pub fn with_txn(self, transaction: ::db::Transaction<'static>) -> StateHandlerOutcome<S> {
         self.with_txn_opt(Some(transaction))
     }
 
     pub fn with_txn_opt(
         mut self,
-        transaction: Option<PgTransaction<'static>>,
+        transaction: Option<::db::Transaction<'static>>,
     ) -> StateHandlerOutcome<S> {
         debug_assert!(
             self.take_transaction().is_none(),
@@ -293,7 +296,7 @@ impl<S> StateHandlerOutcome<S> {
         }
     }
 
-    pub fn take_transaction(&mut self) -> Option<PgTransaction<'static>> {
+    pub fn take_transaction(&mut self) -> Option<::db::Transaction<'static>> {
         match self {
             StateHandlerOutcome::Wait { txn, .. } => txn,
             StateHandlerOutcome::Transition { txn, .. } => txn,
@@ -303,16 +306,16 @@ impl<S> StateHandlerOutcome<S> {
         .take()
     }
 
-    /// Ensures this StateHandlerOutcome contains a PgTransaction (starting a new one if not) then
+    /// Ensures this StateHandlerOutcome contains a database transaction (starting a new one if not) then
     /// calls the passed async closure with it. If successful, returns self.
     pub async fn in_transaction<'a, E>(
         mut self,
         pg_pool: &'a PgPool,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'static>,
+            &'txn mut ::db::Transaction<'static>,
         ) -> futures::future::BoxFuture<'txn, Result<(), E>>
         + Send,
-    ) -> sqlx::Result<Result<Self, E>>
+    ) -> Result<Result<Self, E>, StateHandlerError>
     where
         E: Send,
     {
@@ -325,7 +328,12 @@ impl<S> StateHandlerOutcome<S> {
 
         let txn = match txn_opt {
             Some(txn) => txn,
-            None => txn_opt.insert(pg_pool.begin().await?),
+            None => txn_opt.insert(
+                pg_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?,
+            ),
         };
 
         Ok(f(txn).await.map(|()| self))
@@ -428,6 +436,14 @@ impl From<InvalidMachineType> for StateHandlerError {
 }
 
 impl StateHandlerError {
+    /// Preserves the transaction error category at wrapped transaction boundaries.
+    pub fn from_transaction(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::Sqlx(error) => Self::TransactionError(Box::new(error.source)),
+            error => Self::from(error),
+        }
+    }
+
     /// Returns the label that will be used to identify the error in metrics
     ///
     /// This will be a simplified description of the error, to avoid having too

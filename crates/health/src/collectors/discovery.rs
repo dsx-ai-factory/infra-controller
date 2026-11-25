@@ -175,11 +175,12 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
         } else {
             service_root.systems().await?
         };
+        let mut system_statuses = Vec::new();
         if let Some(systems) = systems {
             for system in systems.members().await? {
                 let system = Arc::new(system);
                 let raw = system.raw();
-                self.emit_resource_status(ResourceStatusObservation::System(raw));
+                system_statuses.push(raw);
 
                 self.discover_processors(&system, fetch_failures, &mut entities, &mut sensor_ids)
                     .await;
@@ -188,6 +189,9 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 self.discover_drives(&system, fetch_failures, &mut entities, &mut sensor_ids)
                     .await;
             }
+        }
+        if !system_statuses.is_empty() {
+            self.emit_resource_status(ResourceStatusObservation::System(system_statuses));
         }
 
         // Which processors are GPUs is the authoritative evidence that a chassis
@@ -199,11 +203,12 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             HashSet::new()
         };
 
+        let mut chassis_statuses = Vec::new();
         if let Some(chassis_list) = service_root.chassis().await? {
             for chassis in chassis_list.members().await? {
                 let chassis = Arc::new(chassis);
                 let raw = chassis.raw();
-                self.emit_resource_status(ResourceStatusObservation::Chassis(raw));
+                chassis_statuses.push(raw);
 
                 self.discover_power_supplies(
                     &chassis,
@@ -221,6 +226,9 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 )
                 .await;
             }
+        }
+        if !chassis_statuses.is_empty() {
+            self.emit_resource_status(ResourceStatusObservation::Chassis(chassis_statuses));
         }
 
         Ok(entities)

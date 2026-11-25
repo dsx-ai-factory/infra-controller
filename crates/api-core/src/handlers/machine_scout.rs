@@ -17,6 +17,7 @@
 use ::rpc::forge::ForgeAgentControlResponse;
 use ::rpc::model::machine::get_action_for_dpu_state;
 use ::rpc::{forge as rpc, forge_agent_control_response as fac, scout_firmware_upgrade as sfu};
+use carbide_machine_controller::handler::FIRMWARE_UPGRADE_SCOUT_DELIVERY_TIMEOUT;
 use carbide_uuid::machine::{DpuMachineId, HostOrDpuId, MachineId, MachineIdSubtype};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
@@ -196,7 +197,7 @@ pub(crate) async fn forge_agent_control(
         let state = db::machine::lookup_host_state_by_dpu_machine_id(&mut txn, &dpu_machine_id)
             .await
             .map_err(CarbideError::from)?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;
@@ -208,13 +209,34 @@ pub(crate) async fn forge_agent_control(
         let (machine, mut txn) = api
             .load_machine(&machine_id, MachineSearchConfig::default())
             .await?;
-        db::machine::update_scout_contact_time(&machine_id, &mut txn)
-            .await
-            .map_err(CarbideError::from)?;
         crate::api::log_machine_snapshot(&machine);
         let host_machine = HostMachine::try_from(machine.clone())
             .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?;
         let state = host_machine.current_state();
+        let pending_firmware = matches!(
+            state,
+            ManagedHostState::HostReprovision {
+                reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                    result: None,
+                    ..
+                },
+                ..
+            } | ManagedHostState::Assigned {
+                instance_state: InstanceState::HostReprovision {
+                    reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                        result: None,
+                        ..
+                    },
+                },
+            }
+        );
+        // Firmware delivery writes history before the machine row, matching the
+        // controller's lock order. Other polls only update the contact column.
+        if !pending_firmware {
+            db::machine::update_scout_contact_time(&machine_id, &mut txn)
+                .await
+                .map_err(CarbideError::from)?;
+        }
 
         match state {
             ManagedHostState::NicFirmwareUpdating { operation } => {
@@ -468,6 +490,9 @@ pub(crate) async fn forge_agent_control(
                 reprovision_state:
                     HostReprovisionState::WaitingForScoutUpgrade {
                         task_json,
+                        deadline,
+                        delivered_at,
+                        started_at,
                         result: None,
                         ..
                     },
@@ -479,19 +504,64 @@ pub(crate) async fn forge_agent_control(
                         reprovision_state:
                             HostReprovisionState::WaitingForScoutUpgrade {
                                 task_json,
+                                deadline,
+                                delivered_at,
+                                started_at,
                                 result: None,
                                 ..
                             },
                     },
             } => {
-                tracing::info!(
-                    machine_id = %machine.id,
-                    "Sending firmware upgrade task to scout",
-                );
-                let action = match serde_json::from_str::<sfu::ScoutFirmwareUpgradeTask>(task_json)
-                {
-                    Ok(task) => Action::FirmwareUpgrade(fac::FirmwareUpgrade { task: Some(task) }),
-                    Err(e) => {
+                let poll_time: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+                    .fetch_one(txn.as_pgconn())
+                    .await
+                    .map_err(|error| {
+                        CarbideError::from(db::DatabaseError::query("scout poll timestamp", error))
+                    })?;
+                let now = chrono::Utc::now();
+                let delivery_deadline = *started_at + FIRMWARE_UPGRADE_SCOUT_DELIVERY_TIMEOUT;
+                // The controller may not have observed the preceding poll yet.
+                let contact = machine
+                    .status
+                    .last_scout_contact_time
+                    .filter(|contact| *contact > *started_at && *contact <= delivery_deadline)
+                    .or_else(|| {
+                        (poll_time > *started_at && poll_time <= delivery_deadline)
+                            .then_some(poll_time)
+                    });
+                let (active_deadline, deadline_type) = if delivered_at.is_some() {
+                    (*deadline, "completion")
+                } else if let Some(contact) = contact {
+                    (
+                        *deadline + contact.signed_duration_since(*started_at),
+                        "completion",
+                    )
+                } else {
+                    (delivery_deadline, "delivery")
+                };
+                let action = match (
+                    serde_json::from_str::<sfu::ScoutFirmwareUpgradeTask>(task_json),
+                    active_deadline,
+                ) {
+                    (Ok(task), deadline) if now > deadline => {
+                        tracing::info!(
+                            machine_id = %machine.id,
+                            upgrade_task_id = %task.upgrade_task_id,
+                            deadline_type,
+                            %deadline,
+                            "Scout firmware upgrade deadline expired, sending no-op action to scout",
+                        );
+                        Action::noop()
+                    }
+                    (Ok(task), _) => {
+                        tracing::info!(
+                            machine_id = %machine.id,
+                            upgrade_task_id = %task.upgrade_task_id,
+                            "Preparing firmware upgrade task for scout",
+                        );
+                        Action::FirmwareUpgrade(fac::FirmwareUpgrade { task: Some(task) })
+                    }
+                    (Err(e), _) => {
                         tracing::warn!(
                             error = %e,
                             "Could not deserialize firmware upgrade task, sending no-op action to scout",
@@ -499,6 +569,46 @@ pub(crate) async fn forge_agent_control(
                         Action::noop()
                     }
                 };
+                if delivered_at.is_none()
+                    && let Some(contact) = contact
+                {
+                    // Save delivery before a later retry overwrites the contact column.
+                    let mut next_state = state.clone();
+                    if let ManagedHostState::HostReprovision {
+                        reprovision_state, ..
+                    }
+                    | ManagedHostState::Assigned {
+                        instance_state: InstanceState::HostReprovision { reprovision_state },
+                    } = &mut next_state
+                        && let HostReprovisionState::WaitingForScoutUpgrade {
+                            delivered_at,
+                            deadline,
+                            ..
+                        } = reprovision_state
+                    {
+                        *delivered_at = Some(contact);
+                        *deadline = active_deadline;
+                    }
+                    let version = machine.state.version;
+                    if matches!(
+                        db::machine::try_update_controller_state(
+                            &mut txn,
+                            &host_machine.id,
+                            version,
+                            version.increment(),
+                            &next_state,
+                        )
+                        .await?,
+                        db::ConditionalWrite::NotApplied(_)
+                    ) {
+                        return Err(Status::aborted(
+                            "scout firmware task state changed; retry poll",
+                        ));
+                    }
+                }
+                db::machine::update_scout_contact_time(&machine_id, &mut txn)
+                    .await
+                    .map_err(CarbideError::from)?;
                 (action, Some(txn))
             }
 

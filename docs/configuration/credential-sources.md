@@ -37,7 +37,38 @@ Unknown fields in either table fail the boot.
 | `"backend"` | Backends only; local UFM entries are ignored | Write to the backend |
 | `"local"` | Environment, then file; never a backend | Rejected before any write. The CLI reports the command as unavailable and repeats the API's reason. |
 
-With `ufm_source = "local"` and InfiniBand management enabled, startup requires a local `ufm_auth_by_fabric` entry for every configured fabric and fails naming the missing fabric. With InfiniBand management disabled, startup succeeds because UFM is dormant. In this mode a Vault import configured by `[secrets] import_from` skips the `ufm/` subtree, so local ownership survives the import.
+With `ufm_source = "local"` and InfiniBand management enabled, startup requires
+a local `ufm_auth_by_fabric` entry for every configured fabric unless that
+fabric sets `auth = "client_certificate"`. For `auth = "token"`, the first local
+entry found must have a non-blank password. Startup fails naming a fabric whose
+required local credential is missing or blank. With InfiniBand management
+disabled, startup succeeds because UFM is dormant. In this mode a Vault import
+configured by `[secrets] import_from` skips the `ufm/` subtree, so local
+ownership survives the import. Local sources remain operator-managed and
+read-only.
+
+Each `[ib_fabrics.<name>]` table has an optional `auth` setting with no default:
+
+- `auth = "client_certificate"` uses the default SPIFFE client certificate
+  files. NICo does not read a UFM credential for that fabric, so none needs to
+  be stored.
+- `auth = "token"` sends the stored password as the UFM token after removing
+  surrounding whitespace. A missing credential or an empty or whitespace-only
+  password is an error.
+- With `auth` unset, an empty or whitespace-only password selects the default
+  SPIFFE client certificate, any other password is the UFM token, and a
+  missing credential is an error.
+
+Postgres reads an exactly empty password as no credential. An empty entry
+therefore leaves the fabric without a credential and hides an earlier token
+stored in Postgres. `credential add-ufm` without `--token` does not select
+certificate authentication when Postgres supplies the credential and `auth` is
+unset. Set `auth = "client_certificate"` instead. Changing `auth` takes effect
+when Core restarts.
+
+`credential delete-ufm` removes the UFM credential from the configured writer
+backend. A credential in another source or a lower-priority backend can then
+answer the read.
 
 ### Site-wide BMC Root Version 0 Ownership Policy
 
@@ -86,7 +117,7 @@ Variable names start with the prefix `CARBIDE_STATIC_CREDENTIAL_`, which `CARBID
 ```bash
 export CARBIDE_CREDENTIALS_ENV_ENABLED=true
 export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__USERNAME=ignored-for-token-or-certificate-auth
-export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-token-or-empty
+export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=ufm-token-or-empty
 ```
 
 A variable with a missing `username` or `password`, or one that does not parse, fails startup without echoing the value.
@@ -99,7 +130,7 @@ The file is JSON or YAML, and only the keys you need have to be present. Every c
 ufm_auth_by_fabric:
   default:
     username: ignored-for-token-or-certificate-auth
-    password: bearer-token-or-empty
+    password: ufm-token-or-empty
 nmxm_auth_by_id:
   nmxm-1:
     username: admin
@@ -124,7 +155,13 @@ machine_identity:
     kv1: <base64-encoded 32-byte key>
 ```
 
-The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`. For UFM, the password is the bearer token, and an empty password selects the default SPIFFE client certificate.
+The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`.
+
+When a fabric leaves `auth` unset, an empty or whitespace-only UFM password
+selects the default SPIFFE client certificate, and any other value is the UFM
+token. Explicit `client_certificate` authentication reads no credential, while
+explicit `token` authentication requires a nonblank password. See
+[UFM Ownership Policy](#ufm-ownership-policy).
 
 The watcher reloads the file on filesystem events and on every `poll_interval`, so a Kubernetes projected Secret that is replaced atomically takes effect without restarting NICo. A valid reload replaces the whole snapshot, and entries removed from the file stop resolving. A reload that is malformed or unreadable keeps the last valid snapshot and logs the failure with the secret values redacted. A file that is missing, unreadable, or malformed at startup, or a zero `poll_interval`, fails startup with an error that redacts the secret values in the same way.
 

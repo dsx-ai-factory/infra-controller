@@ -49,9 +49,13 @@ where
         &self,
         reference: &OperationReference,
     ) -> Result<OperationStatus, PlatformError> {
-        observe(self.endpoint(), None, "operation_status", async {
-            self.read_operation_status(reference).await
-        })
+        observe(
+            &self.instrumentation,
+            self.endpoint(),
+            None,
+            "operation_status",
+            async { self.read_operation_status(reference).await },
+        )
         .await
     }
 

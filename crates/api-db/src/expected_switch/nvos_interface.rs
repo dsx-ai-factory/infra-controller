@@ -22,6 +22,7 @@ use mac_address::MacAddress;
 use model::expected_switch::ExpectedNvosInterface;
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// Replace the NVOS port rows for one switch with `interfaces`.
@@ -44,7 +45,7 @@ pub(super) async fn replace_for_switch(
 
 /// Return every NVOS port of a switch, primary first.
 pub(super) async fn find_by_switch_bmc(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Vec<ExpectedNvosInterface>> {
     let query = "SELECT mac_address, is_primary
@@ -53,14 +54,14 @@ pub(super) async fn find_by_switch_bmc(
          ORDER BY is_primary DESC, mac_address";
     sqlx::query_as(query)
         .bind(bmc_mac_address)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(query, err))
 }
 
 /// Return the switch BMC MAC that owns `nvos_mac_address`, if any.
 pub(super) async fn find_switch_bmc_by_nvos_mac(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     nvos_mac_address: MacAddress,
 ) -> DatabaseResult<Option<MacAddress>> {
     let query = "SELECT bmc_mac_address
@@ -68,7 +69,7 @@ pub(super) async fn find_switch_bmc_by_nvos_mac(
          WHERE mac_address = $1";
     sqlx::query_scalar(query)
         .bind(nvos_mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(query, err))
 }
@@ -76,7 +77,7 @@ pub(super) async fn find_switch_bmc_by_nvos_mac(
 /// Return the first MAC in `candidates` that a switch other than
 /// `exclude_bmc_mac_address` already claims, if any.
 pub(super) async fn find_mac_claimed_elsewhere(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     candidates: &[MacAddress],
     exclude_bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Option<MacAddress>> {
@@ -91,7 +92,7 @@ pub(super) async fn find_mac_claimed_elsewhere(
     sqlx::query_scalar(query)
         .bind(candidates)
         .bind(exclude_bmc_mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(query, err))
 }

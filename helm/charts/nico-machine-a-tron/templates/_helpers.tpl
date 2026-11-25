@@ -62,6 +62,61 @@ Count configured pods.
 {{- print $activePods -}}
 {{- end }}
 
+{{/*
+Stable indices for configured pods. Explicit podIndex overrides the trailing
+decimal suffix. Validate before integer conversion so invalid or overflowing
+values cannot silently become zero. Both MAC pools and DHCP relay IPs use this map.
+Pods that override every enabled MAC base and do not use DHCP relay get no index.
+*/}}
+{{- define "nico-machine-a-tron.podIndices" -}}
+{{- $indices := dict -}}
+{{- $owners := dict -}}
+{{- $macPool := .Values.macAddressPool | default dict -}}
+{{- $macPoolEnabled := ternary $macPool.enabled true (hasKey $macPool "enabled") -}}
+{{- $hwMacRanges := .Values.hwMacAddressRanges | default dict -}}
+{{- $hwMacRangesEnabled := ternary $hwMacRanges.enabled true (hasKey $hwMacRanges "enabled") -}}
+{{- $dhcpRelayEnabled := include "nico-machine-a-tron.dhcpRelayEnabled" . -}}
+{{- range $podName, $podConfig := .Values.pods -}}
+{{- if not $podConfig -}}
+{{- continue -}}
+{{- end -}}
+{{- $hasMachines := gt (len ($podConfig.machines | default dict)) 0 -}}
+{{- $hasRacks := gt (len ($podConfig.racks | default dict)) 0 -}}
+{{- if not (or $hasMachines $hasRacks) -}}
+{{- continue -}}
+{{- end -}}
+{{- $usesMacPool := and $macPoolEnabled (not ($podConfig.macAddressPool | default dict).base) -}}
+{{- $usesHwMacRanges := and $hwMacRangesEnabled (not ($podConfig.hwMacAddressRanges | default dict).base) -}}
+{{- if not (or $usesMacPool $usesHwMacRanges $dhcpRelayEnabled) -}}
+{{- continue -}}
+{{- end -}}
+{{- $rawIndex := regexFind "[0-9]+$" $podName -}}
+{{- if hasKey $podConfig "podIndex" -}}
+{{- $rawIndex = toString $podConfig.podIndex -}}
+{{- else if eq $rawIndex "" -}}
+{{- fail (printf "Pod '%s' must end with a number or set pods.%s.podIndex" $podName $podName) -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" $rawIndex) -}}
+{{- fail (printf "Pod '%s': podIndex must contain decimal digits only; got %q" $podName $rawIndex) -}}
+{{- end -}}
+{{- $rawIndex = regexReplaceAll "^0+" $rawIndex "" | default "0" -}}
+{{- if gt (len $rawIndex) 3 -}}
+{{- fail (printf "Pod '%s': podIndex must be between 0 and 255; got %q" $podName $rawIndex) -}}
+{{- end -}}
+{{- $podIndex := atoi $rawIndex -}}
+{{- if gt $podIndex 255 -}}
+{{- fail (printf "Pod '%s': podIndex must be between 0 and 255; got %q" $podName $rawIndex) -}}
+{{- end -}}
+{{- $key := toString $podIndex -}}
+{{- if hasKey $owners $key -}}
+{{- fail (printf "Duplicate podIndex %d for pods '%s' and '%s'; set unique pods.<name>.podIndex values" $podIndex (get $owners $key) $podName) -}}
+{{- end -}}
+{{- $_ := set $owners $key $podName -}}
+{{- $_ := set $indices $podName $podIndex -}}
+{{- end -}}
+{{- toYaml $indices -}}
+{{- end }}
+
 {{- define "nico-machine-a-tron.certificateSpec" -}}
 duration: {{ .global.certificate.duration }}
 renewBefore: {{ .global.certificate.renewBefore }}

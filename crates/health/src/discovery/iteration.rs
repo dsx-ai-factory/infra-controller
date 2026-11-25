@@ -546,7 +546,7 @@ mod tests {
                 Arc::new(NoopLimiter),
                 metrics_manager,
                 Arc::new(config),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .unwrap();
 
@@ -608,7 +608,7 @@ mod tests {
             Arc::new(NoopLimiter),
             metrics_manager,
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context should start");
 
@@ -706,7 +706,7 @@ mod tests {
             Arc::new(NoopLimiter),
             metrics_manager,
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context should start");
 
@@ -856,12 +856,15 @@ mod tests {
                     continue;
                 }
                 for metric in family.get_metric() {
-                    let labels = metric
-                        .get_label()
-                        .iter()
-                        .map(|label| format!("{}={}", label.name(), label.value()))
-                        .collect::<Vec<_>>()
-                        .join(",");
+                    let mut labels = String::new();
+                    for (index, label) in metric.get_label().iter().enumerate() {
+                        if index > 0 {
+                            labels.push(',');
+                        }
+                        labels.push_str(label.name());
+                        labels.push('=');
+                        labels.push_str(label.value());
+                    }
                     let value = if iterations {
                         metric.get_histogram().get_sample_count()
                     } else {
@@ -911,10 +914,7 @@ mod tests {
             &reqwest(),
             Some(&base_url),
             10,
-            crate::bmc::BmcInstrumentation::new(
-                carbide_instrument::Instrumentation::global(),
-                None,
-            ),
+            crate::bmc::BmcInstrumentation::new(carbide_instrument::Instrumentation::noop(), None),
         ));
         let mut config = Config::default();
         config.endpoint_sources.carbide_api = Configurable::Disabled;
@@ -928,7 +928,7 @@ mod tests {
             Arc::new(NoopLimiter),
             metrics.clone(),
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("discovery context should start");
         let shard_manager = ShardManager {

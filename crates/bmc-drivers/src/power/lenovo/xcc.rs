@@ -24,6 +24,10 @@ pub(crate) struct XccPower;
 /// hanging ForceRestart; the host must report off by then.
 const FORCE_RESTART_OFF_TIME: Duration = Duration::from_secs(10);
 
+fn needs_off_then_on<B: Bmc>(cx: &OpCx<'_, B>, reset_type: ResetType) -> bool {
+    reset_type == ResetType::ForceRestart && cx.has_quirk(Quirk::LenovoForceRestartHangs)
+}
+
 async fn off_then_on<B: Bmc>(cx: &OpCx<'_, B>) -> Result<DriverOutcome, PlatformError>
 where
     B::Error: ActionError,
@@ -57,15 +61,17 @@ where
         Ok(true)
     }
 
+    fn may_use_ipmi_restart(&self, cx: &OpCx<'_, B>, reset_type: ResetType) -> bool {
+        !needs_off_then_on(cx, reset_type) && self.standard().may_use_ipmi_restart(cx, reset_type)
+    }
+
     async fn set(
         &self,
         cx: &OpCx<'_, B>,
         reset_type: ResetType,
     ) -> Result<DriverOutcome, PlatformError> {
         match reset_type {
-            ResetType::ForceRestart if cx.has_quirk(Quirk::LenovoForceRestartHangs) => {
-                off_then_on(cx).await
-            }
+            action if needs_off_then_on(cx, action) => off_then_on(cx).await,
             ResetType::FullPowerCycle => cx
                 .system()
                 .await?
@@ -115,10 +121,14 @@ mod tests {
                 )
                 .build()
                 .await;
-            let quirks = BTreeSet::from([Quirk::LenovoForceRestartHangs]);
+            let quirks = BTreeSet::from([
+                Quirk::LenovoForceRestartHangs,
+                Quirk::RedfishRestartCutsDpuPower,
+            ]);
             let cx = bmc.cx().await.with_quirks(&quirks);
             let started = Instant::now();
 
+            assert!(!XccPower.may_use_ipmi_restart(&cx, ResetType::ForceRestart));
             let result = XccPower.set(&cx, ResetType::ForceRestart).await;
             if powered_on {
                 assert_eq!(result, Ok(DriverOutcome::complete()), "{power_state}");

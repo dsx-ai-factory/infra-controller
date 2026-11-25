@@ -23,19 +23,20 @@
 
 #[cfg(unix)]
 use std::ffi::CString;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 #[cfg(unix)]
 use std::{os::unix::ffi::OsStrExt, os::unix::fs::MetadataExt, os::unix::fs::PermissionsExt};
 
 use carbide_utils::cmd::TokioCmd;
+use machine_validation_adapters::{
+    AdapterContext, AdapterInvocation, AdapterOutput, PluginResult, RuntimeRequirements,
+};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
-
-use crate::plugin_contract::{PluginResult, read_plugin_result};
 
 const MAX_OUTPUT_SIZE: usize = 1024 * 1024;
 const MAX_ERROR_OUTPUT_SIZE: usize = 4096;
@@ -52,7 +53,8 @@ const ATTEMPT_BASE_DIR: &str = "/run/nico/machine-validation";
 /// The runtime access granted to an approved plugin revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PluginPrivilege {
-    /// A non-root container with no network and no additional capabilities.
+    /// A container with dropped capabilities and the approved adapter identity
+    /// and namespaces; standard plugins remain non-root and network-isolated.
     Isolated,
     /// A privileged container, without a host-root bind mount.
     Privileged,
@@ -63,6 +65,7 @@ pub(crate) enum PluginPrivilege {
 /// Immutable execution settings supplied by a later control-plane integration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PluginRuntimeSpec {
+    pub(crate) container_plugin_adapter: Option<String>,
     pub(crate) image: String,
     pub(crate) entrypoint: Vec<String>,
     pub(crate) privilege: PluginPrivilege,
@@ -92,63 +95,71 @@ pub(crate) enum PluginLogStream {
     Stderr,
 }
 
+#[derive(Clone)]
 struct CapturedOutput {
     bytes: Vec<u8>,
     truncated: bool,
     log_dropped: bool,
 }
 
-/// Ensures a cancelled execution still removes its named container.
+/// Owns attempt files until cleanup succeeds, including cancellation before launch.
 ///
 /// `nerdctl` can create a container before its client process exits. The
 /// caller's future may be cancelled during Scout shutdown, so relying only on
 /// `kill_on_drop` would leave that container running.
-struct ContainerCleanupGuard<F>
+struct PluginCleanupGuard<F>
 where
-    F: FnOnce(String),
+    F: FnOnce(String, PathBuf),
 {
+    attempt_dir: Option<PathBuf>,
     container_name: Option<String>,
     schedule_cleanup: Option<F>,
 }
 
-impl<F> ContainerCleanupGuard<F>
+impl<F> PluginCleanupGuard<F>
 where
-    F: FnOnce(String),
+    F: FnOnce(String, PathBuf),
 {
-    fn new(container_name: String, schedule_cleanup: F) -> Self {
+    fn new(attempt_dir: PathBuf, schedule_cleanup: F) -> Self {
         Self {
-            container_name: Some(container_name),
+            attempt_dir: Some(attempt_dir),
+            container_name: None,
             schedule_cleanup: Some(schedule_cleanup),
         }
     }
 
     fn disarm(&mut self) {
+        self.attempt_dir = None;
         self.container_name = None;
     }
 }
 
-impl<F> Drop for ContainerCleanupGuard<F>
+impl<F> Drop for PluginCleanupGuard<F>
 where
-    F: FnOnce(String),
+    F: FnOnce(String, PathBuf),
 {
     fn drop(&mut self) {
-        let Some(container_name) = self.container_name.take() else {
+        let Some(attempt_dir) = self.attempt_dir.take() else {
             return;
         };
-        if let Some(schedule_cleanup) = self.schedule_cleanup.take() {
-            schedule_cleanup(container_name);
-        } else {
-            warn!("Could not schedule cleanup for cancelled machine validation plugin container");
+        if let Some(container_name) = self.container_name.take() {
+            if let Some(schedule_cleanup) = self.schedule_cleanup.take() {
+                schedule_cleanup(container_name, attempt_dir);
+            }
+        } else if let Err(error) = remove_attempt_directory(&attempt_dir) {
+            warn!(%error, "Failed to remove cancelled plugin attempt directory");
         }
     }
 }
 
-fn schedule_container_cleanup(container_name: String) {
+fn schedule_container_cleanup(container_name: String, attempt_dir: PathBuf) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             std::mem::drop(handle.spawn(async move {
                     if let Err(error) = force_remove_plugin_container(&container_name).await {
                         warn!(%container_name, %error, "Failed to remove cancelled machine validation plugin container");
+                    } else if let Err(error) = remove_attempt_directory(&attempt_dir) {
+                        warn!(%container_name, %error, "Failed to remove cancelled plugin attempt directory");
                     }
                 }));
         }
@@ -169,23 +180,65 @@ pub(crate) async fn execute_plugin(
     timeout: std::time::Duration,
     contract_dir: &Path,
     log_sender: Option<mpsc::Sender<PluginLogChunk>>,
+    authorize_launch: impl std::future::Future<Output = Result<(), String>>,
 ) -> Result<PluginExecution, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
     validate_runtime_spec(spec)?;
+    let adapter = machine_validation_adapters::resolve(spec.container_plugin_adapter.as_deref())?;
+    adapter.validate_registration(&spec.entrypoint, &input["parameters"])?;
+    let requirements = adapter.requirements();
     validate_contract_dir(contract_dir)?;
-    let input = serialize_plugin_input(input)?;
+    let serialized_input = serialize_plugin_input(input)?;
     let attempt_dir = plugin_attempt_directory()?;
     let input_dir = attempt_dir.join("input");
     let output_dir = attempt_dir.join("output");
-    if let Err(error) = prepare_plugin_directories(&attempt_dir, &input_dir, &output_dir) {
+    let directory_owner = if requirements.run_as_root {
+        (0, 0)
+    } else {
+        (PLUGIN_UID, PLUGIN_GID)
+    };
+    if let Err(error) =
+        prepare_plugin_directories(&attempt_dir, &input_dir, &output_dir, directory_owner)
+    {
         return match remove_attempt_directory(&attempt_dir) {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(format!("{error}; {cleanup_error}")),
         };
     }
 
+    let mut cleanup_guard =
+        PluginCleanupGuard::new(attempt_dir.clone(), schedule_container_cleanup);
     let (execution, remove_attempt_dir) = async {
-        if let Err(error) = std::fs::write(input_dir.join("input.json"), input) {
+        if let Err(error) = std::fs::write(input_dir.join("input.json"), serialized_input) {
             return (Err(format!("failed to write plugin input: {error}")), true);
+        }
+
+        let context = AdapterContext {
+            input,
+            input_dir: &input_dir,
+            output_dir: &output_dir,
+            contract_dir,
+        };
+        let invocation =
+            match tokio::time::timeout_at(deadline, adapter.prepare(context, &spec.entrypoint))
+                .await
+            {
+                Ok(Ok(invocation)) => invocation,
+                Ok(Err(error)) => return (Err(error), true),
+                Err(_) => {
+                    return (
+                        Err("plugin timeout exhausted preparing invocation".to_owned()),
+                        true,
+                    );
+                }
+            };
+        if let Err(error) =
+            validate_invocation(&invocation, requirements, spec.privilege, contract_dir)
+        {
+            return (Err(error), true);
+        }
+        if let Err(error) = authorize_before_launch(deadline, authorize_launch).await {
+            return (Err(error), true);
         }
 
         let container_name = format!("mv-plugin-{}", Uuid::new_v4());
@@ -197,48 +250,56 @@ pub(crate) async fn execute_plugin(
                 &container_name,
                 spec,
                 contract_dir,
+                requirements,
+                &invocation,
             ))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        if tokio::time::Instant::now() >= deadline {
+            return (
+                Err("plugin timeout exhausted before launch".to_owned()),
+                true,
+            );
+        }
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return (Err(format!("failed to execute plugin: {error}")), true),
         };
-        let mut cleanup_guard =
-            ContainerCleanupGuard::new(container_name.clone(), schedule_container_cleanup);
-        match tokio::time::timeout(timeout, collect_plugin_output(child, log_sender)).await {
-            Ok(Ok((status, stdout, stderr))) if status.success() => {
-                cleanup_guard.disarm();
-                warn_if_log_chunks_dropped(&stdout, &stderr);
-                (
-                    read_plugin_result(&output_dir.join("result.json")).map(|result| {
-                        PluginExecution {
-                            stdout: output_to_string(stdout),
-                            stderr: output_to_string(stderr),
-                            result,
-                        }
-                    }),
-                    true,
-                )
-            }
+        cleanup_guard.container_name = Some(container_name.clone());
+        match tokio::time::timeout_at(deadline, collect_plugin_output(child, log_sender)).await {
             Ok(Ok((status, stdout, stderr))) => {
-                cleanup_guard.disarm();
+                cleanup_guard.container_name = None;
                 warn_if_log_chunks_dropped(&stdout, &stderr);
+                let result = adapter
+                    .interpret(
+                        context,
+                        AdapterOutput {
+                            exit_code: status.code(),
+                            stdout: &stdout.bytes,
+                            stdout_truncated: stdout.truncated,
+                        },
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "{error}; stdout: {}; stderr: {}",
+                            output_error_summary(stdout.clone()),
+                            output_error_summary(stderr.clone())
+                        )
+                    });
                 (
-                    Err(format!(
-                        "plugin exited unsuccessfully with status {:?}; ignoring result.json; stdout: {}; stderr: {}",
-                        status.code(),
-                        output_error_summary(stdout),
-                        output_error_summary(stderr),
-                    )),
+                    result.map(|result| PluginExecution {
+                        stdout: output_to_string(stdout),
+                        stderr: output_to_string(stderr),
+                        result,
+                    }),
                     true,
                 )
             }
             Ok(Err(error)) => match force_remove_plugin_container(&container_name).await {
                 Ok(()) => {
-                    cleanup_guard.disarm();
+                    cleanup_guard.container_name = None;
                     (Err(error), true)
                 }
                 Err(cleanup_error) => (
@@ -252,7 +313,7 @@ pub(crate) async fn execute_plugin(
                 let timeout_error = format!("plugin timed out after {} seconds", timeout.as_secs());
                 match force_remove_plugin_container(&container_name).await {
                     Ok(()) => {
-                        cleanup_guard.disarm();
+                        cleanup_guard.container_name = None;
                         (Err(timeout_error), true)
                     }
                     Err(error) => (
@@ -269,8 +330,25 @@ pub(crate) async fn execute_plugin(
 
     if remove_attempt_dir {
         remove_attempt_directory(&attempt_dir)?;
+        cleanup_guard.disarm();
     }
     execution
+}
+
+async fn authorize_before_launch(
+    deadline: tokio::time::Instant,
+    authorize: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err("plugin timeout exhausted before launch".to_owned());
+    }
+    tokio::time::timeout_at(deadline, authorize)
+        .await
+        .map_err(|_| "plugin timeout exhausted authorizing launch".to_owned())??;
+    if tokio::time::Instant::now() >= deadline {
+        return Err("plugin timeout exhausted before launch".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_runtime_spec(spec: &PluginRuntimeSpec) -> Result<(), String> {
@@ -313,7 +391,7 @@ fn validate_contract_dir(contract_dir: &Path) -> Result<(), String> {
     {
         return Err("plugin contract directory must be an absolute normalized path".to_owned());
     }
-    if contract_dir.to_string_lossy().contains(',') {
+    if contract_dir.to_string_lossy().contains([',', '\0']) {
         return Err("plugin contract directory must not contain commas".to_owned());
     }
     Ok(())
@@ -440,12 +518,96 @@ fn output_error_summary(output: CapturedOutput) -> String {
     )
 }
 
+// Adapter dependencies are typed read-only data, never arbitrary runtime flags.
+fn validate_invocation(
+    invocation: &AdapterInvocation,
+    requirements: RuntimeRequirements,
+    privilege: PluginPrivilege,
+    contract_dir: &Path,
+) -> Result<(), String> {
+    if !invocation.socket_mounts.is_empty() && !requirements.host_sockets {
+        return Err("adapter host sockets require a declared host_sockets requirement".to_owned());
+    }
+    if (!invocation.mounts.is_empty() || !invocation.socket_mounts.is_empty())
+        && !requirements.run_as_root
+        && privilege == PluginPrivilege::Isolated
+    {
+        return Err(
+            "plugin host dependencies require approved adapter access or privilege".to_owned(),
+        );
+    }
+    for (source, target) in invocation
+        .mounts
+        .iter()
+        .map(|mount| (&mount.source, &mount.target))
+        .chain(
+            invocation
+                .socket_mounts
+                .iter()
+                .map(|mount| (&mount.source, &mount.target)),
+        )
+    {
+        validate_contract_dir(source)?;
+        validate_contract_dir(target)?;
+        if source == Path::new("/")
+            || target == Path::new("/")
+            || target.starts_with(contract_dir)
+            || contract_dir.starts_with(target)
+        {
+            return Err(
+                "adapter dependencies must not mount the host root or replace contract files"
+                    .to_owned(),
+            );
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        for mount in &invocation.mounts {
+            let metadata = std::fs::metadata(&mount.source)
+                .map_err(|error| format!("cannot inspect adapter data dependency: {error}"))?;
+            if metadata.file_type().is_socket() {
+                return Err("host Unix sockets must be declared as socket mounts".to_owned());
+            }
+        }
+        for mount in &invocation.socket_mounts {
+            let metadata = std::fs::metadata(&mount.source)
+                .map_err(|error| format!("cannot inspect adapter host socket: {error}"))?;
+            if !metadata.file_type().is_socket() {
+                return Err("adapter host socket mount must reference a Unix socket".to_owned());
+            }
+        }
+    }
+    if invocation
+        .environment
+        .keys()
+        .any(|key| key.is_empty() || key.contains(['=', '\0']) || key == PLUGIN_CONTRACT_DIR_ENV)
+        || invocation
+            .environment
+            .values()
+            .any(|value| value.contains('\0'))
+        || invocation
+            .arguments
+            .iter()
+            .any(|argument| argument.contains('\0'))
+        || invocation
+            .entrypoint
+            .as_ref()
+            .is_some_and(|entrypoint| entrypoint.is_empty() || entrypoint.contains('\0'))
+    {
+        return Err("invalid adapter invocation".to_owned());
+    }
+    Ok(())
+}
+
 fn plugin_runtime_args(
     input_dir: &Path,
     output_dir: &Path,
     container_name: &str,
     spec: &PluginRuntimeSpec,
     contract_dir: &Path,
+    requirements: RuntimeRequirements,
+    invocation: &AdapterInvocation,
 ) -> Vec<String> {
     let input_path = contract_dir.join("input");
     let output_path = contract_dir.join("output");
@@ -455,7 +617,12 @@ fn plugin_runtime_args(
         "run".to_owned(),
         "--rm".to_owned(),
         "--network".to_owned(),
-        "none".to_owned(),
+        if requirements.host_network {
+            "host"
+        } else {
+            "none"
+        }
+        .to_owned(),
         "--env".to_owned(),
         format!("{PLUGIN_CONTRACT_DIR_ENV}={}", contract_dir.display()),
         "--mount".to_owned(),
@@ -475,7 +642,11 @@ fn plugin_runtime_args(
     match spec.privilege {
         PluginPrivilege::Isolated => args.extend([
             "--user".to_owned(),
-            format!("{PLUGIN_UID}:{PLUGIN_GID}"),
+            if requirements.run_as_root {
+                "0:0".to_owned()
+            } else {
+                format!("{PLUGIN_UID}:{PLUGIN_GID}")
+            },
             "--cap-drop".to_owned(),
             "ALL".to_owned(),
             "--security-opt".to_owned(),
@@ -491,12 +662,50 @@ fn plugin_runtime_args(
         ]),
     }
 
+    if requirements.host_pid && spec.privilege != PluginPrivilege::FullHost {
+        args.extend(["--pid".to_owned(), "host".to_owned()]);
+    }
+    if requirements.run_as_root && spec.privilege != PluginPrivilege::Isolated {
+        args.extend(["--user".to_owned(), "0:0".to_owned()]);
+    }
+    if requirements.all_gpus {
+        args.extend(["--gpus".to_owned(), "all".to_owned()]);
+    }
+    if let Some(entrypoint) = &invocation.entrypoint {
+        args.extend(["--entrypoint".to_owned(), entrypoint.clone()]);
+    }
+    for (key, value) in &invocation.environment {
+        args.extend(["--env".to_owned(), format!("{key}={value}")]);
+    }
+    for mount in &invocation.mounts {
+        args.extend([
+            "--mount".to_owned(),
+            format!(
+                "type=bind,src={},dst={},readonly",
+                mount.source.display(),
+                mount.target.display()
+            ),
+        ]);
+    }
+    // A read-only socket bind still permits protocol requests. These mounts
+    // are distinct from data dependencies and require explicit site approval.
+    for mount in &invocation.socket_mounts {
+        args.extend([
+            "--mount".to_owned(),
+            format!(
+                "type=bind,src={},dst={},readonly",
+                mount.source.display(),
+                mount.target.display()
+            ),
+        ]);
+    }
+
     args.extend([
         "--name".to_owned(),
         container_name.to_owned(),
         spec.image.clone(),
     ]);
-    args.extend(spec.entrypoint.iter().cloned());
+    args.extend(invocation.arguments.iter().cloned());
     args
 }
 
@@ -546,7 +755,7 @@ async fn force_remove_plugin_container(container_name: &str) -> Result<(), Strin
     }
     Err(format!(
         "could not remove timed out plugin container {container_name} after {CONTAINER_REMOVE_ATTEMPTS} attempts: {}",
-        last_error.unwrap_or_else(|| "unknown error".to_owned())
+        last_error.as_deref().unwrap_or("unknown error")
     ))
 }
 
@@ -600,6 +809,7 @@ fn prepare_plugin_directories(
     attempt_dir: &Path,
     input_dir: &Path,
     output_dir: &Path,
+    owner: (u32, u32),
 ) -> Result<(), String> {
     std::fs::create_dir_all(attempt_dir)
         .map_err(|error| format!("failed to create plugin attempt directory: {error}"))?;
@@ -611,11 +821,11 @@ fn prepare_plugin_directories(
             .map_err(|error| format!("failed to create plugin directory: {error}"))?;
         let path = CString::new(directory.as_os_str().as_bytes())
             .map_err(|_| "plugin directory path contains a null byte".to_owned())?;
-        // Scout creates these directories for the fixed non-root container
-        // identity. The restrictive mode prevents another host user from
-        // pre-seeding or replacing the plugin's result.
+        // Match the approved container identity, including root without DAC
+        // override capabilities. Restrictive modes prevent other host users
+        // from pre-seeding inputs or replacing results.
         // SAFETY: `path` is NUL-terminated and remains valid for this call.
-        if unsafe { libc::chown(path.as_ptr(), PLUGIN_UID, PLUGIN_GID) } != 0 {
+        if unsafe { libc::chown(path.as_ptr(), owner.0, owner.1) } != 0 {
             return Err(format!(
                 "failed to grant plugin directory access: {}",
                 std::io::Error::last_os_error()
@@ -632,6 +842,7 @@ fn prepare_plugin_directories(
     _attempt_dir: &Path,
     _input_dir: &Path,
     _output_dir: &Path,
+    _owner: (u32, u32),
 ) -> Result<(), String> {
     Err("machine validation plugin execution requires a Unix host".to_owned())
 }
@@ -647,10 +858,104 @@ mod tests {
 
     fn spec(privilege: PluginPrivilege) -> PluginRuntimeSpec {
         PluginRuntimeSpec {
+            container_plugin_adapter: None,
             image: "registry.example/plugin@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
             entrypoint: vec!["/plugin/check".to_owned(), "--verify".to_owned()],
             privilege,
         }
+    }
+
+    // Hardware qualification is opt-in: never run containers on a developer
+    // host merely because the unit test suite is being executed.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires root, a pre-pulled HealthValidation image, GPUs, and Scout journal/runtime dependencies"]
+    async fn dsx_scout_qualification() {
+        // SAFETY: geteuid has no arguments or memory-safety preconditions.
+        assert_eq!(unsafe { libc::geteuid() }, 0, "qualification requires root");
+        let image = std::env::var("NICO_MV_DSX_TEST_IMAGE")
+            .expect("set NICO_MV_DSX_TEST_IMAGE to a pre-pulled digest-pinned image");
+        let expected = std::env::var("NICO_MV_DSX_EXPECTED_SEVERITY")
+            .expect("set NICO_MV_DSX_EXPECTED_SEVERITY to the established node severity");
+        let (outcome, severity) = match expected.as_str() {
+            "PASS" => ("pass", None),
+            "INFO" => ("pass", Some("info")),
+            "WARNING" => ("pass", Some("warning")),
+            "CRITICAL" => ("fail", Some("critical")),
+            "UNKNOWN" => ("fail", Some("unknown")),
+            _ => panic!("unsupported expected severity {expected:?}"),
+        };
+        let mut parameters = serde_json::json!({});
+        if let Ok(count) = std::env::var("NICO_MV_DSX_GPU_COUNT") {
+            parameters["gpu_count"] = count.parse::<u32>().expect("invalid GPU count").into();
+        }
+        let input = serde_json::json!({
+            "machineId": "nico-dsx-qualification",
+            "parameters": parameters,
+        });
+        let mut runtime = spec(PluginPrivilege::Isolated);
+        runtime.image = image;
+        runtime.container_plugin_adapter = Some("DSXHealthValidation".to_owned());
+        // Qualify the DCGM 4 profile against the PR #269 CLI, which defaults
+        // to TENANT_GUEST unless OPERATOR_INFRA is selected explicitly.
+        runtime.entrypoint = vec![
+            "/health-validation".to_owned(),
+            "run".to_owned(),
+            "--execution-context".to_owned(),
+            "OPERATOR_INFRA".to_owned(),
+        ];
+        let (sender, mut receiver) = mpsc::channel::<PluginLogChunk>(1024);
+        let logs = tokio::spawn(async move {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            while let Some(chunk) = receiver.recv().await {
+                match chunk.stream {
+                    PluginLogStream::Stdout => stdout.push_str(&chunk.content),
+                    PluginLogStream::Stderr => stderr.push_str(&chunk.content),
+                }
+            }
+            (stdout, stderr)
+        });
+        let execution = execute_plugin(
+            &runtime,
+            &input,
+            std::time::Duration::from_secs(180),
+            Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            Some(sender),
+            async { Ok(()) },
+        )
+        .await
+        .expect("the real DSX adapter must complete an assessment");
+        let (stdout, stderr) = logs.await.unwrap();
+        assert_eq!(stdout, execution.stdout, "stdout must reach attempt logs");
+        assert_eq!(stderr, execution.stderr, "stderr must reach attempt logs");
+        let report: Value = serde_json::from_str(&execution.stdout).unwrap();
+        assert_eq!(report["overall_severity"], expected);
+        assert_eq!(execution.result.outcome, outcome);
+        assert_eq!(execution.result.severity.as_deref(), severity);
+        println!("HealthValidation stdout: {}", execution.stdout);
+        println!("HealthValidation stderr: {}", execution.stderr);
+
+        // The published Ubuntu-based image also supplies a shell and sleep.
+        // Exercise the same GPU/root/journal profile with a process that cannot
+        // complete before the deadline. Success here requires container removal
+        // and attempt-directory cleanup, otherwise execute_plugin adds an error.
+        runtime.entrypoint = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "exec sleep 90".to_owned(),
+        ];
+        let error = execute_plugin(
+            &runtime,
+            &input,
+            std::time::Duration::from_secs(30),
+            Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            None,
+            async { Ok(()) },
+        )
+        .await
+        .expect_err("qualification process must time out");
+        assert_eq!(error, "plugin timed out after 30 seconds");
     }
 
     #[test]
@@ -661,6 +966,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::Isolated),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
@@ -692,6 +1002,242 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--privileged"));
         assert!(!args.iter().any(|arg| arg == "--pid"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
+        assert!(!args.iter().any(|arg| arg == "--entrypoint"));
+        assert_eq!(
+            &args[args.len() - 3..],
+            [
+                spec(PluginPrivilege::Isolated).image,
+                "/plugin/check".to_owned(),
+                "--verify".to_owned()
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attempt_directories_use_the_selected_container_identity() {
+        let attempt = std::env::temp_dir().join(format!("adapter-directories-{}", Uuid::new_v4()));
+        std::fs::create_dir(&attempt).unwrap();
+        let metadata = std::fs::metadata(&attempt).unwrap();
+        let owner = (metadata.uid(), metadata.gid());
+        let input = attempt.join("input");
+        let output = attempt.join("output");
+        prepare_plugin_directories(&attempt, &input, &output, owner).unwrap();
+        for directory in [&input, &output] {
+            let metadata = std::fs::metadata(directory).unwrap();
+            assert_eq!((metadata.uid(), metadata.gid()), owner);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        }
+        std::fs::remove_dir_all(attempt).unwrap();
+    }
+
+    #[test]
+    fn approved_gpu_adapter_uses_declared_namespaces_without_privileged_or_host_root_access() {
+        let dependency =
+            std::env::temp_dir().join(format!("adapter-dependency-{}", Uuid::new_v4()));
+        std::fs::write(&dependency, b"fixture").unwrap();
+        let requirements = machine_validation_adapters::resolve(Some("DSXHealthValidation"))
+            .unwrap()
+            .requirements();
+        let invocation = AdapterInvocation {
+            entrypoint: Some("/custom/check".to_owned()),
+            arguments: vec!["run".to_owned()],
+            environment: [(
+                "NVIDIA_DRIVER_CAPABILITIES".to_owned(),
+                "utility".to_owned(),
+            )]
+            .into(),
+            mounts: vec![machine_validation_adapters::ReadOnlyMount {
+                source: dependency.clone(),
+                target: "/usr/bin/journalctl".into(),
+            }],
+            socket_mounts: Vec::new(),
+        };
+        let contract = Path::new(DEFAULT_PLUGIN_CONTRACT_DIR);
+        validate_invocation(
+            &invocation,
+            requirements,
+            PluginPrivilege::Isolated,
+            contract,
+        )
+        .unwrap();
+        assert!(
+            validate_invocation(
+                &invocation,
+                RuntimeRequirements::default(),
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        let runtime = spec(PluginPrivilege::Isolated);
+        let args = plugin_runtime_args(
+            Path::new("/tmp/input"),
+            Path::new("/tmp/output"),
+            "test",
+            &runtime,
+            contract,
+            requirements,
+            &invocation,
+        );
+        let mount_argument = format!(
+            "type=bind,src={},dst=/usr/bin/journalctl,readonly",
+            dependency.display()
+        );
+        for pair in [
+            ["--gpus", "all"],
+            ["--user", "0:0"],
+            ["--cap-drop", "ALL"],
+            ["--network", "host"],
+            ["--pid", "host"],
+            ["--entrypoint", "/custom/check"],
+            ["--env", "NVIDIA_DRIVER_CAPABILITIES=utility"],
+            ["--mount", mount_argument.as_str()],
+        ] {
+            assert!(args.windows(2).any(|actual| actual == pair));
+        }
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--privileged" || arg.contains("dst=/host"))
+        );
+        assert_eq!(&args[args.len() - 2..], [runtime.image, "run".to_owned()]);
+        std::fs::remove_file(dependency).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_service_sockets_require_a_declaration_and_cannot_be_data_mounts() {
+        use std::os::unix::net::UnixDatagram;
+
+        use machine_validation_adapters::{HostSocketMount, ReadOnlyMount};
+        let directory = std::env::temp_dir().join(format!("adapter-socket-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("socket");
+        let _socket = UnixDatagram::bind(&path).unwrap();
+        let mut invocation = AdapterInvocation {
+            socket_mounts: vec![HostSocketMount {
+                source: path.clone(),
+                target: "/run/service/socket".into(),
+            }],
+            ..Default::default()
+        };
+        let mut requirements = RuntimeRequirements {
+            run_as_root: true,
+            ..Default::default()
+        };
+        let contract = Path::new(DEFAULT_PLUGIN_CONTRACT_DIR);
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        requirements.host_sockets = true;
+        validate_invocation(
+            &invocation,
+            requirements,
+            PluginPrivilege::Isolated,
+            contract,
+        )
+        .unwrap();
+        let args = plugin_runtime_args(
+            &directory,
+            &directory,
+            "socket-test",
+            &spec(PluginPrivilege::Isolated),
+            contract,
+            requirements,
+            &invocation,
+        );
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "--mount",
+                &format!(
+                    "type=bind,src={},dst=/run/service/socket,readonly",
+                    path.display()
+                )
+            ]));
+        invocation.socket_mounts[0].target = contract.join("input/audit");
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .unwrap_err()
+            .contains("replace contract files")
+        );
+        invocation.socket_mounts.clear();
+        invocation.mounts.push(ReadOnlyMount {
+            source: path.clone(),
+            target: "/run/service/socket".into(),
+        });
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        invocation.mounts.clear();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"not a socket").unwrap();
+        invocation.socket_mounts.push(HostSocketMount {
+            source: path,
+            target: "/run/service/socket".into(),
+        });
+        assert!(
+            validate_invocation(
+                &invocation,
+                requirements,
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn adapter_mounts_cannot_inject_options_or_replace_contract_files() {
+        for (source, target, expected) in [
+            ("/", "/dependency", "must not mount"),
+            (
+                "/host/lib,readonly=false",
+                "/dependency",
+                "must not contain commas",
+            ),
+            ("/host/lib", "/opt/forge/mv/input", "replace contract files"),
+            ("/host/lib", "/", "must not mount"),
+        ] {
+            let invocation = AdapterInvocation {
+                mounts: vec![machine_validation_adapters::ReadOnlyMount {
+                    source: source.into(),
+                    target: target.into(),
+                }],
+                ..Default::default()
+            };
+            assert!(
+                validate_invocation(
+                    &invocation,
+                    RuntimeRequirements {
+                        run_as_root: true,
+                        ..Default::default()
+                    },
+                    PluginPrivilege::Isolated,
+                    Path::new(DEFAULT_PLUGIN_CONTRACT_DIR)
+                )
+                .unwrap_err()
+                .contains(expected)
+            );
+        }
     }
 
     #[test]
@@ -703,6 +1249,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::Isolated),
             contract_dir,
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(
@@ -737,6 +1288,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::Privileged),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
@@ -752,6 +1308,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::FullHost),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
@@ -802,24 +1363,50 @@ mod tests {
         assert!(!container_not_found("permission denied"));
     }
 
-    #[test]
-    fn cancelled_execution_schedules_container_cleanup() {
-        let removed_containers = Arc::new(Mutex::new(Vec::new()));
-        let scheduler_containers = Arc::clone(&removed_containers);
-        {
-            let _cleanup_guard =
-                ContainerCleanupGuard::new("mv-plugin-example".to_owned(), move |container_name| {
-                    scheduler_containers
-                        .lock()
-                        .expect("lock scheduled cleanup")
-                        .push(container_name);
+    #[tokio::test]
+    async fn cancelled_execution_cleans_files_only_after_the_container_is_gone() {
+        for launched in [false, true] {
+            let directory = std::env::temp_dir().join(format!("plugin-cancel-{}", Uuid::new_v4()));
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("input.json"), b"{}").unwrap();
+            let removed_containers = Arc::new(Mutex::new(Vec::new()));
+            let scheduler_containers = Arc::clone(&removed_containers);
+            let attempt_dir = directory.clone();
+            let (ready, waiting) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut guard = PluginCleanupGuard::new(attempt_dir, move |name, path| {
+                    assert!(path.join("input.json").exists());
+                    scheduler_containers.lock().unwrap().push((name, path));
                 });
+                if launched {
+                    guard.container_name = Some("mv-plugin-example".to_owned());
+                }
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+                drop(guard);
+            });
+            waiting.await.unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let scheduled = removed_containers.lock().unwrap();
+            if launched {
+                assert_eq!(
+                    *scheduled,
+                    [("mv-plugin-example".to_owned(), directory.clone())]
+                );
+                assert!(
+                    directory.exists(),
+                    "preserve mounts until container cleanup succeeds"
+                );
+                std::fs::remove_dir_all(&directory).unwrap();
+            } else {
+                assert!(scheduled.is_empty());
+                assert!(
+                    !directory.exists(),
+                    "preparation cancellation must remove input files"
+                );
+            }
         }
-
-        assert_eq!(
-            *removed_containers.lock().expect("lock scheduled cleanup"),
-            ["mv-plugin-example"]
-        );
     }
 
     #[test]
@@ -827,7 +1414,7 @@ mod tests {
         let removed_containers = Arc::new(Mutex::new(Vec::new()));
         let scheduler_containers = Arc::clone(&removed_containers);
         let mut cleanup_guard =
-            ContainerCleanupGuard::new("mv-plugin-example".to_owned(), move |container_name| {
+            PluginCleanupGuard::new("/unused-attempt".into(), move |container_name, _| {
                 scheduler_containers
                     .lock()
                     .expect("lock scheduled cleanup")
@@ -841,6 +1428,35 @@ mod tests {
                 .lock()
                 .expect("lock scheduled cleanup")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_authorization_fails_closed_and_respects_the_attempt_deadline() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        assert!(
+            authorize_before_launch(deadline, async { Ok(()) })
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            authorize_before_launch(deadline, async { Err("policy revoked".to_owned()) }).await,
+            Err("policy revoked".to_owned())
+        );
+        assert_eq!(
+            authorize_before_launch(tokio::time::Instant::now(), async {
+                panic!("an expired attempt must not request launch authorization")
+            })
+            .await,
+            Err("plugin timeout exhausted before launch".to_owned())
+        );
+        assert_eq!(
+            authorize_before_launch(
+                tokio::time::Instant::now() + std::time::Duration::from_millis(5),
+                std::future::pending(),
+            )
+            .await,
+            Err("plugin timeout exhausted authorizing launch".to_owned())
         );
     }
 

@@ -216,7 +216,7 @@ jobs:
           persist-credentials: false
 
       - name: Package and push Helm prereqs chart to production NGC
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}

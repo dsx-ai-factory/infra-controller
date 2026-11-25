@@ -54,8 +54,9 @@ spec:
             properties:
               interNetworkAccess:
                 description: |-
-                  InterNetworkAccess defines if virtual networks within the VPC are routed or not.
-                  if set to false, communication between virtual networks is not allowed.
+                  InterNetworkAccess defines if virtual networks within the VPC are routed
+                  or not. if set to false, communication between virtual networks is not
+                  allowed.
                 type: boolean
               isolationClassName:
                 description: IsolationClassName is the name of the isolation class
@@ -63,8 +64,9 @@ spec:
                 minLength: 1
                 type: string
               nodeSelector:
-                description: NodeSelector Selects the DPU Nodes with specific labels
-                  which belong to this VPC.
+                description: |-
+                  NodeSelector Selects the DPU Nodes with specific labels which belong to
+                  this VPC.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -187,8 +189,9 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
               virtualNetworks:

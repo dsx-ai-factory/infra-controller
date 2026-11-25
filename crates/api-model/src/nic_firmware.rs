@@ -46,16 +46,23 @@ impl fmt::Display for NicFirmwareProfileId {
     }
 }
 
-impl FromStr for NicFirmwareProfileId {
-    type Err = ConfigValidationError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
+impl NicFirmwareProfileId {
+    fn validate(value: &str) -> Result<(), ConfigValidationError> {
         if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
             return Err(ConfigValidationError::InvalidValue(
                 "profile ID must be nonempty without surrounding whitespace or control characters"
                     .into(),
             ));
         }
+        Ok(())
+    }
+}
+
+impl FromStr for NicFirmwareProfileId {
+    type Err = ConfigValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::validate(value)?;
         Ok(Self(value.to_string()))
     }
 }
@@ -65,8 +72,42 @@ impl<'de> Deserialize<'de> for NicFirmwareProfileId {
     where
         D: serde::Deserializer<'de>,
     {
-        String::deserialize(deserializer)?
-            .parse()
+        struct StringVisitor;
+
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = Result<NicFirmwareProfileId, ConfigValidationError>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(value.parse())
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(NicFirmwareProfileId::validate(&value).map(|()| NicFirmwareProfileId(value)))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+                match String::from_utf8(value) {
+                    Ok(value) => self.visit_string(value),
+                    Err(error) => Err(E::invalid_value(
+                        serde::de::Unexpected::Bytes(&error.into_bytes()),
+                        &self,
+                    )),
+                }
+            }
+        }
+
+        deserializer
+            .deserialize_string(StringVisitor)?
             .map_err(serde::de::Error::custom)
     }
 }

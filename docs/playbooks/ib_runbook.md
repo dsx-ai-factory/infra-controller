@@ -210,7 +210,7 @@ root:/# curl -s -k -XPUT -H "Content-Type: application/json" -u admin:123456 -d 
 }
 ```
 
-Generate a token for admin as follows:
+If NICo will use token authentication, generate a token for admin as follows:
 
 ```text
 root:/# curl -s -k -XPOST -u admin:x https://ufm.example.org:443/ufmRest/app/tokens | jq
@@ -246,8 +246,16 @@ No additional steps are required to enable Infiniband in NVIDIA Infra Controller
 
 #### UFM Credential
 
-One of two options can be selected for UFM authentication: `token authentication` or `client authentication`.
-Follow the instructions in the section that applies to the selected option.
+One of two options can be selected for UFM authentication. Set `auth = "token"`
+or `auth = "client_certificate"` in the fabric configuration to select one
+explicitly. Token authentication uses the password as the UFM token. Client
+authentication uses the default SPIFFE client certificate files and needs no
+UFM credential.
+
+When `auth` is not set, an empty or whitespace-only password selects the default
+SPIFFE client certificate, while any other password is a UFM token. The
+empty-password route does not work with Postgres credential storage. See
+[UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
 
 ##### Token Authentication
 
@@ -266,11 +274,22 @@ root:/# curl -s -k -XGET -u admin:password https://ufm:443/ufmRest/app/tokens | 
 ]
 ```
 
-Create the credential for UFM client in NICo by nico-admin-cli as follows:
+Store the token where NICo reads UFM credentials. When a backend supplies the
+credential, use:
 
 ```text
 root:/# nico-admin-cli credential add-ufm --url=https://<address:port> --token=<access_token>
 ```
+
+With `ufm_source = "local"`, store the token in the environment or watched file
+source because `credential add-ufm` is rejected. With `"local_first"`, update a
+local entry if it already supplies the credential. A token in the environment
+source takes effect when Core restarts. See
+[UFM Ownership Policy](../configuration/credential-sources.md#ufm-ownership-policy).
+
+To select token authentication explicitly, set `auth = "token"` in the
+[fabric configuration](#nico-api-site-config) and restart Core. Without `auth`,
+a non-empty password already selects token authentication.
 
 ##### Client Authentication (mTLS)
 
@@ -309,11 +328,12 @@ openssl x509 -in server.crt -text -noout | grep DNS
 
 **Select Client Authentication mode.**
 
-Existing NICo certificates such as `/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` are used for client side.
+Set `auth = "client_certificate"` in `[ib_fabrics.default]` in the
+[nico-api-site-config section](#nico-api-site-config).
 
-```bash
-nico-admin-cli credential add-ufm --url=<ufm host name>
-```
+No UFM credential is needed. NICo reads
+`/var/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` for client
+authentication.
 
 **Generate UFM server certificate using Vault.**
 
@@ -397,6 +417,9 @@ client_cert_authentication = true
 ```bash
 /etc/init.d/ufmd restart
 ```
+
+After UFM accepts the client certificate, restart Core for the changed `auth`
+value to take effect.
 
 **Check functionality.**
 Existing nico certificates such as `/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` are used for verification.
@@ -504,6 +527,7 @@ Infiniband typically expresses `Pkeys` in hex; the available range is `“0x0 ~ 
 ```toml
 [ib_fabrics.default]
 endpoints = ["https://10.217.161.194:443/"]
+# auth = "token" # Optional: "token" or "client_certificate"; see UFM Credential above.
 pkeys = [{ start = "256", end = "2303" }]
 ```
 
@@ -546,7 +570,8 @@ The default home directory is `/opt/ufm`.
 
 ### How to check UFM connection?
 
-There is a debug tools for QA/SRE to check the address/token of UFM:
+For token authentication, QA/SRE can use this debug tool to check the UFM
+address and token:
 
 ```text
 root@host-client:/$ kubectl apply -f https://bit.ly/debug-console
@@ -584,7 +609,14 @@ Ports          :
 
 ### How to check the auth token and UFM IP in NICo?
 
-After configuring UFM credentials in NICo, using the following commands to check whether the token was updated in the credential store. The commands below apply to the default Vault backend. With the Postgres store, confirm the journal row instead: in the `nico_system_nico` database, `SELECT path, seq, kek_id, created_at FROM secrets WHERE path LIKE 'ufm/%' ORDER BY seq DESC;` lists the entries without revealing the encrypted token.
+This check applies when NICo reads a UFM credential; a fabric with
+`auth = "client_certificate"` reads none. After configuring UFM credentials in
+NICo, use the following commands to check whether the token was updated in the
+credential store. The commands below apply to the default Vault backend. With
+the Postgres store, confirm the journal row instead: in the
+`nico_system_nico` database, `SELECT path, seq, kek_id, created_at FROM secrets
+WHERE path LIKE 'ufm/%' ORDER BY seq DESC;` lists the entries without revealing
+the encrypted token.
 
 If a local environment or file source supplies the fabric's credential, NICo reads that source first regardless of what the backend holds; refer to [Credential Sources](../configuration/credential-sources.md) for details.
 

@@ -1310,7 +1310,10 @@ mod recovery_tests {
         }
 
         let gate = Arc::new(Gate::default());
-        let api = crate::api_client::ApiClient(CarbideApiClient::build(Provider(gate.clone())));
+        let api = crate::api_client::ApiClient(CarbideApiClient::build(
+            Provider(gate.clone()),
+            carbide_instrument::Instrumentation::noop(),
+        ));
         let blocker_client = api.0.clone();
         let blocker = tokio::spawn(async move { blocker_client.connection().await });
         tokio::time::timeout(Duration::from_secs(1), gate.entered.notified())

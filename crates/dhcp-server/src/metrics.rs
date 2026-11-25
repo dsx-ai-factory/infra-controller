@@ -765,7 +765,6 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::time::Duration;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
     use dhcproto::v4::OptionCode;
@@ -778,7 +777,7 @@ mod tests {
     const V6_LISTENER_UNAVAILABLE_METRIC: &str = "carbide_dhcp_v6_listener_unavailable_total";
 
     struct SocketSetupFailureCase {
-        emit: fn(),
+        emit: fn(&carbide_instrument::Instrumentation),
         operation: &'static str,
         next_action: &'static str,
     }
@@ -804,7 +803,7 @@ mod tests {
     }
 
     struct TimestampFileFailureInput {
-        emit: fn(),
+        emit: fn(&carbide_instrument::Instrumentation),
     }
 
     #[derive(Debug, PartialEq)]
@@ -828,16 +827,18 @@ mod tests {
         error: Option<String>,
     }
 
-    fn emit_timestamp_initialization_failure() {
-        emit(DhcpTimestampFileFailed::Initialization {
+    fn emit_timestamp_initialization_failure(
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) {
+        instrumentation.emit(DhcpTimestampFileFailed::Initialization {
             dhcp_timestamps_path: "/var/support/forge-dhcp/logs/dhcp_timestamps.json.tmp"
                 .to_string(),
             error: "permission denied".to_string(),
         });
     }
 
-    fn emit_timestamp_write_failure() {
-        emit(DhcpTimestampFileFailed::Write {
+    fn emit_timestamp_write_failure(instrumentation: &carbide_instrument::Instrumentation) {
+        instrumentation.emit(DhcpTimestampFileFailed::Write {
             dhcp_timestamps_path: "/var/support/forge-dhcp/logs/dhcp_timestamps.json.tmp"
                 .to_string(),
             host_interface_id: "60cef902-9779-4666-8362-c9bb4b37185f".to_string(),
@@ -845,8 +846,8 @@ mod tests {
         });
     }
 
-    fn emit_timestamp_read_failure() {
-        emit(DhcpTimestampFileFailed::Read {
+    fn emit_timestamp_read_failure(instrumentation: &carbide_instrument::Instrumentation) {
+        instrumentation.emit(DhcpTimestampFileFailed::Read {
             dhcp_timestamps_path: "/var/support/forge-dhcp/logs/dhcp_timestamps.json".to_string(),
             error: "file not found".to_string(),
         });
@@ -855,8 +856,8 @@ mod tests {
     fn observe_timestamp_file_failure(
         input: TimestampFileFailureInput,
     ) -> TimestampFileFailureObservation {
-        let metrics = MetricsCapture::start();
-        let mut logs = capture_logs(input.emit);
+        let metrics = MetricsCapture::owned();
+        let mut logs = capture_logs(|| (input.emit)(metrics.instrumentation()));
         assert_eq!(logs.len(), 1, "a timestamp-file failure logs once");
         let log = logs.pop().expect("the timestamp-file failure log");
         let field = |name: &str| log.field(name).map(str::to_owned);
@@ -912,10 +913,10 @@ mod tests {
     }
 
     fn observe_socket_setup_failure(
-        metrics: &MetricsCapture,
+        metrics: &carbide_instrument::testing::OwnedMetricsCapture,
         case: SocketSetupFailureCase,
     ) -> SocketSetupFailureObservation {
-        let mut logs = capture_logs(case.emit);
+        let mut logs = capture_logs(|| (case.emit)(metrics.instrumentation()));
         assert_eq!(logs.len(), 1, "one socket failure logs once");
         let log = logs.pop().expect("the socket setup failure log");
         let field = |name: &str| log.field(name).map(str::to_owned);
@@ -980,8 +981,7 @@ mod tests {
     /// terminal control flow is tested separately.
     #[test]
     fn socket_setup_failures_keep_the_existing_diagnostics() {
-        // Snapshot the process-global counter before any case emits its failure Event.
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         // Define each syscall and terminal-action contract independently so label drift identifies its exact source.
         check_values(
@@ -990,8 +990,8 @@ mod tests {
                 Check {
                     scenario: "socket creation will retry",
                     input: SocketSetupFailureCase {
-                        emit: || {
-                            emit(DhcpSocketSetupFailed::new(
+                        emit: |instrumentation| {
+                            instrumentation.emit(DhcpSocketSetupFailed::new(
                                 SocketSetupOperation::Create,
                                 SocketSetupNextAction::Retry,
                                 0,
@@ -1015,8 +1015,8 @@ mod tests {
                 Check {
                     scenario: "reuse-address setup will retry",
                     input: SocketSetupFailureCase {
-                        emit: || {
-                            emit(DhcpSocketSetupFailed::new(
+                        emit: |instrumentation| {
+                            instrumentation.emit(DhcpSocketSetupFailed::new(
                                 SocketSetupOperation::ReuseAddress,
                                 SocketSetupNextAction::Retry,
                                 1,
@@ -1043,8 +1043,8 @@ mod tests {
                 Check {
                     scenario: "nonblocking setup will retry",
                     input: SocketSetupFailureCase {
-                        emit: || {
-                            emit(DhcpSocketSetupFailed::new(
+                        emit: |instrumentation| {
+                            instrumentation.emit(DhcpSocketSetupFailed::new(
                                 SocketSetupOperation::SetNonblocking,
                                 SocketSetupNextAction::Retry,
                                 2,
@@ -1071,8 +1071,8 @@ mod tests {
                 Check {
                     scenario: "address bind will retry",
                     input: SocketSetupFailureCase {
-                        emit: || {
-                            emit(DhcpSocketSetupFailed::new(
+                        emit: |instrumentation| {
+                            instrumentation.emit(DhcpSocketSetupFailed::new(
                                 SocketSetupOperation::BindAddress,
                                 SocketSetupNextAction::Retry,
                                 3,
@@ -1099,8 +1099,8 @@ mod tests {
                 Check {
                     scenario: "broadcast setup exhausts the outer loop",
                     input: SocketSetupFailureCase {
-                        emit: || {
-                            emit(DhcpSocketSetupFailed::new(
+                        emit: |instrumentation| {
+                            instrumentation.emit(DhcpSocketSetupFailed::new(
                                 SocketSetupOperation::SetBroadcast,
                                 SocketSetupNextAction::Return,
                                 9,
@@ -1127,8 +1127,8 @@ mod tests {
                 Check {
                     scenario: "device bind will retry",
                     input: SocketSetupFailureCase {
-                        emit: || {
-                            emit(DhcpInterfaceBindFailed::new(
+                        emit: |instrumentation| {
+                            instrumentation.emit(DhcpInterfaceBindFailed::new(
                                 SocketSetupNextAction::Retry,
                                 "pf0hpf".to_string(),
                                 1,
@@ -1155,8 +1155,8 @@ mod tests {
                 Check {
                     scenario: "device bind exhausts its retry loop",
                     input: SocketSetupFailureCase {
-                        emit: || {
-                            emit(DhcpInterfaceBindFailed::new(
+                        emit: |instrumentation| {
+                            instrumentation.emit(DhcpInterfaceBindFailed::new(
                                 SocketSetupNextAction::Return,
                                 "pf0hpf".to_string(),
                                 0,
@@ -1191,9 +1191,6 @@ mod tests {
     /// operation label selects exactly one series in the shared counter.
     #[test]
     fn timestamp_file_failures_log_and_count_by_operation() {
-        // No other test in this binary triggers a timestamp-file failure. The
-        // exact process-global counter deltas below rely on that isolation;
-        // keep any future call-site failure test under the same log capture.
         check_values(
             [
                 Check {
@@ -1768,18 +1765,22 @@ mod tests {
     /// reasons and diagnostic warning context.
     #[test]
     fn v6_listener_unavailability_counts_each_reason_and_logs_diagnostics() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         // Emit one final failure from each listener lifecycle boundary.
         let logs = capture_logs(|| {
-            emit(DhcpV6ListenerUnavailable::InitialSocketSetup {
-                interface_name: "eth0".to_string(),
-                error: "address unavailable".to_string(),
-            });
-            emit(DhcpV6ListenerUnavailable::SocketRecreation {
-                interface_name: "eth1".to_string(),
-                error: "device disappeared".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(DhcpV6ListenerUnavailable::InitialSocketSetup {
+                    interface_name: "eth0".to_string(),
+                    error: "address unavailable".to_string(),
+                });
+            metrics
+                .instrumentation()
+                .emit(DhcpV6ListenerUnavailable::SocketRecreation {
+                    interface_name: "eth1".to_string(),
+                    error: "device disappeared".to_string(),
+                });
         });
 
         // Both reasons have independent counters and preserve their warnings.
@@ -1812,13 +1813,14 @@ mod tests {
     /// without appearing as packet-processing errors at the default log level.
     #[test]
     fn expected_v6_drops_log_at_debug() {
+        let instrumentation = carbide_instrument::Instrumentation::noop();
         // Exercise the two routine outcomes that are counted but not operational failures.
         let logs = capture_logs(|| {
-            emit(DhcpV6RequestDropped {
+            instrumentation.emit(DhcpV6RequestDropped {
                 reason: V6DropReason::NoIpv6Configuration,
                 error: "no DHCPv6 configuration for interface eth0".to_string(),
             });
-            emit(DhcpV6RequestDropped {
+            instrumentation.emit(DhcpV6RequestDropped {
                 reason: V6DropReason::NotMyPacket,
                 error: "packet received for other server: 0002".to_string(),
             });
@@ -1838,13 +1840,9 @@ mod tests {
     /// request and reply activity at INFO, while processing drops log at ERROR.
     #[test]
     fn packet_events_count_per_label_and_log_at_their_operational_level() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            // Labels deliberately unused by any other test in this binary:
-            // the capture mutex serializes only capture-holding tests, so
-            // shared labels (a Discover request, an Offer grant) would race
-            // with the end-to-end packet tests.
-            emit(DhcpRequestReceived {
+            metrics.instrumentation().emit(DhcpRequestReceived {
                 message_type: MessageTypeLabel::Release,
                 bootp_op: 1,
                 source_address: "192.0.2.10:68".parse().unwrap(),
@@ -1856,7 +1854,7 @@ mod tests {
                 giaddr: Ipv4Addr::new(192, 0, 2, 254),
                 chaddr: "00:11:22:33:44:55".to_string(),
             });
-            emit(DhcpRequestReceived {
+            metrics.instrumentation().emit(DhcpRequestReceived {
                 message_type: MessageTypeLabel::Release,
                 bootp_op: 1,
                 source_address: "192.0.2.10:68".parse().unwrap(),
@@ -1868,7 +1866,7 @@ mod tests {
                 giaddr: Ipv4Addr::new(192, 0, 2, 254),
                 chaddr: "00:11:22:33:44:55".to_string(),
             });
-            emit(DhcpReplySent {
+            metrics.instrumentation().emit(DhcpReplySent {
                 message_type: MessageTypeLabel::Nak,
                 destination_address: "192.0.2.10:68".parse().unwrap(),
                 xid: 0x0102_0304,
@@ -1879,24 +1877,24 @@ mod tests {
                 giaddr: Ipv4Addr::new(192, 0, 2, 254),
                 chaddr: "00:11:22:33:44:55".to_string(),
             });
-            emit(DhcpV6RequestReceived {
+            metrics.instrumentation().emit(DhcpV6RequestReceived {
                 message_type: MessageTypeLabel::Confirm,
                 source_address: "[fe80::10]:546".parse().unwrap(),
             });
-            emit(DhcpV6ReplySent {
+            metrics.instrumentation().emit(DhcpV6ReplySent {
                 message_type: V6ReplyMessageType::Reply,
                 destination_address: "[fe80::10]:546".parse().unwrap(),
             });
-            emit(DhcpPacketDropped {
+            metrics.instrumentation().emit(DhcpPacketDropped {
                 reason: DropReason::RateLimited,
                 error: "parallel packet handling limit reached".to_string(),
             });
             let error = DhcpError::TonicStatusError(tonic::Status::unavailable("api down"));
-            emit(DhcpPacketDropped {
+            metrics.instrumentation().emit(DhcpPacketDropped {
                 reason: DropReason::from(&error),
                 error: error.to_string(),
             });
-            emit(DhcpV6RequestDropped {
+            metrics.instrumentation().emit(DhcpV6RequestDropped {
                 reason: V6DropReason::RateLimited,
                 error: "v6 parallel packet handling limit reached".to_string(),
             });

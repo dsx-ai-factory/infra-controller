@@ -2428,7 +2428,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(sum(max by (forge_site) (${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"})) - clamp_min((sum(max by (forge_site, in_use) (${metric_prefix}_hosts_health_status_count{forge_site=~\"$site\",fresh=\"true\",healthy=\"false\"})) or vector(0)) - (sum(max by (forge_site, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{forge_site=~\"$site\",fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or vector(0)), 0)) / sum(max by (forge_site) (${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"}))",
+          "expr": "1 - clamp_min((sum(max by (forge_site, in_use) (${metric_prefix}_hosts_health_status_count{forge_site=~\"$site\",fresh=\"true\",healthy=\"false\"})) or vector(0)) - (sum(max by (forge_site, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{forge_site=~\"$site\",fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or vector(0)), 0) / clamp_min(sum(max by (forge_site, in_use, healthy) (${metric_prefix}_hosts_health_status_count{forge_site=~\"$site\",fresh=\"true\"})) - (sum(max by (forge_site, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{forge_site=~\"$site\",fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or vector(0)), 1)",
           "legendFormat": "healthy",
           "range": true,
           "instant": false,

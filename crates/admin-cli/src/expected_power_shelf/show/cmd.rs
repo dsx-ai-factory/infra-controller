@@ -141,7 +141,7 @@ pub(super) async fn show(
                     x.bmc_ip,
                     x.machine_id
                         .map(|x| x.to_string())
-                        .unwrap_or("Unlinked".to_string()),
+                        .unwrap_or_else(|| "Unlinked".to_string()),
                 )
             }),
     );

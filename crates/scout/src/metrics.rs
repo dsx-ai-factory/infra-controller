@@ -1115,7 +1115,6 @@ impl ScoutStorageDeviceCleanup {
 mod tests {
     use std::str::FromStr as _;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{
         ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
     };
@@ -1193,20 +1192,22 @@ mod tests {
                 },
             ],
             |case| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let url = match case.kind {
                     FirmwareDownloadKind::Script => "https://firmware.example/script.sh",
                     FirmwareDownloadKind::Artifact => "https://firmware.example/image.bin",
                 };
                 let logs = capture_logs(|| {
-                    emit(ScoutFirmwareDownloadAttemptFailed {
-                        kind: case.kind,
-                        next_action: case.next_action,
-                        attempt: 2,
-                        url: url.to_string(),
-                        error: "HTTP 503".to_string(),
-                        retry_delay_seconds: case.retry_delay_seconds,
-                    });
+                    metrics
+                        .instrumentation()
+                        .emit(ScoutFirmwareDownloadAttemptFailed {
+                            kind: case.kind,
+                            next_action: case.next_action,
+                            attempt: 2,
+                            url: url.to_string(),
+                            error: "HTTP 503".to_string(),
+                            retry_delay_seconds: case.retry_delay_seconds,
+                        });
                 });
                 let log = &logs[0];
 
@@ -1289,8 +1290,8 @@ mod tests {
                         (ScoutMlxRequestRejected::Reconciliation {}, "reconciliation")
                     }
                 };
-                let metrics = MetricsCapture::start();
-                let logs = capture_logs(|| emit(event));
+                let metrics = MetricsCapture::owned();
+                let logs = capture_logs(|| metrics.instrumentation().emit(event));
 
                 Observation {
                     counter_delta: metrics.counter_delta(
@@ -1423,36 +1424,46 @@ mod tests {
             ],
             |case| {
                 let expected = expected(case);
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| match case {
-                    MutationCase::ProfileReset => emit(ScoutMlxProfileResetFailed::execute(
-                        "device".to_string(),
-                        "failure".to_string(),
-                    )),
-                    MutationCase::ProfileApply => emit(ScoutMlxProfileApplyFailed::execute(
-                        "device".to_string(),
-                        "profile".to_string(),
-                        "failure".to_string(),
-                    )),
-                    MutationCase::FirmwareReceipt => {
-                        emit(ScoutMlxFirmwareReceiptFailed::observed(
-                            "device",
-                            &FirmwareOperation {
-                                operation_id: "receipt-id".into(),
-                                state: FirmwareOperationState::Failed,
-                                phase: Some(FirmwareOperationPhase::Burn),
-                                report: Default::default(),
-                                diagnostic: Some("failure".into()),
-                            },
-                        ));
+                    MutationCase::ProfileReset => {
+                        metrics
+                            .instrumentation()
+                            .emit(ScoutMlxProfileResetFailed::execute(
+                                "device".to_string(),
+                                "failure".to_string(),
+                            ))
                     }
-                    MutationCase::FirmwareRequest => {
-                        emit(ScoutMlxFirmwareSupervisorRequestFailed::failed(
+                    MutationCase::ProfileApply => {
+                        metrics
+                            .instrumentation()
+                            .emit(ScoutMlxProfileApplyFailed::execute(
+                                "device".to_string(),
+                                "profile".to_string(),
+                                "failure".to_string(),
+                            ))
+                    }
+                    MutationCase::FirmwareReceipt => {
+                        metrics
+                            .instrumentation()
+                            .emit(ScoutMlxFirmwareReceiptFailed::observed(
+                                "device",
+                                &FirmwareOperation {
+                                    operation_id: "receipt-id".into(),
+                                    state: FirmwareOperationState::Failed,
+                                    phase: Some(FirmwareOperationPhase::Burn),
+                                    report: Default::default(),
+                                    diagnostic: Some("failure".into()),
+                                },
+                            ));
+                    }
+                    MutationCase::FirmwareRequest => metrics.instrumentation().emit(
+                        ScoutMlxFirmwareSupervisorRequestFailed::failed(
                             "device".into(),
                             "receipt-id".into(),
                             "failure".into(),
-                        ))
-                    }
+                        ),
+                    ),
                 });
                 let log = &logs[0];
 
@@ -1589,8 +1600,12 @@ mod tests {
                  outcome,
                  outcome_label,
              }| {
-                let metrics = MetricsCapture::start();
-                let logs = capture_logs(|| emit(ScoutStreamConnection { outcome }));
+                let metrics = MetricsCapture::owned();
+                let logs = capture_logs(|| {
+                    metrics
+                        .instrumentation()
+                        .emit(ScoutStreamConnection { outcome })
+                });
                 Observation {
                     log_count: logs.len(),
                     counter_delta: metrics.counter_delta(
@@ -1604,12 +1619,12 @@ mod tests {
 
     #[test]
     fn scout_stream_reconnect_logs_and_counts() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
                 .expect("valid machine id");
         let logs = capture_logs(|| {
-            emit(ScoutStreamReconnect {
+            metrics.instrumentation().emit(ScoutStreamReconnect {
                 api_endpoint: "https://[::1]:1079".to_string(),
                 machine_id,
             });
@@ -1636,12 +1651,12 @@ mod tests {
 
     #[test]
     fn scout_stream_response_drop_logs_and_counts() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
                 .expect("valid machine id");
         let logs = capture_logs(|| {
-            emit(ScoutStreamResponseDropped {
+            metrics.instrumentation().emit(ScoutStreamResponseDropped {
                 api_endpoint: "https://[::1]:1079".to_string(),
                 machine_id,
                 error: "request stream closed".to_string(),
@@ -1711,7 +1726,7 @@ mod tests {
         }
 
         fn observe(case: CleanupCase) -> Observation {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let (device_type, duration, result) = match case {
                 CleanupCase::Succeeded {
                     device_type,
@@ -1733,11 +1748,13 @@ mod tests {
                 ("outcome", outcome_label),
             ];
             let logs = capture_logs(|| {
-                emit(ScoutStorageDeviceCleanup::from_result(
-                    device_type,
-                    duration,
-                    &result,
-                ));
+                metrics
+                    .instrumentation()
+                    .emit(ScoutStorageDeviceCleanup::from_result(
+                        device_type,
+                        duration,
+                        &result,
+                    ));
             });
             let log = logs.first().map(|log| LogObservation {
                 metadata_name: log.metadata_name.clone(),

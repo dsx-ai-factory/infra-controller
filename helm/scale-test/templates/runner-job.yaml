@@ -2,6 +2,12 @@
 {{- $r := .Values.runner }}
 {{- $s := .Values.store }}
 {{- $instances := has $r.command (list "instance-create" "instance-delete" "instance-lifecycle") }}
+{{- $shutdown := int64 90 }}
+{{- if eq $r.command "firmware" }}
+{{- $cleanup := include "scale-test.positiveSeconds" (dict "key" "runner.firmware.cleanupSeconds" "value" $r.firmware.cleanupSeconds) }}
+{{- if gt (int64 $cleanup) 3600 }}{{ fail "runner.firmware.cleanupSeconds must be at most 3600" }}{{ end }}
+{{- $shutdown = add 150 (int64 $cleanup) }}
+{{- end }}
 {{- $fixture := and $instances (ne (toString $r.fixture.name) "") }}
 {{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
 {{- $runId := required "runner.runId is required when the runner is enabled" $r.runId | toString }}
@@ -10,10 +16,10 @@
 {{- end }}
 {{- $deadline := include "scale-test.positiveSeconds" (dict "key" "runner.activeDeadlineSeconds" "value" $r.activeDeadlineSeconds) }}
 {{- $whole := include "scale-test.positiveSeconds" (dict "key" "runner.wholeRunSeconds" "value" $r.wholeRunSeconds) }}
-{{/* The run bounds itself by wholeRunSeconds plus its 90 s shutdown budget;
+{{/* The run bounds itself by wholeRunSeconds plus its shutdown budget;
      the Job deadline must not cut it short of publishing its result. */}}
-{{- if le (int64 $deadline) (add (int64 $whole) 90) }}
-{{- fail "runner.activeDeadlineSeconds must exceed runner.wholeRunSeconds by more than the 90 s shutdown budget" }}
+{{- if le (int64 $deadline) (add (int64 $whole) $shutdown) }}
+{{- fail (printf "runner.activeDeadlineSeconds must exceed runner.wholeRunSeconds by more than the %d s shutdown budget" $shutdown) }}
 {{- end }}
 # One fleet-up or ingestion run, named runner-<runId> under the release so it never takes a
 # test hook's name: a new runId is a new Job, and the finished one is kept
@@ -39,7 +45,7 @@ spec:
       # The MAT namespace holds a Service per BMC: Service env vars would overflow exec.
       enableServiceLinks: false
       # Room for a cancelled run to drain, publish its result and release the lock.
-      terminationGracePeriodSeconds: 120
+      terminationGracePeriodSeconds: {{ if eq $r.command "firmware" }}{{ add $shutdown 30 }}{{ else }}120{{ end }}
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: true
       {{- with .Values.nodeSelector }}

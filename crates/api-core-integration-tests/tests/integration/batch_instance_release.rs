@@ -174,6 +174,7 @@ async fn allocate_instance(
                 infiniband: None,
                 nvlink: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 spxconfig: None,
                 power_profile: None,

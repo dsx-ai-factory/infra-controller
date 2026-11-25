@@ -42,6 +42,9 @@ data:
           {
             "library": "/usr/lib/kea/hooks/libdhcp.so",
             "parameters": {
+{{- with $hp.nicoPxeServiceUrl }}
+              "nico-pxe-service-url": {{ . | quote }},
+{{- end }}
               "carbide-api-url": {{ default (printf "https://%s.%s.svc.cluster.local:1079" (include "nico-dhcp.apiServiceName" .) (include "nico-dhcp.namespace" .)) $hp.nicoApiUrl | quote }},
               "carbide-metrics-endpoint": {{ printf "[::]:%v" .Values.metrics.port | quote }},
               "hook-dns-servers-ipv6": {{ default "" $dhcp.v6DnsServers | quote }},

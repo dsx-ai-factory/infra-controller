@@ -52,6 +52,7 @@ use async_trait::async_trait;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
+use db::TransactionVending as _;
 use db::work_lock_manager::{WorkLock, WorkLockManagerHandle};
 use health_report::{HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode};
 use sqlx::PgPool;
@@ -484,7 +485,7 @@ impl SwitchReachabilityMonitor {
     /// Verifies the held lock still names this replica. A takeover changes the
     /// lock's worker, which the fence detects as a failed precondition.
     async fn still_owns(&self, lock: &WorkLock) -> NvLinkManagerResult<bool> {
-        let mut txn = self.db_pool.begin().await.map_err(|e| {
+        let mut txn = self.db_pool.txn_begin().await.map_err(|e| {
             NvLinkManagerError::internal(format!("Failed to begin transaction: {e}"))
         })?;
         let owns = match lock.fence_transaction(&mut txn).await {
@@ -512,10 +513,9 @@ impl SwitchReachabilityMonitor {
         metrics: &mut PassMetrics,
     ) -> Result<usize, PassFailure> {
         let (targets, stored) = {
-            let mut conn = self.acquire().await?;
-            let targets = db::switch::find_reachability_targets(conn.as_mut()).await?;
+            let targets = db::switch::find_reachability_targets(&self.db_pool).await?;
             let stored = db::switch::find_health_reports_by_merge_source(
-                conn.as_mut(),
+                &self.db_pool,
                 SWITCH_REACHABILITY_SOURCE,
             )
             .await?;
@@ -525,8 +525,7 @@ impl SwitchReachabilityMonitor {
 
         let endpoints = {
             let switch_ids: Vec<SwitchId> = targets.iter().map(|t| t.switch_id).collect();
-            let mut conn = self.acquire().await?;
-            db::switch::find_switch_endpoints_by_ids(conn.as_mut(), &switch_ids).await?
+            db::switch::find_switch_endpoints_by_ids(&self.db_pool, &switch_ids).await?
         };
         let nvos_ips: HashMap<SwitchId, std::net::IpAddr> = endpoints
             .into_iter()
@@ -714,13 +713,6 @@ impl SwitchReachabilityMonitor {
         Ok(written)
     }
 
-    async fn acquire(&self) -> NvLinkManagerResult<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-        self.db_pool
-            .acquire()
-            .await
-            .map_err(|e| NvLinkManagerError::internal(format!("Failed to acquire connection: {e}")))
-    }
-
     /// Stores `alerts` as the switch's merge report, or removes the report when
     /// `alerts` is empty. Each write is one short transaction fenced on the
     /// pass's work lock, so a pass whose lease another replica took over
@@ -733,7 +725,7 @@ impl SwitchReachabilityMonitor {
         stored: bool,
     ) -> Result<(), WriteFailure> {
         let result = async {
-            let mut txn = self.db_pool.begin().await.map_err(|e| {
+            let mut txn = self.db_pool.txn_begin().await.map_err(|e| {
                 NvLinkManagerError::internal(format!("Failed to begin transaction: {e}"))
             })?;
             lock.fence_transaction(&mut txn).await?;
@@ -1052,12 +1044,9 @@ mod tests {
         pool: &PgPool,
         switch_id: &SwitchId,
     ) -> Result<Option<Vec<(String, Option<String>)>>, Box<dyn std::error::Error>> {
-        let mut conn = pool.acquire().await?;
-        let reports = db::switch::find_health_reports_by_merge_source(
-            conn.as_mut(),
-            SWITCH_REACHABILITY_SOURCE,
-        )
-        .await?;
+        let reports =
+            db::switch::find_health_reports_by_merge_source(pool, SWITCH_REACHABILITY_SOURCE)
+                .await?;
         Ok(reports
             .into_iter()
             .find(|(id, _)| id == switch_id)
@@ -1075,7 +1064,7 @@ mod tests {
         switch_id: &SwitchId,
         state: &model::switch::SwitchControllerState,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let fresh = db::switch::find_by_id(txn.as_mut(), switch_id)
             .await?
             .expect("switch exists");
@@ -1101,7 +1090,7 @@ mod tests {
         use model::switch::SwitchControllerState;
 
         // A ready primary switch with a seeded NVOS IP.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
@@ -1111,8 +1100,7 @@ mod tests {
             .execute(&pool)
             .await?;
         let nvos_ip = {
-            let mut conn = pool.acquire().await?;
-            db::switch::find_switch_endpoints_by_ids(conn.as_mut(), &[switch.id])
+            db::switch::find_switch_endpoints_by_ids(&pool, &[switch.id])
                 .await?
                 .pop()
                 .and_then(|row| row.nvos_ip)
@@ -1129,7 +1117,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
@@ -1240,7 +1228,7 @@ mod tests {
         use model::switch::SwitchControllerState;
 
         for seed in 1..=4u8 {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let switch = db::test_support::switch::create_seeded_discovered(
                 txn.as_mut(),
                 seed,
@@ -1261,7 +1249,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
@@ -1291,7 +1279,7 @@ mod tests {
         use db::work_lock_manager::KeepaliveConfig;
         use model::switch::SwitchControllerState;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
@@ -1312,7 +1300,7 @@ mod tests {
             &mut a_manager,
             pool.clone(),
             keepalive_config,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let a = SwitchReachabilityMonitor::with_prober(
@@ -1327,7 +1315,7 @@ mod tests {
             &mut b_manager,
             pool.clone(),
             keepalive_config,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let b = SwitchReachabilityMonitor::with_prober(
@@ -1385,7 +1373,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use db::work_lock_manager::KeepaliveConfig;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
@@ -1397,7 +1385,7 @@ mod tests {
             &mut stalled,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let monitor = SwitchReachabilityMonitor::with_prober(
@@ -1435,7 +1423,7 @@ mod tests {
                 interval: Duration::from_secs(3600),
                 timeout: Duration::from_millis(1),
             },
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1454,15 +1442,12 @@ mod tests {
             .await?
             .expect("report kept");
         assert_eq!(stored.len(), 1);
-        let mut conn = pool.acquire().await?;
-        let report = db::switch::find_health_reports_by_merge_source(
-            conn.as_mut(),
-            SWITCH_REACHABILITY_SOURCE,
-        )
-        .await?
-        .pop()
-        .expect("report")
-        .1;
+        let report =
+            db::switch::find_health_reports_by_merge_source(&pool, SWITCH_REACHABILITY_SOURCE)
+                .await?
+                .pop()
+                .expect("report")
+                .1;
         assert!(report.alerts[0].message.contains("(first)"));
 
         drop(stale_lock);
@@ -1487,7 +1472,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::switch::SwitchControllerState;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
@@ -1498,7 +1483,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let mut monitor_tasks = JoinSet::new();

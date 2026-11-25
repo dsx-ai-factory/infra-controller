@@ -246,6 +246,9 @@ fn expand(args: TokenStream, input: syn::ItemFn) -> Result<TokenStream, syn::Err
         .collect::<Vec<_>>();
 
     let fn_arg_types = inputs.iter().map(|_| quote! { _ });
+    let fn_arg_names = (0..inputs.len())
+        .map(|i| quote::format_ident!("__sqlx_arg_{i}"))
+        .collect::<Vec<_>>();
 
     let pm2_token_stream = quote! {
         #(#attrs)*
@@ -264,7 +267,9 @@ fn expand(args: TokenStream, input: syn::ItemFn) -> Result<TokenStream, syn::Err
             args.fixtures(Box::leak(Box::new(vec![#(#fixtures),*])));
 
             // We need to give a coercion site or else we get "unimplemented trait" errors.
-            let f: fn(#(#fn_arg_types),*) -> _ = #name;
+            let f: fn(#(#fn_arg_types),*) -> ::core::pin::Pin<
+                ::std::boxed::Box<dyn ::core::future::Future<Output = _>>,
+            > = |#(#fn_arg_names),*| ::std::boxed::Box::pin(#name(#(#fn_arg_names),*));
 
             sqlx_testing::TestFn::run_test(f, args)
         }

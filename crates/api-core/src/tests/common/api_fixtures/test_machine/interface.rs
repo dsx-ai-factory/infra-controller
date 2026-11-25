@@ -37,11 +37,9 @@ impl TestMachineInterface {
         &self,
         arch: MachineArchitecture,
     ) -> PxeInstructions {
-        let mut txn = self.api.txn_begin().await.unwrap();
-        let iface = db::machine_interface::find_one(txn.as_pgconn(), self.id)
+        let iface = db::machine_interface::find_one(self.api.pg_pool(), self.id)
             .await
             .unwrap();
-        txn.commit().await.unwrap();
         let client_ip = iface
             .addresses
             .first()

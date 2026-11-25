@@ -103,6 +103,10 @@ Deprecation notices continue to be returned for one more release cycle after the
 
 Endpoints that have deprecations will be grouped here. Following deprecations are in effect:
 
+### Firmware download credentials
+
+For single and batch rack/tray firmware updates, use `downloadCredentials` instead of `authenticationData`. Both fields retain the same `shared`/`perComponent` structure. The legacy field remains accepted; supply at most one non-null field. No removal release or deadline has been set.
+
 ### Operating System
 
 - `isCloudInit` on create and update requests is deprecated and ignored. The value returned in API responses is derived from whether `userData` is non-empty.

@@ -57,6 +57,8 @@ func (s *submitTaskInventory) GetComponentByID(
 }
 
 func TestManagerImpl_SubmitTask(t *testing.T) {
+	t.Run("preemption", testPreemptingAdmission)
+	t.Run("ordinary forced shutdown does not preempt", testSubmitTaskDoesNotPreemptForcedShutdown)
 	t.Run("rejects a Compute component target with an NVSwitch-only rack rule", func(t *testing.T) {
 		rackID := uuid.New()
 		componentID := uuid.New()
@@ -1159,6 +1161,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 			Status:         taskcommon.TaskStatusPending,
 			IdempotencyKey: idempotencyKey,
 			Attributes: taskcommon.TaskAttributes{
+				TraceID: "1234567890abcdef1234567890abcdef",
 				ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{
 					devicetypes.ComponentTypeCompute: {componentID},
 				},
@@ -1189,6 +1192,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 		require.Equal(t, taskID, gotTaskID)
 		require.Equal(t, 1, executor.executeCalls)
 		require.Equal(t, taskID, executor.lastRequest.Info.TaskID)
+		require.Equal(t, existingTask.Attributes.TraceID, executor.lastRequest.Info.TraceID)
 		require.Equal(t, 1, store.updateScheduledCalls)
 		require.Equal(t, executor.executionID, store.updatedScheduledTask.ExecutionID)
 		require.Zero(t, store.listActiveCalls)
@@ -1474,6 +1478,7 @@ type managerTaskStore struct {
 	updateScheduledErr             error
 	updatedScheduledTask           *taskdef.Task
 	statusUpdates                  []*taskdef.TaskStatusUpdate
+	skipStatusUpdate               bool
 	statusUpdateContextErr         error
 	statusUpdateContextHasDeadline bool
 	runTransactionCalls            int
@@ -1603,11 +1608,11 @@ func (s *managerTaskStore) UpdateScheduledTask(_ context.Context, task *taskdef.
 func (s *managerTaskStore) UpdateTaskStatus(
 	ctx context.Context,
 	update *taskdef.TaskStatusUpdate,
-) error {
+) (bool, error) {
 	s.statusUpdateContextErr = ctx.Err()
 	_, s.statusUpdateContextHasDeadline = ctx.Deadline()
 	s.statusUpdates = append(s.statusUpdates, update)
-	return nil
+	return !s.skipStatusUpdate, nil
 }
 
 func (s *managerTaskStore) UpdateTaskReport(
@@ -1810,7 +1815,7 @@ func (e *managerExecutor) Execute(
 func (e *managerExecutor) CheckStatus(
 	context.Context,
 	string,
-) (taskcommon.TaskStatus, error) {
+) (*taskdef.ExecutionStatus, error) {
 	panic("managerExecutor.CheckStatus: not implemented")
 }
 
@@ -1833,6 +1838,13 @@ func (e *managerExecutor) TerminateTask(
 // ListTaskContextForRack fails unexpected context reads in task-manager tests.
 func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
+}
+
+func (s *managerTaskStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *managerTaskStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
 }
 
 func TestValidateResolvedRackTargets_ComponentReset(t *testing.T) {
@@ -1918,4 +1930,16 @@ func TestManagerImpl_CreateResetTasks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNotifyingTaskStore_UpdateTaskStatus(t *testing.T) {
+	t.Run("skips lookup and notification when a terminal callback changes no row", func(t *testing.T) {
+		// This fake's GetTasks is deliberately unimplemented: a skipped write
+		// must not continue into the lookup/notification path.
+		store := &managerTaskStore{skipStatusUpdate: true}
+		wrapped := newNotifyingTaskStore(store, nil)
+		updated, err := wrapped.UpdateTaskStatus(t.Context(), &taskdef.TaskStatusUpdate{ID: uuid.New(), Status: taskcommon.TaskStatusCompleted})
+		require.NoError(t, err)
+		require.False(t, updated)
+	})
 }

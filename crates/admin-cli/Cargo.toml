@@ -27,11 +27,13 @@ name = "nico-admin-cli"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model" }
 carbide-macros = { path = "../macros" }
+carbide-machine-validation-adapters = { path = "../machine-validation-adapters" }
 carbide-network = { path = "../network" }
 carbide-ssh = { path = "../ssh" }
 carbide-tls = { path = "../tls" }
@@ -61,6 +63,7 @@ libredfish = { workspace = true }
 mac_address = { workspace = true }
 pandoc = { workspace = true }
 prettytable-rs = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }

@@ -44,6 +44,8 @@ pub trait SecureBoot<B: Bmc>: Send + Sync {
     /// operation and returns `self`.
     fn standard(&self) -> &dyn SecureBoot<B>;
 
+    /// The configured and active secure boot state. A resource that does not
+    /// report the configured state yet is [`PlatformError::NotReady`].
     async fn status(&self, cx: &OpCx<'_, B>) -> Result<SecureBootStatus, PlatformError> {
         self.standard().status(cx).await
     }

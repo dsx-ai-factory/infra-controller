@@ -30,6 +30,7 @@ use carbide_uuid::rack::RackId;
 use prometheus::{Histogram, HistogramOpts};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use super::DiscoveryShutdown;
 use super::reachability::ReachabilitySpec;
@@ -564,7 +565,7 @@ impl DiscoveryLoopContext {
             };
 
         Ok(Self {
-            instrumentation,
+            instrumentation: instrumentation.clone(),
             collectors: CollectorState::new(),
             discovery_iteration_histogram,
             discovery_endpoint_fetch_histogram,
@@ -600,6 +601,7 @@ impl DiscoveryLoopContext {
                     source_cfg.client_cert.clone(),
                     source_cfg.client_key.clone(),
                     &source_cfg.api_url,
+                    instrumentation,
                 ))),
                 _ => None,
             },
@@ -611,9 +613,9 @@ impl DiscoveryLoopContext {
     }
 
     /// Stops every started collector, including those discovery was already
-    /// stopping, concurrently within `timeout`; collectors still running when it
+    /// stopping, concurrently before `deadline`; collectors still running when it
     /// passes are abandoned and counted as `timed_out`.
-    pub(crate) async fn drain_collectors(&mut self, timeout: Duration) -> DiscoveryShutdown {
+    pub(crate) async fn drain_collectors(&mut self, deadline: Instant) -> DiscoveryShutdown {
         let collectors = self.collectors.take_all();
         self.collectors.start_stopping(collectors);
         let mut stopping = std::mem::take(&mut self.collectors.stopping);
@@ -625,7 +627,7 @@ impl DiscoveryLoopContext {
 
         let mut closed = 0;
 
-        tokio::time::timeout(timeout, async {
+        tokio::time::timeout_at(deadline, async {
             while stopping.join_next().await.is_some() {
                 closed += 1;
             }
@@ -769,7 +771,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("tls_context").expect("metrics manager")),
             Arc::new(config),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -787,7 +789,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("drain_collectors").expect("metrics manager")),
             Arc::new(Config::default()),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -809,7 +811,9 @@ mod tests {
             Collector::spawn_task(|_| async { std::future::pending::<()>().await }),
         );
 
-        let shutdown = context.drain_collectors(Duration::from_millis(100)).await;
+        let shutdown = context
+            .drain_collectors(Instant::now() + Duration::from_millis(100))
+            .await;
 
         assert_eq!(shutdown.closed, 2);
         assert_eq!(shutdown.timed_out, 1);

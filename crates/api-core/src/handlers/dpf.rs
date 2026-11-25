@@ -80,15 +80,14 @@ pub(crate) async fn get_dpf_state(
         }
     }
 
-    let mut txn = api.txn_begin().await?;
     let filter = if request.machine_ids.is_empty() {
         ObjectFilter::All
     } else {
         ObjectFilter::List(&request.machine_ids)
     };
 
-    let dpf_states = db::machine::find(&mut txn, filter, MachineSearchConfig::default()).await?;
-    txn.commit().await?;
+    let dpf_states =
+        db::machine::find(api.pg_pool(), filter, MachineSearchConfig::default()).await?;
 
     Ok(Response::new(rpc::DpfStateResponse {
         dpf_states: dpf_states
@@ -113,14 +112,12 @@ pub(crate) async fn get_dpf_host_snapshot(
         .into());
     };
 
-    let mut txn = api.txn_begin().await?;
-    let machine = find_one(&mut txn, &machine_id, MachineSearchConfig::default())
+    let machine = find_one(api.pg_pool(), &machine_id, MachineSearchConfig::default())
         .await?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
-    txn.commit().await?;
 
     let host_dpf_id = machine.dpf_id().ok_or_else(|| {
         CarbideError::InvalidArgument(format!(

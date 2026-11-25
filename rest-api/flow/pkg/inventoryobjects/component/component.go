@@ -6,7 +6,6 @@ package component
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/google/uuid"
 
@@ -128,8 +127,7 @@ func (c *Component) IsCompute() bool {
 // If allowNew is true, it adds new BMCs.
 func (c *Component) Patch(p Component, allowNew bool) bool {
 	patched := false
-	if len(p.FirmwareVersion) > 0 &&
-		strings.Compare(p.FirmwareVersion, c.FirmwareVersion) != 0 {
+	if p.FirmwareVersion != "" && p.FirmwareVersion != c.FirmwareVersion {
 		c.FirmwareVersion = p.FirmwareVersion
 		patched = true
 	}

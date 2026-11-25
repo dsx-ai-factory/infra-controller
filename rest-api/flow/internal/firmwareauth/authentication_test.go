@@ -22,9 +22,21 @@ func TestEncryptAndDecryptFor(t *testing.T) {
 	tests := []struct {
 		name               string
 		authenticationData *pb.FirmwareAuthenticationData
+		subTargets         []string
 		componentType      devicetypes.ComponentType
 		want               string
 	}{
+		{
+			name:               "mixed DPU and PMC keeps powershelf credential",
+			authenticationData: perComponentAuthenticationData(nil, nil, proto.String("ps-token")),
+			subTargets:         []string{"dpu", "pmc"}, componentType: devicetypes.ComponentTypePowerShelf, want: "ps-token",
+		},
+		{
+			name:               "mixed DPU and PMC does not give DPU powershelf credential",
+			authenticationData: perComponentAuthenticationData(nil, nil, proto.String("ps-token")),
+			subTargets:         []string{"dpu", "pmc"}, componentType: devicetypes.ComponentTypeCompute,
+		},
+
 		{
 			name:               "shared value",
 			authenticationData: sharedAuthenticationData("shared-token"),
@@ -63,7 +75,7 @@ func TestEncryptAndDecryptFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encrypted, err := Encrypt(cipher, tt.authenticationData, nil)
+			encrypted, err := Encrypt(cipher, tt.authenticationData, tt.subTargets)
 			require.NoError(t, err)
 			require.NotNil(t, encrypted)
 			require.Equal(t, secret.EncryptedDataVersion, encrypted.Version)
@@ -111,6 +123,9 @@ func TestEncryptRejectsInvalidTypedData(t *testing.T) {
 			subTargets:         []string{"DPU"},
 			wantInvalid:        true,
 		},
+		{name: "shared credential cannot hide behind a non-compute target", cipher: cipher, authenticationData: sharedAuthenticationData("token"), subTargets: []string{"dpu", "pmc"}, wantInvalid: true},
+		{name: "compute credential cannot hide behind a non-compute target", cipher: cipher, authenticationData: perComponentAuthenticationData(proto.String("token"), nil, nil), subTargets: []string{"dpu", "pmc"}, wantInvalid: true},
+
 		{
 			name:               "authentication without data cipher",
 			authenticationData: sharedAuthenticationData("token"),

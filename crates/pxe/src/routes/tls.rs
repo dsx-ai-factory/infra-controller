@@ -54,14 +54,18 @@ async fn root_ca(headers: HeaderMap, state: State<AppState>) -> impl IntoRespons
 pub(crate) fn get_router(path_prefix: &str) -> Router<AppState> {
     Router::new().route(
         format!("{}/{}", path_prefix, "root_ca").as_str(),
-        get(root_ca),
+        get(root_ca).layer(axum::middleware::from_fn(
+            crate::middleware::if_range::honor_if_range,
+        )),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
-    use axum::http::Request;
+    use axum::http::{Request, header};
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
     use tempfile::tempdir;
     use tower::ServiceExt;
 
@@ -97,5 +101,64 @@ mod tests {
             .await
             .expect("read response body");
         assert_eq!(body.as_ref(), b"bootstrap trust CA");
+    }
+
+    #[tokio::test]
+    async fn root_ca_route_honors_if_range() {
+        let temp_dir = tempdir().unwrap();
+        let bootstrap_ca_path = temp_dir.path().join("bootstrap-ca.pem");
+        let contents = b"bootstrap trust CA";
+        std::fs::write(&bootstrap_ca_path, contents).unwrap();
+        let mut state = test_app_state();
+        state.runtime_config.bootstrap_root_ca_path =
+            bootstrap_ca_path.to_string_lossy().into_owned();
+        let app = get_router("/api/v0/tls").with_state(state);
+        let request = || Request::builder().uri("/api/v0/tls/root_ca");
+        let baseline = app
+            .clone()
+            .oneshot(request().body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let modified = baseline.headers()[header::LAST_MODIFIED].clone();
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "stale validator restarts the download",
+                    input: "Thu, 01 Jan 1970 00:00:00 GMT",
+                    expect: Yields((StatusCode::OK, None, contents.to_vec())),
+                },
+                Case {
+                    scenario: "matching validator preserves partial downloads",
+                    input: modified.to_str().unwrap(),
+                    expect: Yields((
+                        StatusCode::PARTIAL_CONTENT,
+                        Some("bytes 0-3/18".to_string()),
+                        contents[..4].to_vec(),
+                    )),
+                },
+            ],
+            |validator| {
+                let app = app.clone();
+                let request = request()
+                    .header(header::RANGE, "bytes=0-3")
+                    .header(header::IF_RANGE, validator)
+                    .body(Body::empty())
+                    .unwrap();
+                async move {
+                    let response = app.oneshot(request).await.unwrap();
+                    let status = response.status();
+                    let range = response
+                        .headers()
+                        .get(header::CONTENT_RANGE)
+                        .map(|value| value.to_str().unwrap().to_string());
+                    to_bytes(response.into_body(), 1024)
+                        .await
+                        .map(|body| (status, range, body.to_vec()))
+                        .map_err(|error| error.to_string())
+                }
+            },
+        )
+        .await;
     }
 }

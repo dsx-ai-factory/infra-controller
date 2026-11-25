@@ -140,7 +140,6 @@ struct RedfishSimState {
     /// tests can drive `probe_bmc_vendor`'s Lite-On/Delta chassis fallback.
     chassis_manufacturer: Option<String>,
     platform_actions: Vec<RedfishSimPlatformAction>,
-    uefi_setup_job_id: Option<String>,
     /// Lossless `machine_setup_status` target observations. These reads stay
     /// separate from mutating platform actions and preserve both `Pair` fields.
     machine_setup_status_targets: HashMap<String, Vec<Option<RedfishSimBootInterfaceRef>>>,
@@ -150,7 +149,7 @@ struct RedfishSimState {
     /// `get_systems`, and `get_power_state` return `401` unless the client was
     /// created with a `Direct` credential whose password matches the seeded
     /// `users` entry. This makes credential selection and rejection observable
-    /// in callers such as `bmc_credentials_valid`.
+    /// in callers such as the credential probes in `bmc_accounts`.
     enforce_auth: bool,
     auth_attempts: Vec<RedfishSimAuthAttempt>,
     /// When set, `get_accounts` fails with a non-authentication transport error
@@ -177,27 +176,25 @@ struct RedfishSimState {
     /// When set, every `RedfishClientPool::create_client` fails with a
     /// [`RedfishError::GenericError`] carrying this message, modeling a
     /// transient client-creation failure (credential store, TCP, or the
-    /// vendor probe). Drives the [`super::CredentialOpError::ClientCreation`]
-    /// retry paths at credential-op call sites.
+    /// vendor probe).
     create_client_error: Option<String>,
     /// Optional latency for the three phases of SPDM attester discovery.
     create_client_delay: Duration,
-    service_root_delay: Duration,
-    component_integrities_delay: Duration,
-    /// When set, the sim's `BmcCredentialOps::uefi_setup` override fails with
-    /// [`super::CredentialOpError::ClientCreation`] carrying this message,
-    /// modeling a client-creation failure inside the credential op (the sim
-    /// override replaces the default body, so `create_client_error` cannot
-    /// reach it).
-    uefi_setup_client_creation_error: Option<String>,
-    /// Observe and pause one UEFI setup call while a test changes the site target.
-    uefi_setup_pause: Option<(
-        tokio::sync::oneshot::Sender<Credentials>,
+    /// Gate one successful creation across this simulator; failed attempts leave the gate armed.
+    next_client_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     )>,
-    /// BIOS attribute map returned by `bios()` when set; the sim's `bios()`
-    /// is otherwise unimplemented. Lets unit tests drive the default
-    /// `BmcCredentialOps::uefi_setup` DPU body past its attribute probe.
+    service_root_delay: Duration,
+    component_integrities_delay: Duration,
+    /// Observe and pause one UEFI password change while a test changes the
+    /// site target.
+    uefi_password_change_pause: Option<(
+        tokio::sync::oneshot::Sender<String>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    /// BIOS attribute map returned by `bios()`, which is empty when unset: a
+    /// DPU then exposes no UEFI password to set.
     bios_attributes: Option<HashMap<String, serde_json::Value>>,
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
@@ -754,39 +751,33 @@ impl RedfishSim {
         state.component_integrities_delay = component_integrities;
     }
 
-    /// Force the sim's `uefi_setup` override to fail with
-    /// [`super::CredentialOpError::ClientCreation`] carrying `message`. The
-    /// override replaces the default body, so this (not
-    /// [`Self::set_create_client_error`]) models a client-creation failure
-    /// for callers of `uefi_setup`.
-    pub fn set_uefi_setup_client_creation_error(&self, message: impl Into<String>) {
-        self.state.lock().unwrap().uefi_setup_client_creation_error = Some(message.into());
-    }
-
-    /// Let `uefi_setup` succeed again after
-    /// [`Self::set_uefi_setup_client_creation_error`].
-    pub fn clear_uefi_setup_client_creation_error(&self) {
-        self.state.lock().unwrap().uefi_setup_client_creation_error = None;
-    }
-
-    /// Sets the successful `uefi_setup` result; `Some` models a staged DPU password.
-    pub fn set_uefi_setup_job_id(&self, job_id: Option<String>) {
-        self.state.lock().unwrap().uefi_setup_job_id = job_id;
-    }
-
-    /// Pause the next successful UEFI setup call. The receiver reports the
-    /// credential sent to the device; sending on the returned sender (or
-    /// dropping it) allows setup to complete. Later calls are not paused.
-    pub fn pause_next_uefi_setup(
+    /// Pause the next successful creation. The receiver signals when it is paused.
+    /// Sending or dropping the release sender lets creation finish.
+    pub fn pause_next_client_creation(
         &self,
     ) -> (
-        tokio::sync::oneshot::Receiver<Credentials>,
+        tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (started, credentials) = tokio::sync::oneshot::channel();
+        let (started, preparing) = tokio::sync::oneshot::channel();
         let (resume, paused) = tokio::sync::oneshot::channel();
-        self.state.lock().unwrap().uefi_setup_pause = Some((started, paused));
-        (credentials, resume)
+        self.state.lock().unwrap().next_client_pause = Some((started, paused));
+        (preparing, resume)
+    }
+
+    /// Pause the next successful UEFI password change. The receiver reports
+    /// the new password sent to the device; sending on the returned sender (or
+    /// dropping it) lets the change complete. Later changes are not paused.
+    pub fn pause_next_uefi_password_change(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<String>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, new_password) = tokio::sync::oneshot::channel();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().uefi_password_change_pause = Some((started, paused));
+        (new_password, resume)
     }
 
     /// Sets the Systems collection link advertised by the simulated service root.
@@ -861,23 +852,6 @@ impl RedfishSim {
     pub fn set_system_chassis_ids(&self, chassis_ids: Vec<String>) {
         self.state.lock().unwrap().system_chassis_ids = chassis_ids;
     }
-
-    /// Seed a credential into the sim's credential store -- the same store
-    /// [`Self::credential_reader`] exposes. Controllers that resolve a credential
-    /// through `redfish_client_pool.credential_reader()` (e.g. UEFI setup, which
-    /// now reads the site-wide credential in the controller before calling
-    /// `uefi_setup`) read from here, so tests that drive those paths must seed it.
-    pub async fn seed_credential(
-        &self,
-        key: &carbide_secrets::credentials::CredentialKey,
-        credentials: &carbide_secrets::credentials::Credentials,
-    ) {
-        use carbide_secrets::credentials::CredentialWriter;
-        self.credential_manager
-            .set_credentials(key, credentials)
-            .await
-            .expect("seed redfish-sim credential");
-    }
 }
 
 pub struct RedfishSimTimepoint {
@@ -900,8 +874,11 @@ pub enum RedfishSimPlatformAction {
     IsBiosSetup {
         host: String,
     },
-    UefiSetup {
-        dpu: bool,
+    ReadBios {
+        host: String,
+    },
+    ChangeUefiPassword {
+        host: String,
     },
 }
 
@@ -1376,10 +1353,13 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<HashMap<String, serde_json::Value>, RedfishError>>
     {
         Box::pin(async move {
-            match self.state.lock().unwrap().bios_attributes.clone() {
-                Some(attributes) => Ok(attributes),
-                None => todo!(),
-            }
+            let mut state = self.state.lock().unwrap();
+            state
+                .platform_actions
+                .push(RedfishSimPlatformAction::ReadBios {
+                    host: self._host.clone(),
+                });
+            Ok(state.bios_attributes.clone().unwrap_or_default())
         })
     }
 
@@ -1628,6 +1608,10 @@ impl Redfish for RedfishSimClient {
                     task_status: None,
                     task_monitor: None,
                     percent_complete,
+                    start_time: None,
+                    end_time: None,
+                    payload: None,
+                    hide_payload: None,
                 });
             }
             if self
@@ -1989,13 +1973,28 @@ impl Redfish for RedfishSimClient {
     fn change_uefi_password<'a>(
         &'a self,
         _current_uefi_password: &'a str,
-        _new_uefi_password: &'a str,
+        new_uefi_password: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<Option<String>, RedfishError>> {
         Box::pin(async move {
-            if let Some(message) = &self.state.lock().unwrap().uefi_password_change_error {
-                return Err(RedfishError::GenericError {
-                    error: message.clone(),
-                });
+            let pause = {
+                let mut state = self.state.lock().unwrap();
+                if let Some(message) = &state.uefi_password_change_error {
+                    return Err(RedfishError::GenericError {
+                        error: message.clone(),
+                    });
+                }
+                state
+                    .platform_actions
+                    .push(RedfishSimPlatformAction::ChangeUefiPassword {
+                        host: self._host.clone(),
+                    });
+                state.uefi_password_change_pause.take()
+            };
+            if let Some((started, resume)) = pause {
+                started
+                    .send(new_uefi_password.to_string())
+                    .expect("password change observer dropped");
+                resume.await.ok();
             }
             Ok(None)
         })
@@ -2287,6 +2286,10 @@ impl Redfish for RedfishSimClient {
                 task_status: None,
                 task_monitor: None,
                 percent_complete: None,
+                start_time: None,
+                end_time: None,
+                payload: None,
+                hide_payload: None,
             })
         })
     }
@@ -3152,6 +3155,17 @@ impl Redfish for RedfishSimClient {
 
 #[async_trait]
 impl RedfishClientPool for RedfishSim {
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        // The simulator applies each action directly, without an HTTP retry layer.
+        self.create_client(host, port, auth, vendor).await
+    }
+
     async fn create_client(
         &self,
         host: &str,
@@ -3159,7 +3173,7 @@ impl RedfishClientPool for RedfishSim {
         auth: RedfishAuth,
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
-        {
+        let pause = {
             let mut state = self.state.lock().unwrap();
             state.create_client_calls.push(CreateClientCall {
                 host: host.to_string(),
@@ -3186,6 +3200,12 @@ impl RedfishClientPool for RedfishSim {
             if state.fw_version.is_empty() {
                 state.fw_version = Arc::new("24.10-17".to_string());
             }
+            state.next_client_pause.take()
+        };
+        if let Some((started, resume)) = pause
+            && started.send(()).is_ok()
+        {
+            resume.await.ok();
         }
         // Client creation can wait on credentials or authentication before returning a client.
         let delay = self.state.lock().unwrap().create_client_delay;
@@ -3205,36 +3225,8 @@ impl RedfishClientPool for RedfishSim {
     }
 }
 
-impl super::sealed::Sealed for RedfishSim {}
-
-#[async_trait]
-impl super::BmcCredentialOps for RedfishSim {
-    async fn uefi_setup(
-        &self,
-        _access: &carbide_utils::redfish::BmcAccessInfo,
-        dpu: bool,
-        sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
-        _instrumentation: &carbide_instrument::Instrumentation,
-    ) -> Result<Option<String>, super::CredentialOpError> {
-        let pause = {
-            let mut state = self.state.lock().unwrap();
-            // Fail before recording the action: the op never reached the device.
-            if let Some(error) = state.uefi_setup_client_creation_error.clone() {
-                return Err(super::CredentialOpError::ClientCreation(
-                    RedfishClientCreationError::RedfishError(RedfishError::GenericError { error }),
-                ));
-            }
-            state
-                .platform_actions
-                .push(RedfishSimPlatformAction::UefiSetup { dpu });
-            state.uefi_setup_pause.take()
-        };
-        if let Some((started, resume)) = pause {
-            started
-                .send(sitewide_uefi_credentials)
-                .expect("setup observer dropped");
-            resume.await.ok();
-        }
-        Ok(self.state.lock().unwrap().uefi_setup_job_id.clone())
+impl From<Arc<RedfishSim>> for super::DirectRedfishPool {
+    fn from(sim: Arc<RedfishSim>) -> Self {
+        Self(sim)
     }
 }

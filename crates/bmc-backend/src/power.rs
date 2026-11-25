@@ -16,14 +16,20 @@
  */
 
 use bmc_drivers::CatalogError;
-use bmc_platform::{DriverOutcome, PlatformError, Power};
+use bmc_platform::{BootProgress, BootProgressTypes, DriverOutcome, PlatformError, Power};
 use bmc_runtime::BoundDriver;
 use carbide_redfish::nv_redfish::RedfishBmc;
+use libredfish::model::{
+    BootProgress as LibredfishBootProgress, BootProgressTypes as LibredfishBootProgressTypes,
+};
 use libredfish::{Redfish, SystemPowerControl};
 use nv_redfish::resource::{PowerState, ResetType};
 
 use crate::BackendBmc;
 use crate::convert::platform_error;
+
+/// The OEM boot state of a BlueField whose Arm OS is running.
+const BLUEFIELD_OEM_OS_IS_RUNNING: &str = "OsIsRunning";
 
 impl BackendBmc {
     /// See [`bmc_runtime::ConnectedBmc::power`].
@@ -51,6 +57,18 @@ impl BackendPower<'_> {
                 .map(power_state)
                 .map_err(platform_error),
             Self::Drivers(power) => power.state().await,
+        }
+    }
+
+    /// See [`Power::boot_progress`]. libredfish has no drivers, so a BlueField's
+    /// OEM running state is reported as `OsRunning` here for every platform.
+    pub async fn boot_progress(&self) -> Result<Option<BootProgress>, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                let system = client.get_system().await.map_err(platform_error)?;
+                Ok(system.boot_progress.map(boot_progress))
+            }
+            Self::Drivers(power) => power.boot_progress().await,
         }
     }
 
@@ -108,6 +126,46 @@ fn power_state(state: libredfish::PowerState) -> Option<PowerState> {
     }
 }
 
+fn boot_progress(progress: LibredfishBootProgress) -> BootProgress {
+    let last_state = if progress.oem_last_state.as_deref() == Some(BLUEFIELD_OEM_OS_IS_RUNNING) {
+        Some(BootProgressTypes::OsRunning)
+    } else {
+        progress.last_state.map(boot_progress_type)
+    };
+    BootProgress {
+        last_state,
+        oem_last_state: progress.oem_last_state,
+    }
+}
+
+fn boot_progress_type(state: LibredfishBootProgressTypes) -> BootProgressTypes {
+    match state {
+        LibredfishBootProgressTypes::None => BootProgressTypes::None,
+        LibredfishBootProgressTypes::PrimaryProcessorInitializationStarted => {
+            BootProgressTypes::PrimaryProcessorInitializationStarted
+        }
+        LibredfishBootProgressTypes::BusInitializationStarted => {
+            BootProgressTypes::BusInitializationStarted
+        }
+        LibredfishBootProgressTypes::MemoryInitializationStarted => {
+            BootProgressTypes::MemoryInitializationStarted
+        }
+        LibredfishBootProgressTypes::SecondaryProcessorInitializationStarted => {
+            BootProgressTypes::SecondaryProcessorInitializationStarted
+        }
+        LibredfishBootProgressTypes::PCIResourceConfigStarted => {
+            BootProgressTypes::PciResourceConfigStarted
+        }
+        LibredfishBootProgressTypes::SystemHardwareInitializationComplete => {
+            BootProgressTypes::SystemHardwareInitializationComplete
+        }
+        LibredfishBootProgressTypes::SetupEntered => BootProgressTypes::SetupEntered,
+        LibredfishBootProgressTypes::OSBootStarted => BootProgressTypes::OsBootStarted,
+        LibredfishBootProgressTypes::OSRunning => BootProgressTypes::OsRunning,
+        LibredfishBootProgressTypes::OEM => BootProgressTypes::Oem,
+    }
+}
+
 fn system_power_control(reset_type: ResetType) -> Option<SystemPowerControl> {
     match reset_type {
         ResetType::On => Some(SystemPowerControl::On),
@@ -140,6 +198,38 @@ mod tests {
             "states callers wait out" {
                 libredfish::PowerState::Reset => Some(PowerState::PoweringOn),
                 libredfish::PowerState::Unknown => None,
+            }
+        );
+    }
+
+    #[test]
+    fn libredfish_boot_stages_keep_their_redfish_names() {
+        value_scenarios!(boot_progress_type:
+            "renamed in nv-redfish" {
+                LibredfishBootProgressTypes::PCIResourceConfigStarted
+                    => BootProgressTypes::PciResourceConfigStarted,
+                LibredfishBootProgressTypes::OSRunning => BootProgressTypes::OsRunning,
+                LibredfishBootProgressTypes::OEM => BootProgressTypes::Oem,
+            }
+        );
+    }
+
+    #[test]
+    fn a_bluefield_oem_running_state_reports_as_os_running() {
+        let progress = |last_state, oem_last_state: Option<&str>| LibredfishBootProgress {
+            last_state,
+            last_state_time: None,
+            oem_last_state: oem_last_state.map(str::to_string),
+        };
+        value_scenarios!(run = |progress: LibredfishBootProgress| boot_progress(progress).last_state;
+            "the OS runs" {
+                progress(Some(LibredfishBootProgressTypes::OEM), Some("OsIsRunning"))
+                    => Some(BootProgressTypes::OsRunning),
+            }
+            "reported as is" {
+                progress(Some(LibredfishBootProgressTypes::OEM), Some("UEFI"))
+                    => Some(BootProgressTypes::Oem),
+                progress(None, None) => None,
             }
         );
     }

@@ -17,8 +17,8 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use carbide_dpu_agent_utils::FMDS_IPV6_ADDRESS;
 use clap::Parser;
-use forge_dpu_agent_utils::FMDS_IPV6_ADDRESS;
 use ipnetwork::{IpNetwork, Ipv6Network};
 
 #[derive(Parser)]

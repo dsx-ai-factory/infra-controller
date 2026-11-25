@@ -27,7 +27,7 @@
 # building on Apple Silicon hosts, which would otherwise SEGFAULT while
 # assembling aws-lc-sys's hand-written x86-64 assembly code.
 #
-ARG RUST_VERSION=1.97.1
+ARG RUST_VERSION=1.100.0
 
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
 

@@ -81,7 +81,7 @@ pub async fn create(
 
     match sqlx::query_as::<Postgres, ComputeAllocation>(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(instance_type_id)
         .bind(&metadata.name)
         .bind(sqlx::types::Json(&metadata.labels))
@@ -129,7 +129,7 @@ pub async fn find_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if let Some(instance_type_ids) = instance_type_ids {
@@ -177,7 +177,7 @@ pub async fn find_by_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -291,7 +291,7 @@ pub async fn update(
         .bind(updated_by)
         .bind(id)
         .bind(expected_version)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .fetch_one(txn)
         .await
     {
@@ -329,7 +329,7 @@ pub async fn soft_delete(
 
     sqlx::query_as(query)
         .bind(compute_allocation_id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .fetch_optional(txn)
         .await
         .map_err(|err: sqlx::Error| DatabaseError::query(query, err))
@@ -340,6 +340,7 @@ mod tests {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn compute_allocation_queries_survive_added_columns(
@@ -351,7 +352,7 @@ mod tests {
 
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE compute_allocations ADD COLUMN test_added_column text;",
@@ -367,7 +368,7 @@ mod tests {
     async fn exercise_compute_allocation_queries(
         connection: &mut PgConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         let tenant = crate::tenant::create_and_persist(
             "projection-tenant".to_string(),
             Metadata {

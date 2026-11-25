@@ -29,16 +29,12 @@ pub(crate) async fn get_network_topology(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
     let query = match &req.id {
         Some(x) => ObjectFilter::One(x.as_str()),
         None => ObjectFilter::All,
     };
 
-    let data = db::network_devices::get_topology(&mut txn, query).await?;
-
-    txn.commit().await?;
+    let data = db::network_devices::get_topology(&mut api.db_reader(), query).await?;
 
     Ok(Response::new(data.into()))
 }

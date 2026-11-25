@@ -405,7 +405,15 @@ The `--query` flag is a **free-text search across `name`, `description`, and `st
 
 ### `--debug`
 
-The global `--debug` flag logs the full HTTP request and response for the wrapped command. The bearer token is redacted; everything else is visible. Because `--debug` is a global flag, it must precede the resource and operation. By contrast, `--output` belongs to the generated operation and follows it.
+The global `--debug` flag logs the full HTTP request and response for the wrapped command. Because `--debug` is a global flag, it must precede the resource and operation. By contrast, `--output` belongs to the generated operation and follows it.
+
+nicocli redacts the secrets it recognizes before logging. Body field names are matched without regard to case, `-`, or `_`; header names are matched without regard to case only.
+
+- The `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, and `X-Auth-Token` headers. The two authorization headers keep their scheme, as `Bearer <redacted>`.
+- Body fields whose name contains `credential`, `password`, `secret`, `privateKey`, or `apiKey`, or is or ends in `token`. A field whose name ends in one of those, singular or plural, also redacts every value nested beneath it.
+- The user information, query, and fragment of each `url` under `artifacts` or `upgradeScript`, which can carry a signed download token. The scheme, host, and path stay visible.
+
+Everything else is visible, so treat the output as sensitive.
 
 ```bash
 $ nicocli --debug tenant current
@@ -486,6 +494,7 @@ The `nico-mcp` command takes the following flags:
 | `--listen` | `NICO_MCP_LISTEN` | Listen address. Defaults to `:8080`. |
 | `--path` | `NICO_MCP_PATH` | MCP handler path. Defaults to `/mcp`. |
 | `--shutdown-timeout` | `NICO_MCP_SHUTDOWN_TIMEOUT` | Graceful shutdown timeout. Defaults to `10s`. |
+| `--metrics-listen` | `NICO_MCP_METRICS_LISTEN` | Listen address for Prometheus metrics at `/metrics`. Metrics are not served when empty. See [Metrics](../operations/nico-mcp.md#metrics). |
 | `--base-url` | `NICO_BASE_URL` | Default NICo REST base URL. |
 | `--org` | `NICO_ORG` | Default organization for REST requests. |
 | `--api-name` | `NICO_API_NAME` | API path segment. Defaults to `nico`. |

@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 )
 
 const (
@@ -289,4 +290,22 @@ func TestReprovisionHostDpus_EmptyHostID(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "host machine id is required")
+}
+
+func TestReprovisionHostDpus_PreemptedBeforeReboot(t *testing.T) {
+	mock := nicoapi.NewMockClient()
+	mock.SetHostDpuMachineIds(testHost, []string{testDPUA})
+	mock.SetHostInstanceID(testHost, testInst)
+	preempted := errors.New("task was preempted after the DPU trigger")
+	ctx := dispatchguard.WithCheck(t.Context(), func(context.Context) error {
+		if len(mock.DpuReprovisioningTriggers()) > 0 {
+			return preempted
+		}
+		return nil
+	})
+	err := ReprovisionHostDpus(ctx, mock, testHost, true, Options{})
+	require.ErrorIs(t, err, preempted)
+	require.Len(t, mock.DpuReprovisioningTriggers(), 1)
+	require.Empty(t, mock.InstancePowerCalls())
+	require.Empty(t, mock.HostUpdateOverridesActive(), "preemption must still remove the maintenance override")
 }

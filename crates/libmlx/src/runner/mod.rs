@@ -38,11 +38,14 @@ pub(crate) use supervisor_protocol::{HELLO, Request, Response};
 /// Unit-test binaries live in `deps`, while Cargo places the helper beside it.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn test_firmware_executor() -> FirmwareToolExecutor {
+    use std::path::Path;
     let executable = std::env::current_exe().unwrap();
     let helper = executable
         .parent()
-        .unwrap()
-        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
         .unwrap()
         .join("mlx-firmware-supervisor");
     assert!(

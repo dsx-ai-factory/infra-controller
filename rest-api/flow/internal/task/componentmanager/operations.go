@@ -5,6 +5,7 @@ package componentmanager
 
 import (
 	"context"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
@@ -126,4 +127,10 @@ type FirmwareConsistencyChecker interface {
 	// VerifyFirmwareConsistency checks that all target components report the same
 	// firmware version set. Returns an error if versions diverge.
 	VerifyFirmwareConsistency(ctx context.Context, target common.Target) error
+}
+
+// FirmwareCredentialStatusReader polls using the same device logins as dispatch.
+// Implementations must forward supplied pairs rather than using stored credentials.
+type FirmwareCredentialStatusReader interface {
+	GetFirmwareStatusWithCredentials(ctx context.Context, target common.Target, credentials *corev1.ComponentCredentialOverrides) (map[string]operations.FirmwareUpdateStatus, error)
 }

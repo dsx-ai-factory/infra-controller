@@ -112,8 +112,8 @@ impl MlxFwResetRunner {
             FirmwareError::ResetFailed(format!("Failed to execute mlxfwreset: {e}"))
         })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
         if !output.status.success() {
             if stderr.contains("Permission denied") || stdout.contains("Permission denied") {
@@ -126,7 +126,7 @@ impl MlxFwResetRunner {
             return Err(FirmwareError::ResetFailed(error_msg));
         }
 
-        Ok(stdout)
+        Ok(stdout.into_owned())
     }
 }
 

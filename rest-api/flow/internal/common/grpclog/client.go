@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/status"
@@ -47,7 +47,7 @@ func UnaryClientInterceptor(target string) grpc.UnaryClientInterceptor {
 		st, _ := status.FromError(err)
 		service, method := splitFullMethod(fullMethod)
 
-		logger := cotel.LoggerWithTrace(ctx, log.Logger)
+		logger := logcorrelation.LoggerWithTrace(ctx, log.Logger)
 		ev := logger.WithLevel(LevelFromCode(st.Code())).
 			Str("grpc.target", target).
 			Str("grpc.service", service).

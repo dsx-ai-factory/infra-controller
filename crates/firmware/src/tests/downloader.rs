@@ -18,10 +18,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+use carbide_instrument::LabelValue;
 use carbide_instrument::testing::{
     ApproxHistogramSum, CapturedLog, MetricsCapture, capture_logs, capture_logs_async,
 };
-use carbide_instrument::{LabelValue, emit};
 use carbide_test_support::{Check, check_values};
 use model::firmware::loggable_url;
 use sha2::Digest;
@@ -376,8 +376,6 @@ async fn failed_download_is_reported_once_then_retried() {
 #[tokio::test]
 async fn truncated_http_body_is_removed_before_a_successful_retry() {
     let instrumentation_test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
-    // This test emits the transfer metric. Serialize its observations with
-    // the metric-contract tests, which assert exact deltas.
     let metrics = MetricsCapture::for_registry(instrumentation_test_meter.registry());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/fw.bin", listener.local_addr().unwrap());
@@ -1005,7 +1003,7 @@ fn artifact_unavailable_events_preserve_log_contracts_and_count_reasons() {
         counter_delta: f64,
     }
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     check_values(
         [
             Check {
@@ -1043,16 +1041,18 @@ fn artifact_unavailable_events_preserve_log_contracts_and_count_reasons() {
                 Fixture::StaleCacheRemovalFailed => "stale_cache_removal_failed",
             };
             let logs = capture_logs(|| match fixture {
-                Fixture::MissingUrl => emit(FirmwareArtifactMissingUrl {
+                Fixture::MissingUrl => metrics.instrumentation().emit(FirmwareArtifactMissingUrl {
                     reason: ArtifactUnavailableReason::MissingUrl,
                     firmware_path: format!("{:?}", Path::new("/firmware/missing.fwpkg")),
                 }),
                 Fixture::StaleCacheRemovalFailed => {
-                    emit(FirmwareStaleCachedArtifactRemovalFailed {
-                        reason: ArtifactUnavailableReason::StaleCacheRemovalFailed,
-                        filename: "/firmware/stale.fwpkg".to_string(),
-                        error: "read-only filesystem".to_string(),
-                    });
+                    metrics
+                        .instrumentation()
+                        .emit(FirmwareStaleCachedArtifactRemovalFailed {
+                            reason: ArtifactUnavailableReason::StaleCacheRemovalFailed,
+                            filename: "/firmware/stale.fwpkg".to_string(),
+                            error: "read-only filesystem".to_string(),
+                        });
                 }
             });
 
@@ -1237,16 +1237,16 @@ fn download_outcome_labels_render_snake_case() {
 /// context.
 #[test]
 fn download_finished_records_duration_and_owns_the_completion_line() {
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let logs = capture_logs(|| {
-        emit(DownloadFinished::Ok {
+        metrics.instrumentation().emit(DownloadFinished::Ok {
             took: Duration::from_secs(30),
             url: "https://firmware.example/bmc.fwpkg".to_string(),
             filename: "/firmware/bmc.fwpkg".to_string(),
         });
         // Tests which emit `status`, `transfer`, or `io` also hold a metric
         // capture, so their observations cannot race these exact deltas.
-        emit(DownloadFinished::Status {
+        metrics.instrumentation().emit(DownloadFinished::Status {
             took: Duration::from_secs(2),
             url: "https://firmware.example/bmc.fwpkg".to_string(),
             filename: "/firmware/bmc.fwpkg".to_string(),
@@ -1254,13 +1254,13 @@ fn download_finished_records_duration_and_owns_the_completion_line() {
                     https://firmware.example/bmc.fwpkg: 404 Not Found"
                 .to_string(),
         });
-        emit(DownloadFinished::Transfer {
+        metrics.instrumentation().emit(DownloadFinished::Transfer {
             took: Duration::from_secs(3),
             url: "https://firmware.example/uefi.fwpkg".to_string(),
             filename: "/firmware/uefi.fwpkg".to_string(),
             error: "connection reset by peer".to_string(),
         });
-        emit(DownloadFinished::Io {
+        metrics.instrumentation().emit(DownloadFinished::Io {
             took: Duration::from_secs(4),
             url: "https://firmware.example/cec.fwpkg".to_string(),
             filename: "/firmware/cec.fwpkg".to_string(),

@@ -321,7 +321,8 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) GenerateAndUpdateVersion(ctx 
 
 	// Initial has contains OperatingSystemID
 	hash := sha1.New()
-	hash.Write([]byte(dbossa.OperatingSystemID.String()))
+	operatingSystemIDBytes, _ := dbossa.OperatingSystemID.MarshalText()
+	hash.Write(operatingSystemIDBytes)
 
 	// Update hash based on Operating System parameter (Image based OS)
 	if dbossa.OperatingSystem != nil {

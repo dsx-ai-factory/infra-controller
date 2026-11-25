@@ -19,11 +19,12 @@
 
 use carbide_uuid::network::NetworkSegmentId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::network_segment::{self, NetworkSegment, NetworkSegmentControllerState};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 
 use crate::context::NetworkSegmentStateHandlerContextObjects;
@@ -46,21 +47,22 @@ impl StateControllerIO for NetworkSegmentStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "network_segments_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        db::network_segment::list_segment_ids(txn, None).await
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        db::network_segment::list_segment_ids(pool, None).await
     }
 
     /// Loads a state snapshot from the database
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         segment_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         let mut segments = db::network_segment::find_by(
-            txn,
+            db,
             ObjectColumnFilter::One(db::network_segment::IdColumn, segment_id),
             model::network_segment::NetworkSegmentSearchConfig {
                 include_num_free_ips: true,
@@ -89,7 +91,6 @@ impl StateControllerIO for NetworkSegmentStateControllerIO {
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

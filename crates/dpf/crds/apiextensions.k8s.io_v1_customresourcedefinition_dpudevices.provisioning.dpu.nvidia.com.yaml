@@ -57,41 +57,45 @@ spec:
             properties:
               bmcCredentialSecretName:
                 description: |-
-                  BMCCredentialSecretName is the name of a Secret in the same namespace containing
-                  per-device BMC credentials. The secret must contain a "password" key with the BMC credential value.
-                  If specified, this password takes precedence over the shared bmc-shared-password secret.
+                  BMCCredentialSecretName is the name of a Secret in the same namespace
+                  containing per-device BMC credentials. The secret must contain a
+                  "password" key with the BMC credential value. If specified, this password
+                  takes precedence over the shared bmc-shared-password secret.
                 type: string
               bmcFactoryResetPolicy:
                 default: OnInitialization
                 description: |-
-                  BMCFactoryResetPolicy controls whether DPF resets this DPU BMC to factory defaults
-                  while initializing the DPUDevice. The reset clears all BMC configuration, including
-                  network settings, so the BMC must obtain its address via DHCP.
-                  - OnInitialization (default): reset the BMC once, while the DPUDevice is initialized.
+                  BMCFactoryResetPolicy controls whether DPF resets this DPU BMC to factory
+                  defaults while initializing the DPUDevice. The reset clears all BMC
+                  configuration, including network settings, so the BMC must obtain its
+                  address via DHCP.
+                  - OnInitialization (default): reset the BMC once, while the DPUDevice is
+                    initialized.
                   - Never: never reset.
-                  The value is honored only until the factory reset step finishes; changing it
-                  after BMCFactoryResetReady is True has no effect.
-                  The policy applies only when the install interface is Redfish. Other install interfaces
-                  never reset the BMC; BMCFactoryResetReady reports FactoryResetSkipped unless a reset was
-                  already recorded under Redfish.
+                  The value is honored only until the factory reset step finishes; changing
+                  it after BMCFactoryResetReady is True has no effect. The policy applies
+                  only when the install interface is Redfish. Other install interfaces
+                  never reset the BMC; BMCFactoryResetReady reports FactoryResetSkipped
+                  unless a reset was already recorded under Redfish.
                 enum:
                 - OnInitialization
                 - Never
                 type: string
               bmcIp:
                 description: |-
-                  BMCIP is the IP address of the BMC (Base Management Controller) on the device.
-                  This is used for remote management and monitoring of the device.
-                  When this value changes, the controller re-establishes secure communication with the BMC
-                  and re-issues the IP-bound BMC server certificate without reprovisioning the DPU.
+                  BMCIP is the IP address of the BMC (Base Management Controller) on the
+                  device. This is used for remote management and monitoring of the device.
+                  When this value changes, the controller re-establishes secure
+                  communication with the BMC and re-issues the IP-bound BMC server
+                  certificate without reprovisioning the DPU.
                   Example: "10.1.2.3"
                 format: ipv4
                 type: string
               bmcPort:
                 default: 443
                 description: |-
-                  BMCPort is the port number of the BMC (Base Management Controller) on the device.
-                  This is used for remote management and monitoring of the device.
+                  BMCPort is the port number of the BMC (Base Management Controller) on the
+                  device. This is used for remote management and monitoring of the device.
                   This value is immutable and should not be changed once set.
                   Example: 443
                 format: int32
@@ -106,20 +110,22 @@ spec:
                   nodeAnnotations:
                     additionalProperties:
                       type: string
-                    description: NodeAnnotations specifies annotations to be added
-                      to the DPU cluster node for this device.
+                    description: |-
+                      NodeAnnotations specifies annotations to be added to the DPU cluster node
+                      for this device.
                     type: object
                   nodeLabels:
                     additionalProperties:
                       type: string
-                    description: NodeLabels specifies labels to be added to the DPU
-                      cluster node for this device.
+                    description: |-
+                      NodeLabels specifies labels to be added to the DPU cluster node for
+                      this device.
                     type: object
                 type: object
               nicDeviceCount:
                 description: |-
-                  NICDeviceCount is the expected number of NIC devices used by dpu-agent provisioning.
-                  Valid range is 1 to 8. When unspecified, it defaults to 8.
+                  NICDeviceCount is the expected number of NIC devices used by dpu-agent
+                  provisioning. Valid range is 1 to 8. When unspecified, it defaults to 8.
                 maximum: 8
                 minimum: 1
                 type: integer
@@ -139,12 +145,13 @@ spec:
                   rule: self == oldSelf
               opn:
                 description: |-
-                  OPN is the Ordering Part Number of the device.
-                  It's used to track the device's compatibility with different software versions.
-                  This value is immutable and should not be changed once set.
+                  OPN is the Ordering Part Number of the device. It's used to track the
+                  device's compatibility with different software versions. This value is
+                  immutable and should not be changed once set.
                   Example: "900-9D3B4-00SV-EA0"
 
-                  Deprecated: This field is deprecated and will be removed in a future version. Use status.opn instead.
+                  Deprecated: This field is deprecated and will be removed in a future
+                  version. Use status.opn instead.
                 type: string
                 x-kubernetes-validations:
                 - message: OPN is immutable
@@ -155,7 +162,8 @@ spec:
                   This value is immutable and should not be changed once set.
                   Example: "eth0"
 
-                  Deprecated: This field is deprecated and will be removed in a future version. Use status.pf0Name instead.
+                  Deprecated: This field is deprecated and will be removed in a future
+                  version. Use status.pf0Name instead.
                 type: string
                 x-kubernetes-validations:
                 - message: PF0 Name is immutable
@@ -167,7 +175,8 @@ spec:
                   This value is immutable and should not be changed once set.
                   Example: "MT_0001234567", "MT25066004C7"
 
-                  Deprecated: This field is deprecated and will be removed in a future version. Use status.psid instead.
+                  Deprecated: This field is deprecated and will be removed in a future
+                  version. Use status.psid instead.
                 type: string
                 x-kubernetes-validations:
                 - message: PSID is immutable
@@ -185,8 +194,8 @@ spec:
                   rule: self == oldSelf
               values:
                 description: |-
-                  Values contains free-form per-device values used to render a DPUFlavorTemplate
-                  into a concrete generated DPUFlavor for this device.
+                  Values contains free-form per-device values used to render a
+                  DPUFlavorTemplate into a concrete generated DPUFlavor for this device.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
             required:
@@ -195,65 +204,72 @@ spec:
           status:
             properties:
               bmcCredentialSecretName:
-                description: BMCCredentialSecretName is the name of the Secret last
-                  used successfully for BMC authentication.
+                description: |-
+                  BMCCredentialSecretName is the name of the Secret last used successfully
+                  for BMC authentication.
                 type: string
               bmcFactoryResetRequestTime:
                 description: |-
-                  BMCFactoryResetRequestTime is when DPF submitted ResetToDefaults to the BMC.
-                  It is nil until the request has been accepted, and once set it is never cleared:
-                  it is what keeps the BMC from being reset again for this DPUDevice.
+                  BMCFactoryResetRequestTime is when DPF submitted ResetToDefaults to the
+                  BMC. It is nil until the request has been accepted, and once set it is
+                  never cleared: it is what keeps the BMC from being reset again for
+                  this DPUDevice.
                 format: date-time
                 type: string
               bmcIp:
                 description: |-
-                  BMCIP is the IP address of the BMC (Base Management Controller) on the device.
-                  This is used for remote management and monitoring of the device.
-                  The controller synchronizes this value from spec.bmcIp after reconciling an address change.
+                  BMCIP is the IP address of the BMC (Base Management Controller) on the
+                  device. This is used for remote management and monitoring of the device.
+                  The controller synchronizes this value from spec.bmcIp after reconciling
+                  an address change.
                   Example: "10.1.2.3"
                 format: ipv4
                 type: string
               bmcPort:
                 default: 443
                 description: |-
-                  BMCPort is the port number of the BMC (Base Management Controller) on the device.
-                  This is used for remote management and monitoring of the device.
+                  BMCPort is the port number of the BMC (Base Management Controller) on the
+                  device. This is used for remote management and monitoring of the device.
                   This value is immutable and should not be changed once set.
                   Example: 443
                 format: int32
                 minimum: 1
                 type: integer
               bmcServerCertificate:
-                description: BMCServerCertificate reports the BMC mTLS server certificate
+                description: |-
+                  BMCServerCertificate reports the BMC mTLS server certificate
                   rotation state.
                 properties:
                   issuedForBMCIP:
                     description: |-
-                      IssuedForBMCIP is the BMC address the installed certificate was issued for. When it differs
-                      from status.bmcIp, the identity bound into the certificate no longer matches the address the
-                      controller talks to and the certificate must be re-established. It is empty on devices
-                      provisioned before this field existed; the controller records it on the next successful
-                      rotation or expiry backfill.
+                      IssuedForBMCIP is the BMC address the installed certificate was issued
+                      for. When it differs from status.bmcIp, the identity bound into the
+                      certificate no longer matches the address the controller talks to and
+                      the certificate must be re-established. It is empty on devices
+                      provisioned before this field existed; the controller records it on the
+                      next successful rotation or expiry backfill.
                     type: string
                   lastRotationTime:
-                    description: LastRotationTime is the time DPF last successfully
-                      rotated the certificate.
+                    description: |-
+                      LastRotationTime is the time DPF last successfully rotated
+                      the certificate.
                     format: date-time
                     type: string
                   notAfter:
                     description: |-
-                      NotAfter is the expiry time of the certificate currently installed. It is taken
-                      from the issued certificate at rotation time.
+                      NotAfter is the expiry time of the certificate currently installed. It is
+                      taken from the issued certificate at rotation time.
                     format: date-time
                     type: string
                   observedManualTrigger:
                     description: |-
-                      ObservedManualTrigger records the value of the manual rotation annotation that
-                      was last honored, so the same trigger is not processed twice.
+                      ObservedManualTrigger records the value of the manual rotation annotation
+                      that was last honored, so the same trigger is not processed twice.
                     type: string
                 type: object
               caTrustBundle:
-                description: CATrustBundle stores trust bundle reconciliation progress
+                description: |-
+                  CATrustBundle stores trust bundle reconciliation progress
                   for the DPUDevice.
                 properties:
                   lastUpdateTime:
@@ -341,9 +357,9 @@ spec:
                 type: string
               opn:
                 description: |-
-                  OPN is the Ordering Part Number of the device.
-                  It's used to track the device's compatibility with different software versions.
-                  This value is discovered and should not be changed once set.
+                  OPN is the Ordering Part Number of the device. It's used to track the
+                  device's compatibility with different software versions. This value is
+                  discovered and should not be changed once set.
                   Example: "900-9D3B4-00SV-EA0"
                 type: string
               pciAddress:
@@ -373,8 +389,9 @@ spec:
                 description: SecureBoot indicates the current UEFI Secure Boot state.
                 properties:
                   enabled:
-                    description: Enabled indicates whether UEFI Secure Boot is currently
-                      enabled on the DPU.
+                    description: |-
+                      Enabled indicates whether UEFI Secure Boot is currently enabled on
+                      the DPU.
                     type: boolean
                 type: object
               serialNumber:

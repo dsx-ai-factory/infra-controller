@@ -4,11 +4,12 @@
  */
 
 use async_trait::async_trait;
-use bmc_platform::{DriverOutcome, OpCx, PlatformError, Power};
+use bmc_platform::{BootProgress, DriverOutcome, OpCx, PlatformError, Power};
 use nv_redfish::core::{ActionError, Bmc};
 use nv_redfish::oem::nvidia::NvidiaChassisResetType;
 use nv_redfish::resource::{PowerState, ResetType};
 
+use crate::power::nvidia::bluefield;
 use crate::power::standard::StandardPower;
 use crate::power::support::current_power_state;
 use crate::resources::RedfishResourcesExt as _;
@@ -49,6 +50,14 @@ where
 {
     fn standard(&self) -> &dyn Power<B> {
         &StandardPower
+    }
+
+    async fn boot_progress(&self, cx: &OpCx<'_, B>) -> Result<Option<BootProgress>, PlatformError> {
+        bluefield::boot_progress(&StandardPower, cx).await
+    }
+
+    fn may_use_ipmi_restart(&self, _cx: &OpCx<'_, B>, _reset_type: ResetType) -> bool {
+        false
     }
 
     async fn set(
@@ -95,6 +104,9 @@ mod tests {
     /// sends nothing.
     #[tokio::test]
     async fn power_requests_reset_the_arm_cores_through_the_card_chassis() {
+        let (drivers, quirks) =
+            crate::test_support::power_with_restart_quirk(crate::Driver::NvidiaBlueField4Power);
+        let power = drivers.power().unwrap();
         for (reset_type, power_state, expected) in [
             (ResetType::ForceOff, Some("On"), Ok(Some("ArmShutdown"))),
             (
@@ -152,9 +164,13 @@ mod tests {
                 )
                 .build()
                 .await;
-            let cx = bmc.cx().await;
+            let cx = bmc.cx().await.with_quirks(&quirks);
 
-            let result = BlueField4Power.set(&cx, reset_type).await;
+            assert!(
+                !power.may_use_ipmi_restart(&cx, reset_type),
+                "{reset_type:?}"
+            );
+            let result = power.set(&cx, reset_type).await;
             let writes = bmc.writes();
             let posted = writes
                 .iter()

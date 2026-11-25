@@ -67,8 +67,10 @@ func badStore(reason string) error {
 // ProbeMetadata is the probe's /v1/config metrics block, checked. The
 // caller reads it from the probe and injects it.
 type ProbeMetadata struct {
-	Info           probeapi.MetricsInfo
-	ScrapeInterval time.Duration
+	// FirmwareRevision is pinned by the firmware benchmark, never inferred from samples.
+	FirmwareRevision uint64
+	Info             probeapi.MetricsInfo
+	ScrapeInterval   time.Duration
 	// ReaderIntervals holds the interval of each family an enabled reader
 	// sweeps.
 	ReaderIntervals map[probeapi.Family]time.Duration

@@ -30,6 +30,7 @@ name = "machine_validation"
 [dependencies]
 
 carbide-instrument = { path = "../instrument" }
+carbide-machine-validation-adapters = { path = "../machine-validation-adapters" }
 carbide-uuid = { path = "../uuid" }
 
 tokio = { features = ["full"], workspace = true }

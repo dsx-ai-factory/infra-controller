@@ -230,7 +230,7 @@ impl AxumRouterHttpClient {
             return Err(Error::InvalidResponse {
                 url,
                 status,
-                text: String::from_utf8_lossy(&bytes).to_string(),
+                text: String::from_utf8_lossy(&bytes).into_owned(),
             });
         }
         if status == StatusCode::ACCEPTED {
@@ -305,7 +305,7 @@ impl HttpClient for AxumRouterHttpClient {
             return Err(Error::InvalidResponse {
                 url,
                 status,
-                text: String::from_utf8_lossy(&bytes).to_string(),
+                text: String::from_utf8_lossy(&bytes).into_owned(),
             });
         }
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(Error::Json)?;

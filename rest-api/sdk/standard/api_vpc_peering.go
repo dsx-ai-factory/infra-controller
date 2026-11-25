@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -201,6 +202,7 @@ A Site precondition failure returns `412` and leaves the peering's REST status u
 
 Tenant Admin can delete only peerings where both VPCs belong to their tenant.
 Provider Admin can delete only multi-tenant peerings in sites they provide.
+An unresolved or positively stopped parent VPC creation returns `409`; its saved identity does not authorize deletion of the Site peering.
 
 User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
 
@@ -314,6 +316,17 @@ func (a *VPCPeeringAPIService) DeleteVpcPeeringExecute(r ApiDeleteVpcPeeringRequ
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -348,10 +361,10 @@ type ApiGetAllVpcPeeringRequest struct {
 	pageSize        *int32
 	orderBy         *string
 	isMultiTenant   *bool
-	status          *string
-	vpcId           *string
-	peerTenantId    *string
-	includeRelation *string
+	status          *[]string
+	vpcId           *[]string
+	peerTenantId    *[]string
+	includeRelation *[]string
 }
 
 // Optional Site ID filter. If provided, caller must have access to the specified Site.
@@ -385,25 +398,25 @@ func (r ApiGetAllVpcPeeringRequest) IsMultiTenant(isMultiTenant bool) ApiGetAllV
 }
 
 // Optional filter by peering status. Repeat the parameter to match multiple statuses.
-func (r ApiGetAllVpcPeeringRequest) Status(status string) ApiGetAllVpcPeeringRequest {
+func (r ApiGetAllVpcPeeringRequest) Status(status []string) ApiGetAllVpcPeeringRequest {
 	r.status = &status
 	return r
 }
 
 // Optional filter by VPC ID involved in the peering as either vpc1 or vpc2. Repeat the parameter to match multiple VPCs.
-func (r ApiGetAllVpcPeeringRequest) VpcId(vpcId string) ApiGetAllVpcPeeringRequest {
+func (r ApiGetAllVpcPeeringRequest) VpcId(vpcId []string) ApiGetAllVpcPeeringRequest {
 	r.vpcId = &vpcId
 	return r
 }
 
 // Optional filter by tenant ID of a VPC involved in the peering. Repeat the parameter to match multiple tenants.
-func (r ApiGetAllVpcPeeringRequest) PeerTenantId(peerTenantId string) ApiGetAllVpcPeeringRequest {
+func (r ApiGetAllVpcPeeringRequest) PeerTenantId(peerTenantId []string) ApiGetAllVpcPeeringRequest {
 	r.peerTenantId = &peerTenantId
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllVpcPeeringRequest) IncludeRelation(includeRelation string) ApiGetAllVpcPeeringRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllVpcPeeringRequest) IncludeRelation(includeRelation []string) ApiGetAllVpcPeeringRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -476,16 +489,48 @@ func (a *VPCPeeringAPIService) GetAllVpcPeeringExecute(r ApiGetAllVpcPeeringRequ
 		parameterAddToHeaderOrQuery(localVarQueryParams, "isMultiTenant", r.isMultiTenant, "form", "")
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.vpcId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "vpcId", r.vpcId, "form", "")
+		t := *r.vpcId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "vpcId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "vpcId", t, "form", "multi")
+		}
 	}
 	if r.peerTenantId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "peerTenantId", r.peerTenantId, "form", "")
+		t := *r.peerTenantId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "peerTenantId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "peerTenantId", t, "form", "multi")
+		}
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
@@ -578,11 +623,11 @@ type ApiGetVpcPeeringRequest struct {
 	ApiService      *VPCPeeringAPIService
 	org             string
 	id              string
-	includeRelation *string
+	includeRelation *[]string
 }
 
-// Related entity to expand
-func (r ApiGetVpcPeeringRequest) IncludeRelation(includeRelation string) ApiGetVpcPeeringRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetVpcPeeringRequest) IncludeRelation(includeRelation []string) ApiGetVpcPeeringRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -640,7 +685,15 @@ func (a *VPCPeeringAPIService) GetVpcPeeringExecute(r ApiGetVpcPeeringRequest) (
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

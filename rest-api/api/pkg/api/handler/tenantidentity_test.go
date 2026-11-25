@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -176,9 +177,9 @@ func TestTenantIdentityWorkflowHandlers_TimeoutReturns500AndTerminatesWorkflow(t
 		t.Run(tt.name, func(t *testing.T) {
 			beforeTerminate := countMockCalls(&temporalClient.Mock, "TerminateWorkflow")
 
-			body := strings.NewReader("")
+			body := bytes.NewReader(nil)
 			if tt.body != nil {
-				body = strings.NewReader(string(tt.body))
+				body = bytes.NewReader(tt.body)
 			}
 			httpReq := httptest.NewRequest(tt.method, "/", body)
 			httpReq.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -578,7 +579,7 @@ func TestTenantIdentityPUT_WorkflowIDIncludesPayloadHash(t *testing.T) {
 
 	doPUT := func(t *testing.T, handler echo.HandlerFunc, body []byte) {
 		t.Helper()
-		httpReq := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(string(body)))
+		httpReq := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
 		httpReq.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		recorder := httptest.NewRecorder()
 		echoCtx := echoSrv.NewContext(httpReq, recorder)
@@ -730,7 +731,7 @@ func TestCreateOrUpdateTenantIdentityPUT_Status(t *testing.T) {
 			TokenTtlSeconds: 3600,
 		})
 		require.NoError(t, err)
-		httpReq := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(string(body)))
+		httpReq := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
 		httpReq.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		recorder := httptest.NewRecorder()
 		echoCtx := echoSrv.NewContext(httpReq, recorder)
@@ -748,7 +749,7 @@ func TestCreateOrUpdateTenantIdentityPUT_Status(t *testing.T) {
 			SubjectTokenAudience: "exchange-aud",
 		})
 		require.NoError(t, err)
-		httpReq := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(string(body)))
+		httpReq := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
 		httpReq.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		recorder := httptest.NewRecorder()
 		echoCtx := echoSrv.NewContext(httpReq, recorder)

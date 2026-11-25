@@ -100,13 +100,26 @@ func TestIsCompute(t *testing.T) {
 	assert.False(t, comp.IsCompute())
 }
 
-func TestPatch(t *testing.T) {
-	comp := New(devicetypes.ComponentTypeCompute, nil, "1.0.0", nil)
-	newComp := New(devicetypes.ComponentTypeCompute, nil, "1.0.1", nil)
+func TestComponent_Patch(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		version     string
+		wantVersion string
+		wantPatched bool
+	}{
+		{name: "different firmware", version: "1.0.1", wantVersion: "1.0.1", wantPatched: true},
+		{name: "same firmware", version: "1.0.0", wantVersion: "1.0.0"},
+		{name: "empty firmware", version: "", wantVersion: "1.0.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			comp := New(devicetypes.ComponentTypeCompute, nil, "1.0.0", nil)
+			newComp := New(devicetypes.ComponentTypeCompute, nil, tc.version, nil)
 
-	patched := comp.Patch(newComp, false)
-	assert.True(t, patched)
-	assert.Equal(t, newComp.FirmwareVersion, comp.FirmwareVersion)
+			patched := comp.Patch(newComp, false)
+			assert.Equal(t, tc.wantPatched, patched)
+			assert.Equal(t, tc.wantVersion, comp.FirmwareVersion)
+		})
+	}
 }
 
 func TestInRackPositionCompare(t *testing.T) {

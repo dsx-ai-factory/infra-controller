@@ -1134,7 +1134,10 @@ async fn read_expected_groups<'a>(
                 FirmwareRole::Shelf => shelves.push(device),
             }
         }
-        let manager = component_manager::rms::rms_rack_firmware_update_manager(client.clone());
+        let manager = component_manager::rms::rms_rack_firmware_update_manager(
+            client.clone(),
+            api.instrumentation.clone(),
+        );
         let response = until_deadline(deadline, async {
             manager
                 .get_firmware_expectations(RackFirmwareExpectationsRequest {

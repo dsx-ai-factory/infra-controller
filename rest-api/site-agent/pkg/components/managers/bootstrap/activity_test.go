@@ -166,7 +166,7 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 			Namespace: "default",
 		},
 		Data: map[string][]byte{
-			"certificate": []byte(pemCertBytes),
+			"certificate": pemCertBytes,
 		},
 	}
 	_, err = client.CoreV1().Secrets("default").Create(context.TODO(), mockTemporalSecret, metav1.CreateOptions{})

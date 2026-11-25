@@ -583,7 +583,7 @@ func TestUserSQLDAO_Update(t *testing.T) {
 				t.Errorf("LastName = %v, want %v", *got.LastName, *tt.want.LastName)
 			}
 
-			if got.Updated.String() == user.Updated.String() {
+			if got.Updated.Equal(user.Updated) {
 				t.Errorf("got.Updated = %v, want different value", got.Updated)
 			}
 

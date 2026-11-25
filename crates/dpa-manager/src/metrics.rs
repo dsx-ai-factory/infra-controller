@@ -168,7 +168,7 @@ impl DpaMonitorInstruments {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 
@@ -203,9 +203,9 @@ mod tests {
 
         value_scenarios!(
             run = |IterationCase { latency, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         DpaMonitorIterationFinished::Succeeded { latency }
                     } else {
                         DpaMonitorIterationFinished::Failed {
@@ -277,10 +277,12 @@ mod tests {
     /// family name, HELP text, unit suffix, or label-free samples.
     #[test]
     fn dpa_monitor_iteration_histogram_exposition_stays_stable() {
-        let metrics = MetricsCapture::start();
-        emit(DpaMonitorIterationFinished::Succeeded {
-            latency: Duration::from_millis(125),
-        });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(DpaMonitorIterationFinished::Succeeded {
+                latency: Duration::from_millis(125),
+            });
 
         let encoded = metrics.render();
         assert!(

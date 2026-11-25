@@ -240,7 +240,6 @@ fn machine_state_controller(
         db_reader: api.database_connection.clone().into(),
         redfish_client_pool: clients.redfish.clone(),
         bmc_connector: BmcConnector::Libredfish(clients.redfish.clone()),
-        bmc_credential_ops: clients.redfish.clone(),
         ipmi_tool: carbide_ipmi::test_support(),
         site_config: config.machine_state_handler_site_config().into(),
         component_manager: None,
@@ -252,6 +251,8 @@ fn machine_state_controller(
         dpu_uefi_rotation_gate: rotation_gate(
             db::credential_rotation::CredentialRotationType::DpuUefi,
         ),
+        dpf_per_dpu_bmc_credentials: false,
+        dpf_rotation_locks: Some(api.work_lock_manager_handle()),
         dpu_bmc_service_rotation_gate: rotation_gate(
             db::credential_rotation::CredentialRotationType::DpuBmcService,
         ),
@@ -271,6 +272,7 @@ fn machine_state_controller(
         .database(
             api.database_connection.clone(),
             api.work_lock_manager_handle(),
+            api.instrumentation(),
         )
         .meter("carbide_machines", meter)
         .processor_id(processor_id)

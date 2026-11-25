@@ -58,8 +58,8 @@ func NewGetAllInstanceInfiniBandInterfaceHandler(dbSession *cdb.Session, tc temp
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param instanceId path string true "ID of Instance"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Instance', 'Subnet'"
+// @Param status query []string false "Filter InfiniBand Interfaces by Status e.g. 'Pending', 'Error'. Repeat the parameter to specify multiple values." collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Instance', 'Subnet'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -109,11 +109,11 @@ func NewGetAllInfiniBandInterfaceHandler(dbSession *cdb.Session, tc temporalClie
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param siteId query string true "ID of Site"
-// @Param instanceId path string true "ID of Instance"
-// @Param infinibandPartitionId path string true "ID of InfiniBandPartition"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfiniBandPartition, Instance'"
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param instanceId query []string false "Filter by Instance IDs" collectionFormat(multi)
+// @Param infinibandPartitionId query []string false "Filter by InfiniBand Partition IDs" collectionFormat(multi)
+// @Param status query []string false "Filter InfiniBand Interfaces by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one status." collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfiniBandPartition, Instance'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -206,7 +206,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 			// Check if Tenant has access to Site
 			err := common.ValidateTenantSiteAccess(ctx, nil, gaibih.dbSession, &tenant, siteID)
 			if errors.Is(err, cdb.ErrDoesNotExist) {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Site: %s specified in query doesn't exist or Tenant doesn't have access to it", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Site: %s specified in query doesn't exist or Tenant doesn't have access to it", siteID), nil)
 			}
 			if err != nil {
 				logger.Error().Err(err).Msg("error checking Tenant access to Site")
@@ -259,12 +259,12 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 			instance, ok := instanceIDMap[instanceID]
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Instance with ID: %s specified in %s",
-					instanceID.String(), lo.Ternary(instanceIDFromPath, "request", "query")), nil)
+					instanceID, lo.Ternary(instanceIDFromPath, "request", "query")), nil)
 			}
 
 			if instance.TenantID != tenant.ID {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Instance: %s specified in %s doesn't belong to current Tenant",
-					instanceID.String(), lo.Ternary(instanceIDFromPath, "request", "query")), nil)
+					instanceID, lo.Ternary(instanceIDFromPath, "request", "query")), nil)
 			}
 		}
 	}
@@ -304,11 +304,11 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 		for _, ibPartitionID := range infiniBandPartitionIDs {
 			ibPartition, ok := ibPartitionIDMap[ibPartitionID]
 			if !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find InfiniBand Partition with ID: %s specified in query", ibPartitionID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find InfiniBand Partition with ID: %s specified in query", ibPartitionID), nil)
 			}
 
 			if ibPartition.TenantID != tenant.ID {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("InfiniBand Partition: %s specified in query doesn't belong to current Tenant", ibPartitionID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("InfiniBand Partition: %s specified in query doesn't belong to current Tenant", ibPartitionID), nil)
 			}
 		}
 	}
@@ -320,7 +320,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", status))
 		_, ok := cdbm.InfiniBandInterfaceStatusMap[status]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+			logger.Warn().Msgf("invalid value in status query: %v", status)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Status value: %s in query", status), nil)
 		}
 		statuses = append(statuses, status)

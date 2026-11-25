@@ -35,6 +35,38 @@ async fn respond(handle: &mut ApiHandle, method: &str, path: &str, status: u16, 
     );
 }
 
+#[tokio::test]
+async fn startup_accepts_an_existing_shared_secret_without_updating_it() {
+    let (service, mut handle) = mock::pair();
+    let repo = KubeRepository::with_client(Client::new(service, "default"));
+    let operation =
+        DpfSdkBuilder::new(repo, NS, "staged-password".to_string()).build_without_resources();
+    let server = async {
+        respond(&mut handle, "GET", &format!("/apis/operator.dpu.nvidia.com/v1alpha1/namespaces/{NS}/dpfoperatorconfigs/dpfoperatorconfig"), 200, operator_config(Some("v30.0.0"))).await;
+        respond(
+            &mut handle,
+            "POST",
+            &format!("/api/v1/namespaces/{NS}/secrets"),
+            409,
+            json!({
+                "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                "code": 409, "reason": "AlreadyExists", "message": "shared Secret exists",
+            }),
+        )
+        .await;
+    };
+    let (sdk, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(operation, server)
+    })
+    .await
+    .unwrap();
+    assert!(
+        sdk.unwrap()
+            .shared_bmc_password_ready
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+}
+
 fn operator_config(version: Option<&str>) -> Value {
     json!({
         "apiVersion": "operator.dpu.nvidia.com/v1alpha1",
@@ -69,7 +101,7 @@ async fn startup_caches_installed_version_and_gates_bmc_credentials_without_more
             DpfSdkBuilder::new(repo, NS, "shared-password".to_string()).build_without_resources();
         let server = async {
             respond(&mut handle, "GET", &format!("/apis/operator.dpu.nvidia.com/v1alpha1/namespaces/{NS}/dpfoperatorconfigs/dpfoperatorconfig"), 200, operator_config(Some(version))).await;
-            respond(&mut handle, "PATCH", &format!("/api/v1/namespaces/{NS}/secrets/{SECRET_NAME}"), 200,
+            respond(&mut handle, "POST", &format!("/api/v1/namespaces/{NS}/secrets"), 201,
                 json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": SECRET_NAME, "namespace": NS}})).await;
         };
         let (sdk, ()) = tokio::time::timeout(Duration::from_secs(10), async {

@@ -80,9 +80,9 @@ machineATron:
 topologySpread:
   enabled: true
 
-# Per-pod MAC pools: the chart numbers pods by their position in the sorted
-# pod list, so 23 pods get 23 distinct third bytes under 02:00 and 02:01, and
-# MACs and the UFM inventory id derived from the range base stay unique.
+# Per-pod MAC pools: each pod's numeric suffix selects its third byte under
+# 02:00 and 02:01, so MACs and the UFM inventory id stay unique as pods change.
+# For explicit podIndex overrides, see the chart README's Stable Pod Indices.
 macAddressPool:
   enabled: true
   basePrefix: "02:00"

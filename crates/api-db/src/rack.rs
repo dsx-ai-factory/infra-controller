@@ -47,13 +47,10 @@ impl ColumnInfo<'_> for IdColumn {
     }
 }
 
-pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Rack>, DB>(
-    conn: &mut DB,
+pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Rack>>(
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
-) -> DatabaseResult<Vec<Rack>>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+) -> DatabaseResult<Vec<Rack>> {
     let mut query = FilterableQueryBuilder::new(
         "SELECT id, rack_profile_id, rack_group_id, config, controller_state,
                 controller_state_version, controller_state_outcome, health_reports,
@@ -64,7 +61,7 @@ where
 
     query
         .build_query_as()
-        .fetch_all(&mut *conn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
@@ -211,10 +208,48 @@ async fn create_with_group(
 
 // only update the config
 pub async fn update(
-    txn: &mut PgConnection,
+    connection: &mut PgConnection,
     rack_id: &RackId,
     config: &RackConfig,
 ) -> DatabaseResult<Rack> {
+    let mut txn = crate::Transaction::begin_inner(connection).await?;
+    if !crate::cm_action::lock(&mut txn, crate::cm_action::Target::Rack(rack_id)).await? {
+        return Err(DatabaseError::NotFoundError {
+            kind: "rack",
+            id: rack_id.to_string(),
+        });
+    }
+    let mut config = config.clone();
+    if let Some(scope) = config.maintenance_requested.as_mut()
+        && scope.action_id.is_none()
+        && let Some(requested_at) = scope.requested_at
+    {
+        let requested_at = serde_json::to_value(requested_at)
+            .map_err(|error| DatabaseError::internal(error.to_string()))?;
+        let requested_at = requested_at.as_str().ok_or_else(|| {
+            DatabaseError::internal("rack request timestamp is not a string".into())
+        })?;
+        let existing =
+            sqlx::query_scalar("SELECT id FROM cm_actions WHERE rack_id = $1 AND request_key = $2")
+                .bind(rack_id)
+                .bind(requested_at)
+                .fetch_optional(&mut *txn)
+                .await
+                .map_err(|error| DatabaseError::query("rack::maintenance action", error))?;
+        scope.action_id = Some(match existing {
+            Some(id) => id,
+            None => {
+                crate::cm_action::create(
+                    &mut txn,
+                    crate::cm_action::Target::Rack(rack_id),
+                    requested_at,
+                    trace_propagation::correlation::current_id()
+                        .unwrap_or_else(trace_propagation::correlation::TraceId::generate),
+                )
+                .await?
+            }
+        });
+    }
     // `maintenance_termination_requested` is a latch owned by the rack
     // controller.
     // Once set during Maintenance, preserve the complete persisted config so
@@ -239,12 +274,14 @@ pub async fn update(
                   firmware_upgrade_job, nvos_update_job, created, updated, deleted,
                   name, description, labels, version"#;
     let rack: Rack = sqlx::query_as(query)
-        .bind(sqlx::types::Json(config))
+        .bind(sqlx::types::Json(&config))
         .bind(rack_id)
-        .fetch_one(txn)
+        .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(query, e))?;
 
+    crate::cm_action::reconcile(&mut txn, crate::cm_action::Target::Rack(rack_id)).await?;
+    txn.commit().await?;
     Ok(rack)
 }
 
@@ -254,9 +291,10 @@ pub async fn update(
 /// completed the scoped cleanup. It updates only the two maintenance request
 /// fields so a stale controller snapshot cannot overwrite unrelated config.
 pub async fn consume_maintenance_termination_request(
-    txn: &mut PgConnection,
+    connection: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Rack> {
+    let mut txn = crate::Transaction::begin_inner(connection).await?;
     let query = r#"UPDATE racks
         SET config = jsonb_set(
             jsonb_set(config, '{maintenance_requested}', 'null'::jsonb),
@@ -272,10 +310,12 @@ pub async fn consume_maintenance_termination_request(
                   name, description, labels, version"#;
     let rack: Rack = sqlx::query_as(query)
         .bind(rack_id)
-        .fetch_one(txn)
+        .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(query, e))?;
 
+    crate::cm_action::reconcile(&mut txn, crate::cm_action::Target::Rack(rack_id)).await?;
+    txn.commit().await?;
     Ok(rack)
 }
 

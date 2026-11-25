@@ -132,7 +132,18 @@ store:
 # send nothing) or false. It has no helm test. The README sizes the budgets.
 runner:
   enabled: false
-  command: fleet-up # or ingestion, instance-create, instance-delete, instance-lifecycle
+  command: fleet-up # or ingestion, instance-create, instance-delete, instance-lifecycle, firmware
+  firmware:
+    'n': 1000
+    component: bmc # bmc or uefi, one configured target and hardware type
+    targetVersion: ""
+    # Public dummy bytes for MAT only. Supply a real image and digest for hardware.
+    artifactURL: https://raw.githubusercontent.com/python/cpython/v3.12.0/LICENSE
+    artifactSHA256: 3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf
+    windowSeconds: 7200
+    cleanupSeconds: 3300
+    reportMaxAgeSeconds: 600
+    managerScrapeSeconds: 30 # nico-api metric scrape interval, independent of the probe
   rest: {url: "", org: "", providerOrg: "", tokenSecret: "", caSecret: {name: "", key: ca.crt}, auth: {tokenUrl: "", providerSecret: "", tenantClientId: "", tenantSecret: ""}}
   fixture:
     name: "" # nonempty enables one-install setup and a run-owned REST-only sidecar

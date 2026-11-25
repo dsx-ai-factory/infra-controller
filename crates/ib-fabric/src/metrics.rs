@@ -879,7 +879,6 @@ fn truncate_error_for_metric_label(mut error: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
@@ -963,9 +962,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         IbMonitorIterationFinished::Succeeded { latency }
                     } else {
                         IbMonitorIterationFinished::Failed {
@@ -1287,7 +1286,7 @@ mod tests {
                         "resolve_membership_state"
                     }
                 };
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let endpoints = vec![
                     "https://ufm-1".to_string(),
                     "https://ufm-2".to_string(),
@@ -1295,56 +1294,56 @@ mod tests {
                 let error = ERROR.to_string();
                 let logs = capture_logs(|| match case {
                     PartialFailureCase::BuildClient => {
-                        emit(IbFabricDataLoadFailed::build_client(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::build_client(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::HealthCheck => {
-                        emit(IbFabricDataLoadFailed::health_check(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::health_check(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::LoadPorts => {
-                        emit(IbFabricDataLoadFailed::load_ports(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::load_ports(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::LoadPartitions => {
-                        emit(IbFabricDataLoadFailed::load_partitions(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::load_partitions(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::PreloadSkuInactiveDevices => {
-                        emit(IbMonitorSkuInactivePreloadFailed::new(ERROR.to_string()));
+                        metrics.instrumentation().emit(IbMonitorSkuInactivePreloadFailed::new(ERROR.to_string()));
                     }
                     PartialFailureCase::UpdateMachineStatusObservation => {
-                        emit(IbMonitorMachineStatusObservationFailed::new(
+                        metrics.instrumentation().emit(IbMonitorMachineStatusObservationFailed::new(
                             ERROR.to_string(),
                             MACHINE_ID.to_string(),
                         ));
                     }
                     PartialFailureCase::ResolvePartitionId => {
-                        emit(IbMonitorPkeyReconciliationSkipped::NoPartitionIdForPkey { pkey: PKEY.to_string() });
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::NoPartitionIdForPkey { pkey: PKEY.to_string() });
                     }
                     PartialFailureCase::ResolvePartition => {
-                        emit(IbMonitorPkeyReconciliationSkipped::PartitionMissing { pkey: PKEY.to_string() });
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::PartitionMissing { pkey: PKEY.to_string() });
                     }
                     PartialFailureCase::DuplicateFabricOwnership => {
-                        emit(IbMonitorPkeyReconciliationSkipped::DuplicateFabricOwnership {
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::DuplicateFabricOwnership {
                             fabric: FABRIC.to_string(),
                             guid: GUID.to_string(),
                             pkey: PKEY.to_string(),
                         });
                     }
                     PartialFailureCase::DuplicateMachineOwnership => {
-                        emit(IbMonitorPkeyReconciliationSkipped::DuplicateMachineOwnership {
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::DuplicateMachineOwnership {
                             fabric: FABRIC.to_string(),
                             guid: GUID.to_string(),
                             pkey: PKEY.to_string(),
                         });
                     }
                     PartialFailureCase::MembershipStateLookupFailed => {
-                        emit(IbMonitorPkeyReconciliationSkipped::MembershipStateLookupFailed {
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::MembershipStateLookupFailed {
                             fabric: FABRIC.to_string(),
                             guid: GUID.to_string(),
                             pkey: PKEY.to_string(),
@@ -1379,10 +1378,12 @@ mod tests {
     fn ib_monitor_iteration_histogram_exposition_stays_stable() {
         const EXPOSED_METRIC: &str = "carbide_ib_monitor_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(IbMonitorIterationFinished::Succeeded {
-            latency: Duration::from_millis(125),
-        });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(IbMonitorIterationFinished::Succeeded {
+                latency: Duration::from_millis(125),
+            });
 
         let encoded = metrics.render();
         assert!(

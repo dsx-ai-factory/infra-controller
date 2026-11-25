@@ -29,6 +29,7 @@ type ManagerAPI struct {
 	// Add all the manager interfaces here
 	Bootstrap              BootstrapInterface
 	Site                   SiteInterface
+	SitePrefix             SitePrefixInterface
 	VPC                    VPCInterface
 	VpcPrefix              VpcPrefixInterface
 	VpcPeering             VpcPeeringInterface

@@ -23,6 +23,7 @@ use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_ib_fabric::ib::{Filter, IBFabric, IBFabricManager};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::instance::InstanceId;
+use db::TransactionVending as _;
 use model::ib::{
     DEFAULT_IB_FABRIC_NAME, IBMtu, IBNetwork, IBQosConf, IBRateLimit, IBServiceLevel, IbMembership,
 };
@@ -425,7 +426,7 @@ async fn duplicate_machine_ownership_leaves_retired_membership_alone(pool: sqlx:
     let first = create_managed_host(&env).await;
     let second = create_managed_host(&env).await;
     let guid = {
-        let mut topology_update = pool.begin().await.unwrap();
+        let mut topology_update = pool.txn_begin().await.unwrap();
         let first_machine = first.host().db_machine(&mut topology_update).await;
         let guid = first_machine
             .status
@@ -576,7 +577,7 @@ async fn membership_state_lookup_failure_defers_only_failed_membership(pool: sql
 
     // Pause after the monitor has written its status observation but before it
     // reads the retired record, then make only the later `Machine` reread wait.
-    let mut retired_membership_gate = pool.begin().await.unwrap();
+    let mut retired_membership_gate = pool.txn_begin().await.unwrap();
     let retired_membership_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(retired_membership_gate.as_mut())
         .await
@@ -591,7 +592,7 @@ async fn membership_state_lookup_failure_defers_only_failed_membership(pool: sql
     let monitor_iteration = tokio::spawn(async move { monitor.run_single_iteration().await });
     wait_for_blocked_query(&pool, retired_membership_gate_pid, "retired_ib_memberships").await;
 
-    let mut machine_gate = pool.begin().await.unwrap();
+    let mut machine_gate = pool.txn_begin().await.unwrap();
     let machine_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(machine_gate.as_mut())
         .await
@@ -691,7 +692,7 @@ async fn live_membership_is_unbound_after_instance_deletion_while_retired_record
     assert!(membership_is_present(&fabric, pkey, &guid).await);
     assert!(retired_membership_exists(&pool, &exact).await);
 
-    let mut deletion = pool.begin().await.unwrap();
+    let mut deletion = pool.txn_begin().await.unwrap();
     db::instance::mark_as_deleted(instance_id, deletion.as_mut())
         .await
         .unwrap();
@@ -740,7 +741,7 @@ async fn membership_reused_after_snapshot_is_not_unbound(pool: sqlx::PgPool) {
     // Hold only this retired record. The reuse transaction can acquire the
     // Instance and then its owning Machine, then pause when it removes the
     // retirement.
-    let mut membership_guard = pool.begin().await.unwrap();
+    let mut membership_guard = pool.txn_begin().await.unwrap();
     sqlx::query(
         "SELECT fabric FROM retired_ib_memberships \
          WHERE fabric = $1 AND pkey = $2 AND guid = $3 FOR UPDATE",
@@ -819,7 +820,7 @@ async fn membership_removed_from_hardware_after_snapshot_stays_retired(pool: sql
 
     // Hold the retired membership query after the monitor has captured the
     // original hardware information and live `Instance` configuration.
-    let mut query_gate = pool.begin().await.unwrap();
+    let mut query_gate = pool.txn_begin().await.unwrap();
     let query_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(query_gate.as_mut())
         .await
@@ -833,7 +834,7 @@ async fn membership_removed_from_hardware_after_snapshot_stays_retired(pool: sql
     let monitor_iteration = tokio::spawn(async move { monitor.run_single_iteration().await });
     wait_for_blocked_query(&pool, query_gate_pid, "retired_ib_memberships").await;
 
-    let mut topology_update = pool.begin().await.unwrap();
+    let mut topology_update = pool.txn_begin().await.unwrap();
     let machine = managed_host.host().db_machine(&mut topology_update).await;
     let mut hardware_info = machine
         .status
@@ -878,7 +879,7 @@ async fn retired_membership_checks_force_deletion_after_machine_wait(pool: sqlx:
     // Hold the retired membership table until the monitor has read the live
     // `Instance` and recorded the missing membership. This fixes the stale
     // candidate and its ordinary bind action before `ForceDeletion` begins.
-    let mut query_gate = pool.begin().await.unwrap();
+    let mut query_gate = pool.txn_begin().await.unwrap();
     let query_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(query_gate.as_mut())
         .await
@@ -892,7 +893,7 @@ async fn retired_membership_checks_force_deletion_after_machine_wait(pool: sqlx:
     let monitor_iteration = tokio::spawn(async move { monitor.run_single_iteration().await });
     wait_for_blocked_query(&pool, query_gate_pid, "retired_ib_memberships").await;
 
-    let mut force_deletion = pool.begin().await.unwrap();
+    let mut force_deletion = pool.txn_begin().await.unwrap();
     let force_deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(force_deletion.as_mut())
         .await
@@ -936,7 +937,7 @@ async fn force_deletion_without_retirement_keeps_the_existing_membership(pool: s
         .new_client(DEFAULT_IB_FABRIC_NAME)
         .await
         .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = managed_host.host().db_machine(&mut txn).await;
     assert!(
         db::machine::advance(
@@ -974,7 +975,7 @@ async fn deleted_instance_keeps_the_retired_membership(pool: sqlx::PgPool) {
     // Model legacy or incomplete state where an `Instance` was marked deleted
     // without atomically recording its membership. Until the membership is
     // retired, the monitor still treats its IB configuration as expected.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::instance::mark_as_deleted(instance_id, txn.as_mut())
         .await
         .unwrap();
@@ -1013,7 +1014,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
     // Assign a SKU to the machine (required for IB port down tracking)
     // Since BOM validation is disabled in test config, we need to manually assign a SKU
     {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let sku = db::sku::generate_sku_from_machine(txn.as_mut(), &host_machine_id).await?;
         db::sku::create(&mut txn, &sku).await?;
         db::machine::assign_sku(txn.as_mut(), &host_machine_id, &sku.id).await?;
@@ -1067,7 +1068,8 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
     assert!(
         alert
             .classifications
-            .contains(&"PreventAllocations".to_string()),
+            .iter()
+            .any(|classification| classification == "PreventAllocations"),
         "IbPortDown alert should have PreventAllocations classification"
     );
 
@@ -1108,7 +1110,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 
     // Assign a SKU to the machine (required for IB port down tracking)
     {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let sku = db::sku::generate_sku_from_machine(txn.as_mut(), &host_machine_id).await?;
         db::sku::create(&mut txn, &sku).await?;
         db::machine::assign_sku(txn.as_mut(), &host_machine_id, &sku.id).await?;

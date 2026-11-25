@@ -16,9 +16,10 @@
  */
 
 //! Operator-requested managed host reset: wait for the DPUs to return to `Admin`,
-//! delete the tenant instance, clean up the host, and remove its DPF CRs before
+//! delete the tenant instance, clean up the host, and remove its DPF CRs and credential Secrets before
 //! DPU discovery re-ingests it. Hosts without an instance skip the network wait.
 
+use db::TransactionVending as _;
 use eyre::eyre;
 use model::machine::{
     CleanupContext, CleanupState, DpuDiscoveringState, DpuDiscoveringStates, ManagedHostState,
@@ -46,7 +47,10 @@ pub(super) async fn handle_reset(
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     match reset_state {
         ResetState::DeletingInstance => handle_deleting_instance(state, ctx, common_pools).await,
-        ResetState::DeletingCrs => handle_deleting_crs(state, ctx, dpf_sdk).await,
+        ResetState::DeletingCrs => handle_deleting_crs(state, dpf_sdk).await,
+        ResetState::DeletingBmcCredentialSecrets => {
+            handle_deleting_bmc_credential_secrets(state, ctx, dpf_sdk).await
+        }
     }
 }
 
@@ -62,7 +66,12 @@ async fn handle_deleting_instance(
     };
 
     if !state.use_admin_network() {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let mut network_config = state.host_snapshot.network_config.value.clone();
         network_config.use_admin_network = Some(true);
         db::machine::try_update_network_config(
@@ -111,7 +120,12 @@ async fn handle_deleting_instance(
 
     // The delete and the segment release must commit together, as in the Assigned
     // termination path.
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::instance::delete(instance.id, &mut txn)
         .await
         .map_err(|err| StateHandlerError::GenericError(err.into()))?;
@@ -151,7 +165,6 @@ async fn handle_deleting_instance(
 /// re-running it on each poll is safe.
 async fn handle_deleting_crs(
     state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: Option<&dyn DpfOperations>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let dpf_sdk = dpf_sdk.ok_or_else(|| {
@@ -161,24 +174,7 @@ async fn handle_deleting_crs(
         ))
     })?;
 
-    let host_dpf_id =
-        state
-            .host_snapshot
-            .dpf_id()
-            .ok_or_else(|| StateHandlerError::MissingData {
-                object_id: state.host_snapshot.id.to_string(),
-                missing: "dpf_id",
-            })?;
-    let dpu_dpf_ids = state
-        .dpu_snapshots
-        .iter()
-        .map(|dpu| {
-            dpu.dpf_id().ok_or_else(|| StateHandlerError::MissingData {
-                object_id: dpu.id.to_string(),
-                missing: "dpf_id",
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let (host_dpf_id, dpu_dpf_ids) = host_dpf_ids(state)?;
 
     // Reused from decommissioning; deletes the host's DPUNode and DPUDevice CRs.
     dpf_sdk
@@ -200,6 +196,58 @@ async fn handle_deleting_crs(
         ));
     }
 
+    Ok(StateHandlerOutcome::transition(ManagedHostState::Reset {
+        reset_state: ResetState::DeletingBmcCredentialSecrets,
+    }))
+}
+
+fn host_dpf_ids(
+    state: &ManagedHostStateSnapshot,
+) -> Result<(String, Vec<String>), StateHandlerError> {
+    let host_dpf_id =
+        state
+            .host_snapshot
+            .dpf_id()
+            .ok_or_else(|| StateHandlerError::MissingData {
+                object_id: state.host_snapshot.id.to_string(),
+                missing: "dpf_id",
+            })?;
+    let dpu_dpf_ids = state
+        .dpu_snapshots
+        .iter()
+        .map(|dpu| {
+            dpu.dpf_id().ok_or_else(|| StateHandlerError::MissingData {
+                object_id: dpu.id.to_string(),
+                missing: "dpf_id",
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((host_dpf_id, dpu_dpf_ids))
+}
+
+async fn handle_deleting_bmc_credential_secrets(
+    state: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    dpf_sdk: Option<&dyn DpfOperations>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let dpf_sdk = dpf_sdk.ok_or_else(|| {
+        StateHandlerError::GenericError(eyre!(
+            "managed host {} reset requires DPF, but DPF is not configured",
+            state.host_snapshot.id,
+        ))
+    })?;
+    let (node_id, device_ids) = host_dpf_ids(state)?;
+    if !dpf_sdk
+        .delete_host_bmc_credential_secrets(&node_id, &device_ids)
+        .await
+        .map_err(|error| StateHandlerError::GenericError(error.into()))?
+    {
+        return Ok(StateHandlerOutcome::wait(
+            "waiting for managed host BMC credential Secrets to be deleted".to_string(),
+        ));
+    }
+
     start_host_reingestion(state, ctx).await
 }
 
@@ -216,7 +264,12 @@ async fn start_host_reingestion(
     let host_id = &state.host_snapshot.id;
 
     let mut dpu_states = std::collections::HashMap::new();
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // A surviving failure record would re-park the host via `get_failed_state`.
     db::machine::clear_failure_details(host_id, &mut txn).await?;

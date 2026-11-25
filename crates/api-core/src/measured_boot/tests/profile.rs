@@ -38,6 +38,7 @@
 mod tests {
     use std::collections::HashMap;
 
+    use db::TransactionVending as _;
     use db::measured_boot::interface::profile::{
         get_all_measurement_profile_attr_records, get_all_measurement_profile_records,
     };
@@ -50,7 +51,7 @@ mod tests {
     // sure the records themselves are correct.
     #[crate::sqlx_test]
     async fn test_profile_crudl(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let vals = HashMap::from([
             (String::from("sys_vendor"), String::from("dell")),
@@ -185,12 +186,12 @@ mod tests {
         ]);
 
         // Create the first profile and commit it
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::measured_boot::profile::new(&mut txn, Some(String::from("my-profile")), &vals).await?;
         txn.commit().await?;
 
         // Try to create a duplicate by name (should fail) - use separate txn since failure aborts it
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let dupe_by_name =
             db::measured_boot::profile::new(&mut txn, Some(String::from("my-profile")), &vals2)
                 .await;
@@ -198,7 +199,7 @@ mod tests {
         // txn is aborted due to error, don't try to use it further
 
         // Try to create a duplicate by attrs (should fail) - use separate txn
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let dupe_by_vals =
             db::measured_boot::profile::new(&mut txn, Some(String::from("my-profile2")), &vals)
                 .await;
@@ -206,7 +207,7 @@ mod tests {
         // txn is aborted due to error, don't try to use it further
 
         // Create a non-duplicate (should succeed)
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let not_a_dupe =
             db::measured_boot::profile::new(&mut txn, Some(String::from("my-profile2")), &vals2)
                 .await;
@@ -222,7 +223,7 @@ mod tests {
     // the matching logic works as expected.
     #[crate::sqlx_test]
     async fn test_profile_matching(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let vals1 = HashMap::from([
             (String::from("sys_vendor"), String::from("dell")),

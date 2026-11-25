@@ -59,6 +59,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_platform::ServiceRootIdentity;
+use carbide_network::BaseMac;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
@@ -74,12 +75,10 @@ use model::site_explorer::{
     LockdownStatus, MachineSetupDiff, MachineSetupStatus, ServiceRoot as ModelServiceRoot,
     derive_hardware_class,
 };
-use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
 use nv_redfish::core::ODataId;
 use nv_redfish::oem::ami::config_bmc::{
-    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState,
-    LockoutBiosVariableWriteMode, LockoutHostControlState,
+    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState, LockoutHostControlState,
 };
 use nv_redfish::oem::lenovo::computer_system::{FpMode, PortSwitchingTo};
 use nv_redfish::oem::lenovo::manager::KcsState;
@@ -121,10 +120,16 @@ fn is_bluefield_system_id(id: &str) -> bool {
     matches!(id, "Bluefield" | "BlueField_0")
 }
 
+/// Selects a Redfish chassis whose Assembly link should be followed.
+pub type ChassisAssemblyFilter<'a> =
+    &'a (dyn Fn(&nv_redfish::schema::chassis::Chassis) -> bool + Sync);
+
 pub struct Config<'a, B: Bmc> {
     pub boot_interface_mac: Option<MacAddress>,
     pub error_classifier: ErrorClassifier<'a, B>,
     pub retry_timeout: Duration,
+    /// Follow the Assembly link when this predicate matches the chassis.
+    pub collect_chassis_assembly: ChassisAssemblyFilter<'a>,
     /// Whether to read drive firmware versions from the primary system's
     /// Storage subsystems and report each enabled drive with a usable model
     /// and version as a `Drive_<Model>_<DriveId>` firmware inventory entry.
@@ -145,28 +150,22 @@ fn should_fetch_bf4_chassis_except_irot_nic(odata_id: &ODataId) -> bool {
 
 /// Builds the chassis exploration config shared by [`nv_generate_exploration_report`]
 /// and the [`detect_hw_type`] accessor, so detection cannot drift between them.
-fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Config {
+fn build_chassis_explore_config<'a, B: Bmc>(
+    root: &ServiceRoot<B>,
+    collect_chassis_assembly: ChassisAssemblyFilter<'a>,
+) -> chassis::Config<'a> {
     let is_nvidia_vendor = root.vendor() == Some(Vendor::new("Nvidia"))
         || root.vendor() == Some(Vendor::new("NVIDIA"));
     let need_bf4_network_device_fns = is_nvidia_vendor && is_bf4_product(root.product());
 
     chassis::Config {
+        collect_chassis_assembly,
         network_adapter: network_adapter::Config {
             // Dell exploration needs NDF data for host-DPU pairing. BF4 needs
             // NDF0 `PermanentMACAddress` to derive PF0 base MAC as (NDF0 - 0x10)
             // while some BMC firmware does not expose ComputerSystem BaseMAC.
             need_network_device_fns: root.vendor() == Some(Vendor::new("Dell"))
                 || need_bf4_network_device_fns,
-        },
-        need_assembly_sn: |id| {
-            // For GB200 and Vera Rubin hosts, use the Chassis_0 assembly serial
-            // number to match Nautobot / expected-machine inventory serials.
-            (id == "Chassis_0").then_some(|model| {
-                model.is_some_and(|model| {
-                    hw::vera_rubin::chassis_assembly_serial_model(model.into_inner())
-                }) || model == Some(AssemblyModel::new("GB200 NVL"))
-                    || model == Some(AssemblyModel::new("Titania-Bianca Compute Tray PDB"))
-            })
         },
         // BlueField-3 DPU (Tested on BF-25.10-9 firmware) has issue
         // with ERoT chassis. It stucks sometimes until next request
@@ -186,6 +185,11 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
                 && root.product() == Some(Product::new("BlueField-3 DPU")))
             .then_some(|odata_id| odata_id.last_segment() != Some("Bluefield_ERoT"))
         },
+        // Supermicro lists the RAID storage enclosure in the chassis collection
+        // while the host is rebooting, but fetching it returns 404 until the
+        // controller is up. Skip a listed chassis that answers 404 for the cycle
+        // rather than failing the whole exploration.
+        skip_not_found_members: root.vendor() == Some(Vendor::new("Supermicro")),
     }
 }
 
@@ -243,9 +247,11 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
-    let chassis_explore_config = build_chassis_explore_config(&root);
+    let chassis_explore_config =
+        build_chassis_explore_config(&root, config.collect_chassis_assembly);
     let mut explored_chassis =
-        ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
+        ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
+            .await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
     let explored_component_integrities = ExploredComponentIntegrity::explore(&root).await;
 
@@ -617,12 +623,7 @@ fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
 /// The service root part of the identity driver selection matches on, read
 /// from `root` directly. It is all a BMC in factory state serves.
 pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
-    let root = service_root(root);
-    ServiceRootIdentity {
-        vendor: root.vendor,
-        product: root.product,
-        oem_keys: root.oem_keys,
-    }
+    ServiceRootIdentity::from_service_root(root)
 }
 
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
@@ -942,7 +943,9 @@ fn lockdown_status<B: Bmc>(
             );
 
             let model = system.hardware_id().model.map(|v| v.into_inner());
-            let is_ars_121l_dnr = model == Some("ARS-121L-DNR");
+            let must_keep_host_interface_enabled = model.is_some_and(|model| {
+                model.contains("ARS-121L-DNR") || model.contains("ARS-221GL-FNB-NC24B")
+            });
             let (inband_locked, inband_unlocked) = if explored_chassis.is_mgx_c2() {
                 (
                     ipmi_host_interface_enabled.is_none_or(|enabled| !enabled),
@@ -955,8 +958,8 @@ fn lockdown_status<B: Bmc>(
                         || kcs_privilege == Some(SupermicroPrivilege::Administrator),
                 )
             };
-            // ARS-121L-DNR must keep HostInterface enabled to PXE boot.
-            let host_interface_locked = hi_enabled == is_ars_121l_dnr;
+            // ARS-121L-DNR and ARS-221GL-FNB-NC24B must keep HostInterface enabled to PXE boot.
+            let host_interface_locked = must_keep_host_interface_enabled || !hi_enabled;
 
             let status = if is_syslockdown && inband_locked && host_interface_locked {
                 InternalLockdownStatus::Enabled
@@ -1005,12 +1008,6 @@ fn lenovo_ami_lockdown_status(
             attrs
                 .lockout_host_control
                 .map(|v| v == LockoutHostControlState::Enable),
-        ),
-        (
-            "LockoutBiosVariableWriteMode",
-            attrs
-                .lockout_bios_variable_write_mode
-                .map(|v| v == LockoutBiosVariableWriteMode::Enable),
         ),
         (
             "LockdownBiosSettingsChange",
@@ -1399,7 +1396,7 @@ fn machine_setup_status<B: Bmc>(
                 // Looking for UEFI Device path:
                 // VenHw(REDACTED)/MemoryMapped(REDACTED)/PciRoot(0x6)/Pci(0x0,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)/MAC(020304050607,0x1)/IPv4(0.0.0.0)/Uri()
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1437,7 +1434,7 @@ fn machine_setup_status<B: Bmc>(
                 // Looking for UEFI Device path:
                 // VenHw(...)/.../MAC(020304050607,0x1)/IPv4(0.0.0.0)/Uri()
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1471,7 +1468,7 @@ fn machine_setup_status<B: Bmc>(
             }
             if let Some(mac) = boot_interface_mac {
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1500,7 +1497,7 @@ fn machine_setup_status<B: Bmc>(
             );
             if let Some(mac) = boot_interface_mac {
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1524,6 +1521,10 @@ fn machine_setup_status<B: Bmc>(
         diffs,
         evaluated_boot_interface: None,
     }
+}
+
+fn uefi_mac_needle(mac: MacAddress) -> String {
+    format!("/MAC({},", BaseMac::from(mac))
 }
 
 fn compare_boot_options<B: Bmc>(
@@ -1568,6 +1569,12 @@ mod tests {
     };
 
     #[test]
+    fn uefi_mac_needle_preserves_padding_uppercase_and_path_delimiters() {
+        let mac = mac_address::MacAddress::new([0, 1, 10, 16, 160, 255]);
+        assert_eq!(super::uefi_mac_needle(mac), "/MAC(00010A10A0FF,");
+    }
+
+    #[test]
     fn lenovo_ami_lockdown_requires_config_and_host_interface_to_agree() {
         for (value, interface, expected) in [
             ("Enable", Some(false), InternalLockdownStatus::Enabled),
@@ -1579,7 +1586,7 @@ mod tests {
             let attrs = serde_json::from_value(serde_json::json!({
                 "@odata.id": "/redfish/v1/Managers/Self/Oem/ConfigBMC",
                 "LockoutHostControl": value,
-                "LockoutBiosVariableWriteMode": value,
+                "LockoutBiosVariableWriteMode": if value == "Enable" { "Disable" } else { "Enable" },
                 "LockdownBiosSettingsChange": value,
                 "LockdownBiosUpgradeDowngrade": value,
             }))

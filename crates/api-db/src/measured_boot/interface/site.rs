@@ -95,10 +95,10 @@ pub async fn get_approved_machines(
 }
 
 pub async fn get_approval_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: TrustedMachineId,
 ) -> Result<Option<MeasurementApprovedMachineRecord>, DatabaseError> {
-    common::get_object_for_id(txn, machine_id)
+    common::get_object_for_id(conn, machine_id)
         .await
         .map_err(|e| e.with_op_name("get_approval_for_machine_id"))
 }
@@ -163,7 +163,7 @@ pub async fn get_approved_profiles(
 }
 
 pub async fn get_approval_for_profile_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     profile_id: MeasurementSystemProfileId,
 ) -> Result<Option<MeasurementApprovedProfileRecord>, DatabaseError> {
     // TODO(chet): get_object_for_id should become fetch_optional.
@@ -173,7 +173,7 @@ pub async fn get_approval_for_profile_id(
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(profile_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::new("get_approval_for_profile_id", e))
 }

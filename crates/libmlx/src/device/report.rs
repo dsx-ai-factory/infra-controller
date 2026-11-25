@@ -53,7 +53,7 @@ impl MlxDeviceReport {
         let hostname = hostname::get()
             .unwrap_or_else(|_| "unknown".into())
             .to_string_lossy()
-            .to_string();
+            .into_owned();
 
         Self {
             hostname,

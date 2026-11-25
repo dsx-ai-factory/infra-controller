@@ -49,6 +49,7 @@ version-compare = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+carbide-api-db = { path = "../api-db", features = ["test-support"] }
 carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
@@ -61,6 +62,7 @@ libc = { workspace = true }
 librms = { workspace = true }
 prometheus-text-parser = { path = "../prometheus-text-parser" }
 tempfile = { workspace = true }
+tonic = { workspace = true }
 
 [lints]
 workspace = true

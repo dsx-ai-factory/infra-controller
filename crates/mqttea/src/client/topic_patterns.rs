@@ -155,15 +155,14 @@ impl std::fmt::Display for TopicPatterns {
         match self {
             Self::Single(pattern) => write!(f, "'{pattern}'"),
             Self::Multiple(patterns) => {
-                write!(
-                    f,
-                    "[{}]",
-                    patterns
-                        .iter()
-                        .map(|p| format!("'{p}'"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
+                f.write_str("[")?;
+                for (index, pattern) in patterns.iter().enumerate() {
+                    if index != 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "'{pattern}'")?;
+                }
+                f.write_str("]")
             }
         }
     }

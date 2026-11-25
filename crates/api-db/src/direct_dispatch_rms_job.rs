@@ -24,7 +24,8 @@ use std::collections::HashSet;
 
 use mac_address::MacAddress;
 
-use crate::DatabaseError;
+use crate::db_read::DbReader;
+use crate::{DatabaseError, TransactionVending as _};
 
 /// Backend operation whose current job reference is tracked for a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,7 +42,7 @@ pub enum RmsJobKind {
 
 impl RmsJobKind {
     /// Stable database value; existing firmware references retain their kinds.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::FirmwareObject => "firmware_object",
             Self::SwitchSystemImage => "switch_system_image",
@@ -72,16 +73,23 @@ pub async fn save(
     job_kind: RmsJobKind,
     job_id: &str,
 ) -> Result<(), DatabaseError> {
-    let sql = "INSERT INTO direct_dispatch_rms_jobs (bmc_mac, job_kind, job_id) \
-               VALUES ($1, $2, $3) ON CONFLICT (bmc_mac, job_kind) \
-               DO UPDATE SET job_id = EXCLUDED.job_id, created = now()";
+    let mut txn = db.txn_begin().await?;
+    crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
+    let action_id = crate::cm_action::firmware(&mut txn, bmc_mac, job_kind, job_id).await?;
+    let sql = "INSERT INTO direct_dispatch_rms_jobs (bmc_mac, job_kind, job_id, action_id) \
+               VALUES ($1, $2, $3, $4) \
+               ON CONFLICT (bmc_mac, job_kind) \
+               DO UPDATE SET job_id = EXCLUDED.job_id, action_id = EXCLUDED.action_id, created = now()";
     sqlx::query(sql)
         .bind(bmc_mac)
         .bind(job_kind.as_str())
         .bind(job_id)
-        .execute(db)
+        .bind(action_id)
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
+    crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
+    txn.commit().await?;
     Ok(())
 }
 
@@ -91,19 +99,24 @@ pub async fn delete(
     bmc_mac: MacAddress,
     job_kind: RmsJobKind,
 ) -> Result<(), DatabaseError> {
-    let sql = "DELETE FROM direct_dispatch_rms_jobs WHERE bmc_mac = $1 AND job_kind = $2";
+    let mut txn = db.txn_begin().await?;
+    crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
+    let sql = "DELETE FROM direct_dispatch_rms_jobs \
+               WHERE bmc_mac = $1 AND job_kind = $2";
     sqlx::query(sql)
         .bind(bmc_mac)
         .bind(job_kind.as_str())
-        .execute(db)
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
+    crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
+    txn.commit().await?;
     Ok(())
 }
 
 /// Fetch the current reference for one device/kind, if recorded.
 pub async fn get(
-    db: &sqlx::PgPool,
+    conn: impl DbReader<'_>,
     bmc_mac: MacAddress,
     job_kind: RmsJobKind,
 ) -> Result<Option<String>, DatabaseError> {
@@ -111,9 +124,37 @@ pub async fn get(
     sqlx::query_scalar(sql)
         .bind(bmc_mac)
         .bind(job_kind.as_str())
-        .fetch_optional(db)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))
+}
+
+/// Read the originating log trace for the exact backend job being polled.
+/// Legacy jobs and jobs replaced during a poll have no matching context.
+pub async fn trace_id(
+    conn: impl DbReader<'_>,
+    bmc_mac: MacAddress,
+    job_kind: RmsJobKind,
+    job_id: &str,
+) -> Result<Option<trace_propagation::correlation::TraceId>, DatabaseError> {
+    let metadata: Option<sqlx::types::Json<crate::cm_action::Metadata>> = sqlx::query_scalar("SELECT a.metadata FROM direct_dispatch_rms_jobs j JOIN cm_actions a ON a.id = j.action_id AND a.request_key = j.job_kind || ':' || j.job_id WHERE j.bmc_mac = $1 AND j.job_kind = $2 AND j.job_id = $3")
+        .bind(bmc_mac).bind(job_kind.as_str()).bind(job_id).fetch_optional(conn).await
+        .map_err(|error| DatabaseError::query("direct_dispatch_rms_job::trace_id", error))?;
+    Ok(metadata.map(|metadata| metadata.0.trace_id))
+}
+
+/// Mark the exact backend job's action finished. A replacement job is untouched;
+/// its predecessor's completion can arrive after a newer submission.
+pub async fn finish(
+    db: &sqlx::PgPool,
+    bmc_mac: MacAddress,
+    job_kind: RmsJobKind,
+    job_id: &str,
+) -> Result<(), DatabaseError> {
+    sqlx::query("UPDATE cm_actions a SET completed_at = statement_timestamp() WHERE completed_at IS NULL AND id = (SELECT action_id FROM direct_dispatch_rms_jobs j WHERE bmc_mac = $1 AND job_kind = $2 AND job_id = $3 AND a.request_key = j.job_kind || ':' || j.job_id)")
+        .bind(bmc_mac).bind(job_kind.as_str()).bind(job_id).execute(db).await
+        .map_err(|error| DatabaseError::query("direct_dispatch_rms_job::finish", error))?;
+    Ok(())
 }
 
 /// Fetch firmware references only; reset jobs must not enter firmware status aggregation.
@@ -152,9 +193,9 @@ pub async fn replace_firmware_jobs(
             "reset jobs cannot replace firmware references".to_owned(),
         ));
     }
-    let mut txn = db.begin().await.map_err(|e| {
-        DatabaseError::new("direct_dispatch_rms_job::replace_firmware_jobs: begin", e)
-    })?;
+    let mut txn = db.txn_begin().await?;
+
+    crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
 
     let delete_sql = "DELETE FROM direct_dispatch_rms_jobs \
                       WHERE bmc_mac = $1 AND job_kind IN ('firmware_object', 'switch_system_image')";
@@ -164,28 +205,30 @@ pub async fn replace_firmware_jobs(
         .await
         .map_err(|e| DatabaseError::new(delete_sql, e))?;
 
-    let insert_sql = "INSERT INTO direct_dispatch_rms_jobs (bmc_mac, job_kind, job_id) \
-                      VALUES ($1, $2, $3)";
+    let insert_sql = "INSERT INTO direct_dispatch_rms_jobs (bmc_mac, job_kind, job_id, action_id) \
+                      VALUES ($1, $2, $3, $4)";
     for (job_kind, job_id) in jobs {
+        let action_id = crate::cm_action::firmware(&mut txn, bmc_mac, *job_kind, job_id).await?;
         sqlx::query(insert_sql)
             .bind(bmc_mac)
             .bind(job_kind.as_str())
             .bind(job_id)
+            .bind(action_id)
             .execute(&mut *txn)
             .await
             .map_err(|e| DatabaseError::new(insert_sql, e))?;
     }
 
-    txn.commit().await.map_err(|e| {
-        DatabaseError::new("direct_dispatch_rms_job::replace_firmware_jobs: commit", e)
-    })?;
+    crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
+
+    txn.commit().await?;
     Ok(())
 }
 
 /// Select devices with firmware references for direct-dispatch status routing.
 /// Reset references never redirect firmware status from the state controller.
 pub async fn find_macs_with_firmware_job(
-    db: &sqlx::PgPool,
+    conn: impl DbReader<'_>,
     bmc_macs: &[MacAddress],
 ) -> Result<HashSet<MacAddress>, DatabaseError> {
     if bmc_macs.is_empty() {
@@ -195,7 +238,7 @@ pub async fn find_macs_with_firmware_job(
                AND job_kind IN ('firmware_object', 'switch_system_image')";
     let macs: Vec<MacAddress> = sqlx::query_scalar(sql)
         .bind(bmc_macs)
-        .fetch_all(db)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
     Ok(macs.into_iter().collect())
@@ -211,6 +254,7 @@ mod tests {
         RmsJobKind, delete, find_macs_with_firmware_job, get, get_firmware_jobs,
         replace_firmware_jobs, save,
     };
+    use crate::TransactionVending as _;
 
     const FW_OBJECT: RmsJobKind = RmsJobKind::FirmwareObject;
     const SYS_IMAGE: RmsJobKind = RmsJobKind::SwitchSystemImage;
@@ -327,7 +371,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn rename_migration_preserves_firmware_references(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::raw_sql(
             "ALTER TABLE direct_dispatch_rms_jobs RENAME TO direct_dispatch_firmware_update_jobs;
              INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id, created)

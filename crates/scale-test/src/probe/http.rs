@@ -281,6 +281,8 @@ mod tests {
             last_attempt_error: None,
         };
         let target = |model: &str| FirmwareTarget {
+            component_name: None,
+            inventory_name_regex: None,
             vendor: "Dell".to_string(),
             model: model.to_string(),
             component: Component::Bmc,
@@ -289,9 +291,12 @@ mod tests {
         };
         fake.set_config(ConfigResponse {
             nico_api: Some(ConfigNicoApi {
+                revision: None,
                 read,
                 firmware_targets: vec![target("R750"), target("R760")],
                 runtime: RuntimeSettings {
+                    machine_update_run_interval_seconds: None,
+                    requires_manual_upgrade: None,
                     max_concurrent_machine_updates_absolute: Some(10),
                     max_concurrent_machine_updates_percent: None,
                     auto_host_firmware_update: Some(false),

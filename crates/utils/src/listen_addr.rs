@@ -86,8 +86,28 @@ impl Serialize for ListenAddr {
 
 impl<'de> Deserialize<'de> for ListenAddr {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
+        struct ListenAddrVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ListenAddrVisitor {
+            type Value = Result<ListenAddr, ParseListenAddrError>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(value.parse())
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer
+            .deserialize_string(ListenAddrVisitor)?
             .map_err(serde::de::Error::custom)
     }
 }
@@ -98,6 +118,44 @@ mod tests {
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[test]
+    fn listen_addr_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "*:1079";
+        let cases = [
+            (
+                "borrowed string",
+                ListenAddr::deserialize(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                ListenAddr::deserialize(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                ListenAddr::deserialize(StringDeserializer::<Error>::new(input.to_string())),
+            ),
+            (
+                "bytes",
+                ListenAddr::deserialize(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert_eq!(value, ListenAddr::Any { port: 1079 }, "{scenario}");
+        }
+
+        let error = ListenAddr::deserialize(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
 
     #[test]
     fn serde_preserves_listen_address_strings() {

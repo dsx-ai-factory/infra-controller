@@ -15,5 +15,5 @@
 # limitations under the License.
 #
 [toolchain]
-# If you change this grep for "rust:1.97.1" and update those Dockerfiles
-channel = "1.97.1"
+# If you change this grep for "rust:1.100.0" and update those Dockerfiles
+channel = "1.100.0"

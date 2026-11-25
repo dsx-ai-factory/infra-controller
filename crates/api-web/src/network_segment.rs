@@ -25,6 +25,7 @@ use carbide_api_core::Api;
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::network::NetworkSegmentId;
 use hyper::http::StatusCode;
+use itertools::Itertools;
 use rpc::forge as forgerpc;
 use rpc::forge::forge_server::Forge;
 
@@ -73,12 +74,7 @@ impl TryFrom<forgerpc::NetworkSegment> for NetworkSegmentRowDisplay {
             state_display: super::StateDisplay::from_lifecycle(lifecycle),
             sub_domain: String::new(), // filled in later
             mtu: config.mtu.unwrap_or(-1),
-            prefixes: config
-                .prefixes
-                .iter()
-                .map(|x| x.prefix.to_string())
-                .collect::<Vec<String>>()
-                .join(", "),
+            prefixes: config.prefixes.iter().map(|x| x.prefix.as_str()).join(", "),
             version: lifecycle.map(|lc| lc.version.clone()).unwrap_or_default(),
         })
     }
@@ -297,7 +293,7 @@ impl TryFrom<forgerpc::NetworkSegment> for NetworkSegmentDetail {
             deleted: segment
                 .deleted
                 .map(|x| x.to_string())
-                .unwrap_or("Not Deleted".to_string()),
+                .unwrap_or_else(|| "Not Deleted".to_string()),
             lifecycle_detail,
             domain_id: config.subdomain_id.unwrap_or_default().to_string(),
             domain_name: String::new(), // filled in later

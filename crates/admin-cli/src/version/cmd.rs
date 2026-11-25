@@ -52,11 +52,14 @@ macro_rules! rv {
 }
 
 fn format_list(values: &[String]) -> String {
-    values
-        .chunks(5)
-        .map(|values| values.join(", "))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = String::new();
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            output.push_str(if index % 5 == 0 { "\n" } else { ", " });
+        }
+        output.push_str(value);
+    }
+    output
 }
 
 /// Client to retry `version` with when the first, server-verifying attempt
@@ -221,4 +224,23 @@ pub(super) async fn handle_show_version(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn list_formatting_preserves_empty_values_and_five_item_lines() {
+        carbide_test_support::value_scenarios!(run = |values: &[&str]| {
+            let values: Vec<String> = values.iter().map(|value| (*value).to_string()).collect();
+            super::format_list(&values)
+        };
+            "no values" {
+                &[][..] => "".to_string(),
+            }
+            "fifth item ends the line without discarding empty items" {
+                &["", "α", "'", "line\nbreak", "", "last"][..]
+                    => ", α, ', line\nbreak, \nlast".to_string(),
+            }
+        );
+    }
 }

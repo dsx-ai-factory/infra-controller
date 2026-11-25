@@ -345,8 +345,8 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
                                 &[
                                     attrs,
                                     &[
-                                        KeyValue::new("state", full_state.state.to_string()),
-                                        KeyValue::new("substate", full_state.substate.to_string()),
+                                        KeyValue::new("state", full_state.state),
+                                        KeyValue::new("substate", full_state.substate),
                                     ],
                                 ]
                                 .concat(),
@@ -372,8 +372,8 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
                                 [
                                     attrs,
                                     &[
-                                        KeyValue::new("state", full_state.state.to_string()),
-                                        KeyValue::new("substate", full_state.substate.to_string()),
+                                        KeyValue::new("state", full_state.state),
+                                        KeyValue::new("substate", full_state.substate),
                                     ],
                                 ]
                                 .concat()
@@ -405,12 +405,12 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
                                     &[
                                         attrs,
                                         &[
-                                            KeyValue::new("state", full_state.state.to_string()),
+                                            KeyValue::new("state", full_state.state),
                                             KeyValue::new(
                                                 "substate",
-                                                full_state.substate.to_string(),
+                                                full_state.substate,
                                             ),
-                                            KeyValue::new("error", error.to_string()),
+                                            KeyValue::new("error", *error),
                                         ],
                                     ]
                                     .concat(),
@@ -422,9 +422,9 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
                                 &[
                                     attrs,
                                     &[
-                                        KeyValue::new("state", full_state.state.to_string()),
-                                        KeyValue::new("substate", full_state.substate.to_string()),
-                                        KeyValue::new("error", "any".to_string()),
+                                        KeyValue::new("state", full_state.state),
+                                        KeyValue::new("substate", full_state.substate),
+                                        KeyValue::new("error", "any"),
                                     ],
                                 ]
                                 .concat(),
@@ -485,8 +485,8 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
             .map(IO::metric_state_names)
             .unwrap_or(("unknown", ""));
 
-        let initial_state_attr = KeyValue::new("state", initial_state_name.to_string());
-        let initial_substate_attr = KeyValue::new("substate", initial_substate_name.to_string());
+        let initial_state_attr = KeyValue::new("state", initial_state_name);
+        let initial_substate_attr = KeyValue::new("substate", initial_substate_name);
 
         // If a follow-up state is defined, emit metrics for exiting and leaving the state
         if let Some(next_state) = object_metrics.next_state.as_ref() {
@@ -494,8 +494,8 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
 
             let attrs = &[initial_state_attr.clone(), initial_substate_attr.clone()];
             self.state_exited_counter.add(1, attrs);
-            let next_state_attr = KeyValue::new("state", next_state_name.to_string());
-            let next_substate_attr = KeyValue::new("substate", next_substate_name.to_string());
+            let next_state_attr = KeyValue::new("state", next_state_name);
+            let next_substate_attr = KeyValue::new("substate", next_substate_name);
             let attrs = &[next_state_attr, next_substate_attr];
             self.state_entered_counter.add(1, attrs);
 
@@ -511,14 +511,8 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
             let attrs_with_next_state = &[
                 initial_state_attr.clone(),
                 initial_substate_attr.clone(),
-                KeyValue::new(
-                    "next_state",
-                    transition_record.target_state.state.to_string(),
-                ),
-                KeyValue::new(
-                    "next_substate",
-                    transition_record.target_state.substate.to_string(),
-                ),
+                KeyValue::new("next_state", transition_record.target_state.state),
+                KeyValue::new("next_substate", transition_record.target_state.substate),
             ];
             self.time_in_state_histogram.record(
                 transition_record.time_in_state.as_secs_f64(),

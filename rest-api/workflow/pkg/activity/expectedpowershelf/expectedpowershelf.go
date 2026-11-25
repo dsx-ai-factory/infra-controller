@@ -76,15 +76,38 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 	// Initialize ExpectedPowerShelf DAO (used for reconciliation of expected instances)
 	epsDAO := cdbm.NewExpectedPowerShelfDAO(mei.dbSession)
 
-	// Fetch ALL existing expected power shelves for site
-	filterInput := cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{siteID}}
-	existingExpectedPowerShelves, _, err := epsDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get ExpectedPowerShelves for Site from DB")
-		return err
+	// The deletion sweep only considers Expected Power Shelves that existed before this page is applied,
+	// and only deletes one that has not changed since.
+	var siteExpectedPowerShelfIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
+	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
+		siteExpectedPowerShelfIDsAndUpdated, err = epsDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedPowerShelf IDs and Updated timestamps for Site from DB")
+			return err
+		}
 	}
 
-	// Build a map of all existing Expected Power Shelves by UUID (unique identifier)
+	// Look up only the Expected Power Shelves this page reports. Pages run concurrently, so loading
+	// the whole Site here would make each page's memory grow with the Site's Expected Power Shelf count.
+	pageExpectedPowerShelfIDs := []uuid.UUID{}
+	for _, reps := range expectedPowerShelfInventory.GetExpectedPowerShelves() {
+		id, serr := uuid.Parse(reps.GetExpectedPowerShelfId().GetValue())
+		if serr == nil {
+			pageExpectedPowerShelfIDs = append(pageExpectedPowerShelfIDs, id)
+		}
+	}
+
+	existingExpectedPowerShelves := []cdbm.ExpectedPowerShelf{}
+	if len(pageExpectedPowerShelfIDs) > 0 {
+		filterInput := cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedPowerShelfIDs: pageExpectedPowerShelfIDs}
+		existingExpectedPowerShelves, _, err = epsDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedPowerShelves for Site from DB")
+			return err
+		}
+	}
+
+	// Build a map of the page's existing Expected Power Shelves by UUID (unique identifier)
 	existingByID := map[uuid.UUID]*cdbm.ExpectedPowerShelf{}
 	for _, eps := range existingExpectedPowerShelves {
 		existingByID[eps.ID] = &eps
@@ -211,7 +234,7 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
-		for _, eps := range existingExpectedPowerShelves {
+		for _, eps := range siteExpectedPowerShelfIDsAndUpdated {
 			if _, keep := reportedIDs[eps.ID]; keep {
 				continue
 			}

@@ -48,7 +48,7 @@ step with series_labels() in crates/site-health-probe-api/src/metrics.rs; a
 probe config test compares them.
 */}}
 {{- define "nico-site-health-probe.seriesLabels" -}}
-allocatable eligible family initiator instance_type kind linked metric mode model predicate reader reason resource result stage state type update_complete
+allocatable component eligible family initiator instance_type kind linked metric mode model phase predicate reader ready reason resource result stage state type update_complete vendor
 {{- end }}
 
 {{/*

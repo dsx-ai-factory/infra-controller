@@ -14,8 +14,8 @@ nico-admin-cli expected-switch update
 [-u|--bmc-username] [-p|--bmc-password]
 [-s|--switch-serial-number] [--nvos-interface]
 [--nvos-username] [--nvos-password] [--meta-name]
-[--meta-description] [--label] [--rack_id]
-[--bmc-ip-address] [--extended] [--nvos-ip-address]
+[--extended] [--meta-description] [--label]
+[--rack_id] [--bmc-ip-address] [--nvos-ip-address]
 [--bmc-retain-credentials] [--sort-by]
 [-h|--help]
 ```
@@ -92,6 +92,14 @@ NVOS password of the expected switch
 
 Replace the metadata name. An empty or omitted value leaves it unchanged
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--meta-description <META_DESCRIPTION>`
 
 Replace the metadata description. An empty or omitted value leaves it
@@ -112,14 +120,6 @@ Rack ID for this switch
 BMC IP address of the expected switch. Must not be unspecified,
 multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6
 form of each
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--nvos-ip-address <NVOS_IP_ADDRESS>`
 

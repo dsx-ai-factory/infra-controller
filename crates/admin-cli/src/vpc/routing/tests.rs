@@ -130,10 +130,10 @@ async fn dispatch_routing_state(state: VpcRoutingState) -> Vec<u8> {
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{address}"),
-            &client_config,
-        ))),
+        api_client: ApiClient(CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format: OutputFormat::AsciiTable,
             request_timeout: client_config.request_timeout,
@@ -927,10 +927,10 @@ fn release_acknowledgements_require_the_exact_cleanup_and_unchanged_active_confi
 #[tokio::test]
 async fn mutation_run_paths_require_cloud_unsafe_acknowledgement_before_io() {
     let mut ctx = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-            "invalid-unconnected-url",
-            &CarbideClientConfig::default(),
-        ))),
+        api_client: ApiClient(CarbideApiClient::new(
+            &ApiConfig::new("invalid-unconnected-url", &CarbideClientConfig::default()),
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format: OutputFormat::Json,
             request_timeout: None,

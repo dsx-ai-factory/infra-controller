@@ -14,6 +14,17 @@ This page covers host firmware selected from the
 recovery also runs in the pre-ingestion state machine, but installs a DPU boot
 image to recover the DPU; it is not a host firmware-catalog workflow.
 
+After successful BMC time synchronization, every switch BMC enters
+[initial NVOS password rotation](../nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
+before firmware checks and updates. Completing or skipping that password step
+allows firmware work to proceed. Disabling firmware updates or switch creation
+does not disable the password step.
+Compute-tray and DPU BMCs do not enter `NvosPasswordRotation` or its
+`CheckFirmware` continuation; they proceed through their existing firmware path.
+For a switch BMC with IPv4 and IPv6 endpoints, one endpoint owns the persisted
+NVOS rotation and the other waits in `Check`. Both continue to firmware checks
+after the owner records the confirmed password version.
+
 ## Rack compute trays
 
 An expected compute tray with a rack ID uses its rack profile instead of the
@@ -102,8 +113,15 @@ For example:
 ```mermaid
 flowchart TD
     A["Fresh BMC exploration report"] --> B["BMC reset and time checks"]
-    B -- "unknown vendor" --> J["Complete pre-ingestion"]
-    B -- "known vendor" --> B1{"Report has a model?"}
+    B --> S{"Switch BMC?"}
+    S -- Yes --> N["Handle initial NVOS password"]
+    S -- No --> V["Check firmware"]
+    N -- "Complete or confirmed version" --> NV["CheckFirmware state"]
+    NV --> V
+    N -- "Wait or retryable error" --> NW["Retry password step"]
+    NW --> N
+    V -- "unknown vendor" --> J["Complete pre-ingestion"]
+    V -- "known vendor" --> B1{"Report has a model?"}
     B1 -- No --> A1{"Global autoupdate enabled?"}
     A1 -- No --> J
     A1 -- Yes --> R1{"Report refreshed already?"}
@@ -134,6 +152,13 @@ The state machine performs the following work:
 1. **Prepare the BMC.** NICo attempts an initial BMC reset, waits for a fresh
    exploration report, configures the site's NTP servers, and checks BMC time.
    Firmware comparison uses the refreshed inventory.
+1. **Handle switch NVOS credentials.** Every switch BMC enters
+   `NvosPasswordRotation` before firmware work. Missing component-manager
+   dependencies or an unsupported backend return an error and retain this state
+   for retry. Completing or skipping the password step advances to `CheckFirmware`.
+   NICo skips rotation when the BMC's NVOS credential-rotation record has a
+   confirmed `current_version`, including version `0`.
+   Other BMCs continue directly to firmware checks.
 1. **Evaluate minimums.** NICo selects the effective catalog definition by BMC
    vendor and host model, then compares matched inventory versions with each
    configured pre-ingestion threshold. A component below its minimum starts
@@ -157,7 +182,10 @@ The state machine performs the following work:
    cannot be verified or selected for another update.
 1. **Continue ingestion.** NICo repeats target selection for the remaining
    ordered components. When none need an update, it marks pre-ingestion
-   complete and the normal ingestion process can continue.
+   complete and the normal ingestion process can continue. Switch creation
+   waits until every allocated address on the BMC interface has an explored
+   endpoint in `Complete`. An unexplored address or an endpoint with unfinished
+   or failed pre-ingestion blocks creation.
 
 `firmware_global.max_uploads` limits concurrent uploads across firmware
 workflows. `firmware_global.concurrency_limit` limits how many endpoints the
@@ -173,11 +201,13 @@ state:
 nico-admin-cli -a <core-api-url> site-explorer get-report endpoint <bmc-ip>
 ```
 
-The states most relevant to host firmware are:
+The states most relevant to firmware pre-ingestion are:
 
 | State | Meaning |
 |---|---|
 | `InitialBMCReset`, `SetNtpServers`, `TimeSyncReset` | NICo is preparing the BMC and obtaining reliable inventory before comparing versions. |
+| `NvosPasswordRotation` | NICo is checking switch credential eligibility or waiting for the initial NVOS password operation before firmware work. Completion or skipping advances to `CheckFirmware`. |
+| `CheckFirmware` | Initial NVOS password handling is finished or skipped; NICo will check firmware minimums next. Pre-ingestion is not yet complete. |
 | `FirmwareCheckRefreshWait` | The report lacked a host model, or a component's inventory entry or version, or had a version that does not compare with its minimum; NICo is waiting for one refreshed report before deciding. |
 | `UpgradeFirmwareWait` | The firmware was uploaded and NICo is polling the Redfish task. |
 | `ScriptRunning` | The configured firmware upgrade script is running. |

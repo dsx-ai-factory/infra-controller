@@ -35,12 +35,12 @@ const (
 // Settings is the nico-api client configuration.
 type Settings struct {
 	CertDir string
-	// Spiffe is the SPIFFE settings the client enforces on the mounted certificate at every credential load, including each handshake reload, so a certificate that
-	// stops naming the write service is refused rather than used.
+	// Spiffe is enforced for expected-inventory writes at startup and reload.
 	Spiffe SpiffeSettings
 	// ServerName is the TLS server name nico-api's certificate is verified against. OPEN (spec-E section 11): the Rust default was not traced; set from config, never
 	// guessed here.
 	ServerName string
+	firmware   bool
 }
 
 func (s Settings) certPath() string { return filepath.Join(s.dir(), "tls.crt") }
@@ -61,10 +61,22 @@ type Client struct {
 	timeout time.Duration
 }
 
-// Dial builds a nico-api client that presents the mounted client certificate over verified TLS. It refuses a URL the records reader refuses, the override that turns
-// verification off, a key that does not load or match, and a certificate that does not name the write service, so a wrong identity is named at startup rather than as an
-// opaque call failure later. The pair is re-read and re-checked for each connection, which fails rather than connecting without a valid certificate when the pair no
-// longer loads or no longer names the write service: nico-api accepts a TLS client with no certificate, so an unloadable or misnamed pair must never send writes.
+// DialFirmware presents the preprovisioned admin certificate over verified TLS.
+// Core authorizes its issuer mapping. Dial instead enforces the MAT SPIFFE
+// identity for expected-inventory writes. Both paths reload bounded matching
+// credential files and refuse anonymous fallback.
+func DialFirmware(apiURL string, s Settings) (*Client, error) {
+	s.firmware = true
+	return Dial(apiURL, s)
+}
+
+func checkClientIdentity(cert []byte, s Settings) (string, error) {
+	if s.firmware {
+		return "", nil
+	} // Core maps ExternalUser; SPIFFE service names cannot prove admin access.
+	return CheckIdentity(cert, s.Spiffe)
+}
+
 func Dial(apiURL string, s Settings) (*Client, error) {
 	if reason := inventory.CheckedAPIURL(apiURL); reason != "" {
 		return nil, errors.New(reason)
@@ -79,7 +91,7 @@ func Dial(apiURL string, s Settings) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := CheckIdentity(cert, s.Spiffe); err != nil {
+	if _, err := checkClientIdentity(cert, s); err != nil {
 		return nil, err
 	}
 	creds, err := transportCreds(s)
@@ -95,8 +107,8 @@ func Dial(apiURL string, s Settings) (*Client, error) {
 	return &Client{conn, corev1.NewForgeClient(conn), rpcTimeout}, nil
 }
 
-// transportCreds verifies the server against ca.crt and reloads the client pair on every handshake. The reload re-checks the certificate's SPIFFE identity, so a
-// certificate that no longer names the write service, or a key that no longer loads or matches, aborts the handshake: nothing is ever sent without a valid identity.
+// transportCreds verifies the server against ca.crt and reloads the matching
+// client pair on each handshake, including the MAT check for non-firmware clients.
 func transportCreds(s Settings) (credentials.TransportCredentials, error) {
 	caPEM, err := readFile(s.caPath())
 	if err != nil {
@@ -111,14 +123,14 @@ func transportCreds(s Settings) (credentials.TransportCredentials, error) {
 		RootCAs:    roots,
 		ServerName: s.ServerName,
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			cert, err := os.ReadFile(s.certPath())
+			cert, err := readFile(s.certPath())
 			if err != nil {
 				return nil, errors.New("the client certificate could not be read")
 			}
-			if _, err := CheckIdentity(cert, s.Spiffe); err != nil {
+			if _, err := checkClientIdentity(cert, s); err != nil {
 				return nil, err
 			}
-			key, err := os.ReadFile(s.keyPath())
+			key, err := readFile(s.keyPath())
 			if err != nil {
 				return nil, errors.New("the client key could not be read")
 			}
@@ -130,6 +142,14 @@ func transportCreds(s Settings) (credentials.TransportCredentials, error) {
 		},
 	}
 	return credentials.NewTLS(cfg), nil
+}
+
+// UpsertHostFirmwareConfig performs one bounded catalog merge, without retry.
+func (c *Client) UpsertHostFirmwareConfig(ctx context.Context, body *corev1.UpsertHostFirmwareConfigRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	_, err := c.forge.UpsertHostFirmwareConfig(ctx, body)
+	return sanitize(err)
 }
 
 // Close shuts the connection.
@@ -199,5 +219,13 @@ func (c *Client) AddExpectedPowerShelf(ctx context.Context, body *corev1.Expecte
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	_, err := c.forge.AddExpectedPowerShelf(ctx, body, opts...)
+	return sanitize(err)
+}
+
+// SetFirmwareUpdateTimeWindow is a single bounded setter call. It never retries.
+func (c *Client) SetFirmwareUpdateTimeWindow(ctx context.Context, body *corev1.SetFirmwareUpdateTimeWindowRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	_, err := c.forge.SetFirmwareUpdateTimeWindow(ctx, body)
 	return sanitize(err)
 }

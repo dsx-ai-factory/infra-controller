@@ -208,6 +208,7 @@ service:
       - vpc_prefix
       - spdm_attestation
       - ib_partition
+      - nvlink_domain
 
 sshConsole:
   serviceName: nico-ssh-console-rs
@@ -336,12 +337,16 @@ env:
 ## from an existing Secret and configures nico-api to watch it; no credential
 ## content is rendered into this chart's ConfigMaps or values. The selected key
 ## must contain JSON or YAML. UFM entries have this shape (both fields are
-## required; an empty password selects the default SPIFFE client certificate):
+## required). When a fabric does not set `auth`, an empty or whitespace-only
+## password selects the default SPIFFE client certificate; any other value is
+## the UFM token. A fabric with `auth = "client_certificate"` reads no UFM
+## credential; one with `auth = "token"` requires a nonblank token. See
+## docs/configuration/credential-sources.md (UFM Ownership Policy).
 ##
 ## ufm_auth_by_fabric:
 ##   default:
 ##     username: ignored-for-token-or-certificate-auth
-##     password: bearer-token-or-empty
+##     password: ufm-token-or-empty
 ##
 ## bmc_site_wide_root:
 ##   username: root
@@ -353,7 +358,8 @@ env:
 credentials:
   # local_first preserves environment/file overrides with persistent-backend
   # fallback. backend ignores local UFM entries. local requires every configured
-  # fabric in the environment/file sources and rejects backend mutations.
+  # fabric in the environment/file sources unless it sets
+  # auth = "client_certificate", and rejects backend mutations.
   ufmSource: local_first
   # Controls only the unversioned (version 0) site-wide BMC root. local_first
   # reads environment, then file, then falls back to the backend. backend ignores
@@ -640,6 +646,17 @@ siteConfig:
 dpf:
   rbacCreate: false
   operatorNamespace: dpf-operator-system
+  # DPUCluster names in operatorNamespace whose service chains NICo may observe.
+  # Nonempty entries require operatorNamespace and the DPUServiceCredentialRequest CRD to exist, even with rbacCreate=false.
+  # Each entry creates a DPUServiceCredentialRequest and, with rbacCreate=true,
+  # grants NICo get access to that request and its named kubeconfig Secret.
+  # Requests specify a one-hour token duration. DPF must create and rotate the remote
+  # nico-service-vpc-observer ServiceAccount's credentials; the nico-dpu-agent
+  # chart grants its remote read permissions.
+  # Empty disables credential provisioning. Service VPC observation requires
+  # these credentials; NICo must never fall back to admin credentials.
+  # Example: ["carbide-dpf-cluster"]. Entries must be distinct DPUCluster names.
+  serviceVpcObserverClusters: []
 
 ## NICo Web UI hostname (always created as ConfigMap)
 hostname: "nico.local"

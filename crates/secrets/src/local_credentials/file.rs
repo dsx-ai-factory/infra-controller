@@ -365,7 +365,7 @@ impl CredentialReader for FileCredentialsWatcher {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs, capture_logs_async};
     use carbide_test_support::{Check, check_values};
     use tempfile::tempdir;
@@ -911,7 +911,7 @@ mod tests {
 
     #[test]
     fn live_watcher_failures_keep_the_existing_diagnostics() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         check_values(
             [
@@ -991,7 +991,7 @@ mod tests {
             |case| {
                 let mut logs = capture_logs(|| {
                     let error = case.error.to_string();
-                    emit(match case.operation {
+                    metrics.instrumentation().emit(match case.operation {
                         StaticCredentialWatcherOperation::PrimaryWatch => {
                             StaticCredentialWatcherFailed::PrimaryWatch { error }
                         }

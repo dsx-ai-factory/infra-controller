@@ -69,3 +69,15 @@ func TestExecutionPlanUnmarshalRejectsUnknownVersion(t *testing.T) {
 	require.ErrorContains(t, err, "unknown execution plan version 2")
 	require.Nil(t, plan)
 }
+
+func TestMarshalExecutionPlan(t *testing.T) {
+	t.Run("internal preemption cannot enter persisted plans", func(t *testing.T) {
+		info := operations.PowerControlTaskInfo{Operation: operations.PowerOperationForcePowerOff}
+		raw, err := info.Marshal()
+		require.NoError(t, err)
+		plan := &eventrule.SubmitTaskPlan{Operation: operation.Wrapper{Type: info.Type(), Code: info.CodeString(), Info: raw}, ConflictStrategy: operation.ConflictStrategyPreempt}
+		encoded, err := codec.MarshalExecutionPlan(plan)
+		require.ErrorContains(t, err, "unknown task conflict strategy")
+		require.Nil(t, encoded)
+	})
+}

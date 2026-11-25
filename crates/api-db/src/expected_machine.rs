@@ -95,13 +95,13 @@ pub async fn find_by_id(
 }
 
 pub async fn find_many_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedMachine>> {
     let sql = select_expected_machine!("WHERE bmc_mac_address=ANY($1)");
     let v: Vec<ExpectedMachine> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))?;
 
@@ -172,20 +172,20 @@ pub async fn find_rms_identities_by_bmc_macs(
 /// the surrounding network. The SQL keeps the physical `host_nics` column so
 /// existing databases need no migration for the model rename.
 pub async fn find_by_interface_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_mac_address: MacAddress,
 ) -> DatabaseResult<Option<ExpectedMachine>> {
     let query = select_expected_machine!("WHERE host_nics @> $1::jsonb");
     let mac_address = serde_json::json!([{ "mac_address": interface_mac_address.to_string() }]);
     sqlx::query_as(query)
         .bind(sqlx::types::Json(mac_address))
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(query, err))
 }
 
 pub async fn find_one_linked(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Option<LinkedExpectedMachine>> {
     let sql = r#"
@@ -205,7 +205,7 @@ FROM expected_machines em
  "#;
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
@@ -241,13 +241,13 @@ pub async fn find_all_for_replace(txn: &mut PgConnection) -> DatabaseResult<Vec<
 
 /// find_all_by_rack_id returns all expected machines for a given rack_id.
 pub async fn find_all_by_rack_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedMachine>> {
     let sql = select_expected_machine!("WHERE rack_id=$1");
     sqlx::query_as(sql)
         .bind(rack_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }

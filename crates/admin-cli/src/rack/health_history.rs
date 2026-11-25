@@ -42,6 +42,6 @@ impl Run for Args {
             .api_client
             .get_rack_health_history(self.rack_id.clone())
             .await?;
-        display_health_history(self.rack_id.as_ref(), history, ctx.config.format)
+        display_health_history(&self.rack_id, history, ctx.config.format)
     }
 }

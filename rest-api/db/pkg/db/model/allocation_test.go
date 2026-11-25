@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -809,13 +810,13 @@ func TestAllocationSQLDAO_GetAll(t *testing.T) {
 			}
 
 			if tc.includeInfrastructureProviderRelations {
-				assert.Equal(t, tc.filter.InfrastructureProviderIDs[0].String(), got[0].InfrastructureProvider.ID.String())
+				assert.Equal(t, tc.filter.InfrastructureProviderIDs[0], got[0].InfrastructureProvider.ID)
 			}
 			if tc.includeTenantRelations && len(tc.filter.TenantIDs) > 0 {
-				assert.Equal(t, tc.filter.TenantIDs[0].String(), got[0].Tenant.ID.String())
+				assert.Equal(t, tc.filter.TenantIDs[0], got[0].Tenant.ID)
 			}
 			if tc.includeSiteRelations && len(tc.filter.SiteIDs) > 0 {
-				assert.Equal(t, tc.filter.SiteIDs[0].String(), got[0].Site.ID.String())
+				assert.Equal(t, tc.filter.SiteIDs[0], got[0].Site.ID)
 			}
 
 			if tc.firstEntry != nil {
@@ -996,6 +997,12 @@ func TestAllocationSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := asd.GetByID(ctx, nil, tc.input.AllocationID, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := asd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
@@ -1006,9 +1013,7 @@ func TestAllocationSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedTenantID, got.TenantID)
 				assert.Equal(t, *tc.expectedSiteID, got.SiteID)
 				assert.Equal(t, *tc.expectedStatus, got.Status)
-				if got.Updated.String() == a1.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 			}
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

@@ -28,6 +28,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::forge::ManagedHostNetworkConfigResponse;
 use ::rpc::{carbide_tls_client, forge as rpc};
+use carbide_certs::cert_renewal::ClientCertRenewer;
+use carbide_dpu_agent_utils::FMDS_IPV6_ADDRESS;
+use carbide_dpu_remediation::remediation::{MachineInfo, RemediationExecutor};
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_host_support::lldp_snapshot_cache::classify_against_accepted_snapshot;
 use carbide_network::virtualization::VpcVirtualizationType;
@@ -35,9 +38,6 @@ use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
 use carbide_systemd::systemd;
 use carbide_uuid::machine::DpuMachineId;
 use eyre::WrapErr;
-use forge_certs::cert_renewal::ClientCertRenewer;
-use forge_dpu_agent_utils::FMDS_IPV6_ADDRESS;
-use forge_dpu_remediation::remediation::{MachineInfo, RemediationExecutor};
 use ipnetwork::{IpNetwork, Ipv6Network};
 use mac_address::MacAddress;
 use prost::Message as _;
@@ -320,7 +320,7 @@ pub(super) async fn setup_and_run(
     let nvue_context = match options.hbn_config_mode {
         HbnConfigMode::ContainerExec => None,
         HbnConfigMode::NvueRest => {
-            let nvue_client = nvue_client::NvueClient::new_https_from_env()?;
+            let nvue_client = nvue_client::NvueClient::new_https_from_env(instrumentation.clone())?;
             let nvue_context = NvueClientContext::new(nvue_client);
             Some(nvue_context)
         }
@@ -2180,7 +2180,7 @@ async fn hack_dpu_os_to_load_atf_uefi_with_specific_versions() -> eyre::Result<(
             .await
             .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
 
-        String::from_utf8_lossy(&output.stdout).to_string()
+        String::from_utf8_lossy(&output.stdout).into_owned()
     };
 
     // The specific check is to see if we have not loaded but have a recommended ATF/UEFI is 2.9.

@@ -67,6 +67,14 @@ func Encrypt(
 			"dpu-only firmware updates do not support authentication data",
 		)}
 	}
+	// A rack-wide selection may include DPU plus non-compute targets. After
+	// partitioning, the compute branch is still DPU-only and cannot consume
+	// download credentials. Keep unrelated per-tray credentials scoped.
+	computeTargets := firmwarecomponents.ForType(subTargets, devicetypes.ComponentTypeCompute)
+	if firmwarecomponents.IsNICoDPUOnlySubTargets(computeTargets) &&
+		(authenticationData.GetShared() != "" || authenticationData.GetPerComponent().GetCompute() != "") {
+		return nil, &InvalidDataError{err: errors.New("dpu-only compute updates do not support authentication data")}
+	}
 	if cipher == nil {
 		return nil, ErrDataCipherNotConfigured
 	}

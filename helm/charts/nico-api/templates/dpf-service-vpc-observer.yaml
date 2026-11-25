@@ -1,0 +1,24 @@
+{{- $namespace := .Values.dpf.operatorNamespace | default "dpf-operator-system" }}
+{{- range .Values.dpf.serviceVpcObserverClusters }}
+{{- $name := include "nico-api.serviceVpcObserverCredentialName" (printf "%s/%s" $namespace .) }}
+---
+apiVersion: svc.dpu.nvidia.com/v1alpha1
+kind: DPUServiceCredentialRequest
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nico-api.labels" $ | nindent 4 }}
+spec:
+  type: kubeconfig
+  duration: 1h
+  targetCluster:
+    name: {{ . | quote }}
+    namespace: {{ $namespace }}
+  serviceAccount:
+    name: nico-service-vpc-observer
+    namespace: {{ $namespace }}
+  secret:
+    name: {{ $name }}
+    namespace: {{ $namespace }}
+{{- end }}

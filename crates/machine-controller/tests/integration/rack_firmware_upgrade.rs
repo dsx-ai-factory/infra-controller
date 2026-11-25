@@ -69,6 +69,7 @@ async fn create_instance(env: &TestHarness, host: &TestManagedHost) -> InstanceI
         network: InstanceNetworkConfig::default(),
         infiniband: InstanceInfinibandConfig::default(),
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         extension_services: InstanceExtensionServicesConfig::default(),
         nvlink: InstanceNvLinkConfig::default(),
         spxconfig: InstanceSpxConfig::default(),
@@ -285,11 +286,12 @@ async fn assigned_host_bypasses_legacy_check_and_returns_ready_on_completion(
     ));
     assert!(machine.host_reprovision_requested.is_none());
 
-    let mut txn = env.test_harness.db_txn().await;
-    let attached_instance =
-        db::instance::find_id_by_machine_id(txn.as_mut(), &host.host.id).await?;
+    let attached_instance = db::instance::find_id_by_machine_id(
+        &env.test_harness.api().database_connection,
+        &host.host.id,
+    )
+    .await?;
     assert_eq!(attached_instance, Some(instance_id));
-    txn.rollback().await?;
 
     Ok(())
 }

@@ -63,25 +63,28 @@ spec:
             properties:
               dpuNodeName:
                 description: |-
-                  DPUNodeName is the name of DPUNode object that represents the node to which the volume should
-                  be attached
+                  DPUNodeName is the name of DPUNode object that represents the node to
+                  which the volume should be attached
                 minLength: 1
                 type: string
               dpuVolumeName:
-                description: DPUVolumeName is the name of DPUVolume object that represents
-                  the volume to be attached
+                description: |-
+                  DPUVolumeName is the name of DPUVolume object that represents the volume
+                  to be attached
                 minLength: 1
                 type: string
               functionType:
-                description: FunctionType is the type of the emulated function that
-                  should be used to attach the volume
+                description: |-
+                  FunctionType is the type of the emulated function that should be used to
+                  attach the volume
                 enum:
                 - pf
                 - vf
                 type: string
               hotplugFunction:
-                description: HotplugFunction is a boolean flag that indicates if the
-                  emulated function should be hotplugged
+                description: |-
+                  HotplugFunction is a boolean flag that indicates if the emulated function
+                  should be hotplugged
                 type: boolean
             required:
             - dpuNodeName
@@ -106,8 +109,9 @@ spec:
               attachmentMetadata:
                 additionalProperties:
                   type: string
-                description: AttachmentMetadata contains the metadata of the volume
-                  attachment returned by the Vendor CSI driver
+                description: |-
+                  AttachmentMetadata contains the metadata of the volume attachment
+                  returned by the Vendor CSI driver
                 type: object
               conditions:
                 description: Conditions defines current service state.
@@ -199,8 +203,9 @@ spec:
                     description: The attributes of the emulated VirtioFS function
                     properties:
                       filesystemTag:
-                        description: Filesystem tag identified by SNAP on the host
-                          (used for the mount). Relevant for volume of type filesystem
+                        description: |-
+                          Filesystem tag identified by SNAP on the host (used for the mount).
+                          Relevant for volume of type filesystem
                         type: string
                     type: object
                 type: object
@@ -213,8 +218,9 @@ spec:
                   if any
                 type: string
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
             type: object

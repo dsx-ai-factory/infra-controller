@@ -74,6 +74,7 @@ async fn maintenance_multi_dpu(db_pool: sqlx::PgPool, recheck: bool) -> Result<(
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -184,8 +185,7 @@ async fn maintenance_multi_dpu(db_pool: sqlx::PgPool, recheck: bool) -> Result<(
     }
 
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(
         matches!(
             host.current_state(),
@@ -323,7 +323,7 @@ async fn ending_maintenance(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM machine_state_controller_queued_objects WHERE object_id = $1",
         )
-        .bind(host_id.to_string())
+        .bind(host_id)
         .fetch_one(&env.pool)
         .await
     };
@@ -344,7 +344,7 @@ async fn ending_maintenance(
         "starting maintenance must not touch the boot configuration",
     );
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await?;
 

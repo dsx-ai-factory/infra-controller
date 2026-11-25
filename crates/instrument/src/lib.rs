@@ -74,8 +74,8 @@
 //! [`Instrumentation::global`] is a lazy compatibility alias for incremental
 //! migration to handles. All free recording functions delegate to that alias;
 //! install the global provider before the first metric recording. Log-only
-//! events do not initialize it. The RED helper and log-event counts remain
-//! process-global. This API does not install or propagate an ambient scope.
+//! events do not initialize it. RED helpers take an explicit handle; log-event
+//! counts remain process-global. This API does not propagate an ambient scope.
 //!
 //! # Cardinality is enforced by the types
 //!

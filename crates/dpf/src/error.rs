@@ -68,6 +68,10 @@ pub enum DpfError {
     #[error("local BMC password source unavailable: {0}")]
     LocalBmcPasswordSourceUnavailable(String),
 
+    /// Reports observer kubeconfig parse/load failures without retaining credential-bearing diagnostics.
+    #[error("invalid DPU-cluster observer kubeconfig")]
+    ObserverKubeconfig,
+
     #[error("configuration error: {0}")]
     ConfigError(String),
 

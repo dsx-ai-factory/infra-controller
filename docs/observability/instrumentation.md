@@ -185,13 +185,17 @@ with the error as log-only context -- on failure. For other outbound boundaries
 (Redfish, HTTP, IPMI), wrap the call directly:
 
 ```rust
-let response = carbide_instrument::red::instrumented("redfish", "power_control",
+let response = carbide_instrument::red::instrumented(&instrumentation, "redfish", "power_control",
     client.power_control(&target, action)).await?;
 ```
 
 The `backend`/`operation` labels are `&'static str` on purpose: compile-time literals
 only, never values from the wire -- the type is the cardinality guard. Streaming calls
-record time to the stream handle, not the stream's lifetime.
+record time to the stream handle, not the stream's lifetime. RED helpers and generated
+client constructors take an explicit `Instrumentation` handle. Its clones share a lazily
+created histogram; retain the owning meter provider until all recording tasks and metric
+scrapes have finished. Independent providers and registries keep separate clients' RED
+metrics isolated.
 
 ## Rules for labels and context
 

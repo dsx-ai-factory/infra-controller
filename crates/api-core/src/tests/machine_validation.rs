@@ -29,6 +29,7 @@ use common::api_fixtures::{
     get_machine_validation_runs, on_demand_machine_validation,
 };
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineState, MachineValidatingState,
     MachineValidationFilter, ManagedHostState, ValidationState,
@@ -81,9 +82,7 @@ async fn test_machine_validation_complete_with_error(
 
     let mh = create_host_with_machine_validation(&env, None, Some("Test Error".to_owned())).await;
 
-    let mut txn = env.pool.begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
     match machine.current_state() {
         ManagedHostState::Failed {
             details,
@@ -151,9 +150,7 @@ async fn test_machine_validation_with_error(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Failed {
@@ -290,10 +287,7 @@ async fn test_machine_validation(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-
-    let machine = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Ready => {}
@@ -495,9 +489,12 @@ async fn test_create_update_external_config(
         .unwrap()
         .into_inner();
 
-    assert_eq!(res_next.config.clone().unwrap().name, name);
-    assert_eq!(res_next.config.clone().unwrap().description.unwrap(), desc);
-    assert_eq!(&res_next.config.clone().unwrap().version, "2");
+    assert_eq!(res_next.config.as_ref().unwrap().name, name);
+    assert_eq!(
+        res_next.config.as_ref().unwrap().description.as_deref(),
+        Some(desc)
+    );
+    assert_eq!(&res_next.config.as_ref().unwrap().version, "2");
     assert_eq!(res_next.config.unwrap().config, input.as_bytes().to_vec());
     let res_list = env
         .api
@@ -545,7 +542,7 @@ async fn test_get_external_configs_filters_by_requested_names(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
     let config = b"{}".to_vec();
     // Add/update is disabled, so seed the stored configurations through the database.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for name in ["config-a", "config-b", "config-c"] {
         db::machine_validation_config::save(txn.as_mut(), name, "validation parameters", &config)
             .await?;
@@ -698,9 +695,7 @@ async fn test_machine_validation_test_on_demand_filter(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-    let machine = mh.dpu().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.dpu().db_machine(&env.pool).await;
 
     match machine.current_state() {
         ManagedHostState::Ready => {}
@@ -846,7 +841,7 @@ async fn concurrent_on_demand_requests_create_only_one_run(
     // Keep both requests behind this lock until they have begun their lookup.
     // Without the handler's row lock, both requests can observe an unscheduled
     // machine and each create a run before either updates the request flag.
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(mh.host().id)
         .execute(gate.as_mut())
@@ -973,14 +968,12 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
     .await;
 
     let reboot_request_before_wait = {
-        let mut txn = env.pool.begin().await?;
-        let machine = mh.host().db_machine(&mut txn).await;
-        let reboot = machine
+        let machine = mh.host().db_machine(&env.pool).await;
+
+        machine
             .status
             .last_reboot_requested
-            .map(|last_reboot| (last_reboot.time, last_reboot.mode));
-        txn.commit().await?;
-        reboot
+            .map(|last_reboot| (last_reboot.time, last_reboot.mode))
     };
 
     let mut machine_validation_config = env.config.machine_validation_config.clone();
@@ -1021,14 +1014,12 @@ async fn test_machine_validation_disabled_waits_for_in_flight_reboot(
     .await;
 
     let reboot_request_after_wait = {
-        let mut txn = env.pool.begin().await?;
-        let machine = mh.host().db_machine(&mut txn).await;
-        let reboot = machine
+        let machine = mh.host().db_machine(&env.pool).await;
+
+        machine
             .status
             .last_reboot_requested
-            .map(|last_reboot| (last_reboot.time, last_reboot.mode));
-        txn.commit().await?;
-        reboot
+            .map(|last_reboot| (last_reboot.time, last_reboot.mode))
     };
     assert_eq!(reboot_request_after_wait, reboot_request_before_wait);
 
@@ -1295,6 +1286,160 @@ async fn test_machine_validation_mark_test_as_verfied(
 }
 
 #[crate::sqlx_test]
+async fn named_adapter_launch_authorization_rechecks_persisted_policy(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use rpc::forge::machine_validation_heartbeat_request::Target;
+
+    use crate::test_support::builder::TestApiBuilder;
+
+    let env = create_test_env(pool).await;
+    let mut config = get_config();
+    let approved = MachineValidationConfig {
+        approved_plugin_registries: vec!["registry.example.com".to_owned()],
+        allowed_container_plugin_adapters: vec!["DSXHealthValidation".to_owned()],
+        allow_plugin_host_network: true,
+        allow_plugin_host_pid: true,
+        allow_plugin_host_sockets: true,
+        ..Default::default()
+    };
+    config.machine_validation_config = approved.clone();
+    let mut api = TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(Arc::new(config))
+    .build();
+    let validation_id = MachineValidationId::new();
+    let machine_id: carbide_uuid::machine::MachineId =
+        "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+    let run_item_id = MachineValidationRunItemId::new();
+    let attempt_id = carbide_uuid::machine_validation::MachineValidationAttemptId::new();
+    // Seed an immutable plan accepted under an earlier policy. No catalog row
+    // is needed: launch authorization must inspect the execution snapshot.
+    sqlx::query(
+        "INSERT INTO machine_validation (id, machine_id, name, context, state, total, completed)
+         VALUES ($1, $2, 'adapter policy', 'OnDemand', 'InProgress', 1, 0)",
+    )
+    .bind(validation_id)
+    .bind(machine_id)
+    .execute(&env.pool)
+    .await?;
+    let plugin = serde_json::json!({
+        "type": "container", "container_plugin_adapter": "DSXHealthValidation",
+        "image": format!("registry.example.com/health@sha256:{}", "a".repeat(64)),
+        "entrypoint": ["/health-validation", "run"], "parameters_json": "{}",
+        "privileged": false, "host_access_full": false,
+    });
+    sqlx::query(
+        "INSERT INTO machine_validation_run_items
+         (id, run_id, test_id, display_name, context, state, order_index, timeout_seconds, plugin)
+         VALUES ($1, $2, 'adapter-test', 'adapter test', 'OnDemand', 'Pending', 0, 60, $3)",
+    )
+    .bind(run_item_id)
+    .bind(validation_id)
+    .bind(plugin)
+    .execute(&env.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO machine_validation_attempts (id, run_item_id, attempt_number, state)
+         VALUES ($1, $2, 1, 'Pending')",
+    )
+    .bind(attempt_id)
+    .bind(run_item_id)
+    .execute(&env.pool)
+    .await?;
+    let request = |target| {
+        tonic::Request::new(rpc::forge::MachineValidationHeartbeatRequest {
+            validation_id: Some(validation_id),
+            target: Some(target),
+        })
+    };
+    let authorization = || request(Target::PluginLaunchTestId("adapter-test".to_owned()));
+    let allowed = api
+        .heartbeat_machine_validation_run(authorization())
+        .await?
+        .into_inner();
+    assert!(allowed.accepted && allowed.plugin_launch_authorized);
+    let pending =
+        db::machine_validation_execution::find_attempt_by_id(&env.pool, &attempt_id).await?;
+    assert_eq!(pending.state.to_string(), "Pending");
+    assert!(
+        pending.last_heartbeat_at.is_none(),
+        "authorization must not record liveness"
+    );
+    assert!(
+        api.heartbeat_machine_validation_run(request(Target::TestId("adapter-test".to_owned())))
+            .await?
+            .into_inner()
+            .accepted
+    );
+    let mut original =
+        db::machine_validation_execution::find_attempt_by_id(&env.pool, &attempt_id).await?;
+    assert!(original.last_heartbeat_at.is_some());
+    for (setting, target) in [
+        ("adapter", Target::TestId("adapter-test".to_owned())),
+        ("network", Target::RunItemId(run_item_id.into())),
+        ("pid", Target::AttemptId(attempt_id.into())),
+        ("sockets", Target::TestId("adapter-test".to_owned())),
+    ] {
+        let policy = &mut Arc::make_mut(&mut api.runtime_config).machine_validation_config;
+        *policy = approved.clone();
+        match setting {
+            "adapter" => policy.allowed_container_plugin_adapters.clear(),
+            "network" => policy.allow_plugin_host_network = false,
+            "pid" => policy.allow_plugin_host_pid = false,
+            "sockets" => policy.allow_plugin_host_sockets = false,
+            _ => unreachable!(),
+        }
+        let error = api
+            .heartbeat_machine_validation_run(authorization())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{setting}");
+        assert!(error.message().contains("current site policy"));
+        let attempt =
+            db::machine_validation_execution::find_attempt_by_id(&env.pool, &attempt_id).await?;
+        assert_eq!(
+            attempt.last_heartbeat_at, original.last_heartbeat_at,
+            "{setting}"
+        );
+        let heartbeat = api
+            .heartbeat_machine_validation_run(request(target))
+            .await?
+            .into_inner();
+        assert!(
+            heartbeat.accepted,
+            "revocation must not suppress liveness: {setting}"
+        );
+        assert!(!heartbeat.plugin_launch_authorized);
+        let alive =
+            db::machine_validation_execution::find_attempt_by_id(&env.pool, &attempt_id).await?;
+        assert!(
+            alive.last_heartbeat_at > original.last_heartbeat_at,
+            "liveness must advance after revocation: {setting}"
+        );
+        assert_eq!(alive.state.to_string(), "Running");
+        original = alive;
+    }
+    // Even an approved adapter cannot launch a completed attempt.
+    Arc::make_mut(&mut api.runtime_config).machine_validation_config = approved;
+    sqlx::query("UPDATE machine_validation_attempts SET state = 'Failed' WHERE id = $1")
+        .bind(attempt_id)
+        .execute(&env.pool)
+        .await?;
+    let completed = api
+        .heartbeat_machine_validation_run(authorization())
+        .await?
+        .into_inner();
+    assert!(!completed.accepted && !completed.plugin_launch_authorized);
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn plugin_full_host_approval_and_enablement_are_server_managed(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1306,6 +1451,7 @@ async fn plugin_full_host_approval_and_enablement_are_server_managed(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let plugin = rpc::forge::MachineValidationPlugin {
         r#type: "container".to_owned(),
+        container_plugin_adapter: None,
         image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         entrypoint: vec!["/plugin/entrypoint".to_owned()],
         parameters_json: "{}".to_owned(),
@@ -1580,8 +1726,7 @@ async fn test_on_demant_un_verified_machine_validation(
         create_host_with_machine_validation(&env, Some(machine_validation_result.clone()), None)
             .await;
 
-    let mut txn = env.pool.begin().await?;
-    let machine = mh.dpu().db_machine(&mut txn).await;
+    let machine = mh.dpu().db_machine(&env.pool).await;
     match machine.current_state() {
         ManagedHostState::Ready => {}
         s => {
@@ -3156,6 +3301,10 @@ async fn test_machine_validation_tests_on_startup_default_mode(
         ],
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
+        allow_plugin_host_network: false,
+        allow_plugin_host_pid: false,
+        allow_plugin_host_sockets: false,
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3237,6 +3386,10 @@ async fn test_machine_validation_tests_enable_all_mode(
         }],
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
+        allow_plugin_host_network: false,
+        allow_plugin_host_pid: false,
+        allow_plugin_host_sockets: false,
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3304,6 +3457,10 @@ async fn test_machine_validation_tests_on_startup_disable_all_mode(
         }],
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
+        allow_plugin_host_network: false,
+        allow_plugin_host_pid: false,
+        allow_plugin_host_sockets: false,
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3424,6 +3581,10 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         tests: vec![], // Empty test configuration
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
+        allow_plugin_host_network: false,
+        allow_plugin_host_pid: false,
+        allow_plugin_host_sockets: false,
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3460,6 +3621,10 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         tests: vec![], // Empty test configuration
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
+        allow_plugin_host_network: false,
+        allow_plugin_host_pid: false,
+        allow_plugin_host_sockets: false,
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),

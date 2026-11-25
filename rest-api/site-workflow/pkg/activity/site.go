@@ -34,8 +34,8 @@ func NewManageSiteConfigInventory(inventoryConfig ManageInventoryConfig, siteAge
 // DiscoverSiteConfigInventory collects Core build metadata, advertised
 // capabilities, and runtime configuration, alongside the Site Agent's own build info. It
 // publishes that snapshot to the Cloud workflow, which stores the Core version and SLAAC
-// capability, records the Site Agent build info, and creates IP Blocks for the Site fabric
-// prefixes.
+// capability, and records the Site Agent build info. SitePrefix inventory reconciles
+// Site fabric IP Blocks.
 func (msi *ManageSiteConfigInventory) DiscoverSiteConfigInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverSiteConfigInventory").Logger()
 	logger.Info().Msg("Starting activity")
@@ -59,7 +59,7 @@ func (msi *ManageSiteConfigInventory) DiscoverSiteConfigInventory(ctx context.Co
 	}
 
 	workflowOptions := tClient.StartWorkflowOptions{
-		ID:        fmt.Sprintf("update-site-config-inventory-%s", msi.inventoryConfig.SiteID.String()),
+		ID:        fmt.Sprintf("update-site-config-inventory-%s", msi.inventoryConfig.SiteID),
 		TaskQueue: msi.inventoryConfig.TemporalPublishQueue,
 	}
 

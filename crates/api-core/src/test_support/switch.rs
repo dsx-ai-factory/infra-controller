@@ -43,7 +43,7 @@ pub async fn attach_switches_with_nvos_credentials(
 ) -> Result<Vec<SwitchId>, Box<dyn std::error::Error>> {
     // Expected records must already be committed before this transaction.
     // ADMIN and UNDERLAY must exist before provisioning interfaces and switches.
-    let mut txn = api.database_connection.begin().await?;
+    let mut txn = api.txn_begin().await?;
     for record in &expected_switches {
         let admin_segments = db::network_segment::admin(txn.as_mut())
             .await

@@ -806,7 +806,7 @@ mod report_loop_tests {
     const REPORT_METRIC: &str = "carbide_dpu_agent_report_total";
 
     struct EventCase {
-        emit: fn(),
+        emit: fn(&carbide_instrument::Instrumentation),
         report_loop: &'static str,
         outcome: &'static str,
     }
@@ -862,8 +862,8 @@ mod report_loop_tests {
             report_loop,
             outcome,
         } = case;
-        let metrics = MetricsCapture::start();
-        let logs = capture_logs(emit)
+        let metrics = MetricsCapture::owned();
+        let logs = capture_logs(|| emit(metrics.instrumentation()))
             .into_iter()
             .map(|log| {
                 let retry_interval_kind = log.field_kind("retry_interval_seconds");
@@ -895,10 +895,7 @@ mod report_loop_tests {
                 Check {
                     scenario: "inventory success logs at debug",
                     input: EventCase {
-                        emit: || {
-                            InventoryReport::Succeeded
-                                .emit(&carbide_instrument::Instrumentation::global())
-                        },
+                        emit: |instrumentation| InventoryReport::Succeeded.emit(instrumentation),
                         report_loop: "inventory",
                         outcome: "ok",
                     },
@@ -918,10 +915,7 @@ mod report_loop_tests {
                 Check {
                     scenario: "inventory failure remains metric-only",
                     input: EventCase {
-                        emit: || {
-                            InventoryReport::Failed
-                                .emit(&carbide_instrument::Instrumentation::global())
-                        },
+                        emit: |instrumentation| InventoryReport::Failed.emit(instrumentation),
                         report_loop: "inventory",
                         outcome: "error",
                     },
@@ -933,10 +927,7 @@ mod report_loop_tests {
                 Check {
                     scenario: "config fetch success logs at info",
                     input: EventCase {
-                        emit: || {
-                            ConfigFetch::Succeeded
-                                .emit(&carbide_instrument::Instrumentation::global())
-                        },
+                        emit: |instrumentation| ConfigFetch::Succeeded.emit(instrumentation),
                         report_loop: "config_fetch",
                         outcome: "ok",
                     },
@@ -956,12 +947,12 @@ mod report_loop_tests {
                 Check {
                     scenario: "config fetch failure retains retry context",
                     input: EventCase {
-                        emit: || {
+                        emit: |instrumentation| {
                             ConfigFetch::Failed {
                                 error: "config failed".to_string(),
                                 retry_interval_seconds: 30.5,
                             }
-                            .emit(&carbide_instrument::Instrumentation::global())
+                            .emit(instrumentation)
                         },
                         report_loop: "config_fetch",
                         outcome: "error",
@@ -985,9 +976,7 @@ mod report_loop_tests {
                 Check {
                     scenario: "FMDS success logs at info",
                     input: EventCase {
-                        emit: || {
-                            FmdsPush::Succeeded.emit(&carbide_instrument::Instrumentation::global())
-                        },
+                        emit: |instrumentation| FmdsPush::Succeeded.emit(instrumentation),
                         report_loop: "fmds_push",
                         outcome: "ok",
                     },
@@ -1007,12 +996,12 @@ mod report_loop_tests {
                 Check {
                     scenario: "FMDS failure retains address context",
                     input: EventCase {
-                        emit: || {
+                        emit: |instrumentation| {
                             FmdsPush::Failed {
                                 error: "FMDS failed".to_string(),
                                 fmds_address: "http://fmds:50051".to_string(),
                             }
-                            .emit(&carbide_instrument::Instrumentation::global())
+                            .emit(instrumentation)
                         },
                         report_loop: "fmds_push",
                         outcome: "error",
@@ -1036,10 +1025,7 @@ mod report_loop_tests {
                 Check {
                     scenario: "network status success logs at info",
                     input: EventCase {
-                        emit: || {
-                            NetworkStatus::Succeeded
-                                .emit(&carbide_instrument::Instrumentation::global())
-                        },
+                        emit: |instrumentation| NetworkStatus::Succeeded.emit(instrumentation),
                         report_loop: "network_status",
                         outcome: "ok",
                     },
@@ -1059,11 +1045,11 @@ mod report_loop_tests {
                 Check {
                     scenario: "network status RPC failure retains error context",
                     input: EventCase {
-                        emit: || {
+                        emit: |instrumentation| {
                             NetworkStatus::RpcFailed {
                                 error: "RPC failed".to_string(),
                             }
-                            .emit(&carbide_instrument::Instrumentation::global())
+                            .emit(instrumentation)
                         },
                         report_loop: "network_status",
                         outcome: "error",
@@ -1084,11 +1070,11 @@ mod report_loop_tests {
                 Check {
                     scenario: "missing config retains machine context",
                     input: EventCase {
-                        emit: || {
+                        emit: |instrumentation| {
                             ConfigFetch::NotFound {
                                 machine_id: MACHINE_ID.to_string(),
                             }
-                            .emit(&carbide_instrument::Instrumentation::global())
+                            .emit(instrumentation)
                         },
                         report_loop: "config_fetch",
                         outcome: "error",
@@ -1109,12 +1095,12 @@ mod report_loop_tests {
                 Check {
                     scenario: "network connection failure retains endpoint context",
                     input: EventCase {
-                        emit: || {
+                        emit: |instrumentation| {
                             NetworkStatus::ConnectionFailed {
                                 forge_api: "https://forge:50051".to_string(),
                                 error: "connection refused".to_string(),
                             }
-                            .emit(&carbide_instrument::Instrumentation::global())
+                            .emit(instrumentation)
                         },
                         report_loop: "network_status",
                         outcome: "error",
@@ -1146,7 +1132,6 @@ mod http_request_tests {
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::routing::get;
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{
         ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
     };
@@ -1183,15 +1168,19 @@ mod http_request_tests {
     }
 
     fn observe_event(case: EventCase) -> EventObservation {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| match case {
-            EventCase::Request => emit(DpuAgentHttpRequestStarted {
+            EventCase::Request => metrics.instrumentation().emit(DpuAgentHttpRequestStarted {
                 method: "GET".to_string(),
                 request_path: "/latest/meta-data".to_string(),
             }),
-            EventCase::Response => emit(DpuAgentHttpResponseGenerated::new(Duration::from_micros(
-                12_500,
-            ))),
+            EventCase::Response => {
+                metrics
+                    .instrumentation()
+                    .emit(DpuAgentHttpResponseGenerated::new(Duration::from_micros(
+                        12_500,
+                    )))
+            }
         })
         .into_iter()
         .map(|log| LogObservation {

@@ -113,7 +113,7 @@ func runRuleList(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			rule.ID.String(),
+			rule.ID,
 			rule.Name,
 			opTypeStr,
 			rule.OperationCode,

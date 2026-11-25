@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -48,9 +49,15 @@ Create a VPC for the org.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-When `slaacEnabled` is true, REST reads `vpcSlaac` from the latest successfully stored configuration inventory for the selected Site before persisting the VPC. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag reports Core support only; it does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. Core can also return 412 after dispatch for another create prerequisite. Failure to resolve the Site client or persist the VPC returns 500, rolls back the REST transaction, and does not request a remote create. An error returned while starting the workflow also returns 500 and may leave remote acceptance unknown. After the start request, an unavailable result returns 503, while a workflow wait timeout returns 500 and triggers an attempted workflow termination. Errors while starting or waiting for the workflow roll back the REST transaction, but do not guarantee that Core did not create the VPC; a later inventory reconciliation may recreate the REST record.
+When `slaacEnabled` is true, REST reads `vpcSlaac` from the latest successfully stored configuration inventory for the selected Site before persisting the VPC. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag reports Core support only; it does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. Core can also return 412 after dispatch for another create prerequisite.
 
-Safe recovery from an ambiguous create result requires supplying a stable `id` in the original request. After an ambiguous error while starting the workflow or after dispatch, callers should allow inventory reconciliation time, then retrieve that `id`. If the VPC is found, do not retry. If no record is found, reuse the same `id` for any retry; reusing the ID prevents a second Core VPC record, but the retry itself is not guaranteed to succeed and can return 409 if reconciliation completes concurrently.
+REST saves the original VPC identity, normalized request, tenant, Site, metadata, and caller attribution before asking Core to create the VPC. Successful synchronous creation returns 201 after local completion commits. A failed response-history read does not undo that success; `statusHistory` is empty in that response, and a later GET can retrieve persisted history. Prerequisites, creation, and local completion share one response budget, capped by any earlier caller deadline. Core unavailability returns 503. An uncertain start or workflow wait timeout retains Pending and its dependencies. REST does not terminate or repeat an uncertain creation.
+
+Inventory completes the same original record after observing a matching committed Core VPC. Completion checks the Core ID, Tenant, creation metadata, and creation fields that Core persists against the saved request. A response without structured configuration or metadata cannot complete the row. Missing inventory does not prove cancellation. Recovery uses the VPC stored on the Site.
+
+Pending creation blocks VPC updates and routing mutations. An unresolved or stopped request does not establish ownership for child inventory or peering deletion. DELETE asks Core to cancel unfinished creation. If creation committed first, Core returns the VPC for matching and normal deletion checks. Otherwise, Core prevents delayed creation with that ID and confirms allocation cleanup before REST records Error and permits local cleanup. A known local decision not to dispatch also permits local cleanup. Failed or uncertain cancellation retains Pending and its dependencies; repeat DELETE to retry cancellation without creating another VPC. Imported Error VPCs without a saved rejection retain normal Core deletion checks.
+
+An optional `id` selects the VPC identity. Independent requests without an `id` remain distinct requests. Reusing an existing REST identity returns 409; it does not replay creation. If an explicitly requested ID instead collides with a different VPC on the Site, REST retains the Pending request and its dependencies for operator repair. It does not adopt or delete the conflicting VPC. After an ambiguous response, use the saved VPC ID in the error message to inspect the retained record instead of submitting another creation. A 4xx response after dispatch can retain the original request; correcting the body and resubmitting the same ID returns 409. REST recovery only observes the original operation and never starts another Core creation after the foreground request expires.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -150,6 +157,17 @@ func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Res
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -172,6 +190,17 @@ func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Res
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 500 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -183,7 +212,29 @@ func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Res
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -224,7 +275,15 @@ DeleteVpc Delete a VPC
 
 Delete a specific VPC by ID.
 
-Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Instance checks include direct and prefix-derived Interface attachments owned by other Tenants. Delete those dependent resources first.
+For a Pending VPC, REST asks the Site to settle creation. If creation already committed, the returned VPC must match the saved creation inputs before normal deletion continues. Otherwise, Core prevents later creation with this ID and waits for unfinished allocation cleanup before confirming cancellation. REST then saves its cancellation decision before local deletion. The operation also handles a crash after REST saved the request but before dispatch. It does not start another create.
+
+REST commits local soft deletion of a positively stopped request before attempting DPS cleanup. Only that deletion's successful caller attempts bounded DPS cleanup, and REST returns 202 after the local deletion. A cleanup failure or process interruption can leave a DPS group for operator reconciliation; the soft-deleted request retains its original group reference and rejection proof. A later DELETE returns 404 and does not repeat DPS cleanup. DPS deletion uses the group name and cannot atomically require that the group is still the original provider object. REST sends no Core mutation or deletion for this request, so an unrelated Core VPC with the same UUID is unaffected. A local database failure returns 500 and prevents the DPS attempt.
+
+Before relying on Pending DELETE cancellation, deploy the updated Core, REST handlers, and inventory workers, and drain creates started by earlier versions. Earlier writers do not honor the saved cancellation decision and can finish creation after REST removes the request.
+
+Failed, malformed, or timed-out cancellation retains Pending and its dependencies. Repeat DELETE to retry the same Core identity. Creation cancellation and ordinary deletion share one response budget. A Site that does not support creation cancellation returns 501 and retains the request; upgrade both Core and Site Agent before retrying. Imported Error VPCs without a saved cancellation decision use normal Core deletion checks.
+
+Deletion requires the VPC's Site to be `Registered`, unless creation has already been confirmed stopped or never dispatched. All deletion paths require that no Subnets, VPC Prefixes, or Instances reference the VPC. Instance checks include direct and prefix-derived Interface attachments owned by other Tenants. Delete those dependent resources first.
 
 First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
@@ -371,6 +430,39 @@ func (a *VPCAPIService) DeleteVpcExecute(r ApiDeleteVpcRequest) (*MessageRespons
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -391,37 +483,37 @@ type ApiGetAllVpcRequest struct {
 	ctx                      context.Context
 	ApiService               *VPCAPIService
 	org                      string
-	siteId                   *string
-	status                   *string
-	networkSecurityGroupId   *string
-	nvLinkLogicalPartitionId *string
+	siteId                   *[]string
+	status                   *[]string
+	networkSecurityGroupId   *[]string
+	nvLinkLogicalPartitionId *[]string
 	query                    *string
-	includeRelation          *string
+	includeRelation          *[]string
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
 }
 
 // Filter VPCs by Site ID. Can be specified multiple times to filter on more than one Site.
-func (r ApiGetAllVpcRequest) SiteId(siteId string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) SiteId(siteId []string) ApiGetAllVpcRequest {
 	r.siteId = &siteId
 	return r
 }
 
 // Filter VPCs by Status. Can be specified multiple times to filter on more than one Status.
-func (r ApiGetAllVpcRequest) Status(status string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) Status(status []string) ApiGetAllVpcRequest {
 	r.status = &status
 	return r
 }
 
 // Filter VPCs by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
-func (r ApiGetAllVpcRequest) NetworkSecurityGroupId(networkSecurityGroupId string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) NetworkSecurityGroupId(networkSecurityGroupId []string) ApiGetAllVpcRequest {
 	r.networkSecurityGroupId = &networkSecurityGroupId
 	return r
 }
 
 // Filter VPCs by NVLink Logical Partition ID. Can be specified multiple times to filter on more than one NVLink Logical Partition.
-func (r ApiGetAllVpcRequest) NvLinkLogicalPartitionId(nvLinkLogicalPartitionId string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) NvLinkLogicalPartitionId(nvLinkLogicalPartitionId []string) ApiGetAllVpcRequest {
 	r.nvLinkLogicalPartitionId = &nvLinkLogicalPartitionId
 	return r
 }
@@ -432,8 +524,8 @@ func (r ApiGetAllVpcRequest) Query(query string) ApiGetAllVpcRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllVpcRequest) IncludeRelation(includeRelation string) ApiGetAllVpcRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllVpcRequest) IncludeRelation(includeRelation []string) ApiGetAllVpcRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -503,22 +595,62 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 	localVarFormParams := url.Values{}
 
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.networkSecurityGroupId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", r.networkSecurityGroupId, "form", "")
+		t := *r.networkSecurityGroupId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", t, "form", "multi")
+		}
 	}
 	if r.nvLinkLogicalPartitionId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", r.nvLinkLogicalPartitionId, "form", "")
+		t := *r.nvLinkLogicalPartitionId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -602,11 +734,11 @@ type ApiGetVpcRequest struct {
 	ApiService      *VPCAPIService
 	org             string
 	vpcId           string
-	includeRelation *string
+	includeRelation *[]string
 }
 
-// Related entity to expand
-func (r ApiGetVpcRequest) IncludeRelation(includeRelation string) ApiGetVpcRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetVpcRequest) IncludeRelation(includeRelation []string) ApiGetVpcRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -618,7 +750,7 @@ func (r ApiGetVpcRequest) Execute() (*VPC, *http.Response, error) {
 /*
 GetVpc Retrieve a VPC
 
-Retrieve a specific VPC by ID.
+Retrieve a specific VPC by ID. A Pending VPC retains its original caller attribution and creation inputs while its original Core outcome remains unresolved, including after a lost response.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
@@ -661,7 +793,15 @@ func (a *VPCAPIService) GetVpcExecute(r ApiGetVpcRequest) (*VPC, *http.Response,
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
@@ -963,7 +1103,7 @@ Before release, independently verify that all attached and directly peered DPUs 
 
 Supply the exact `ifVersionMatch` and `expectedInactiveVni` from the authoritative state used for that decision. REST does not substitute a fresh version. The release advances the Core VPC version and makes the inactive VNI available for allocation to another VPC. It is never part of an automatic profile change or cleanup loop.
 
-A timeout, lost response, or invalid acknowledgement may follow a committed release. Inspect authoritative routing state before deciding what to do next; do not automatically retry or replace the original version. A stale-version error does not prove that a previous release failed. The ordinary VPC GET may lag the authoritative response.
+A timeout, lost response, or invalid acknowledgement may follow a committed release. Inspect authoritative routing state before deciding what to do next; do not automatically retry or replace the original version. If an earlier release timed out, a stale-version rejection does not establish whether that release completed. The ordinary VPC GET may lag the authoritative response.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Infrastructure Provider Org
@@ -1080,6 +1220,17 @@ func (a *VPCAPIService) ReleaseVpcInactiveVniExecute(r ApiReleaseVpcInactiveVniR
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -1169,7 +1320,7 @@ func (r ApiUpdateVpcRequest) Execute() (*VPC, *http.Response, error) {
 /*
 UpdateVpc Update VPC
 
-# Update an existing VPC
+Update an existing VPC. Pending or positively rejected creation returns 409 before any update or DPS change.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
 
@@ -1455,6 +1606,17 @@ func (a *VPCAPIService) UpdateVpcRoutingProfileExecute(r ApiUpdateVpcRoutingProf
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -1560,7 +1722,7 @@ UpdateVpcVirtualization Update VPC Virtualization
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
 
 Tenant must own the VPC
-Request is rejected if the VPC already has Subnets or Instances.
+Request is rejected if the VPC already has Subnets or Instances. Pending or positively rejected creation returns 409 before any virtualization change.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -1653,6 +1815,17 @@ func (a *VPCAPIService) UpdateVpcVirtualizationExecute(r ApiUpdateVpcVirtualizat
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

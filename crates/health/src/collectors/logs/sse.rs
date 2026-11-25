@@ -896,7 +896,7 @@ mod tests {
                 Arc::clone(endpoint.bmc()),
                 endpoint,
                 SseLogCollectorConfig {
-                    instrumentation: carbide_instrument::Instrumentation::global(),
+                    instrumentation: carbide_instrument::Instrumentation::noop(),
                     include_diagnostics: false,
                     request_concurrency: NonZeroUsize::MIN,
                     gpu_inventory: None,
@@ -974,7 +974,7 @@ mod tests {
             Arc::clone(endpoint.bmc()),
             endpoint,
             SseLogCollectorConfig {
-                instrumentation: carbide_instrument::Instrumentation::global(),
+                instrumentation: carbide_instrument::Instrumentation::noop(),
                 include_diagnostics: false,
                 request_concurrency: NonZeroUsize::MIN,
                 gpu_inventory: None,
@@ -1020,6 +1020,7 @@ mod tests {
     fn sse_collector(
         base_url: &Url,
         close_timeout: Duration,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> SseLogCollector<crate::bmc::BmcClient> {
         use crate::endpoint::test_support::endpoint_with_creds;
         use crate::endpoint::{BmcAddr, BmcCredentials as HealthCredentials};
@@ -1041,7 +1042,7 @@ mod tests {
             Arc::clone(endpoint.bmc()),
             endpoint,
             SseLogCollectorConfig {
-                instrumentation: carbide_instrument::Instrumentation::global(),
+                instrumentation,
                 include_diagnostics: false,
                 request_concurrency: NonZeroUsize::MIN,
                 gpu_inventory: None,
@@ -1215,7 +1216,7 @@ mod tests {
         use bmc_mock::{EventServiceConfig, EventServiceLimits};
         use carbide_instrument::testing::MetricsCapture;
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         let limits = EventServiceConfig::try_from(EventServiceLimits {
             max_subscribers: 1,
@@ -1228,7 +1229,11 @@ mod tests {
         let (router, state) = dell_poweredge_r750_router_with_event_limits(limits);
         let events = Arc::clone(state.event_service.as_ref().expect("event service"));
         let (mut server, base_url) = serve_https("health-sse-cap", router);
-        let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+        let mut collector = sse_collector(
+            &base_url,
+            Duration::from_secs(5),
+            metrics.instrumentation().clone(),
+        );
         let bmc = Arc::clone(&collector.bmc);
 
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -1336,9 +1341,13 @@ mod tests {
         ];
 
         for (name, bmc, expected) in cases {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let (mut server, base_url) = serve_https("health-sse-refused", bmc.router());
-            let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+            let mut collector = sse_collector(
+                &base_url,
+                Duration::from_secs(5),
+                metrics.instrumentation().clone(),
+            );
 
             let connected = tokio::time::timeout(Duration::from_secs(10), collector.connect())
                 .await
@@ -1352,7 +1361,6 @@ mod tests {
                 "{name}"
             );
 
-            drop(metrics);
             server.stop().await.expect("server stops");
         }
     }
@@ -1394,7 +1402,7 @@ mod tests {
         ];
 
         for (name, creates_destination, reason, expected) in cases {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
 
             let bmc = CapacityBmc {
                 creates_destination,
@@ -1403,7 +1411,11 @@ mod tests {
 
             let listings = Arc::clone(&bmc.listings);
             let (mut server, base_url) = serve_https("health-sse-early-end", bmc.router());
-            let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+            let mut collector = sse_collector(
+                &base_url,
+                Duration::from_secs(5),
+                metrics.instrumentation().clone(),
+            );
 
             tokio::time::timeout(Duration::from_secs(10), async {
                 assert!(matches!(
@@ -1429,7 +1441,6 @@ mod tests {
                 "{name}"
             );
 
-            drop(metrics);
             server.stop().await.expect("server stops");
         }
     }
@@ -1439,7 +1450,7 @@ mod tests {
         use bmc_mock::test_support::serve_https;
         use carbide_instrument::testing::MetricsCapture;
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let close_timeout = Duration::from_millis(300);
 
         // `connect` lists before and after the open; the diagnosis listing never answers.
@@ -1449,7 +1460,8 @@ mod tests {
         };
 
         let (mut server, base_url) = serve_https("health-sse-stalled", bmc.router());
-        let mut collector = sse_collector(&base_url, close_timeout);
+        let mut collector =
+            sse_collector(&base_url, close_timeout, metrics.instrumentation().clone());
 
         assert!(matches!(
             collector.connect().await,
@@ -1480,7 +1492,7 @@ mod tests {
         use bmc_mock::{EventServiceConfig, EventServiceLimits};
         use carbide_instrument::testing::MetricsCapture;
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
 
         let limits = EventServiceConfig::try_from(EventServiceLimits {
             max_subscribers: 1,
@@ -1493,7 +1505,11 @@ mod tests {
         let (router, state) = dell_poweredge_r750_router_with_event_limits(limits);
         let events = Arc::clone(state.event_service.as_ref().expect("event service"));
         let (mut server, base_url) = serve_https("health-sse-reap", router);
-        let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+        let mut collector = sse_collector(
+            &base_url,
+            Duration::from_secs(5),
+            metrics.instrumentation().clone(),
+        );
         collector.reap_on_cap = true;
 
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -1557,10 +1573,14 @@ mod tests {
         ];
 
         for (name, bmc, reason, expected) in cases {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let deletes = Arc::clone(&bmc.deletes);
             let (mut server, base_url) = serve_https("health-sse-reap-trigger", bmc.router());
-            let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+            let mut collector = sse_collector(
+                &base_url,
+                Duration::from_secs(5),
+                metrics.instrumentation().clone(),
+            );
             collector.reap_on_cap = true;
 
             tokio::time::timeout(Duration::from_secs(10), async {
@@ -1590,7 +1610,6 @@ mod tests {
                 "{name}"
             );
 
-            drop(metrics);
             server.stop().await.expect("server stops");
         }
     }
@@ -1600,7 +1619,7 @@ mod tests {
         use bmc_mock::test_support::serve_https;
         use carbide_instrument::testing::MetricsCapture;
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let close_timeout = Duration::from_millis(300);
 
         let bmc = CapacityBmc {
@@ -1610,7 +1629,8 @@ mod tests {
 
         let deletes = Arc::clone(&bmc.deletes);
         let (mut server, base_url) = serve_https("health-sse-reap-stalled", bmc.router());
-        let mut collector = sse_collector(&base_url, close_timeout);
+        let mut collector =
+            sse_collector(&base_url, close_timeout, metrics.instrumentation().clone());
         collector.reap_on_cap = true;
 
         assert!(matches!(
@@ -1652,7 +1672,7 @@ mod tests {
             &fetch_permits,
             resolution_timeout,
             None,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
     }
@@ -1688,7 +1708,7 @@ mod tests {
             false,
             &fetch_permits,
             None,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -1963,7 +1983,7 @@ mod tests {
                 task_permits.as_ref(),
                 Duration::from_secs(1),
                 None,
-                &carbide_instrument::Instrumentation::global(),
+                &carbide_instrument::Instrumentation::noop(),
             )
             .await
         });
@@ -2041,7 +2061,7 @@ mod tests {
             false,
             2,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         );
         let next_event = tokio::spawn(async move { event_stream.next().await });
 

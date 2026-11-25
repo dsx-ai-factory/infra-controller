@@ -282,7 +282,7 @@ fn value_topic(metadata_topic: &str, integration: &str) -> Result<String, BmsDsx
         });
     };
 
-    let mut segments = path.split('/');
+    let mut segments = path.splitn(3, '/');
     let Some(object_type) = segments.next() else {
         return Err(BmsDsxExchangeError::InvalidMetadataTopic {
             topic: metadata_topic.to_string(),
@@ -293,7 +293,7 @@ fn value_topic(metadata_topic: &str, integration: &str) -> Result<String, BmsDsx
             topic: metadata_topic.to_string(),
         });
     };
-    let tag_path = segments.collect::<Vec<_>>().join("/");
+    let tag_path = segments.next().unwrap_or_default();
 
     if object_type.is_empty() || point_type.is_empty() || tag_path.is_empty() {
         return Err(BmsDsxExchangeError::InvalidMetadataTopic {

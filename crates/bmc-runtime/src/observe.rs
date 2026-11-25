@@ -75,6 +75,7 @@ struct BmcDriverUnservable {
 /// the transport has not already logged. Only the call is timed. `capability`
 /// is `None` for an operation no capability driver runs.
 pub(crate) async fn observe<T>(
+    instrumentation: &carbide_instrument::Instrumentation,
     endpoint: &BmcRef,
     capability: Option<Capability>,
     operation: &'static str,
@@ -99,7 +100,7 @@ pub(crate) async fn observe<T>(
             Err(PlatformError::Unsupported) => "unsupported",
             Err(_) => "error",
         };
-        red::record(BACKEND, operation, outcome, elapsed_ms);
+        red::record(instrumentation, BACKEND, operation, outcome, elapsed_ms);
         if let Err(error) = &result
             && needs_failure_log(error)
         {
@@ -172,8 +173,9 @@ mod tests {
         ];
         for (outcome, result, logged) in cases {
             let case = format!("{result:?}");
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let (_, logs) = capture_logs_async(observe(
+                metrics.instrumentation(),
                 &endpoint,
                 Some(Capability::Power),
                 "power.set",

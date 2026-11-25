@@ -193,6 +193,7 @@ drivers! {
         HpeIloPower = "hpe-ilo-power" => power::hpe::ilo::IloPower,
         LenovoXccPower = "lenovo-xcc-power" => power::lenovo::xcc::XccPower,
         LiteOnPowerShelfPower = "liteon-power-shelf-power" => power::liteon::power_shelf::LiteOnPowerShelfPower,
+        NvidiaBlueFieldPower = "nvidia-bluefield-power" => power::nvidia::bluefield::BlueFieldPower,
         NvidiaBlueField4Power = "nvidia-bluefield4-power" => power::nvidia::bluefield4::BlueField4Power,
         NvidiaGh200Power = "nvidia-gh200-power" => power::nvidia::openbmc::Gh200Power,
         NvidiaOpenBmcPower = "nvidia-openbmc-power" => power::nvidia::openbmc::OpenBmcPower,

@@ -169,7 +169,10 @@ async fn run_connection(
     // A fresh wrapper and underlying HTTP/2 channel per connection model the
     // independent process and transport lifecycle of each simulated Scout.
     let api_config = ApiConfig::new(api_endpoint, client_config);
-    let mut client = CarbideApiClient::new(&api_config).connection().await?;
+    let mut client =
+        CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop())
+            .connection()
+            .await?;
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tx.send(ScoutStreamApiBoundMessage {
         flow_uuid: None,

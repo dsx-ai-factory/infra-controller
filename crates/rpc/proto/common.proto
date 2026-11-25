@@ -182,6 +182,11 @@ message IpxeTemplateId {
   string value = 1;
 }
 
+message DhcpOptionSetId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::dhcp_option_set::DhcpOptionSetId";
+  string value = 1;
+}
+
 message RackHardwareType {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string value = 1;

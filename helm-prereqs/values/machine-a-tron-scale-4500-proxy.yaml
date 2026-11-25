@@ -104,6 +104,7 @@ pods:
   # proxy-mode install, so keep it.
   mat-0: null
   default:
+    podIndex: 0  # Explicit index for a pod without a numeric name suffix.
     machines:
       rack-machines: null
       dell-hosts:

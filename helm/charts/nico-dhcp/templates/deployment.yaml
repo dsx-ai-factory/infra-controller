@@ -20,6 +20,10 @@ spec:
       {{- include "nico-dhcp.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.config.enabled }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      {{- end }}
       labels:
         {{- include "nico-dhcp.labels" . | nindent 8 }}
     spec:

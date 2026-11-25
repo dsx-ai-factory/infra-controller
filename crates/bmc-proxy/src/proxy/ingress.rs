@@ -576,7 +576,7 @@ mod tests {
     struct TlsFailureInput {
         metric: &'static str,
         reason: &'static str,
-        emit: fn(),
+        emit: fn(&carbide_instrument::Instrumentation),
     }
 
     #[derive(Debug, PartialEq)]
@@ -597,21 +597,21 @@ mod tests {
         peer_address: Option<String>,
     }
 
-    fn emit_tcp_accept_failure() {
-        carbide_instrument::emit(TcpAcceptFailed {
+    fn emit_tcp_accept_failure(instrumentation: &carbide_instrument::Instrumentation) {
+        instrumentation.emit(TcpAcceptFailed {
             reason: ConnectionFailReason::TcpConnectionFailure,
             error: "accept failed".to_string(),
         });
     }
 
-    fn emit_tls_certificate_reload_failure() {
-        carbide_instrument::emit(TlsCertificateReloadFailed {
+    fn emit_tls_certificate_reload_failure(instrumentation: &carbide_instrument::Instrumentation) {
+        instrumentation.emit(TlsCertificateReloadFailed {
             error: "certificate reload failed".to_string(),
         });
     }
 
-    fn emit_tls_connection_failure() {
-        carbide_instrument::emit(TlsConnectionFailed {
+    fn emit_tls_connection_failure(instrumentation: &carbide_instrument::Instrumentation) {
+        instrumentation.emit(TlsConnectionFailed {
             reason: ConnectionFailReason::TlsConnectionFailure,
             error: "handshake failed".to_string(),
             peer_address: "192.0.2.20:443"
@@ -621,8 +621,8 @@ mod tests {
     }
 
     fn observe_tls_failure(input: TlsFailureInput) -> TlsFailureObservation {
-        let metrics = MetricsCapture::start();
-        let logs = capture_logs(input.emit)
+        let metrics = MetricsCapture::owned();
+        let logs = capture_logs(|| (input.emit)(metrics.instrumentation()))
             .into_iter()
             .map(|log| {
                 let event_name = log.field("event_name").map(str::to_owned);
@@ -772,7 +772,7 @@ mod tests {
     /// Restoring the key does not bypass backoff; the due retry loads it.
     #[tokio::test(start_paused = true)]
     async fn failed_reload_keeps_the_acceptor_and_recovers_after_backoff() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let dir = tempfile::tempdir().expect("TLS files directory");
         let key = include_str!("../../../../dev/certs/localhost/localhost.key");
         let key_path = dir.path().join("identity.key");
@@ -785,12 +785,10 @@ mod tests {
             admin_root_cafile_path: format!("{fixtures}ca.crt"),
             switch: None,
         };
-        let mut tls = RefreshableTlsAcceptor::new(
-            config.clone(),
-            carbide_instrument::Instrumentation::global(),
-        )
-        .await
-        .expect("initial TLS config");
+        let mut tls =
+            RefreshableTlsAcceptor::new(config.clone(), metrics.instrumentation().clone())
+                .await
+                .expect("initial TLS config");
         let original = tls.acceptor.clone();
         let not_due = tls
             .current(|| async { panic!("fresh configuration must not reload") })
@@ -801,10 +799,7 @@ mod tests {
         tls.reload_at = Instant::now();
         let retained = tls
             .current(|| {
-                RefreshableTlsAcceptor::new(
-                    config.clone(),
-                    carbide_instrument::Instrumentation::global(),
-                )
+                RefreshableTlsAcceptor::new(config.clone(), metrics.instrumentation().clone())
             })
             .await;
         assert!(Arc::ptr_eq(retained.config(), original.config()));
@@ -819,18 +814,13 @@ mod tests {
         tokio::time::advance(TLS_RELOAD_RETRY_INTERVAL - Duration::from_nanos(1)).await;
         let before_retry = tls
             .current(|| {
-                RefreshableTlsAcceptor::new(
-                    config.clone(),
-                    carbide_instrument::Instrumentation::global(),
-                )
+                RefreshableTlsAcceptor::new(config.clone(), metrics.instrumentation().clone())
             })
             .await;
         assert!(Arc::ptr_eq(before_retry.config(), original.config()));
         tokio::time::advance(Duration::from_nanos(1)).await;
         let recovered = tls
-            .current(|| {
-                RefreshableTlsAcceptor::new(config, carbide_instrument::Instrumentation::global())
-            })
+            .current(|| RefreshableTlsAcceptor::new(config, metrics.instrumentation().clone()))
             .await;
         assert!(!Arc::ptr_eq(recovered.config(), original.config()));
         assert_eq!(tls.reload_at, Instant::now() + TLS_REFRESH_INTERVAL);
@@ -842,10 +832,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stalled_reload_is_reused_and_joined_after_timeout_or_cancellation() {
         for cancel in [false, true] {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let (acceptor, _) = test_identity();
             let mut tls = RefreshableTlsAcceptor {
-                instrumentation: carbide_instrument::Instrumentation::global(),
+                instrumentation: metrics.instrumentation().clone(),
                 acceptor: acceptor.clone(),
                 reload_at: Instant::now(),
             };
@@ -853,13 +843,14 @@ mod tests {
             let mut tasks = JoinSet::new();
             let (started, wait_started) = tokio::sync::oneshot::channel();
             let (release, wait_release) = std::sync::mpsc::channel();
+            let instrumentation = metrics.instrumentation().clone();
             let retained = tls
                 .current(|| {
                     reload_tls(&mut tasks, Instant::now(), move || {
                         started.send(()).expect("announce the blocking read");
                         wait_release.recv().expect("finish the blocking read");
                         Ok(RefreshableTlsAcceptor {
-                            instrumentation: carbide_instrument::Instrumentation::global(),
+                            instrumentation,
                             acceptor,
                             reload_at: Instant::now() + TLS_REFRESH_INTERVAL,
                         })
@@ -902,7 +893,7 @@ mod tests {
             );
 
             {
-                let instrumentation = carbide_instrument::Instrumentation::global();
+                let instrumentation = metrics.instrumentation().clone();
                 let stopping = stop_tls_reloads(&mut tasks, &instrumentation);
                 tokio::pin!(stopping);
                 tokio::select! {
@@ -974,7 +965,6 @@ mod tests {
     /// clock).
     async fn served(caller: Caller) -> (String, Duration) {
         // Serving emits the connection metrics other tests measure.
-        let _metrics = MetricsCapture::start();
         let (acceptor, ca) = test_identity();
         let (mut client_io, server_io) = tokio::io::duplex(64 * 1024);
         let started = tokio::time::Instant::now();
@@ -990,7 +980,7 @@ mod tests {
                 auto::Builder::new(TokioExecutor::new()),
                 answering_app(),
                 started + TLS_HANDSHAKE_TIMEOUT,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .await;
         });
@@ -1071,7 +1061,7 @@ mod tests {
     /// What a caller connected to a running proxy sees when `event` happens
     /// there: (what the caller got, TLS reloads that failed).
     async fn caller_sees(event: AtTheProxy) -> (String, f64) {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let (acceptor, ca) = test_identity();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1080,9 +1070,9 @@ mod tests {
         let proxy = BmcProxy {
             app: answering_app(),
             listener,
-            state: test_state_with_config(CONFIG_WITHOUT_TLS_FILES),
+            state: test_state_with_config(CONFIG_WITHOUT_TLS_FILES, metrics.instrumentation()),
             tls_acceptor: RefreshableTlsAcceptor {
-                instrumentation: carbide_instrument::Instrumentation::global(),
+                instrumentation: metrics.instrumentation().clone(),
                 acceptor,
                 reload_at: match event {
                     AtTheProxy::AReloadFails => Instant::now(),
@@ -1137,12 +1127,15 @@ mod tests {
             metrics.counter_delta(TLS_FAILURE_METRIC, &[("reason", "tls_connection_failure")]),
             0.0
         );
-        let rendered = metrics.render();
-        assert!(rendered.contains(&format!(
-            "# HELP {TLS_RELOAD_FAILURE_METRIC} {}",
-            <TlsCertificateReloadFailed as carbide_instrument::Event>::DESCRIBE
-        )));
-        assert!(rendered.contains(&format!("# TYPE {TLS_RELOAD_FAILURE_METRIC} counter")));
+        // The reload scenario registers this metric; shutdown alone does not emit it.
+        if matches!(event, AtTheProxy::AReloadFails) {
+            let rendered = metrics.render();
+            assert!(rendered.contains(&format!(
+                "# HELP {TLS_RELOAD_FAILURE_METRIC} {}",
+                <TlsCertificateReloadFailed as carbide_instrument::Event>::DESCRIBE
+            )));
+            assert!(rendered.contains(&format!("# TYPE {TLS_RELOAD_FAILURE_METRIC} counter")));
+        }
         (got, failures)
     }
 
@@ -1178,8 +1171,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn accept_backoff_retries_and_observes_cancellation() {
         for cancel in [false, true] {
-            let metrics = MetricsCapture::start();
-            let instrumentation = carbide_instrument::Instrumentation::global();
+            let metrics = MetricsCapture::owned();
+            let instrumentation = metrics.instrumentation().clone();
             let mut attempts = 0;
             let started = Instant::now();
             let shutdown = CancellationToken::new();

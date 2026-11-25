@@ -65,8 +65,13 @@ reviews:
         observable consequence. Compare with the base before flagging unchanged
         behavior. Read the PR rationale, relevant construction paths, callers,
         wrappers, and retained tests; check evidence that contradicts the claim.
-        If proposing a remedy, verify that it fixes the stated problem under the
-        actual framework and runner without violating another contract.
+        For an edge case, trace how the input or state reaches the changed code
+        past existing validation and invariants. Include required rejection paths.
+        Verify that the smallest proposed fix works under the actual framework and
+        runner and preserves existing contracts. Before proposing a new representation,
+        collection, fallback, persistent record, or shared interface change, identify
+        the supported case that existing data, callers, or recovery cannot handle.
+        If only the defect is clear, report it on its own.
         For compatibility claims, identify the published contract, merged schema,
         or supported consumer affected. Assume merged migrations are deployed;
         do not infer a release contract from an intermediate PR revision alone.
@@ -80,7 +85,9 @@ reviews:
         by retained coverage; name the regression it catches. Do not repeat
         compiler, formatter, or linter diagnostics already reported by CI.
         Keep independent defects separate; do not bundle optional rewrites with
-        a valid fix. Group repeated instances of one root cause. When challenged,
+        a valid fix. Group repeated instances of one root cause. Check existing
+        review threads before posting. If another reviewer raised the same defect,
+        add only new evidence or a correction that changes the fix. When challenged,
         check the counter-evidence before withdrawing or learning a general rule.
         Verify a learning's premise against the current head and support contract.
         Preserve its PR, path, and release limits; temporary exceptions need an
@@ -123,7 +130,11 @@ reviews:
         predecessor-schema tests using the shipped migration file.
     - path: "rest-api/**"
       instructions: >-
-        Apply rest-api/AGENTS.md to changed behavior. Preserve tenant ownership
+        Apply rest-api/AGENTS.md to changed behavior. Before proposing a new field,
+        check, or record across components, compare handlers that use the same
+        execution model (synchronous upstream call, asynchronous workflow, or
+        database-only operation). Identify which component owns the state and
+        where its validation or recovery falls short. Preserve tenant ownership
         checks and API response fields, including empty values except for the
         documented date-gated deprecation and opt-in includeRelation cases.
         Pagination must sort deterministically before slicing, with supported orderBy

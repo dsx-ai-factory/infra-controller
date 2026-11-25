@@ -569,7 +569,7 @@ tests:
     template: runner-config.yaml
     asserts:
       - failedTemplate:
-          errorMessage: runner.command must be fleet-up, ingestion, instance-create, instance-delete or instance-lifecycle
+          errorMessage: runner.command must be fleet-up, ingestion, instance-create, instance-delete, instance-lifecycle or firmware
 
   - it: renders a five-host instance create with one runner Job and referenced credentials
     template: runner-config.yaml
@@ -808,3 +808,94 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: runner.instance.deleteCount must be a whole count of 0 or more
+
+  - it: renders independent firmware BMC with native health, admin credentials and bounded cleanup
+    set: &firmwareValues
+      runner.enabled: true
+      runner.command: firmware
+      runner.runId: firmware-dry
+      runner.dryRun: true
+      runner.activeDeadlineSeconds: 7800
+      runner.observation.intervalSeconds: 120
+      runner.instance.apiPoolReplicas: 1
+      runner.instance.apiPoolSelector: {job: api}
+      runner.firmware.targetVersion: target
+      runner.firmware.n: 7
+      runner.firmware.cleanupSeconds: 900
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "'n': 7"
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'nativeHealth:'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'rest:|tenantId:|sidecar|cleanLifecycleManifest:'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'artifactURL: "https://raw.githubusercontent.com/python/cpython/v3.12.0/LICENSE"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'artifactSHA256: "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"'
+  - it: renders UEFI catalog artifact overrides
+    set:
+      <<: *firmwareValues
+      runner.firmware.component: uefi
+      runner.firmware.artifactURL: https://artifact.example/uefi
+      runner.firmware.artifactSHA256: abcdef
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'component: "uefi"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'artifactURL: "https://artifact.example/uefi"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'artifactSHA256: "abcdef"'
+  - it: reserves firmware drain, cleanup, publication and headroom
+    set: *firmwareValues
+    template: runner-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 1080
+      - notExists:
+          path: spec.template.spec.initContainers
+      - contains:
+          path: spec.template.spec.volumes
+          content: {name: nico-client-cert, secret: {secretName: nico-cert}}
+  - it: accepts the first firmware deadline above the watchdog budget
+    set:
+      <<: *firmwareValues
+      runner.activeDeadlineSeconds: 7651
+    template: runner-job.yaml
+    asserts:
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 7651
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 1080
+
+  - it: rejects a firmware Job deadline that cuts cleanup short
+    set:
+      <<: *firmwareValues
+      runner.activeDeadlineSeconds: 7650
+    template: runner-job.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.activeDeadlineSeconds must exceed runner.wholeRunSeconds by more than the 1050 s shutdown budget
+
+
+  - it: creates the firmware release run-data claim
+    set: *firmwareValues
+    template: run-data-pvc.yaml
+    asserts:
+      - hasDocuments: {count: 1}
+      - equal:
+          path: metadata.name
+          value: run-scale-test-run-data

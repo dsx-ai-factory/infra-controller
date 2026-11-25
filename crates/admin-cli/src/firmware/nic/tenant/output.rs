@@ -164,7 +164,7 @@ mod tests {
                     api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
                         "http://127.0.0.1:1",
                         &CarbideClientConfig::default(),
-                    ))),
+                    ), carbide_instrument::Instrumentation::noop())),
                     config: RuntimeConfig {
                         format: OutputFormat::Json,
                         request_timeout: None,
@@ -215,10 +215,10 @@ mod tests {
         let (writer, reader) = tokio::io::duplex(64);
         drop(reader);
         let mut ctx = RuntimeContext {
-            api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-                "http://127.0.0.1:1",
-                &CarbideClientConfig::default(),
-            ))),
+            api_client: ApiClient(CarbideApiClient::new(
+                &ApiConfig::new("http://127.0.0.1:1", &CarbideClientConfig::default()),
+                carbide_instrument::Instrumentation::noop(),
+            )),
             config: RuntimeConfig {
                 format: OutputFormat::Json,
                 request_timeout: None,

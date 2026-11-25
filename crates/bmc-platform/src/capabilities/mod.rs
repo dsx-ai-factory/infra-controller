@@ -43,7 +43,7 @@ pub use console::{
 pub use dpu::{Dpu, DpuStatus, HostPrivilegeLevel, NicMode, RshimState};
 pub use firmware::{Firmware, FirmwareComponent, FirmwareUpload};
 pub use lockdown::{Lockdown, LockdownDesiredState, LockdownScope, LockdownState, LockdownStatus};
-pub use power::Power;
+pub use power::{BootProgress, BootProgressTypes, Power};
 pub use secure_boot::{SecureBoot, SecureBootStatus};
 pub use storage::Storage;
 pub use super_nic::SuperNic;

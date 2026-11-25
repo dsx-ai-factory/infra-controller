@@ -71,14 +71,14 @@ spec:
                             items:
                               properties:
                                 ip:
-                                  description: IP is the IP address to exclude from
-                                    DHCP allocation. must be part for the virtual
-                                    network subnet.
+                                  description: |-
+                                    IP is the IP address to exclude from DHCP allocation. must be part
+                                    for the virtual network subnet.
                                   type: string
                                 range:
-                                  description: Range is the range of IP addresses
-                                    to exclude from DHCP allocation. must be part
-                                    for the virtual network subnet.
+                                  description: |-
+                                    Range is the range of IP addresses to exclude from DHCP allocation.
+                                    must be part for the virtual network subnet.
                                   properties:
                                     end:
                                       description: End is the end of the IP address
@@ -95,8 +95,9 @@ spec:
                               type: object
                             type: array
                           subnet:
-                            description: Subnet is the network subnet in CIDR format
-                              to use for DHCP. the first IP in the subnet is the gateway.
+                            description: |-
+                              Subnet is the network subnet in CIDR format to use for DHCP. the first
+                              IP in the subnet is the gateway.
                             type: string
                         required:
                         - dhcp
@@ -111,12 +112,14 @@ spec:
               masquerade:
                 default: true
                 description: |-
-                  Masquerade defines if the virtual network should masquerade the traffic before egressing to external networks.
-                  valid only if ExternallyRouted is true
+                  Masquerade defines if the virtual network should masquerade the traffic
+                  before egressing to external networks. valid only if ExternallyRouted
+                  is true
                 type: boolean
               nodeSelector:
-                description: NodeSelector Selects the DPU Nodes with specific labels
-                  which can belong to the virtual network.
+                description: |-
+                  NodeSelector Selects the DPU Nodes with specific labels which can
+                  belong to the virtual network.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -167,8 +170,9 @@ spec:
                 - Bridged
                 type: string
               vpcName:
-                description: vpcName is the name of the DPUVPC the virtual network
-                  belongs within the same namespace.
+                description: |-
+                  vpcName is the name of the DPUVPC the virtual network belongs within
+                  the same namespace.
                 type: string
             required:
             - externallyRouted
@@ -241,8 +245,9 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
             type: object

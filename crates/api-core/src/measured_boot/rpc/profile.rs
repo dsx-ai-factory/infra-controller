@@ -147,7 +147,7 @@ pub(crate) async fn handle_delete_measurement_system_profile(
         }
     };
 
-    let system_profile = profile.ok_or(CarbideError::NotFoundError {
+    let system_profile = profile.ok_or_else(|| CarbideError::NotFoundError {
         kind: "profile",
         id: "provided selector".to_string(),
     })?;
@@ -164,11 +164,11 @@ pub(crate) async fn handle_show_measurement_system_profile(
     api: &Api,
     req: ShowMeasurementSystemProfileRequest,
 ) -> Result<ShowMeasurementSystemProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut db_reader = api.db_reader();
     let system_profile = match req.selector {
         // Show a system profile with the given profile ID.
         Some(show_measurement_system_profile_request::Selector::ProfileId(profile_uuid)) => {
-            db::measured_boot::profile::load_from_id(&mut txn, profile_uuid)
+            db::measured_boot::profile::load_from_id(&mut db_reader, profile_uuid)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("{e}"),
@@ -176,7 +176,7 @@ pub(crate) async fn handle_show_measurement_system_profile(
         }
         // Show a system profile with the given profile name.
         Some(show_measurement_system_profile_request::Selector::ProfileName(profile_name)) => {
-            db::measured_boot::profile::load_from_name(&mut txn, profile_name)
+            db::measured_boot::profile::load_from_name(&mut db_reader, profile_name)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("{e}"),
@@ -185,7 +185,6 @@ pub(crate) async fn handle_show_measurement_system_profile(
         // Show all system profiles.
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
-    txn.commit().await?;
 
     Ok(ShowMeasurementSystemProfileResponse {
         system_profile: Some(system_profile.into()),
@@ -235,12 +234,11 @@ pub(crate) async fn handle_list_measurement_system_profile_bundles(
     api: &Api,
     req: ListMeasurementSystemProfileBundlesRequest,
 ) -> Result<ListMeasurementSystemProfileBundlesResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     let bundle_ids = match req.selector {
         // ...and do it by profile ID.
         Some(list_measurement_system_profile_bundles_request::Selector::ProfileId(
             profile_uuid,
-        )) => get_bundles_for_profile_id(&mut txn, profile_uuid)
+        )) => get_bundles_for_profile_id(api.pg_pool(), profile_uuid)
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("{e}"),
@@ -249,7 +247,7 @@ pub(crate) async fn handle_list_measurement_system_profile_bundles(
         // ...or do it by profile name.
         Some(list_measurement_system_profile_bundles_request::Selector::ProfileName(
             profile_name,
-        )) => get_bundles_for_profile_name(&mut txn, profile_name)
+        )) => get_bundles_for_profile_name(api.pg_pool(), profile_name)
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("{e}"),
@@ -258,8 +256,6 @@ pub(crate) async fn handle_list_measurement_system_profile_bundles(
         // ... either a UUID or name is required.
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
-
-    txn.commit().await?;
 
     Ok(ListMeasurementSystemProfileBundlesResponse { bundle_ids })
 }
@@ -270,11 +266,10 @@ pub(crate) async fn handle_list_measurement_system_profile_machines(
     api: &Api,
     req: ListMeasurementSystemProfileMachinesRequest,
 ) -> Result<ListMeasurementSystemProfileMachinesResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     let machine_ids: Vec<String> = match req.selector {
         // ...and do it by profile ID.
         Some(list_measurement_system_profile_machines_request::Selector::ProfileId(profile_id)) => {
-            get_machines_for_profile_id(&mut txn, profile_id)
+            get_machines_for_profile_id(api.pg_pool(), profile_id)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("{e}"),
@@ -286,7 +281,7 @@ pub(crate) async fn handle_list_measurement_system_profile_machines(
         // ...or do it by profile name.
         Some(list_measurement_system_profile_machines_request::Selector::ProfileName(
             profile_name,
-        )) => get_machines_for_profile_name(&mut txn, profile_name)
+        )) => get_machines_for_profile_name(api.pg_pool(), profile_name)
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("{e}"),
@@ -297,7 +292,6 @@ pub(crate) async fn handle_list_measurement_system_profile_machines(
         // ...and it has to be either by ID or name.
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
-    txn.commit().await?;
 
     Ok(ListMeasurementSystemProfileMachinesResponse { machine_ids })
 }

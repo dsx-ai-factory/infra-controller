@@ -4,12 +4,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -148,13 +148,13 @@ func (f *templatedProxyFixture) bindProxyClient(psc *proxySiteClient) {
 	f.scp.IDClientMap[f.site.ID.String()] = psc.client
 }
 
-func (f *templatedProxyFixture) newEchoContext(method, body string, params map[string]string) (echo.Context, *httptest.ResponseRecorder) {
+func (f *templatedProxyFixture) newEchoContext(method string, body []byte, params map[string]string) (echo.Context, *httptest.ResponseRecorder) {
 	return f.newEchoContextForUser(method, body, params, f.tnu)
 }
 
-func (f *templatedProxyFixture) newEchoContextForUser(method, body string, params map[string]string, user *cdbm.User) (echo.Context, *httptest.ResponseRecorder) {
+func (f *templatedProxyFixture) newEchoContextForUser(method string, body []byte, params map[string]string, user *cdbm.User) (echo.Context, *httptest.ResponseRecorder) {
 	e := echo.New()
-	req := httptest.NewRequest(method, "/", strings.NewReader(body))
+	req := httptest.NewRequest(method, "/", bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)
@@ -250,7 +250,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		body, merr := json.Marshal(createReq)
 		require.NoError(t, merr)
 
-		ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+		ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 		h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 		require.NoError(t, h.Handle(ec))
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -290,7 +290,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		body, merr := json.Marshal(updateReq)
 		require.NoError(t, merr)
 
-		ec, rec := f.newEchoContext(http.MethodPatch, string(body), map[string]string{"orgName": f.tnOrg, "id": osID})
+		ec, rec := f.newEchoContext(http.MethodPatch, body, map[string]string{"orgName": f.tnOrg, "id": osID})
 		h := UpdateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 		require.NoError(t, h.Handle(ec))
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -315,7 +315,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		psc := newProxySiteClient(t, deleteOperatingSystemMethod, nil, nil)
 		f.bindProxyClient(psc)
 
-		ec, rec := f.newEchoContext(http.MethodDelete, "", map[string]string{"orgName": f.tnOrg, "id": osID})
+		ec, rec := f.newEchoContext(http.MethodDelete, nil, map[string]string{"orgName": f.tnOrg, "id": osID})
 		h := DeleteOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 		require.NoError(t, h.Handle(ec))
 		require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
@@ -380,7 +380,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 			f.bindProxyClient(psc)
 			body, err := json.Marshal(step.request)
 			require.NoError(t, err, step.name)
-			ec, rec := f.newEchoContext(http.MethodPatch, string(body), map[string]string{"orgName": f.tnOrg, "id": os.ID.String()})
+			ec, rec := f.newEchoContext(http.MethodPatch, body, map[string]string{"orgName": f.tnOrg, "id": os.ID.String()})
 			h := UpdateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 			require.NoError(t, h.Handle(ec), step.name)
 			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", step.name, rec.Body.String())
@@ -420,7 +420,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_ProviderCreateOmitsTenantOrganizat
 
 	ec, rec := f.newEchoContextForUser(
 		http.MethodPost,
-		string(body),
+		body,
 		map[string]string{"orgName": f.ipOrg},
 		f.ipu,
 	)
@@ -482,7 +482,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_UpdateRejectsMultipleSites(t *test
 	require.NoError(t, err)
 	ec, rec := f.newEchoContext(
 		http.MethodPatch,
-		string(body),
+		body,
 		map[string]string{"orgName": f.tnOrg, "id": os.ID.String()},
 	)
 
@@ -510,7 +510,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_ProxyCreateExecuteError(t *testing
 	body, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+	ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 	h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 	require.NoError(t, h.Handle(ec))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -544,7 +544,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_ProxyCreateTimeout(t *testing.T) {
 	body, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+	ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 	h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 	require.NoError(t, h.Handle(ec))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -590,7 +590,7 @@ func TestOperatingSystemHandler_TemplatedIPXE_TemplateNotAvailableAtSite(t *test
 	body, merr := json.Marshal(createReq)
 	require.NoError(t, merr)
 
-	ec, rec := f.newEchoContext(http.MethodPost, string(body), map[string]string{"orgName": f.tnOrg})
+	ec, rec := f.newEchoContext(http.MethodPost, body, map[string]string{"orgName": f.tnOrg})
 	h := CreateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
 	require.NoError(t, h.Handle(ec))
 	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())

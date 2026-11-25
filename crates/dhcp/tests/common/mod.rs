@@ -25,6 +25,7 @@ mod kea_v6;
 
 use std::io::{Read, Write};
 use std::net::{Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use dhcp::mock_api_server::DHCP_RESPONSE_FQDN;
@@ -66,18 +67,66 @@ pub(super) fn send_and_recv_v6(
 }
 
 /// Return the Kea hook built by the same Cargo invocation as this integration test.
-fn hook_library_path() -> String {
-    let test_executable =
-        std::env::current_exe().expect("cannot locate integration test executable");
-    let deps_dir = test_executable
+fn hook_library_path() -> PathBuf {
+    // TODO: As of rust 1.100, the layout of the target directory has changed, and it is no longer
+    // deterministic where the built libdhcp.so will be found. It's kept in a directory with a hash
+    // for a name, so the only way to find it is to look for anything under e.g.
+    // target/debug/build/carbide-dhcp named libdhcp.so and find the newest one. The "more correct"
+    // way of doing this would be the "artifact-dependencies" cargo feature, but it's nightly-only:
+    // https://doc.rust-lang.org/cargo/reference/unstable.html#artifact-dependencies. Once this is
+    // stable we can make this more deterministic.
+
+    let test_executable = std::env::current_exe()
+        .expect("cannot locate integration test executable")
         .parent()
-        .expect("integration test executable has no parent directory");
-    let library_name = format!(
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(|p| p.canonicalize().ok())
+        .expect("integration test executable has no third-level parent directory");
+    let lib_name = format!(
         "{}dhcp{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     );
-    let hook_library = deps_dir.join(library_name);
+    let hook_library = match std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            r#"find "{}" -type f -name "{}" -print0 | xargs -0r ls -tr | tail -1"#,
+            test_executable.display(),
+            lib_name,
+        ))
+        .output()
+    {
+        Ok(output) => {
+            if output.status.success() {
+                let s = match String::from_utf8(output.stdout) {
+                    Ok(s) => {
+                        if s.trim().is_empty() {
+                            panic!("No {lib_name} found in target directory")
+                        } else {
+                            s
+                        }
+                    }
+                    Err(e) => {
+                        panic!(
+                            "Invalid utf8 finding Kea hook library: {}",
+                            e.into_utf8_lossy()
+                        );
+                    }
+                };
+                PathBuf::from(s.trim())
+            } else {
+                panic!(
+                    "Failed to run find command to find Kea hook library:\nstdout:\n{}\n\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+        }
+        Err(err) => {
+            panic!("Failed to run find command to find Kea hook library: {err}");
+        }
+    };
 
     assert!(
         hook_library.is_file(),
@@ -85,7 +134,7 @@ fn hook_library_path() -> String {
         hook_library.display()
     );
 
-    hook_library.to_string_lossy().into_owned()
+    hook_library
 }
 
 /// Return the DHCPv6 dropped-request counter value for a reason label.

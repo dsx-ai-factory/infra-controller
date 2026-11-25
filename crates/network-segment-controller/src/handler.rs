@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use carbide_uuid::network::NetworkSegmentId;
-use db::ConditionalWrite;
 use db::resource_pool::ResourcePoolAllocationNotOwned;
+use db::{ConditionalWrite, TransactionVending as _};
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentDeletionState, NetworkSegmentType,
@@ -145,7 +145,12 @@ impl StateHandler for NetworkSegmentStateHandler {
                         // Check here whether the IPs are actually freed.
                         // If ones are still allocated, we can not delete and have to
                         // update the `delete_at` timestamp.
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         if db::instance_address::segment_has_allocations(&mut txn, &state.id)
                             .await?
                         {
@@ -179,7 +184,12 @@ impl StateHandler for NetworkSegmentStateHandler {
                         }
                     }
                     NetworkSegmentDeletionState::DBDelete => {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         // Free or reassigned values leave this segment nothing to release.
                         if let Some(vni) = state.status.vni.take() {
                             match db::resource_pool::release(

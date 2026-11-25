@@ -28,7 +28,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use carbide_authn::middleware::{AuthContext, Principal};
@@ -688,10 +688,10 @@ async fn fake_nico_api_capturing_headers(
             .await
             .expect("fake nico-api serves");
     });
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("http://{addr}"),
-        &CarbideClientConfig::default(),
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(&format!("http://{addr}"), &CarbideClientConfig::default()),
+        carbide_instrument::Instrumentation::noop(),
+    );
     (client, lookups, headers)
 }
 
@@ -705,8 +705,21 @@ fn root_password() -> BmcCredentials {
 /// A proxy that reaches BMCs through the `bmc_proxy` override `upstream`,
 /// whose ACL grants the anonymous caller `acl`, and which holds
 /// `credentials` for [`FAKE_BMC_IP`] so no nico-api call is made.
-async fn proxy_to(upstream: &str, acl: &str, credentials: BmcCredentials) -> BmcProxyState {
-    proxy_configured(upstream, acl, "", credentials, "follow_same_origin").await
+async fn proxy_to(
+    upstream: &str,
+    acl: &str,
+    credentials: BmcCredentials,
+    instrumentation: &carbide_instrument::Instrumentation,
+) -> BmcProxyState {
+    proxy_configured(
+        upstream,
+        acl,
+        "",
+        credentials,
+        "follow_same_origin",
+        instrumentation,
+    )
+    .await
 }
 
 /// [`proxy_to`], with explicit `[[class]]` tables and a redirect mode.
@@ -716,6 +729,7 @@ async fn proxy_configured(
     classes: &str,
     credentials: BmcCredentials,
     redirect_mode: &str,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> BmcProxyState {
     proxy_configured_for(
         upstream,
@@ -724,6 +738,7 @@ async fn proxy_configured(
         "",
         for_bmc(credentials),
         redirect_mode,
+        instrumentation,
     )
     .await
 }
@@ -737,9 +752,11 @@ async fn proxy_configured_for(
     switch_tls: &str,
     cached: TargetCredentials,
     redirect_mode: &str,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> BmcProxyState {
-    let state = test_state_with_config(&format!(
-        r#"
+    let state = test_state_with_config(
+        &format!(
+            r#"
         bmc_proxy = "{upstream}"
 
         [redirects]
@@ -760,7 +777,9 @@ async fn proxy_configured_for(
 
         {classes}
         "#
-    ));
+        ),
+        instrumentation,
+    );
     state
         .credential_cache
         .insert(FAKE_BMC_IP.parse().unwrap(), cached)
@@ -770,8 +789,18 @@ async fn proxy_configured_for(
 
 /// [`proxy_to`] the BMC at `bmc`, overriding only its port, with every
 /// request allowed.
-async fn proxy_reaching(bmc: SocketAddr, credentials: BmcCredentials) -> BmcProxyState {
-    proxy_to(&format!(":{}", bmc.port()), r#"["/**"]"#, credentials).await
+async fn proxy_reaching(
+    bmc: SocketAddr,
+    credentials: BmcCredentials,
+    instrumentation: &carbide_instrument::Instrumentation,
+) -> BmcProxyState {
+    proxy_to(
+        &format!(":{}", bmc.port()),
+        r#"["/**"]"#,
+        credentials,
+        instrumentation,
+    )
+    .await
 }
 
 fn proxied(
@@ -812,12 +841,8 @@ struct Answer {
     body: Bytes,
 }
 
-/// Sends one request while the caller holds the process-global metrics window.
-async fn exchange(
-    _metrics: &MetricsCapture,
-    state: &BmcProxyState,
-    request: Request<Body>,
-) -> Answer {
+/// Sends one request through the test proxy.
+async fn exchange(state: &BmcProxyState, request: Request<Body>) -> Answer {
     let response = match proxy_request(axum::extract::State(state.clone()), request).await {
         Ok(response) | Err(response) => response,
     };
@@ -847,13 +872,16 @@ fn values(headers: &HeaderMap, name: &str) -> Vec<String> {
 /// the BMC's answer comes back with its headers and body.
 #[tokio::test]
 async fn a_request_reaches_the_bmc_with_its_encoded_query_and_headers() {
-    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
-    let state = proxy_reaching(addr, root_password()).await;
+    let state = proxy_reaching(
+        addr,
+        root_password(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await;
     let path_and_query =
         format!("{SYSTEM_PATH}?%24filter=EventFormatType%20eq%20%27MetricReport%27");
     let answer = exchange(
-        &metrics,
         &state,
         proxied(
             Method::GET,
@@ -884,16 +912,16 @@ async fn a_request_reaches_the_bmc_with_its_encoded_query_and_headers() {
 /// the caller's original path and query spelling.
 #[tokio::test]
 async fn escape_case_matching_preserves_the_upstream_request_target() {
-    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_to(
         &addr.to_string(),
         r#"["GET /redfish/v1/Registries/%4aResource%3AName"]"#,
         root_password(),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     let path_and_query = "/redfish/v1/Registries/%4AResource%3aName?name=%2f";
-    let answer = exchange(&metrics, &state, get(path_and_query)).await;
+    let answer = exchange(&state, get(path_and_query)).await;
 
     assert_eq!(answer.status, 404, "the fake BMC has no registry handler");
     let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one authorized request");
@@ -903,8 +931,6 @@ async fn escape_case_matching_preserves_the_upstream_request_target() {
 /// Escape opt-in preserves the request target and cannot bypass the path guard.
 #[tokio::test]
 async fn escape_policies_preserve_nvue_ids_without_bypassing_the_path_guard() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     let path = "/nvue_v1/revision/changeset%2fadmin%2F2026-10-14%2Fextra?rev=changeset%2Fadmin";
     check_cases_async(
         [
@@ -926,8 +952,8 @@ async fn escape_policies_preserve_nvue_ids_without_bypassing_the_path_guard() {
         ],
         |(acl, request_path)| async move {
             let (addr, bmc) = spawn_fake_bmc();
-            let state = proxy_to(&addr.to_string(), acl, root_password()).await;
-            let response = exchange(metrics_window, &state, get(request_path)).await;
+            let state = proxy_to(&addr.to_string(), acl, root_password(), &carbide_instrument::Instrumentation::noop()).await;
+            let response = exchange( &state, get(request_path)).await;
             let paths = bmc
                 .received()
                 .into_iter()
@@ -943,10 +969,15 @@ async fn escape_policies_preserve_nvue_ids_without_bypassing_the_path_guard() {
 /// host in a `Forwarded` of its own, in place of the caller's.
 #[tokio::test]
 async fn a_host_override_is_told_the_bmc_in_forwarded() {
-    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
-    let state = proxy_to(&addr.to_string(), r#"["/**"]"#, root_password()).await;
-    let answer = exchange(&metrics, &state, get(SYSTEM_PATH)).await;
+    let state = proxy_to(
+        &addr.to_string(),
+        r#"["/**"]"#,
+        root_password(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await;
+    let answer = exchange(&state, get(SYSTEM_PATH)).await;
 
     assert_eq!(answer.status, 200);
     let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one request");
@@ -959,13 +990,12 @@ async fn a_host_override_is_told_the_bmc_in_forwarded() {
 /// What the BMC saw of the credential: every `Authorization` and every
 /// `X-Auth-Token` value.
 async fn credential_on_the_wire(
-    metrics: &MetricsCapture,
+    instrumentation: &carbide_instrument::Instrumentation,
     credentials: BmcCredentials,
 ) -> (Vec<String>, Vec<String>) {
     let (addr, bmc) = spawn_fake_bmc();
-    let state = proxy_reaching(addr, credentials).await;
+    let state = proxy_reaching(addr, credentials, instrumentation).await;
     let answer = exchange(
-        metrics,
         &state,
         proxied(
             Method::GET,
@@ -992,8 +1022,6 @@ async fn credential_on_the_wire(
 /// token header.
 #[tokio::test]
 async fn the_proxys_credential_replaces_the_callers() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -1010,7 +1038,10 @@ async fn the_proxys_credential_replaces_the_callers() {
             },
         ],
         |credentials| async move {
-            Ok::<_, Infallible>(credential_on_the_wire(metrics_window, credentials).await)
+            Ok::<_, Infallible>(
+                credential_on_the_wire(&carbide_instrument::Instrumentation::noop(), credentials)
+                    .await,
+            )
         },
     )
     .await;
@@ -1018,21 +1049,23 @@ async fn the_proxys_credential_replaces_the_callers() {
 
 /// How the BMC received a body: (status the caller got, bytes received,
 /// `Content-Length` values, `Transfer-Encoding` values).
-async fn upload(metrics: &MetricsCapture, len: usize) -> (u16, usize, Vec<String>, Vec<String>) {
+async fn upload(
+    instrumentation: &carbide_instrument::Instrumentation,
+    len: usize,
+) -> (u16, usize, Vec<String>, Vec<String>) {
     let (addr, bmc) = spawn_fake_bmc();
-    let state = proxy_reaching(addr, root_password()).await;
-    let answer = exchange(
-        metrics,
-        &state,
-        proxied(
-            Method::POST,
-            UPLOAD_PATH,
-            to_the_bmc(),
-            &[(header::CONTENT_LENGTH, len.to_string().as_str())],
-            Body::from(vec![b'x'; len]),
-        ),
-    )
-    .await;
+    let state = proxy_reaching(addr, root_password(), instrumentation).await;
+    let mut request = proxied(
+        Method::POST,
+        UPLOAD_PATH,
+        to_the_bmc(),
+        &[],
+        Body::from(vec![b'x'; len]),
+    );
+    request
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    let answer = exchange(&state, request).await;
     let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one request");
     (
         answer.status,
@@ -1047,8 +1080,6 @@ async fn upload(metrics: &MetricsCapture, len: usize) -> (u16, usize, Vec<String
 /// reject chunked uploads.
 #[tokio::test]
 async fn request_bodies_reach_the_bmc_whole_with_their_length() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     let streamed = MAX_BUFFERED_BODY_SIZE + 1;
     check_cases_async(
         [
@@ -1063,7 +1094,9 @@ async fn request_bodies_reach_the_bmc_whole_with_their_length() {
                 expect: Yields((202, streamed, vec![streamed.to_string()], vec![])),
             },
         ],
-        |len| async move { Ok::<_, Infallible>(upload(metrics_window, len).await) },
+        |len| async move {
+            Ok::<_, Infallible>(upload(&carbide_instrument::Instrumentation::noop(), len).await)
+        },
     )
     .await;
 }
@@ -1072,10 +1105,14 @@ async fn request_bodies_reach_the_bmc_whole_with_their_length() {
 /// caller without it.
 #[tokio::test]
 async fn an_error_echoing_the_credential_is_redacted() {
-    let metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
-    let state = proxy_reaching(addr, root_password()).await;
-    let answer = exchange(&metrics, &state, get(LEAKY_PATH)).await;
+    let state = proxy_reaching(
+        addr,
+        root_password(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await;
+    let answer = exchange(&state, get(LEAKY_PATH)).await;
 
     assert_eq!(answer.status, 500);
     let body = String::from_utf8_lossy(&answer.body);
@@ -1105,24 +1142,28 @@ fn credential_sent(received: &Received) -> &'static str {
 /// caller got, the password each attempt carried, the password cached
 /// afterwards, whether the caller saw either password).
 async fn after_rejection(
-    metrics: &MetricsCapture,
+    instrumentation: &carbide_instrument::Instrumentation,
     input: Rejected,
 ) -> (u16, Vec<&'static str>, Option<String>, bool) {
     let (addr, bmc) = spawn_fake_bmc();
-    let mut state = proxy_reaching(addr, root_password()).await;
+    let mut state = proxy_reaching(addr, root_password(), instrumentation).await;
     state.api_client = fake_nico_api().await;
     let request = if input.body_len == 0 {
         proxied(input.method, input.path, to_the_bmc(), &[], Body::empty())
     } else {
-        proxied(
+        let mut request = proxied(
             input.method,
             input.path,
             to_the_bmc(),
-            &[(header::CONTENT_LENGTH, input.body_len.to_string().as_str())],
+            &[],
             Body::from(vec![b'x'; input.body_len]),
-        )
+        );
+        request
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(input.body_len));
+        request
     };
-    let answer = exchange(metrics, &state, request).await;
+    let answer = exchange(&state, request).await;
 
     let attempts = bmc.received().iter().map(credential_sent).collect();
     let cached = match state
@@ -1152,8 +1193,6 @@ async fn after_rejection(
 /// password is scrubbed of the one that attempt sent.
 #[tokio::test]
 async fn a_rejected_credential_is_replaced_once() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -1189,7 +1228,11 @@ async fn a_rejected_credential_is_replaced_once() {
                 expect: Yields((401, vec!["cached"], None, false)),
             },
         ],
-        |input| async move { Ok::<_, Infallible>(after_rejection(metrics_window, input).await) },
+        |input| async move {
+            Ok::<_, Infallible>(
+                after_rejection(&carbide_instrument::Instrumentation::noop(), input).await,
+            )
+        },
     )
     .await;
 }
@@ -1198,10 +1241,14 @@ async fn a_rejected_credential_is_replaced_once() {
 /// replayed, and the caller sees the final answer.
 #[tokio::test]
 async fn a_redirect_is_followed_to_the_final_answer() {
-    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
-    let state = proxy_reaching(addr, root_password()).await;
-    let answer = exchange(&metrics, &state, get(MOVED_PATH)).await;
+    let state = proxy_reaching(
+        addr,
+        root_password(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await;
+    let answer = exchange(&state, get(MOVED_PATH)).await;
 
     assert_eq!(answer.status, 200);
     assert_eq!(answer.body, SYSTEM_BODY);
@@ -1217,7 +1264,6 @@ async fn a_redirect_is_followed_to_the_final_answer() {
 /// reference, leaving the separately authorized follow-up to the caller.
 #[tokio::test]
 async fn return_to_client_mode_does_not_follow_the_redirect() {
-    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -1225,9 +1271,10 @@ async fn return_to_client_mode_does_not_follow_the_redirect() {
         "",
         root_password(),
         "return_to_client",
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
-    let answer = exchange(&metrics, &state, get(MOVED_PATH)).await;
+    let answer = exchange(&state, get(MOVED_PATH)).await;
 
     assert_eq!(answer.status, 307);
     assert_eq!(values(&answer.headers, "location"), [SYSTEM_PATH]);
@@ -1243,9 +1290,13 @@ async fn return_to_client_mode_does_not_follow_the_redirect() {
 /// address resolves to.
 #[tokio::test]
 async fn a_bmc_named_by_mac_is_reached_at_its_ip() {
-    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
-    let state = proxy_reaching(addr, root_password()).await;
+    let state = proxy_reaching(
+        addr,
+        root_password(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await;
     state
         .ip_cache
         .insert(
@@ -1254,7 +1305,6 @@ async fn a_bmc_named_by_mac_is_reached_at_its_ip() {
         )
         .await;
     let answer = exchange(
-        &metrics,
         &state,
         proxied(
             Method::GET,
@@ -1273,9 +1323,12 @@ async fn a_bmc_named_by_mac_is_reached_at_its_ip() {
 /// A proxy reaching a fresh fake BMC, with no credentials cached for it, whose
 /// nico-api knows `inventory`: the proxy, the fake BMC, and the lookups the
 /// fake nico-api receives.
-async fn proxy_resolving_through(inventory: FakeInventory) -> (BmcProxyState, FakeBmc, Lookups) {
+async fn proxy_resolving_through(
+    inventory: FakeInventory,
+    instrumentation: &carbide_instrument::Instrumentation,
+) -> (BmcProxyState, FakeBmc, Lookups) {
     let (addr, bmc) = spawn_fake_bmc();
-    let mut state = proxy_reaching(addr, root_password()).await;
+    let mut state = proxy_reaching(addr, root_password(), instrumentation).await;
     state
         .credential_cache
         .remove(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
@@ -1295,7 +1348,7 @@ async fn outbound_requests_follow_parent_sampling_with_unsampled_roots() {
 
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     keep_callsites_enabled();
-    let metrics = MetricsCapture::start();
+
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
         .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOff)))
@@ -1306,7 +1359,12 @@ async fn outbound_requests_follow_parent_sampling_with_unsampled_roots() {
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
     );
     let (addr, bmc) = spawn_fake_bmc();
-    let mut state = proxy_reaching(addr, root_password()).await;
+    let mut state = proxy_reaching(
+        addr,
+        root_password(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await;
     let (api_client, _, api_headers) =
         fake_nico_api_capturing_headers(Duration::ZERO, FakeInventory::NoSwitch, stored_nvos())
             .await;
@@ -1340,7 +1398,7 @@ async fn outbound_requests_follow_parent_sampling_with_unsampled_roots() {
                 .headers_mut()
                 .insert("traceparent", value.parse().unwrap());
         }
-        let answer = exchange(&metrics, &state, request).await;
+        let answer = exchange(&state, request).await;
         assert_eq!(answer.status, 200, "{scenario}");
         let mut headers = api_headers.lock().unwrap().clone();
         assert!(
@@ -1383,7 +1441,7 @@ async fn outbound_requests_follow_parent_sampling_with_unsampled_roots() {
 /// upstream saw, the target cached for the address, the target the request
 /// span names, the lookups nico-api received).
 async fn resolved_through(
-    metrics: &MetricsCapture,
+    instrumentation: &carbide_instrument::Instrumentation,
     (inventory, path): (FakeInventory, &'static str),
 ) -> (u16, Vec<String>, Option<&'static str>, String, Vec<String>) {
     keep_callsites_enabled();
@@ -1395,9 +1453,9 @@ async fn resolved_through(
         tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
     );
-    let (state, bmc, lookups) = proxy_resolving_through(inventory).await;
+    let (state, bmc, lookups) = proxy_resolving_through(inventory, instrumentation).await;
 
-    let answer = exchange(metrics, &state, get(path)).await;
+    let answer = exchange(&state, get(path)).await;
 
     let sent = bmc
         .received()
@@ -1433,8 +1491,6 @@ async fn resolved_through(
 /// cannot resolve to one switch's credentials is not served.
 #[tokio::test]
 async fn an_address_is_served_with_the_credentials_for_what_it_is() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     let nvos_basic = redfish_basic_authorization_context("nvos-admin", Some(NVOS_PASSWORD)).0;
     check_cases_async(
         [
@@ -1494,7 +1550,11 @@ async fn an_address_is_served_with_the_credentials_for_what_it_is() {
                 )),
             },
         ],
-        |input| async move { Ok::<_, Infallible>(resolved_through(metrics_window, input).await) },
+        |input| async move {
+            Ok::<_, Infallible>(
+                resolved_through(&carbide_instrument::Instrumentation::noop(), input).await,
+            )
+        },
     )
     .await;
 }
@@ -1504,19 +1564,14 @@ async fn an_address_is_served_with_the_credentials_for_what_it_is() {
 /// again.
 #[tokio::test]
 async fn a_denied_probe_is_not_repeated_within_its_retry_time() {
-    let metrics = MetricsCapture::start();
-    let (state, _bmc, lookups) = proxy_resolving_through(FakeInventory::ProbeDenied).await;
+    let metrics = MetricsCapture::owned();
+    let (state, _bmc, lookups) =
+        proxy_resolving_through(FakeInventory::ProbeDenied, metrics.instrumentation()).await;
     let ip: IpAddr = FAKE_BMC_IP.parse().unwrap();
 
-    assert_eq!(
-        exchange(&metrics, &state, get(SYSTEM_PATH)).await.status,
-        200
-    );
+    assert_eq!(exchange(&state, get(SYSTEM_PATH)).await.status, 200);
     state.credential_cache.remove(&ip).await;
-    assert_eq!(
-        exchange(&metrics, &state, get(SYSTEM_PATH)).await.status,
-        200
-    );
+    assert_eq!(exchange(&state, get(SYSTEM_PATH)).await.status, 200);
 
     assert_eq!(
         *lookups.lock().unwrap(),
@@ -1537,7 +1592,10 @@ struct Refused {
 }
 
 /// (status the caller got, whether the BMC received anything).
-async fn refusal(metrics: &MetricsCapture, input: Refused) -> (u16, bool) {
+async fn refusal(
+    instrumentation: &carbide_instrument::Instrumentation,
+    input: Refused,
+) -> (u16, bool) {
     let (addr, bmc) = spawn_fake_bmc();
     let (_held, refusing) = refusing_port();
     let port = if input.bmc_listening {
@@ -1545,8 +1603,14 @@ async fn refusal(metrics: &MetricsCapture, input: Refused) -> (u16, bool) {
     } else {
         refusing
     };
-    let state = proxy_to(&format!(":{port}"), input.acl, root_password()).await;
-    let answer = exchange(metrics, &state, (input.request)()).await;
+    let state = proxy_to(
+        &format!(":{port}"),
+        input.acl,
+        root_password(),
+        instrumentation,
+    )
+    .await;
+    let answer = exchange(&state, (input.request)()).await;
     (answer.status, !bmc.received().is_empty())
 }
 
@@ -1554,8 +1618,6 @@ async fn refusal(metrics: &MetricsCapture, input: Refused) -> (u16, bool) {
 /// that says why, and none reaches the BMC.
 #[tokio::test]
 async fn requests_the_proxy_does_not_deliver() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -1631,7 +1693,9 @@ async fn requests_the_proxy_does_not_deliver() {
                 expect: Yields((502, false)),
             },
         ],
-        |input| async move { Ok::<_, Infallible>(refusal(metrics_window, input).await) },
+        |input| async move {
+            Ok::<_, Infallible>(refusal(&carbide_instrument::Instrumentation::noop(), input).await)
+        },
     )
     .await;
 }
@@ -1671,7 +1735,7 @@ enum Lookup {
 /// off", the credential each attempt at the BMC carried). The caller must
 /// get its answer long before the slow BMC or nico-api would have answered.
 async fn under_the_quick_class(
-    _metrics: &MetricsCapture,
+    instrumentation: &carbide_instrument::Instrumentation,
     (method, path, lookup): (Method, &'static str, Lookup),
 ) -> (u16, &'static str, Vec<&'static str>) {
     let (addr, bmc) = spawn_fake_bmc();
@@ -1681,6 +1745,7 @@ async fn under_the_quick_class(
         QUICK_CLASS,
         root_password(),
         "follow_same_origin",
+        instrumentation,
     )
     .await;
     let lookup_delay = match lookup {
@@ -1716,8 +1781,6 @@ async fn under_the_quick_class(
 /// with fresh credentials, and nico-api's credential lookups included.
 #[tokio::test]
 async fn a_request_is_held_to_its_classs_budget() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -1751,7 +1814,9 @@ async fn a_request_is_held_to_its_classs_budget() {
             },
         ],
         |input| async move {
-            Ok::<_, Infallible>(under_the_quick_class(metrics_window, input).await)
+            Ok::<_, Infallible>(
+                under_the_quick_class(&carbide_instrument::Instrumentation::noop(), input).await,
+            )
         },
     )
     .await;
@@ -1782,7 +1847,7 @@ const DPS_CLASS: &str = r#"
 /// classifying it, so no task outlives the capture: a span such a task closed
 /// after the capture ended would reach a subscriber that never saw it.
 async fn class_on_the_span(
-    metrics: &MetricsCapture,
+    instrumentation: &carbide_instrument::Instrumentation,
     (method, spiffe_service): (Method, Option<&'static str>),
 ) -> (u16, String) {
     keep_callsites_enabled();
@@ -1800,6 +1865,7 @@ async fn class_on_the_span(
         &format!("{DPS_CLASS}{QUICK_CLASS}"),
         root_password(),
         "follow_same_origin",
+        instrumentation,
     )
     .await;
     let mut request = proxied(method, SLOW_PATH, None, &[], Body::empty());
@@ -1810,7 +1876,7 @@ async fn class_on_the_span(
             .collect(),
         authorization: None,
     });
-    let answer = exchange(metrics, &state, request).await;
+    let answer = exchange(&state, request).await;
     let span = exporter
         .get_finished_spans()
         .expect("finished spans")
@@ -1832,8 +1898,6 @@ async fn class_on_the_span(
 /// caller's identity and its pattern.
 #[tokio::test]
 async fn the_request_span_names_its_class() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -1852,16 +1916,16 @@ async fn the_request_span_names_its_class() {
                 expect: Yields((400, "dps".to_string())),
             },
         ],
-        |input| async move { Ok::<_, Infallible>(class_on_the_span(metrics_window, input).await) },
+        |input| async move {
+            Ok::<_, Infallible>(
+                class_on_the_span(&carbide_instrument::Instrumentation::noop(), input).await,
+            )
+        },
     )
     .await;
 }
 
-/// The answer to `request`, its body not yet read. Unlike [`exchange`], it
-/// takes no [`MetricsCapture`]: a test that holds slots takes one before its
-/// first request and sends every request within it. Waiting for the capture
-/// blocks the test's thread, and a slot held meanwhile could outlive its
-/// exchange's bound and be reclaimed.
+/// The answer to `request`, its body not yet read.
 async fn answer(state: &BmcProxyState, request: Request<Body>) -> http::Response<Body> {
     match proxy_request(axum::extract::State(state.clone()), request).await {
         Ok(response) | Err(response) => response,
@@ -1884,7 +1948,6 @@ const ONE_AT_A_TIME: &str = r#"
 /// once, long before the held slot's bound would have reclaimed it.
 #[tokio::test]
 async fn a_slot_is_held_until_the_response_body_is_sent() {
-    let _metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -1892,6 +1955,7 @@ async fn a_slot_is_held_until_the_response_body_is_sent() {
         ONE_AT_A_TIME,
         root_password(),
         "follow_same_origin",
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     let unread = answer(&state, get(SYSTEM_PATH)).await;
@@ -1920,7 +1984,6 @@ async fn a_slot_is_held_until_the_response_body_is_sent() {
 /// What a request for `path` gets from a class of one at a time with an
 /// 800-millisecond budget, once it has waited 400 milliseconds for its slot.
 async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
-    let _metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
     let mut state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -1936,7 +1999,7 @@ async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
         ),
         root_password(),
         "follow_same_origin",
-    )
+     &carbide_instrument::Instrumentation::noop())
     .await;
     state.api_client = fake_nico_api().await;
     let unread = answer(&state, get(SYSTEM_PATH)).await;
@@ -1978,7 +2041,6 @@ async fn waiting_for_a_slot_spends_the_first_attempts_budget() {
 /// waits and is refused, and the BMC has received only the two attempts.
 #[tokio::test]
 async fn a_replay_keeps_its_slot() {
-    let _metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let mut state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -1994,6 +2056,7 @@ async fn a_replay_keeps_its_slot() {
         ),
         root_password(),
         "follow_same_origin",
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     state.api_client = fake_nico_api().await;
@@ -2045,7 +2108,7 @@ enum BreakerScenario {
 /// The statuses three requests get from a proxy with a [`breaker`] failing on
 /// `trip_on`, and [`QUICK_CLASS`], in `scenario`.
 async fn three_requests(
-    metrics: &MetricsCapture,
+    instrumentation: &carbide_instrument::Instrumentation,
     (scenario, trip_on): (BreakerScenario, Option<&str>),
 ) -> Vec<u16> {
     let (addr, _bmc) = spawn_fake_bmc();
@@ -2083,12 +2146,13 @@ async fn three_requests(
             credentials,
         },
         "follow_same_origin",
+        instrumentation,
     )
     .await;
     state.api_client = fake_nico_api_with(Duration::ZERO, inventory).await.0;
     let mut statuses = Vec::new();
     for _ in 0..3 {
-        statuses.push(exchange(metrics, &state, get(path)).await.status);
+        statuses.push(exchange(&state, get(path)).await.status);
         // The BMC's runtime counts an exchange's outcome once it sees the
         // exchange's slot freed.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2104,8 +2168,6 @@ async fn three_requests(
 #[tokio::test]
 async fn what_trips_a_bmcs_breaker() {
     const WITH_5XX: Option<&str> = Some(r#"["unreachable", "timeout", "5xx"]"#);
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -2160,7 +2222,11 @@ async fn what_trips_a_bmcs_breaker() {
                 expect: Yields(vec![502, 502, 502]),
             },
         ],
-        |input| async move { Ok::<_, Infallible>(three_requests(metrics_window, input).await) },
+        |input| async move {
+            Ok::<_, Infallible>(
+                three_requests(&carbide_instrument::Instrumentation::noop(), input).await,
+            )
+        },
     )
     .await;
 }
@@ -2172,7 +2238,6 @@ async fn what_trips_a_bmcs_breaker() {
 /// that opens on one failure still serves the request after it.
 #[tokio::test]
 async fn a_timeout_from_waiting_is_not_the_bmcs() {
-    let metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
     let state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -2193,18 +2258,19 @@ async fn a_timeout_from_waiting_is_not_the_bmcs() {
         ),
         root_password(),
         "follow_same_origin",
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     let unread = answer(&state, get(SYSTEM_PATH)).await;
     let first_status = unread.status().as_u16();
-    let waiting = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH));
+    let waiting = exchange(&state, get(BRIEFLY_SLOW_PATH));
     let release = async {
         tokio::time::sleep(BRIEFLY_SLOW_DELAY).await;
         drop(unread);
     };
     let (waiting, ()) = tokio::join!(waiting, release);
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let next = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await;
+    let next = exchange(&state, get(BRIEFLY_SLOW_PATH)).await;
     assert_eq!((first_status, waiting.status, next.status), (200, 502, 200));
 }
 
@@ -2213,7 +2279,6 @@ async fn a_timeout_from_waiting_is_not_the_bmcs() {
 /// not, even for a breaker that opens on one 401.
 #[tokio::test]
 async fn only_the_last_attempts_answer_counts() {
-    let metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
     let mut state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -2227,12 +2292,13 @@ async fn only_the_last_attempts_answer_counts() {
         "#,
         root_password(),
         "follow_same_origin",
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     state.api_client = fake_nico_api().await;
-    let replayed = exchange(&metrics, &state, get(ROTATED_PATH)).await;
+    let replayed = exchange(&state, get(ROTATED_PATH)).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let next = exchange(&metrics, &state, get(ROTATED_PATH)).await;
+    let next = exchange(&state, get(ROTATED_PATH)).await;
     assert_eq!((replayed.status, next.status), (200, 200));
 }
 
@@ -2240,7 +2306,7 @@ async fn only_the_last_attempts_answer_counts() {
 /// judged on each answer, and the HTTP status after one request for `path`
 /// with an 800-millisecond budget.
 async fn slo_misses_after(path: &'static str) -> (u16, f64) {
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let (addr, _bmc) = spawn_fake_bmc();
     let state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -2262,9 +2328,10 @@ async fn slo_misses_after(path: &'static str) -> (u16, f64) {
         ),
         root_password(),
         "follow_same_origin",
+        metrics.instrumentation(),
     )
     .await;
-    let answer = exchange(&metrics, &state, get(path)).await;
+    let answer = exchange(&state, get(path)).await;
     // The BMC's runtime weighs the answer once it sees the slot freed.
     tokio::time::sleep(Duration::from_millis(20)).await;
     (
@@ -2305,10 +2372,10 @@ async fn latency_counts_until_the_bmc_answers() {
 /// The switch is bmc-mock's NVOS, which checks the credentials it is sent.
 #[tokio::test]
 async fn a_switch_is_served_through_its_rotated_nvos_password() {
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let (addr, nvos) = spawn_mock_switch();
     let stored: StoredNvos = Arc::new(Mutex::new(nvos.admin_credentials()));
-    let mut state = proxy_reaching(addr, root_password()).await;
+    let mut state = proxy_reaching(addr, root_password(), metrics.instrumentation()).await;
     state
         .credential_cache
         .remove(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
@@ -2320,13 +2387,13 @@ async fn a_switch_is_served_through_its_rotated_nvos_password() {
         serde_json::from_slice(&answer.body).expect("a JSON body")
     };
 
-    let answer = exchange(&metrics, &state, get("/nvue_v1/system?rev=operational")).await;
+    let answer = exchange(&state, get("/nvue_v1/system?rev=operational")).await;
     assert_eq!(answer.status, 200, "{:?}", answer.body);
     assert_eq!(json(&answer)["product-name"], "nvos");
     assert_eq!(*lookups.lock().unwrap(), [probe_lookup(), nvos_lookup()]);
 
     // The cached credentials serve the next request without a lookup.
-    let answer = exchange(&metrics, &state, get("/nvue_v1/platform/environment/fan")).await;
+    let answer = exchange(&state, get("/nvue_v1/platform/environment/fan")).await;
     assert_eq!(answer.status, 200, "{:?}", answer.body);
     assert_eq!(
         json(&answer).pointer("/FAN1~11/current-speed"),
@@ -2342,7 +2409,7 @@ async fn a_switch_is_served_through_its_rotated_nvos_password() {
         "rotated".to_string(),
     );
 
-    let answer = exchange(&metrics, &state, get("/nvue_v1/system")).await;
+    let answer = exchange(&state, get("/nvue_v1/system")).await;
     assert_eq!(answer.status, 200, "{:?}", answer.body);
     assert_eq!(
         *lookups.lock().unwrap(),
@@ -2362,12 +2429,12 @@ async fn a_switch_is_served_through_its_rotated_nvos_password() {
 /// leaves with their query, and nothing beside or into the tree.
 #[tokio::test]
 async fn the_nvue_environment_acl_example_covers_its_tree() {
-    let metrics = MetricsCapture::start();
     let (addr, nvos) = spawn_mock_switch();
     let state = proxy_to(
         &format!(":{}", addr.port()),
         r#"["GET /nvue_v1/platform/environment/**"]"#,
         root_password(),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     let (username, password) = nvos.admin_credentials();
@@ -2381,7 +2448,7 @@ async fn the_nvue_environment_acl_example_covers_its_tree() {
             },
         )
         .await;
-    let (metrics_window, state) = (&metrics, &state);
+    let state = &state;
     check_cases_async(
         [
             Case {
@@ -2410,7 +2477,7 @@ async fn the_nvue_environment_acl_example_covers_its_tree() {
         ],
         |(method, path): (Method, &str)| async move {
             let request = proxied(method, path, to_the_bmc(), &[], Body::empty());
-            Ok::<_, Infallible>(exchange(metrics_window, state, request).await.status)
+            Ok::<_, Infallible>(exchange(state, request).await.status)
         },
     )
     .await;
@@ -2471,7 +2538,7 @@ fn switch_tls_table(switch_tls: &SwitchTlsConfig) -> String {
 /// the upstream's certificate failed verification, and how many requests the
 /// upstream received.
 async fn reached_with(
-    metrics: &MetricsCapture,
+    instrumentation: &carbide_instrument::Instrumentation,
     (upstream, profile): (MtlsUpstream, SwitchProfile),
 ) -> (u16, bool, usize) {
     let ca = SwitchCa::new();
@@ -2508,6 +2575,7 @@ async fn reached_with(
             credentials: root_password(),
         },
         "follow_same_origin",
+        instrumentation,
     )
     .await;
     // A refused certificate sends the replay to nico-api, which knows the
@@ -2518,7 +2586,7 @@ async fn reached_with(
     };
     state.api_client = fake_nico_api_with(Duration::ZERO, inventory).await.0;
 
-    let answer = exchange(metrics, &state, get(NVUE_SYSTEM_PATH)).await;
+    let answer = exchange(&state, get(NVUE_SYSTEM_PATH)).await;
     let refused = String::from_utf8_lossy(&answer.body).contains("failed verification");
     (answer.status, refused, upstream.received().len())
 }
@@ -2532,8 +2600,6 @@ async fn reached_with(
 /// certificate is sent the request, credentials included, and answers 400.
 #[tokio::test]
 async fn a_switch_requiring_a_client_certificate_is_reached_with_the_proxys() {
-    let metrics = MetricsCapture::start();
-    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -2567,7 +2633,11 @@ async fn a_switch_requiring_a_client_certificate_is_reached_with_the_proxys() {
                 expect: Yields((200, false, 1)),
             },
         ],
-        |input| async move { Ok::<_, Infallible>(reached_with(metrics_window, input).await) },
+        |input| async move {
+            Ok::<_, Infallible>(
+                reached_with(&carbide_instrument::Instrumentation::noop(), input).await,
+            )
+        },
     )
     .await;
 }
@@ -2577,7 +2647,7 @@ async fn a_switch_requiring_a_client_certificate_is_reached_with_the_proxys() {
 /// keeps no validity for a trust anchor.
 #[tokio::test]
 async fn a_switch_an_expired_ca_anchors_is_reached_and_the_ca_reported() {
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let ca = SwitchCa::expired();
     let certificate = ca.issue(&[SWITCH_NAME], ExtendedKeyUsagePurpose::ServerAuth);
     let (addr, switch) = spawn_switch_requiring_client_certificates(&ca, certificate);
@@ -2592,10 +2662,11 @@ async fn a_switch_an_expired_ca_anchors_is_reached_and_the_ca_reported() {
             credentials: root_password(),
         },
         "follow_same_origin",
+        metrics.instrumentation(),
     )
     .await;
 
-    let answer = exchange(&metrics, &state, get(NVUE_SYSTEM_PATH)).await;
+    let answer = exchange(&state, get(NVUE_SYSTEM_PATH)).await;
 
     assert_eq!(answer.status, 200);
     assert_eq!(switch.received().len(), 1);
@@ -2615,7 +2686,7 @@ async fn a_switch_an_expired_ca_anchors_is_reached_and_the_ca_reported() {
 /// credential on the BMC client.
 #[tokio::test]
 async fn an_address_cached_as_a_switch_is_served_as_the_bmc_it_now_is() {
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
     let (addr, bmc) = spawn_fake_bmc();
     let files = tempfile::tempdir().expect("TLS files directory");
     let switch_tls = switch_tls_table(&SwitchCa::new().switch_tls(files.path(), Some(SWITCH_NAME)));
@@ -2629,12 +2700,13 @@ async fn an_address_cached_as_a_switch_is_served_as_the_bmc_it_now_is() {
             credentials: root_password(),
         },
         "follow_same_origin",
+        metrics.instrumentation(),
     )
     .await;
     let (api_client, lookups) = fake_nico_api_with(Duration::ZERO, FakeInventory::NoSwitch).await;
     state.api_client = api_client;
 
-    let answer = exchange(&metrics, &state, get(SYSTEM_PATH)).await;
+    let answer = exchange(&state, get(SYSTEM_PATH)).await;
 
     assert_eq!(answer.status, 200, "{:?}", answer.body);
     let sent: Vec<String> = bmc

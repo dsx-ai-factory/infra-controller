@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,7 +54,7 @@ func TestExpectedInventoryBatchHandlersRejectIncompleteRequests(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			recorder := invokeExpectedInventoryBatchHandler(t, user, "test-org", http.MethodPut, test.path, fmt.Sprintf(`{"siteId":%q}`, siteID), "", test.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, "test-org", http.MethodPut, test.path, strings.NewReader(fmt.Sprintf(`{"siteId":%q}`, siteID)), "", test.handle)
 			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		})
 	}
@@ -68,7 +69,7 @@ func TestExpectedInventoryBatchHandlersRejectIncompleteRequests(t *testing.T) {
 	}
 	for _, test := range deleteHandlers {
 		t.Run("delete "+test.name+" without siteId", func(t *testing.T) {
-			recorder := invokeExpectedInventoryBatchHandler(t, user, "test-org", http.MethodDelete, test.path, "", "", test.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, "test-org", http.MethodDelete, test.path, strings.NewReader(""), "", test.handle)
 			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		})
 	}
@@ -807,7 +808,7 @@ func testReplaceAllExpectedMachinesLoopbacks(t *testing.T) {
 			require.NoError(t, err)
 			body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00-11-22-33-aa-bb","chassisSerialNumber":"retained"%s}]}`, site.ID.String(), site.ID.String(), test.fields)
 			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut,
-				"/v2/org/test-org/nico/expected-machine/all", body, "", handler.Handle)
+				"/v2/org/test-org/nico/expected-machine/all", strings.NewReader(body), "", handler.Handle)
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			require.Len(t, captured.ExpectedMachines, 1)
 			forwarded := captured.ExpectedMachines[0]
@@ -872,7 +873,7 @@ func testReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
 	})
 
 	body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:11","chassisSerialNumber":"replacement"}]}`, site.ID.String(), site.ID.String())
-	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
+	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", strings.NewReader(body), "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
 	require.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
 
 	stored, err := dao.Get(ctx, nil, original.ID, nil, false)
@@ -929,7 +930,7 @@ func testReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory(t *
 	})
 
 	body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","skuId":"requested-sku"}]}`, site.ID.String(), site.ID.String())
-	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
+	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", strings.NewReader(body), "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.True(t, lockProbe.fired, "the lock probe must run before inserting the Expected Machine")
 	var pgErr *pgconn.PgError
@@ -994,7 +995,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}{
 		{
 			name: "machine", path: "/v2/org/test-org/nico/expected-machine/all",
-			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty"}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
+			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","retainBmcCredentials":true,"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty"}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
 			handle:  NewReplaceAllExpectedMachinesHandler(dbSession, pool, cfg).Handle,
 			method:  corev1.Forge_ReplaceAllExpectedMachines_FullMethodName,
 			secrets: []string{"machine-user", "machine-pass"},
@@ -1017,7 +1018,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 
 	for _, replacement := range replacements {
 		t.Run("replace all "+replacement.name, func(t *testing.T) {
-			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, replacement.path, replacement.body, "", replacement.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, replacement.path, strings.NewReader(replacement.body), "", replacement.handle)
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			request := captured[len(captured)-1]
 			require.Equal(t, replacement.method, request.FullMethod)
@@ -1034,6 +1035,8 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}
 	require.Empty(t, machineList.ExpectedMachines[1].HostNics)
 	require.Equal(t, "machine-pass", machineList.ExpectedMachines[0].BmcPassword)
+	require.Equal(t, cutil.GetPtr(true), machineList.ExpectedMachines[0].BmcRetainCredentials)
+	require.Equal(t, cutil.GetPtr(false), machineList.ExpectedMachines[1].BmcRetainCredentials, "omitted retention is replaced with false")
 	require.Len(t, machineList.ExpectedMachines[0].HostNics, 1)
 	require.Equal(t, "CX9", machineList.ExpectedMachines[0].HostNics[0].GetNicType())
 	require.Equal(t, "192.0.2.9", machineList.ExpectedMachines[0].HostNics[0].GetFixedIp())
@@ -1062,7 +1065,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}
 	for _, deletion := range deletions {
 		t.Run("delete all "+deletion.name, func(t *testing.T) {
-			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodDelete, deletion.path, "", site.ID.String(), deletion.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodDelete, deletion.path, strings.NewReader(""), site.ID.String(), deletion.handle)
 			require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 			request := captured[len(captured)-1]
 			require.Equal(t, deletion.method, request.FullMethod)
@@ -1104,7 +1107,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	for _, replacement := range replacements {
 		t.Run("reject concurrent "+replacement.name+" replacement", func(t *testing.T) {
 			callsBefore := len(captured)
-			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, replacement.path, replacement.body, "", replacement.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, replacement.path, strings.NewReader(replacement.body), "", replacement.handle)
 			require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
 			require.Len(t, captured, callsBefore, "lock conflict must not reach Core")
 		})
@@ -1112,7 +1115,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	for _, deletion := range deletions {
 		t.Run("reject concurrent "+deletion.name+" deletion", func(t *testing.T) {
 			callsBefore := len(captured)
-			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodDelete, deletion.path, "", site.ID.String(), deletion.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodDelete, deletion.path, strings.NewReader(""), site.ID.String(), deletion.handle)
 			require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
 			require.Len(t, captured, callsBefore, "lock conflict must not reach Core")
 		})
@@ -1132,9 +1135,9 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	require.Equal(t, "retained-shelf", shelves[0].ShelfSerialNumber)
 }
 
-func invokeExpectedInventoryBatchHandler(t *testing.T, user *cdbm.User, org, method, path, body, siteID string, handle func(echo.Context) error) *httptest.ResponseRecorder {
+func invokeExpectedInventoryBatchHandler(t *testing.T, user *cdbm.User, org, method, path string, body io.Reader, siteID string, handle func(echo.Context) error) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request := httptest.NewRequest(method, path, body)
 	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	if siteID != "" {
 		query := request.URL.Query()

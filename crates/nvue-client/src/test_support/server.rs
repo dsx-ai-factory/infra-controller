@@ -235,12 +235,15 @@ fn into_response(response: MockResponse) -> Response {
 }
 
 fn format_failures(failures: &[String]) -> String {
-    let failures = failures
-        .iter()
-        .map(|failure| format!("- {failure}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("NVUE mock verification failed:\n{failures}")
+    let mut message = String::from("NVUE mock verification failed:\n");
+    for (index, failure) in failures.iter().enumerate() {
+        if index > 0 {
+            message.push('\n');
+        }
+        message.push_str("- ");
+        message.push_str(failure);
+    }
+    message
 }
 
 #[cfg(test)]

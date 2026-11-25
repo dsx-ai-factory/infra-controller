@@ -90,6 +90,10 @@ pub(crate) fn instance_id(i: u32) -> InstanceId {
 /// A host in `state`, with the given DPUs, as the compact read sees it.
 pub(crate) fn host(i: u32, state: &str, dpus: &[u32]) -> HostDetail {
     HostDetail {
+        firmware_window: None,
+        firmware_policy_eligible: None,
+        firmware_policy_blocking_reason: None,
+        firmware: None,
         id: host_id(i),
         state: state.to_string(),
         state_reason: None,
@@ -120,6 +124,10 @@ pub(crate) fn host(i: u32, state: &str, dpus: &[u32]) -> HostDetail {
 /// none of the facts only the compact read has.
 fn full_read(host: HostDetail) -> HostDetail {
     HostDetail {
+        firmware_window: None,
+        firmware_policy_eligible: None,
+        firmware_policy_blocking_reason: None,
+        firmware: None,
         version_source: VersionSource::MachineRecord,
         report_at: None,
         report_error: None,
@@ -287,6 +295,9 @@ pub(crate) struct FakeSite {
     pub expected_rack_groups: Vec<forge::ExpectedRackGroup>,
     pub firmware_requests: Vec<HostReprovisioningListItem>,
     pub explored: BTreeMap<String, site_explorer::ExploredEndpoint>,
+    pub runtime_config: Option<forge::RuntimeConfig>,
+    pub desired_firmware: Vec<forge::DesiredFirmwareVersionEntry>,
+    pub host_firmware: Vec<forge::AvailableHostFirmware>,
     /// IDs every by-ID read leaves out although the census lists them.
     pub withheld: BTreeSet<String>,
 }
@@ -622,6 +633,25 @@ impl NicoApi for FakeNico {
                 .collect()
         })
         .await
+    }
+
+    async fn runtime_config(&self) -> Result<Option<forge::RuntimeConfig>, CallError> {
+        self.answer("version", |site| site.runtime_config.clone())
+            .await
+    }
+
+    async fn desired_firmware_versions(
+        &self,
+    ) -> Result<Vec<forge::DesiredFirmwareVersionEntry>, CallError> {
+        self.answer("get_desired_firmware_versions", |site| {
+            site.desired_firmware.clone()
+        })
+        .await
+    }
+
+    async fn host_firmware(&self) -> Result<Vec<forge::AvailableHostFirmware>, CallError> {
+        self.answer("list_host_firmware", |site| site.host_firmware.clone())
+            .await
     }
 }
 

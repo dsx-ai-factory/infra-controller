@@ -170,11 +170,10 @@ pub(crate) async fn handle_show_measurement_report_for_id(
     api: &Api,
     req: ShowMeasurementReportForIdRequest,
 ) -> Result<ShowMeasurementReportForIdResponse, Status> {
-    let mut txn = api.txn_begin().await?;
-    let result = Ok(ShowMeasurementReportForIdResponse {
+    Ok(ShowMeasurementReportForIdResponse {
         report: Some(
             db::measured_boot::report::from_id(
-                &mut txn,
+                &mut api.db_reader(),
                 req.report_id
                     .ok_or(CarbideError::MissingArgument("report_id"))?,
             )
@@ -184,9 +183,7 @@ pub(crate) async fn handle_show_measurement_report_for_id(
             })?
             .into(),
         ),
-    });
-    txn.commit().await?;
-    result
+    })
 }
 
 /// handle_show_measurement_reports_for_machine handles the
@@ -195,10 +192,9 @@ pub(crate) async fn handle_show_measurement_reports_for_machine(
     api: &Api,
     req: ShowMeasurementReportsForMachineRequest,
 ) -> Result<ShowMeasurementReportsForMachineResponse, Status> {
-    let mut txn = api.txn_begin().await?;
-    let result = Ok(ShowMeasurementReportsForMachineResponse {
+    Ok(ShowMeasurementReportsForMachineResponse {
         reports: db::measured_boot::report::get_all_for_machine_id(
-            &mut txn,
+            &mut api.db_reader(),
             MachineId::from_str(&req.machine_id).map_err(|_| {
                 CarbideError::from(RpcDataConversionError::InvalidMachineId(req.machine_id))
             })?,
@@ -210,9 +206,7 @@ pub(crate) async fn handle_show_measurement_reports_for_machine(
         .into_iter()
         .map(|report| report.into())
         .collect(),
-    });
-    txn.commit().await?;
-    result
+    })
 }
 
 /// handle_show_measurement_reports handles the ShowMeasurementReports
@@ -239,11 +233,10 @@ pub(crate) async fn handle_list_measurement_report(
     api: &Api,
     req: ListMeasurementReportRequest,
 ) -> Result<ListMeasurementReportResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     let reports: Vec<MeasurementReportRecordPb> = match req.selector {
         Some(list_measurement_report_request::Selector::MachineId(machine_id)) => {
             get_measurement_report_records_for_machine_id(
-                &mut txn,
+                api.pg_pool(),
                 MachineId::from_str(&machine_id).map_err(|_| {
                     CarbideError::from(RpcDataConversionError::InvalidMachineId(machine_id))
                 })?,
@@ -256,7 +249,7 @@ pub(crate) async fn handle_list_measurement_report(
             .map(|report| report.into())
             .collect()
         }
-        None => get_all_measurement_report_records(&mut txn)
+        None => get_all_measurement_report_records(api.pg_pool())
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("failed loading report records: {e}"),
@@ -265,7 +258,6 @@ pub(crate) async fn handle_list_measurement_report(
             .map(|report| report.into())
             .collect(),
     };
-    txn.commit().await?;
     Ok(ListMeasurementReportResponse { reports })
 }
 

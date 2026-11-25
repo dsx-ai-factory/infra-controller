@@ -139,8 +139,8 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("Unable to associate NVLink Logical Partition to Site: %s. Site is not in Registered state", site.ID.String()))
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create NVLink Logical Partition, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
+		logger.Warn().Msgf("Unable to associate NVLink Logical Partition to Site: %s. Site is not in Registered state", site.ID)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create NVLink Logical Partition, Site: %s specified in request is not in Registered state", site.ID), nil)
 	}
 
 	// Determine if tenant has access to requested site
@@ -160,8 +160,8 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	}
 
 	if !siteConfig.NVLinkPartition {
-		logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID.String()))
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID.String()), nil)
+		logger.Warn().Msgf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID), nil)
 	}
 
 	// check for name uniqueness for the tenant, ie, tenant cannot have another NVLinkLogicalPartition with same name
@@ -356,7 +356,7 @@ func NewGetAllNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalC
 // @Param siteId query string true "ID of Site"
 // @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'" collectionFormat(multi)
 // @Param includeInterfaces query boolean false "Include NVLinkInterfaces in response"
 // @Param includeStats query boolean false "Include NVLinkLogicalPartitionStats in response"
 // @Param includeVpcs query boolean false "Include VPCs in response"
@@ -462,7 +462,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.NVLinkLogicalPartitionStatusMap[cdbm.NVLinkLogicalPartitionStatus(statusQuery)]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = append(statuses, statusQuery)
@@ -657,7 +657,7 @@ func NewGetNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of NVLinkLogicalPartition"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Param includeInterfaces query boolean false "Include NVLinkInterfaces in response"
 // @Param includeStats query boolean false "Include NVLinkLogicalPartitionStats in response"
 // @Success 200 {object} model.APINVLinkLogicalPartition

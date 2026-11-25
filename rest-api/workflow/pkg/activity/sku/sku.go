@@ -197,7 +197,7 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 
 				continue
 			}
-			deleted, derr := skuDAO.DeleteIfUnchanged(ctx, nil, sk.ID, sk.Updated)
+			deleted, derr := skuDAO.DeleteIfUnchanged(ctx, nil, sk.ID, sk.SiteID, sk.Updated)
 			if derr != nil {
 				logger.Error().Err(derr).Str("SkuID", sk.ID).Msg("failed to delete SKU from DB")
 				continue

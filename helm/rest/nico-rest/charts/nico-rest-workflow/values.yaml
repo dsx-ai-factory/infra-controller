@@ -15,6 +15,8 @@ cloudWorker:
   # these keys winning. Use it for OTEL_SERVICE_NAME when the cloud worker
   # needs its own service identity.
   extraEnv: {}
+  # -- Cloud worker resources. limits.memory also sets GOMEMLIMIT. Refer to
+  # the top-level extraEnv.
   resources:
     requests:
       memory: "128Mi"
@@ -29,24 +31,20 @@ siteWorker:
   # these keys winning. Use it for OTEL_SERVICE_NAME when the site worker
   # needs its own service identity.
   extraEnv: {}
-  ## The site worker's footprint scales with the size of the site it is
-  ## reconciling, which the original 128Mi/512Mi did not account for -- it was
-  ## sized before large-fleet testing. On a 4,500-host site the steady state is
-  ## roughly 165MiB with a 195MiB peak, so 512Mi leaves under 3x headroom on a
-  ## workload whose demand grows with the inventory.
-  ##
-  ## Raise the limit to 1Gi and the request to 256Mi. The request now sits above
-  ## observed steady state so scheduling reflects real usage, and the limit
-  ## gives ~5x headroom over the measured peak without reserving memory the
-  ## worker has never been shown to need. Deliberately modest: this is
-  ## headroom for a known growth trend, not a fix for a diagnosed leak.
+  # -- Site worker resources. limits.memory also sets GOMEMLIMIT. Refer to
+  # the top-level extraEnv. Site worker pods share the inventory of every
+  # site. On one simulated site of 1,112 racks (20,016 hosts) with a 3-minute
+  # inventory schedule, one pod with these limits finished every cycle.
+  # Memory should cover a recovery start: a pod that started with a whole
+  # cycle open peaked at about 1.4 to 1.7 GiB here. For sizing, refer to
+  # "Worker resources and sizing" in rest-api/deploy/INSTALLATION.md.
   resources:
     requests:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "1Gi"
-      cpu: "500m"
+      memory: "2Gi"
+      cpu: "2000m"
 
 secrets:
   temporalEncryptionKey: temporal-encryption-key
@@ -67,6 +65,13 @@ config:
     user: nico
     # -- Plain-text password. Ignored when secrets.dbCreds is set.
     password: nico
+  # -- Temporal worker tuning. The cloud worker and the site worker read the same config.
+  # worker:
+  #   # Concurrent activity task pollers, 1 to 20. Default 10.
+  #   maxConcurrentActivityPollers: 10
+  #   # Activities one worker pod executes at once, 1 to 1000. Default 128 on
+  #   # both workers.
+  #   maxConcurrentActivityExecutionSize: 128
   temporal:
     host: temporal-frontend.temporal
     port: 7233
@@ -108,5 +113,9 @@ config:
 
 # -- Extra container environment shared by both workers, name->value. Mainly
 # for OTEL_* variables; cloudWorker.extraEnv and siteWorker.extraEnv override
-# it per worker.
+# it per worker. The chart sets GOMEMLIMIT on each worker to 85 percent of its
+# resources.limits.memory, rounded down to whole MiB, only when that limit is a
+# whole number of Mi or Gi. A GOMEMLIMIT key here or in the worker's extraEnv
+# replaces it. Write that value as a quoted string, for example "1500MiB", or
+# "off" for no limit.
 extraEnv: {}

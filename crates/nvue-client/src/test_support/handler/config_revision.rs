@@ -676,8 +676,11 @@ mod tests {
         let handler = ConfigRevisionRollbackHandler::new(json!({}), 0, 0);
         let server =
             super::super::super::MockNvueServer::start(handler).expect("mock server should start");
-        let client =
-            crate::NvueClient::new(server.server_address()).expect("client should be created");
+        let client = crate::NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
         let revision_id = client
             .create_config_revision()
             .await

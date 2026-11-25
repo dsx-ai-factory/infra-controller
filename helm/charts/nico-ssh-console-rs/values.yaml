@@ -41,7 +41,8 @@ annotations:
 
 ## Soft open-file limit applied before startup. Clamped to the runtime hard
 ## limit when it exceeds it. null falls back to 65536; non-null values must be
-## a positive integer (validated at render).
+## a positive integer (validated at render). The BMC connection pool holds at
+## most a quarter of the resulting limit; see sshConsole.bmcPool.maxConnections.
 fileDescriptorLimit: 65536
 
 imagePullSecrets: []
@@ -117,6 +118,30 @@ sshConsole:
   opensshCertificateCaFingerprints: []
   ## Role that must appear in the certificate key_id `roles=` field.
   adminCertificateRole: ""
+  ## BMC connection pool. Each setting is written into the packaged config.toml
+  ## only when set; unset keeps the binary default noted below and leaves the
+  ## rendered file unchanged. Ignored when configFiles.config supplies a
+  ## complete config; set the matching TOML keys there instead.
+  bmcPool:
+    ## Upper bound on BMC connections held open at once: standing connections
+    ## kept for console logging plus connections opened on demand for console
+    ## sessions. Binary default 16384, which keeps a full pool within three
+    ## quarters of a 65536 fileDescriptorLimit at about three descriptors per
+    ## connection. At startup the binary lowers the bound to a quarter of its
+    ## open-file limit when this value, or the default, is larger, so raise it
+    ## only together with fileDescriptorLimit and the runtime hard limit.
+    ## Machines beyond the bound connect on demand.
+    ## TOML key: max_bmc_connections.
+    maxConnections: null
+    ## How long an on-demand connection stays open after its last console
+    ## session ends, for example "600s". Binary default 600s.
+    ## TOML key: on_demand_bmc_idle_timeout.
+    onDemandIdleTimeout: ""
+    ## BMC reachability probes that standing connections have in flight at
+    ## once. On-demand connections probe without waiting for a slot. Binary
+    ## default 512.
+    ## TOML key: max_concurrent_bmc_probes.
+    maxConcurrentProbes: null
 
 # Config files - can be overridden
 configFiles:

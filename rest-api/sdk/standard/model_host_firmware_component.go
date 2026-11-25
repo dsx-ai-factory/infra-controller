@@ -25,6 +25,8 @@ var _ MappedNullable = &HostFirmwareComponent{}
 // HostFirmwareComponent One component entry in a stored host firmware config response.
 type HostFirmwareComponent struct {
 	Type HostFirmwareComponentType `json:"type"`
+	// The drive model of a `Drive` component; null for every other type.
+	DriveModel NullableString `json:"driveModel"`
 	// Inventory regex Core uses to match reported versions for this component.
 	CurrentVersionDetectionRegEx *string `json:"currentVersionDetectionRegEx,omitempty"`
 	// Minimum firmware version required before BMC pre-ingestion can complete.
@@ -39,9 +41,10 @@ type _HostFirmwareComponent HostFirmwareComponent
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewHostFirmwareComponent(type_ HostFirmwareComponentType, firmware []HostFirmwareVersionConfig) *HostFirmwareComponent {
+func NewHostFirmwareComponent(type_ HostFirmwareComponentType, driveModel NullableString, firmware []HostFirmwareVersionConfig) *HostFirmwareComponent {
 	this := HostFirmwareComponent{}
 	this.Type = type_
+	this.DriveModel = driveModel
 	this.Firmware = firmware
 	return &this
 }
@@ -76,6 +79,32 @@ func (o *HostFirmwareComponent) GetTypeOk() (*HostFirmwareComponentType, bool) {
 // SetType sets field value
 func (o *HostFirmwareComponent) SetType(v HostFirmwareComponentType) {
 	o.Type = v
+}
+
+// GetDriveModel returns the DriveModel field value
+// If the value is explicit nil, the zero value for string will be returned
+func (o *HostFirmwareComponent) GetDriveModel() string {
+	if o == nil || o.DriveModel.Get() == nil {
+		var ret string
+		return ret
+	}
+
+	return *o.DriveModel.Get()
+}
+
+// GetDriveModelOk returns a tuple with the DriveModel field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *HostFirmwareComponent) GetDriveModelOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DriveModel.Get(), o.DriveModel.IsSet()
+}
+
+// SetDriveModel sets field value
+func (o *HostFirmwareComponent) SetDriveModel(v string) {
+	o.DriveModel.Set(&v)
 }
 
 // GetCurrentVersionDetectionRegEx returns the CurrentVersionDetectionRegEx field value if set, zero value otherwise.
@@ -177,6 +206,7 @@ func (o HostFirmwareComponent) MarshalJSON() ([]byte, error) {
 func (o HostFirmwareComponent) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["type"] = o.Type
+	toSerialize["driveModel"] = o.DriveModel.Get()
 	if !IsNil(o.CurrentVersionDetectionRegEx) {
 		toSerialize["currentVersionDetectionRegEx"] = o.CurrentVersionDetectionRegEx
 	}
@@ -193,6 +223,7 @@ func (o *HostFirmwareComponent) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"type",
+		"driveModel",
 		"firmware",
 	}
 
@@ -204,8 +235,12 @@ func (o *HostFirmwareComponent) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
+	nullableRequiredProperties := map[string]struct{}{
+		"driveModel": {},
+	}
 	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

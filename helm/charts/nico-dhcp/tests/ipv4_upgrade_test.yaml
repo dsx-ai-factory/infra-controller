@@ -1,6 +1,6 @@
 # Preserve the IPv4 pod template across DHCPv6 toggles and existing values formats.
 suite: DHCPv4 pod preservation
-templates: [deployment.yaml]
+templates: [deployment.yaml, configmap.yaml]
 chart:
   version: 1.0.0
 set:
@@ -14,6 +14,8 @@ tests:
           path: spec.template
           value:
             metadata:
+              annotations:
+                checksum/config: cec3296caac6c25c8792b601334699dbcbef72b0ccf72391e36cf55ad4bbcb59
               labels:
                 helm.sh/chart: nico-dhcp-1.0.0
                 app.kubernetes.io/managed-by: Helm
@@ -53,6 +55,7 @@ tests:
                   configMap:
                     defaultMode: 420
                     name: nico-dhcp-config
+        template: deployment.yaml
 
   # Older values may quote the port while Kubernetes still requires a number.
   - it: retains the IPv4 pod with a quoted metrics port

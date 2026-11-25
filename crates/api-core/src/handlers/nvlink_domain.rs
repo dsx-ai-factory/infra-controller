@@ -76,7 +76,7 @@ pub(crate) async fn get(
 ) -> Result<Response<forge::NvLinkDomain>, Status> {
     log_request_data(&request);
     let id = declaration_id(request.into_inner().id)?;
-    let domain = domains::find_by_ids(api.db_reader().as_mut(), &[id])
+    let domain = domains::find_by_ids(api.pg_pool(), &[id])
         .await
         .map_err(CarbideError::from)?
         .pop()
@@ -96,7 +96,7 @@ pub(crate) async fn find_ids(
     if let Some(id) = &group {
         rpc::model::expected_rack_group::validate_rack_group_id(id).map_err(CarbideError::from)?;
     }
-    let ids = domains::find_ids(api.db_reader().as_mut(), group.as_ref())
+    let ids = domains::find_ids(api.pg_pool(), group.as_ref())
         .await
         .map_err(CarbideError::from)?;
     Ok(Response::new(forge::NvLinkDomainIdList {
@@ -120,7 +120,7 @@ pub(crate) async fn find_by_ids(
         .into_iter()
         .map(|id| declaration_id(Some(id)))
         .collect::<Result<Vec<_>, _>>()?;
-    let domains = domains::find_by_ids(api.db_reader().as_mut(), &ids)
+    let domains = domains::find_by_ids(api.pg_pool(), &ids)
         .await
         .map_err(CarbideError::from)?;
     Ok(Response::new(forge::NvLinkDomainList {
@@ -139,10 +139,9 @@ pub(crate) async fn list_nv_link_domain_health_reports(
         .domain_id
         .ok_or_else(|| CarbideError::MissingArgument("domain_id"))?;
 
-    let health_reports =
-        db::nvlink_domain_health_report::find(api.db_reader().as_mut(), &domain_id)
-            .await?
-            .unwrap_or_default();
+    let health_reports = db::nvlink_domain_health_report::find(api.pg_pool(), &domain_id)
+        .await?
+        .unwrap_or_default();
 
     Ok(Response::new(list_response(health_reports)))
 }

@@ -158,6 +158,7 @@ func buildTargets(
 	for _, c := range info.Components {
 		target := mapOnType[c.Type]
 		target.Type = c.Type
+		target.TraceID = info.TraceID
 		if c.ComponentID == "" {
 			target.IdentifierType = common.IdentifierTypeMACAddress
 		} else if target.IdentifierType == common.IdentifierTypeLegacy {
@@ -315,6 +316,10 @@ func childWorkflowExecutionTimeout(
 	return mainBudget + actionBudget + 2*time.Minute
 }
 
+// componentOperationInfo supplies per-tray options to children without changing
+// the persisted request or the inputs of children already present in history.
+type componentOperationInfo map[devicetypes.ComponentType]any
+
 // executeGenericStageParallel executes all steps in a stage concurrently for any operation type.
 // Each component type in the stage runs as a child workflow (cross-type parallelism).
 // Within each type, components are batched according to the step's max_parallel setting.
@@ -327,6 +332,18 @@ func executeGenericStageParallel(
 	allTargets map[devicetypes.ComponentType]common.Target,
 	activityInfo any,
 ) error {
+	byType, perType := activityInfo.(componentOperationInfo)
+	if perType {
+		for _, step := range steps {
+			target := typeToTargets[step.ComponentType]
+			if target.Len() > 0 {
+				options, exists := byType[step.ComponentType]
+				if !exists || options == nil {
+					return fmt.Errorf("missing operation options for selected tray type %s", devicetypes.ComponentTypeToString(step.ComponentType))
+				}
+			}
+		}
+	}
 	batchingEnabled := componentActionBatchingEnabled(ctx)
 	progressEnabled := firmwareProgressReportingEnabled(ctx, steps)
 
@@ -370,12 +387,17 @@ func executeGenericStageParallel(
 		}
 		childCtx := workflow.WithChildOptions(ctx, childOptions)
 
+		stepInfo := activityInfo
+		if perType {
+			stepInfo = byType[step.ComponentType]
+		}
+
 		future := workflow.ExecuteChildWorkflow(
 			childCtx,
 			nameGenericComponentStepWorkflow,
 			childStep,
 			target,
-			activityInfo,
+			stepInfo,
 			allTargets,
 		)
 		futures = append(futures, childWorkflowEntry{

@@ -291,6 +291,7 @@ impl LabelValue for FirmwareComponentLabel {
             FirmwareComponentType::CombinedBmcUefi => "combined_bmc_uefi",
             FirmwareComponentType::Gpu => "gpu",
             FirmwareComponentType::Cx7 => "cx7",
+            FirmwareComponentType::Cx8 => "cx8",
             FirmwareComponentType::Drive { .. } => "drive",
             FirmwareComponentType::Unknown => "unknown",
         })
@@ -751,7 +752,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
     use carbide_utils::test_support::test_meter::TestMeter;
@@ -902,18 +902,18 @@ mod tests {
     /// ERROR for a failure or timeout.
     #[test]
     fn bfb_copy_finished_records_duration_and_owns_the_completion_line() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(BfbCopyFinished::Ok {
+            metrics.instrumentation().emit(BfbCopyFinished::Ok {
                 took: Duration::from_secs(90),
                 address: IpAddr::from([10, 0, 0, 5]),
             });
-            emit(BfbCopyFinished::Error {
+            metrics.instrumentation().emit(BfbCopyFinished::Error {
                 took: Duration::from_secs(30),
                 address: IpAddr::from([10, 0, 0, 6]),
                 error: "ssh connection reset".to_string(),
             });
-            emit(BfbCopyFinished::Timeout {
+            metrics.instrumentation().emit(BfbCopyFinished::Timeout {
                 took: Duration::from_secs(2100),
                 address: IpAddr::from([10, 0, 0, 7]),
                 error: "BFB copy timed out after 35 minutes".to_string(),
@@ -973,33 +973,35 @@ mod tests {
     }
 
     fn observe_firmware_upload(input: FirmwareUploadInput) -> FirmwareUploadObservation {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let bmc_ip_address = IpAddr::from([10, 0, 0, 5]);
         let method_label = input.method.label_value();
         let outcome_label = input.outcome.label_value();
         let logs = capture_logs(|| {
             let error = input.error.to_string();
-            emit(match (input.outcome, input.method) {
-                (Outcome::Ok, method) => FirmwareUploadFinished::Succeeded { method },
-                (Outcome::Error, FirmwareUploadMethod::SimpleUpdate) => {
-                    FirmwareUploadFinished::SimpleUpdateFailed {
-                        bmc_ip_address,
-                        error,
+            metrics
+                .instrumentation()
+                .emit(match (input.outcome, input.method) {
+                    (Outcome::Ok, method) => FirmwareUploadFinished::Succeeded { method },
+                    (Outcome::Error, FirmwareUploadMethod::SimpleUpdate) => {
+                        FirmwareUploadFinished::SimpleUpdateFailed {
+                            bmc_ip_address,
+                            error,
+                        }
                     }
-                }
-                (Outcome::Error, FirmwareUploadMethod::Multipart) => {
-                    FirmwareUploadFinished::MultipartFailed {
-                        bmc_ip_address,
-                        error,
+                    (Outcome::Error, FirmwareUploadMethod::Multipart) => {
+                        FirmwareUploadFinished::MultipartFailed {
+                            bmc_ip_address,
+                            error,
+                        }
                     }
-                }
-                (Outcome::Error, FirmwareUploadMethod::HttpPush) => {
-                    FirmwareUploadFinished::HttpPushFailed {
-                        bmc_ip_address,
-                        error,
+                    (Outcome::Error, FirmwareUploadMethod::HttpPush) => {
+                        FirmwareUploadFinished::HttpPushFailed {
+                            bmc_ip_address,
+                            error,
+                        }
                     }
-                }
-            });
+                });
         })
         .into_iter()
         .map(|log| {
@@ -1145,15 +1147,19 @@ mod tests {
     /// multipart failure series stays a count of real multipart failures.
     #[test]
     fn a_declined_multipart_route_does_not_count_as_an_upload_failure() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(MultipartFirmwareUploadUnsupported {
-                bmc_ip_address: IpAddr::from([10, 0, 0, 6]),
-                error: "multipart is unsupported".to_string(),
-            });
-            emit(FirmwareUploadFinished::Succeeded {
-                method: FirmwareUploadMethod::HttpPush,
-            });
+            metrics
+                .instrumentation()
+                .emit(MultipartFirmwareUploadUnsupported {
+                    bmc_ip_address: IpAddr::from([10, 0, 0, 6]),
+                    error: "multipart is unsupported".to_string(),
+                });
+            metrics
+                .instrumentation()
+                .emit(FirmwareUploadFinished::Succeeded {
+                    method: FirmwareUploadMethod::HttpPush,
+                });
         });
 
         assert_eq!(logs.len(), 1, "only the declined route logs: {logs:?}");
@@ -1190,19 +1196,23 @@ mod tests {
     /// `address` and `error` as diagnostic context.
     #[test]
     fn firmware_upgrade_task_failures_own_the_warn_line() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(FirmwareUpgradeTaskFinished::Ok {
-                firmware: FirmwareComponentLabel(FirmwareComponentType::Bmc),
-                final_state: UpgradeTaskFinalState::Completed,
-            });
-            emit(FirmwareUpgradeTaskFinished::Error {
-                firmware: FirmwareComponentLabel(FirmwareComponentType::Uefi),
-                final_state: UpgradeTaskFinalState::Exception,
+            metrics
+                .instrumentation()
+                .emit(FirmwareUpgradeTaskFinished::Ok {
+                    firmware: FirmwareComponentLabel(FirmwareComponentType::Bmc),
+                    final_state: UpgradeTaskFinalState::Completed,
+                });
+            metrics
+                .instrumentation()
+                .emit(FirmwareUpgradeTaskFinished::Error {
+                    firmware: FirmwareComponentLabel(FirmwareComponentType::Uefi),
+                    final_state: UpgradeTaskFinalState::Exception,
 
-                address: IpAddr::from([10, 0, 0, 6]),
-                error: "flash verification failed".to_string(),
-            });
+                    address: IpAddr::from([10, 0, 0, 6]),
+                    error: "flash verification failed".to_string(),
+                });
         });
 
         assert_eq!(logs.len(), 1, "only the failure logs: {logs:?}");
@@ -1589,8 +1599,8 @@ mod tests {
     /// HELP text or adding log-only context to the Prometheus label set.
     #[test]
     fn power_control_counter_exposition_stays_stable() {
-        let metrics = MetricsCapture::start();
-        emit(PowerControlFinished {
+        let metrics = MetricsCapture::owned();
+        metrics.instrumentation().emit(PowerControlFinished {
             operation: PowerOperation::ForceOff,
             outcome: Outcome::Ok,
             bmc_ip_address: IpAddr::from([10, 0, 0, 5]),

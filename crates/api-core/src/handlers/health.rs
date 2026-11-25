@@ -31,23 +31,18 @@ pub(crate) async fn list_machine_health_reports(
     api: &Api,
     machine_id: Request<MachineId>,
 ) -> Result<Response<rpc::ListHealthReportResponse>, Status> {
-    let mut txn = api.txn_begin().await?;
-
     let machine_id: MachineId = convert_and_log_machine_id(Some(&machine_id.into_inner()))?;
 
-    let machine = db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default())
+    let machine = db::machine::find_one(api.pg_pool(), &machine_id, MachineSearchConfig::default())
         .await?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
 
-    txn.commit().await?;
-
     Ok(Response::new(rpc::ListHealthReportResponse {
         health_report_entries: machine
             .health_reports
-            .clone()
             .into_iter()
             .map(|o| HealthReportEntry {
                 report: Some(o.0.into()),
@@ -203,10 +198,8 @@ where
         .transpose()
         .map_err(|_| CarbideError::InvalidArgument("invalid end_time timestamp".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
-
     let results =
-        db::health_history::find_by_object_ids(&mut txn, table_id, &ids, start_time, end_time)
+        db::health_history::find_by_object_ids(api.pg_pool(), table_id, &ids, start_time, end_time)
             .await?;
 
     let mut response = rpc::HealthHistories::default();
@@ -218,8 +211,6 @@ where
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(Response::new(response))
 }

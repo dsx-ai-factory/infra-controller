@@ -419,7 +419,7 @@ pub(crate) async fn admin_network(
         routing_profile: admin_vpc_routing_profile,
     } = options;
 
-    let admin_segments = db::network_segment::admin(txn).await?;
+    let admin_segments = db::network_segment::admin(&mut *txn).await?;
     let admin_segment_ids = admin_segments
         .iter()
         .map(|s| s.id)
@@ -715,7 +715,7 @@ pub(crate) async fn resolve_vpc_network_config(
         .map(|vpc_prefix| vpc_prefix.config.prefix.to_string())
         .collect::<Vec<_>>();
     vpc_prefixes.extend(
-        db::network_prefix::find_by_vpc(txn, vpc_id)
+        db::network_prefix::find_by_vpc(&mut *txn, vpc_id)
             .await?
             .into_iter()
             .map(|segment_prefix| segment_prefix.prefix.to_string()),
@@ -736,7 +736,7 @@ pub(crate) async fn resolve_vpc_network_config(
                     .capabilities()
                     .peers_with
                     .to_vec();
-                db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
+                db::vpc_peering::get_active_vpc_peer_vnis(&mut *txn, vpc_id, allowed_peer_types)
                     .await?
                     .into_iter()
                     .map(|(id, _)| id)
@@ -838,7 +838,7 @@ pub(crate) async fn resolve_vpc_network_security_group(
     )
     .await?
     .pop()
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "NetworkSecurityGroup",
         id: network_security_group_id.to_string(),
     })?;

@@ -374,39 +374,37 @@ mod tests {
         );
     }
 
-    // The derivation is a deterministic hash: the same fingerprint and type
-    // produce the same ID string, and the string fields differing on type/source
-    // change the rendered prefix.
+    // The derivation is a deterministic hash: the same fingerprint and type produce the same ID.
     #[test]
     fn from_hardware_info_with_type_is_deterministic() {
         value_scenarios!(
             run = |(left, right)| {
                 let left = from_hardware_info_with_type(&left, MachineType::Host).unwrap();
                 let right = from_hardware_info_with_type(&right, MachineType::Host).unwrap();
-                left.to_string() == right.to_string()
+                left == right
             };
-            "same TPM cert and type yields the same id string" {
+            "same TPM cert and type yields the same ID" {
                 (
                     info_for_id(Some(vec![1, 2, 3]), None),
                     info_for_id(Some(vec![1, 2, 3]), None),
                 ) => true,
             }
 
-            "different TPM certs yield different id strings" {
+            "different TPM certs yield different IDs" {
                 (
                     info_for_id(Some(vec![1, 2, 3]), None),
                     info_for_id(Some(vec![4, 5, 6]), None),
                 ) => false,
             }
 
-            "different serials yield different id strings" {
+            "different serials yield different IDs" {
                 (
                     info_for_id(None, Some(("p1", "b1", "c1"))),
                     info_for_id(None, Some(("p2", "b1", "c1"))),
                 ) => false,
             }
 
-            "same serials yield the same id string" {
+            "same serials yield the same ID" {
                 (
                     info_for_id(None, Some(("p1", "b1", "c1"))),
                     info_for_id(None, Some(("p1", "b1", "c1"))),

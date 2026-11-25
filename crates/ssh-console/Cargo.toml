@@ -66,7 +66,7 @@ russh = { workspace = true }
 http = { workspace = true }
 tonic = { workspace = true, features = ["default"] }
 ringbuf = { workspace = true }
-nix = { features = ["process", "term", "fs"], workspace = true }
+nix = { features = ["process", "term", "fs", "resource"], workspace = true }
 libc = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }

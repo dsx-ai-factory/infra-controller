@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/inventory"
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/jsonx"
 )
 
 func is(t *testing.T, got, want any, what string) {
@@ -29,7 +30,7 @@ const profileID = "GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF"
 // rackIntent is a rack declaring its own group, with the profile nico-api derives from that group.
 func rackIntent(id string) inventory.RackIntent {
 	return inventory.RackIntent{RackID: id, RackProfileID: profileID, Group: inventory.RackGroup{RackGroupID: "g-" + id, Topology: "gb200_nvl72r1_c2g4",
-		Protocol: "NVLINK_V5", Members: []inventory.Member{{Type: "Compute", Manufacturer: "WIWYNN", ID: id + "-c1"}, {Type: "Switch", Manufacturer: "NVIDIA", ID: id + "-s1"}}}}
+		Protocol: "NVLINK_V5", Members: []inventory.Member{{CartridgeIndex: 0, Type: "Compute", Manufacturer: "WIWYNN", ID: id + "-c1"}, {CartridgeIndex: 1, Type: "Switch", Manufacturer: "NVIDIA", ID: id + "-s1"}}}}
 }
 
 func inv(racks []inventory.RackIntent, devices ...inventory.Device) *inventory.SiteInventory {
@@ -97,7 +98,7 @@ func TestRecordsConvertTheServedInventory(t *testing.T) {
 	group := func(id string) *corev1.ExpectedRackGroup {
 		return &corev1.ExpectedRackGroup{RackGroupId: &corev1.RackGroupId{Id: "g-" + id}, Topology: "gb200_nvl72r1_c2g4", Protocol: "NVLINK_V5",
 			Racks: []*corev1.ExpectedRackGroupRack{{RackId: &corev1.RackId{Id: id}, Members: []*corev1.ExpectedRackGroupMember{
-				{Type: "Compute", Manufacturer: "WIWYNN", Id: id + "-c1"}, {Type: "Switch", Manufacturer: "NVIDIA", Id: id + "-s1"}}}}}
+				{CartridgeIndex: proto.Uint32(0), Type: "Compute", Manufacturer: "WIWYNN", Id: id + "-c1"}, {CartridgeIndex: proto.Uint32(1), Type: "Switch", Manufacturer: "NVIDIA", Id: id + "-s1"}}}}}
 	}
 	rack := func(id string) *corev1.ExpectedRack {
 		return &corev1.ExpectedRack{RackId: &corev1.RackId{Id: id}, RackProfileId: &corev1.RackProfileId{Id: profileID}}
@@ -293,5 +294,22 @@ func TestRackProfileIsTheOneNicoAPIDerives(t *testing.T) {
 			got = err.Error()
 		}
 		is(t, got, tc.want, tc.topology+" "+tc.protocol+" "+tc.members)
+	}
+}
+
+func TestRecordsPreserveCartridgeIndices(t *testing.T) {
+	for _, index := range []uint32{0, 7, ^uint32(0)} {
+		t.Run(fmt.Sprint(index), func(t *testing.T) {
+			var member inventory.Member
+			raw := fmt.Sprintf(`{"cartridgeIndex":%d,"type":"Compute","manufacturer":"NVIDIA","id":"member"}`, index)
+			if err := jsonx.Decode([]byte(raw), &member); err != nil {
+				t.Fatal(err)
+			}
+			rack := inventory.RackIntent{Group: inventory.RackGroup{Members: []inventory.Member{member}}}
+			got := rackGroup(&rack).Racks[0].Members[0].CartridgeIndex
+			if got == nil || *got != index {
+				t.Fatalf("member cartridgeIndex %d lost: %v", index, got)
+			}
+		})
 	}
 }

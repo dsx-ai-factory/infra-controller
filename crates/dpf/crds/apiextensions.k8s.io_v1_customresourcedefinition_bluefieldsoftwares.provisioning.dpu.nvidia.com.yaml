@@ -52,9 +52,9 @@ spec:
             properties:
               nicFw:
                 description: |-
-                  NicFw points to the NIC firmware binary used for E/W NIC firmware updates.
-                  Use this when a specific NIC firmware binary is required and is not included in the
-                  platform PLDM firmware bundle.
+                  NicFw points to the NIC firmware binary used for E/W NIC firmware
+                  updates. Use this when a specific NIC firmware binary is required and
+                  is not included in the platform PLDM firmware bundle.
                   In production, prefer using PlatformPldmFwBundle.
                 minLength: 1
                 type: string
@@ -65,17 +65,18 @@ spec:
                 type: string
               platformPldmFwBundle:
                 description: |-
-                  PlatformPldmFwBundle points to the platform PLDM firmware bundle used for E/W NIC
-                  firmware updates.
+                  PlatformPldmFwBundle points to the platform PLDM firmware bundle used
+                  for E/W NIC firmware updates.
                 minLength: 1
                 type: string
               pldmFwBundle:
                 additionalProperties:
                   type: string
                 description: |-
-                  PldmFwBundle maps each PSID to the PLDM firmware bundle URL used for that DPU model's
-                  baseline firmware updates. Each PSID's bundle is a complete PLDM package for that device.
-                  Keys are matched case-insensitively against the BMC-reported DPUDevice status PSID.
+                  PldmFwBundle maps each PSID to the PLDM firmware bundle URL used for
+                  that DPU model's baseline firmware updates. Each PSID's bundle is a
+                  complete PLDM package for that device. Keys are matched
+                  case-insensitively against the BMC-reported DPUDevice status PSID.
                 minProperties: 1
                 type: object
                 x-kubernetes-validations:
@@ -97,8 +98,9 @@ spec:
             description: BlueFieldSoftwareStatus defines the observed state of BlueFieldSoftware
             properties:
               conditions:
-                description: Conditions represent the latest available observations
-                  of BlueFieldSoftware state
+                description: |-
+                  Conditions represent the latest available observations of
+                  BlueFieldSoftware state
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -155,32 +157,37 @@ spec:
                   type: object
                 type: array
               downloadedComponents:
-                description: DownloadedComponents tracks which components have been
-                  successfully downloaded
+                description: |-
+                  DownloadedComponents tracks which components have been successfully
+                  downloaded
                 properties:
                   nicFw:
                     description: |-
-                      NicFw is the local path of the E/W NIC firmware binary, either downloaded from
-                      spec.nicFw or unpacked from the platform PLDM firmware bundle.
+                      NicFw is the local path of the E/W NIC firmware binary, either
+                      downloaded from spec.nicFw or unpacked from the platform PLDM firmware
+                      bundle.
                     type: string
                   osIso:
                     description: OsIso is the local path of the downloaded OS ISO.
                     type: string
                   platformPldmFwBundle:
-                    description: PlatformPldmFwBundle is the local path of the downloaded
-                      platform PLDM firmware bundle.
+                    description: |-
+                      PlatformPldmFwBundle is the local path of the downloaded platform PLDM
+                      firmware bundle.
                     type: string
                   pldmFwBundle:
                     additionalProperties:
                       type: string
                     description: |-
-                      PldmFwBundle maps each PSID to the local path of its downloaded PLDM firmware bundle.
-                      Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                      PldmFwBundle maps each PSID to the local path of its downloaded PLDM
+                      firmware bundle. Keys are matched case-insensitively against the
+                      BMC-reported DPUDevice PSID.
                     type: object
                 type: object
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the
+                  last time it was patched.
                 format: int64
                 type: integer
               phase:
@@ -199,17 +206,20 @@ spec:
                 properties:
                   bluefieldSoftwareVersions:
                     additionalProperties:
-                      description: BluefieldDeviceVersions holds firmware versions
-                        extracted from a single PSID's PLDM bundle.
+                      description: |-
+                        BluefieldDeviceVersions holds firmware versions extracted from a single
+                        PSID's PLDM bundle.
                       properties:
                         bfNicFwVersion:
-                          description: BFNicFwVersion is the BlueField NIC firmware
-                            version shipped in the bundle.
+                          description: |-
+                            BFNicFwVersion is the BlueField NIC firmware version shipped in the
+                            bundle.
                           minLength: 1
                           type: string
                         bmcErotVersion:
-                          description: BMCErotVersion is the BMC ERoT (External Root
-                            of Trust) firmware version shipped in the bundle.
+                          description: |-
+                            BMCErotVersion is the BMC ERoT (External Root of Trust) firmware
+                            version shipped in the bundle.
                           minLength: 1
                           type: string
                         bmcVersion:
@@ -224,8 +234,9 @@ spec:
                           type: string
                       type: object
                     description: |-
-                      BluefieldSoftwareVersions maps each PSID to the firmware versions from that device's
-                      PLDM bundle. Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                      BluefieldSoftwareVersions maps each PSID to the firmware versions from
+                      that device's PLDM bundle. Keys are matched case-insensitively against
+                      the BMC-reported DPUDevice PSID.
                     type: object
                   doca:
                     description: DOCA is the formatted, user-facing DOCA version derived
@@ -233,12 +244,14 @@ spec:
                     type: string
                   ewNicFwVersion:
                     description: |-
-                      EWNicFwVersion is the E/W NIC firmware version taken from the platform PLDM bundle.
-                      It is not keyed by PSID because a BlueFieldSoftware carries a single platform bundle.
+                      EWNicFwVersion is the E/W NIC firmware version taken from the platform
+                      PLDM bundle. It is not keyed by PSID because a BlueFieldSoftware
+                      carries a single platform bundle.
                     type: string
                   osISOVersion:
-                    description: OSISOVersion is the raw DOCA version for the OS ISO,
-                      taken from the ISO filename
+                    description: |-
+                      OSISOVersion is the raw DOCA version for the OS ISO, taken from the ISO
+                      filename
                     type: string
                 type: object
             type: object

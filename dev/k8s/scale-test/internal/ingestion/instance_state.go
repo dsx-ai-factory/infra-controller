@@ -472,6 +472,7 @@ func hostSignature(s *instanceSnapshot, id string) string {
 
 // Evidence is bounded on disk, synced before another dispatch, and hashed.
 type instanceEvidence struct {
+	limit int
 	file  *os.File
 	path  string
 	bytes int
@@ -479,7 +480,7 @@ type instanceEvidence struct {
 	hash  string
 }
 
-func openEvidence(dir, runID string) (*instanceEvidence, error) {
+func openEvidence(dir, runID string, limit int) (*instanceEvidence, error) {
 	path := filepath.Join(dir, runID+".transitions.jsonl")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
@@ -495,14 +496,14 @@ func openEvidence(dir, runID string) (*instanceEvidence, error) {
 		_ = f.Close()
 		return nil, e
 	}
-	return &instanceEvidence{file: f, path: path}, nil
+	return &instanceEvidence{file: f, path: path, limit: limit}, nil
 }
 func (e *instanceEvidence) append(v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	if e.bytes+len(b)+1 > 256<<20 {
+	if e.bytes+len(b)+1 > e.limit {
 		return errors.New("transition evidence quota exhausted")
 	}
 	b = append(b, '\n')
@@ -611,15 +612,29 @@ func (d instanceDetail) outcome(v result.Verdict, err error) result.Outcome {
 	return result.Found(v, reasons, b)
 }
 
+// Keep the instance journey's stricter start-age and duration contract.
 func sourceMeta(meta probeapi.SweepInfo, family probeapi.Family, epoch, interval float64) error {
+	if err := completedSourceMeta(meta, family, epoch, interval); err != nil {
+		return err
+	}
+	if !meta.SweepStart.Before(meta.ReadAt.Time) || time.Since(meta.SweepStart.Time).Seconds() > 2*interval {
+		return instanceIssue("source epoch, cadence, latest attempt or sweep bounds changed")
+	}
+	return nil
+}
+
+func completedSourceMeta(meta probeapi.SweepInfo, family probeapi.Family, epoch, interval float64) error {
 	if meta.SweepIntervalSeconds != interval {
 		return instanceIssue(fmt.Sprintf("probe %s cadence is %g seconds but runner.observation.intervalSeconds is %g", family, meta.SweepIntervalSeconds, interval))
 	}
 	prefix, _, ok := strings.Cut(meta.SnapshotID, "-")
 	process, err := strconv.ParseUint(prefix, 10, 64)
 	gap := epoch - float64(process)/1000
-	if !ok || err != nil || !(gap >= -0.000001 && gap < .001001) || meta.LastAttemptSucceeded == nil || !*meta.LastAttemptSucceeded || meta.Family != family || !meta.SweepStart.Before(meta.ReadAt.Time) || meta.ReadAt.After(time.Now()) || time.Since(meta.SweepStart.Time) < 0 || time.Since(meta.SweepStart.Time).Seconds() > 2*interval || meta.ReadAt.Sub(meta.SweepStart.Time).Seconds() > .75*interval {
+	if !ok || err != nil || !(gap >= -0.000001 && gap < .001001) || meta.LastAttemptSucceeded == nil || !*meta.LastAttemptSucceeded || meta.Family != family || meta.ReadAt.Before(meta.SweepStart.Time) || meta.ReadAt.After(time.Now()) || time.Since(meta.ReadAt.Time).Seconds() > 2*interval {
 		return instanceIssue("source epoch, cadence, latest attempt or sweep bounds changed")
+	}
+	if meta.ReadAt.Sub(meta.SweepStart.Time).Seconds() > .75*interval {
+		return errFirmwareSweepDuration
 	}
 	return nil
 }

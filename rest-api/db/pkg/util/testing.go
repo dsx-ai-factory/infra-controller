@@ -65,7 +65,7 @@ func getTestDBParams() TestDBConfig {
 func GetTestIpamDB(t *testing.T) cipam.Storage {
 	tdbcfg := getTestDBParams()
 
-	ipamDB, err := cipam.NewPostgresStorage(tdbcfg.Host, fmt.Sprintf("%d", tdbcfg.Port), tdbcfg.User, tdbcfg.Password, tdbcfg.Name, cipam.SSLModeDisable)
+	ipamDB, err := cipam.NewPostgresStorage(tdbcfg.Host, strconv.Itoa(tdbcfg.Port), tdbcfg.User, tdbcfg.Password, tdbcfg.Name, cipam.SSLModeDisable)
 	if err != nil {
 		t.Fatal(err)
 	}

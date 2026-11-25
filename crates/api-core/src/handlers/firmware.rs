@@ -20,11 +20,12 @@ use std::collections::{HashMap, HashSet};
 use ::rpc::model::firmware::firmware_component_type_from_rpc;
 use ::rpc::{Timestamp, forge as rpc};
 use carbide_firmware::FirmwareConfigSnapshot;
+use carbide_machine_controller::has_packaged_scout_script;
 use chrono::TimeZone;
 use itertools::Itertools;
 use model::firmware::{
     DesiredFirmwareVersions, FirmwareComponent, FirmwareComponentType, FirmwareEntry,
-    FirmwareFileArtifact, HostFirmwareConfig,
+    FirmwareFileArtifact, HostFirmwareConfig, ScoutConfig,
 };
 use regex::Regex;
 use tonic::{Request, Response, Status};
@@ -111,9 +112,10 @@ pub(crate) async fn list_host_firmware(
                         r#type: component.to_string(),
                         inventory_name_regex: component_info
                             .current_version_reported_as
-                            .clone()
-                            .map(|x| x.as_str().to_string())
-                            .unwrap_or("UNSPECIFIED".to_string()),
+                            .as_ref()
+                            .map(|x| x.as_str())
+                            .unwrap_or("UNSPECIFIED")
+                            .to_string(),
                         version: firmware.version,
                         needs_explicit_start: entry.explicit_start_needed,
                     });
@@ -183,7 +185,11 @@ pub(crate) async fn upsert_host_firmware_config(
     let existing = db::host_firmware_config::get(&mut txn, &vendor, &model)
         .await?
         .map(|row| row.into_config());
+    let sent_versions = patch.sent_versions();
     let firmware = merge_host_firmware_config_patch(existing, patch)?;
+    validate_scout_installs(&firmware, &sent_versions, |component_type| {
+        has_packaged_scout_script(firmware.vendor, &firmware.model, component_type)
+    })?;
     let row = db::host_firmware_config::upsert(&mut txn, &firmware).await?;
 
     txn.commit().await?;
@@ -221,6 +227,11 @@ fn format_upsert_host_firmware_config_request_redacted(
                 if !artifact.url.is_empty() {
                     artifact.url = "[REDACTED]".to_string();
                 }
+            }
+            if let Some(script) = &mut firmware.upgrade_script
+                && !script.url.is_empty()
+            {
+                script.url = "[REDACTED]".to_string();
             }
         }
     }
@@ -269,23 +280,50 @@ impl FirmwareEntryPatch {
 }
 
 impl HostFirmwareConfigPatch {
+    /// The component and version of every firmware version this patch sends.
+    fn sent_versions(&self) -> HashSet<(FirmwareComponentType, String)> {
+        self.components
+            .iter()
+            .flat_map(|(&component_type, component)| {
+                component
+                    .known_firmware
+                    .iter()
+                    .map(move |firmware| (component_type, firmware.entry.version.clone()))
+            })
+            .collect()
+    }
+
     fn from_request(request: &rpc::UpsertHostFirmwareConfigRequest) -> Result<Self, CarbideError> {
         let vendor = parse_vendor(&request.vendor)?;
         let model = parse_host_firmware_config_model(&request.model)?;
 
-        let ordering = request
-            .ordering
-            .iter()
-            .map(|component| {
-                firmware_component_type_from_rpc(*component).map_err(CarbideError::from)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Clients without component_ordering send the type-only ordering.
+        #[allow(deprecated)]
+        let ordering = if request.component_ordering.is_empty() {
+            request
+                .ordering
+                .iter()
+                .map(|&component_type| firmware_component_type_from_rpc(component_type, None))
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            request
+                .component_ordering
+                .iter()
+                .map(|entry| {
+                    firmware_component_type_from_rpc(entry.r#type, entry.drive_model.as_deref())
+                })
+                .collect::<Result<Vec<_>, _>>()
+        }
+        .map_err(CarbideError::from)?;
 
         let mut seen_components = HashSet::new();
         let mut components = HashMap::new();
         for component in &request.components {
-            let component_type =
-                firmware_component_type_from_rpc(component.r#type).map_err(CarbideError::from)?;
+            let component_type = firmware_component_type_from_rpc(
+                component.r#type,
+                component.drive_model.as_deref(),
+            )
+            .map_err(CarbideError::from)?;
             if !seen_components.insert(component_type) {
                 return Err(CarbideError::InvalidArgument(format!(
                     "duplicate firmware component type {component_type}"
@@ -478,6 +516,66 @@ fn validate_host_firmware_config(firmware: &HostFirmwareConfig) -> Result<(), Ca
     Ok(())
 }
 
+// A version installs through Scout when it names an upgrade_script or NICo's
+// image packages a script for its vendor, model and component; a drive never
+// installs any other way, since a BMC upload would bypass Scout. Scout refuses
+// an artifact whose SHA-256 does not match, so each artifact of a Scout version
+// needs one, and a drive version with no Scout script could never install.
+//
+// Only the versions this request sends are checked, after merging, so a stored
+// version the request leaves alone never blocks it, while re-sending a version
+// without its script or hashes is caught.
+fn validate_scout_installs(
+    firmware: &HostFirmwareConfig,
+    sent_versions: &HashSet<(FirmwareComponentType, String)>,
+    has_packaged_script: impl Fn(FirmwareComponentType) -> eyre::Result<bool>,
+) -> Result<(), CarbideError> {
+    let mut packaged = HashMap::new();
+    let mut packaged_script = |component_type: FirmwareComponentType| {
+        if let Some(&known) = packaged.get(&component_type) {
+            return Ok(known);
+        }
+        let found = has_packaged_script(component_type).map_err(|error| {
+            CarbideError::internal(format!(
+                "cannot check the packaged scout script for {component_type}: {error:#}"
+            ))
+        })?;
+        packaged.insert(component_type, found);
+        Ok::<_, CarbideError>(found)
+    };
+
+    for (&component_type, component) in &firmware.components {
+        let is_drive = matches!(component_type, FirmwareComponentType::Drive { .. });
+        for entry in &component.known_firmware {
+            if !sent_versions.contains(&(component_type, entry.version.clone())) {
+                continue;
+            }
+            let names_script = entry
+                .scout
+                .as_ref()
+                .and_then(ScoutConfig::script_url)
+                .is_some();
+            let missing_sha256 = entry.files.iter().any(|file| file.sha256.is_empty());
+            // The packaged script is looked up only when its answer matters.
+            let scout_script_confirmed =
+                names_script || ((is_drive || missing_sha256) && packaged_script(component_type)?);
+            if is_drive && !scout_script_confirmed {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "component {component_type} firmware version {} needs an upgrade_script: NICo has no packaged scout script for {} {} {component_type}, and drives are never upgraded through the BMC",
+                    entry.version, firmware.vendor, firmware.model,
+                )));
+            }
+            if scout_script_confirmed && missing_sha256 {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "component {component_type} firmware version {} installs through scout, which verifies every artifact, so each artifact needs a sha256",
+                    entry.version,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_host_firmware_config_model(model: &str) -> Result<String, CarbideError> {
     let model = model.trim();
     if model.is_empty() {
@@ -510,6 +608,17 @@ fn component_regex(
     model: &str,
     component_type: FirmwareComponentType,
 ) -> Result<Regex, CarbideError> {
+    // Site explorer names each drive's inventory entry
+    // Drive_<Redfish Drive.Model>_<Drive Id> on every platform.
+    if let FirmwareComponentType::Drive { model: drive_model } = component_type {
+        return Regex::new(&format!("^Drive_{}_", regex::escape(drive_model.as_str()))).map_err(
+            |error| {
+                CarbideError::InvalidArgument(format!(
+                    "invalid current_version_reported_as for {vendor} {model} {component_type}: {error}"
+                ))
+            },
+        );
+    }
     if let Some(regex) = catalog_component_regex(vendor, model, component_type) {
         return Regex::new(regex).map_err(|error| {
             CarbideError::InvalidArgument(format!(
@@ -550,8 +659,8 @@ fn catalog_component_regex(
             }
 
             match component_type {
-                FirmwareComponentType::Bmc => Some("^BMC-Primary"),
-                FirmwareComponentType::Uefi => Some("^UEFI"),
+                FirmwareComponentType::Bmc => Some("^BMC-Primary$"),
+                FirmwareComponentType::Uefi => Some("^UEFI$"),
                 _ => None,
             }
         }
@@ -654,6 +763,24 @@ fn firmware_entry_patches_from_version_configs(
             });
         }
 
+        let scout = version
+            .upgrade_script
+            .as_ref()
+            .map(|script| {
+                ScoutConfig::with_script_url(
+                    &script.url,
+                    &script.sha256,
+                    script.execution_timeout_seconds,
+                    script.artifact_download_timeout_seconds,
+                )
+                .map_err(|error| {
+                    CarbideError::InvalidArgument(format!(
+                        "upgrade_script for firmware version {version_string}: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+
         entries.push(FirmwareEntryPatch {
             entry: FirmwareEntry {
                 version: version_string.to_string(),
@@ -662,6 +789,7 @@ fn firmware_entry_patches_from_version_configs(
                 power_drains_needed: version.power_drains_needed,
                 pre_update_resets: version.pre_update_resets,
                 files,
+                scout,
                 ..Default::default()
             },
             preingestion_exclusive_config: version.preingestion_exclusive_config,
@@ -691,6 +819,12 @@ fn parse_preingest_upgrade_when_below(
     component_type: FirmwareComponentType,
     value: Option<&str>,
 ) -> Result<Option<String>, CarbideError> {
+    // Pre-ingestion upgrades only through the BMC, which drives never use.
+    if value.is_some() && matches!(component_type, FirmwareComponentType::Drive { .. }) {
+        return Err(CarbideError::InvalidArgument(format!(
+            "preingest_upgrade_when_below is not supported for drive component {component_type}"
+        )));
+    }
     value
         .map(str::trim)
         .map(|value| {
@@ -732,6 +866,11 @@ fn host_firmware_config_response(
     let created_at = row.created_at;
     let updated_at = row.updated_at;
     let config = row.into_config();
+    let component_ordering: Vec<_> = config
+        .ordering
+        .into_iter()
+        .map(rpc::HostFirmwareComponentRef::from)
+        .collect();
 
     rpc::HostFirmwareConfigResponse {
         vendor: config.vendor.to_pascalcase(),
@@ -739,9 +878,14 @@ fn host_firmware_config_response(
         components: config
             .components
             .into_iter()
-            .map(
-                |(component_type, component)| rpc::HostFirmwareComponentConfigResponse {
-                    r#type: rpc::HostFirmwareComponentType::from(component_type) as i32,
+            .map(|(component_type, component)| {
+                let rpc::HostFirmwareComponentRef {
+                    r#type,
+                    drive_model,
+                } = component_type.into();
+                rpc::HostFirmwareComponentConfigResponse {
+                    r#type,
+                    drive_model,
                     current_version_reported_as: component
                         .current_version_reported_as
                         .map(|regex| regex.as_str().to_string()),
@@ -751,15 +895,17 @@ fn host_firmware_config_response(
                         .map(host_firmware_version_config_response)
                         .collect(),
                     preingest_upgrade_when_below: component.preingest_upgrade_when_below,
-                },
-            )
+                }
+            })
             .collect(),
         explicit_start_needed: config.explicit_start_needed.unwrap_or(false),
-        ordering: config
-            .ordering
-            .into_iter()
-            .map(|component_type| rpc::HostFirmwareComponentType::from(component_type) as i32)
+        #[allow(deprecated)]
+        ordering: component_ordering
+            .iter()
+            .filter(|entry| entry.drive_model.is_none())
+            .map(|entry| entry.r#type)
             .collect(),
+        component_ordering,
         created_at: Some(Timestamp::from(created_at)),
         updated_at: Some(Timestamp::from(updated_at)),
     }
@@ -787,13 +933,23 @@ fn host_firmware_version_config_response(
         power_drains_needed: firmware.power_drains_needed,
         pre_update_resets: firmware.pre_update_resets,
         preingestion_exclusive_config: Some(firmware.preingestion_exclusive_config),
+        upgrade_script: firmware.scout.as_ref().and_then(|scout| {
+            scout
+                .script_url()
+                .map(|(url, sha256)| rpc::HostFirmwareUpgradeScript {
+                    url: url.to_string(),
+                    sha256: sha256.to_string(),
+                    execution_timeout_seconds: scout.execution_timeout_seconds,
+                    artifact_download_timeout_seconds: scout.artifact_download_timeout_seconds,
+                })
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
 
@@ -829,7 +985,7 @@ mod tests {
             FirmwareComponentType::Bmc,
         )
         .unwrap();
-        assert_eq!(lenovo_ami_regex.as_str(), "^BMC-Primary");
+        assert_eq!(lenovo_ami_regex.as_str(), "^BMC-Primary$");
 
         let gb300_regex = component_regex(
             bmc_vendor::BMCVendor::LenovoAMI,
@@ -840,6 +996,48 @@ mod tests {
         assert!(gb300_regex.is_match("BMC"));
         assert!(!gb300_regex.is_match("BMC-Primary"));
         assert!(!gb300_regex.is_match("HGX_BMC_0"));
+    }
+
+    #[test]
+    fn component_regex_lenovo_matches_active_inventory_only() {
+        for vendor in [
+            bmc_vendor::BMCVendor::Lenovo,
+            bmc_vendor::BMCVendor::LenovoAMI,
+        ] {
+            value_scenarios!(run = |(component, id)| {
+                component_regex(vendor, "ThinkSystem SR650 V4", component)
+                    .unwrap()
+                    .is_match(id)
+            };
+                "active inventory" {
+                    (FirmwareComponentType::Bmc, "BMC-Primary") => true,
+                    (FirmwareComponentType::Uefi, "UEFI") => true,
+                }
+                "pending inventory" {
+                    (FirmwareComponentType::Bmc, "BMC-Primary-Pending") => false,
+                    (FirmwareComponentType::Uefi, "UEFI-Pending") => false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn component_regex_matches_drive_inventory_of_any_platform() {
+        let drive_regex = component_regex(
+            bmc_vendor::BMCVendor::Dell,
+            "PowerEdge R760",
+            FirmwareComponentType::Drive {
+                model: model::firmware::DriveModel::new("Dell Ent NVMe CM6 RI 1.92TB").unwrap(),
+            },
+        )
+        .unwrap();
+        // The model's `.` is literal, so another model differing there is not matched.
+        assert_eq!(
+            drive_regex.as_str(),
+            r"^Drive_Dell Ent NVMe CM6 RI 1\.92TB_"
+        );
+        assert!(drive_regex.is_match("Drive_Dell Ent NVMe CM6 RI 1.92TB_Disk.Bay.0"));
+        assert!(!drive_regex.is_match("Drive_Dell Ent NVMe CM6 RI 1x92TB_Disk.Bay.0"));
     }
 
     #[test]
@@ -895,6 +1093,87 @@ mod tests {
             parse_preingest_upgrade_when_below(FirmwareComponentType::Bmc, None).unwrap(),
             None
         );
+
+        // Pre-ingestion uploads through the BMC, which drives never use.
+        let drive = FirmwareComponentType::Drive {
+            model: model::firmware::DriveModel::new("ST24000NM005H").unwrap(),
+        };
+        assert!(parse_preingest_upgrade_when_below(drive, Some("ET07")).is_err());
+        assert_eq!(
+            parse_preingest_upgrade_when_below(drive, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn validate_scout_installs_needs_scripts_for_drives_and_hashes_for_scout() {
+        let drive = FirmwareComponentType::Drive {
+            model: model::firmware::DriveModel::new("ST24000NM005H").unwrap(),
+        };
+        // (component, version names an upgrade_script, artifact has a sha256,
+        // packaged script lookup (None: the lookup fails), request sends the
+        // version)
+        scenarios!(
+            run = |(component_type, names_script, with_sha256, packaged, sent): (
+                FirmwareComponentType,
+                bool,
+                bool,
+                Option<bool>,
+                bool,
+            )| {
+                let mut entry = test_entry("1.0.0", true, "https://firmware.example.invalid/fw.bin");
+                if with_sha256 {
+                    entry.files[0].sha256 =
+                        "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456".to_string();
+                }
+                if names_script {
+                    entry.scout = Some(
+                        ScoutConfig::with_script_url(
+                            "https://scripts.example.invalid/upgrade.sh",
+                            "c60b4c1c2d46f7b9e50d7d2e2d77dbfbe7884030b0e9a86a4636b4bc85d8609e",
+                            3600,
+                            600,
+                        )
+                        .unwrap(),
+                    );
+                }
+                let firmware = test_firmware(HashMap::from([(
+                    component_type,
+                    test_component("^any$", vec![entry]),
+                )]));
+                let sent_versions = if sent {
+                    HashSet::from([(component_type, "1.0.0".to_string())])
+                } else {
+                    HashSet::new()
+                };
+                validate_scout_installs(&firmware, &sent_versions, |_| {
+                    packaged.ok_or_else(|| eyre::eyre!("unreadable metadata.toml"))
+                })
+                .map_err(|error| Status::from(error).code())
+            };
+            "a drive version with a Scout script and artifact hashes" {
+                (drive, true, true, Some(false), true) => Yields(()),
+                (drive, false, true, Some(true), true) => Yields(()),
+            }
+            "a drive version Scout cannot install" {
+                (drive, false, true, Some(false), true) => FailsWith(tonic::Code::InvalidArgument),
+                (drive, true, false, Some(false), true) => FailsWith(tonic::Code::InvalidArgument),
+                (drive, false, true, None, true) => FailsWith(tonic::Code::Internal),
+            }
+            "another component installs through Scout only with a script" {
+                // Not via Scout, so the artifact hash stays optional.
+                (FirmwareComponentType::Cx7, false, false, Some(false), true) => Yields(()),
+                (FirmwareComponentType::Cx7, false, false, Some(true), true) =>
+                    FailsWith(tonic::Code::InvalidArgument),
+                (FirmwareComponentType::Cx7, true, false, Some(false), true) =>
+                    FailsWith(tonic::Code::InvalidArgument),
+                // Nothing depends on the packaged script, so it is not looked up.
+                (FirmwareComponentType::Cx7, false, true, None, true) => Yields(()),
+            }
+            "a stored version the request does not send" {
+                (drive, false, false, Some(false), false) => Yields(()),
+            }
+        );
     }
 
     #[test]
@@ -938,11 +1217,22 @@ mod tests {
                     power_drains_needed: None,
                     pre_update_resets: false,
                     preingestion_exclusive_config: None,
+                    upgrade_script: Some(rpc::HostFirmwareUpgradeScript {
+                        url: "https://scripts.example.invalid/up.sh?token=script-secret"
+                            .to_string(),
+                        sha256: "checksum-present".to_string(),
+                        execution_timeout_seconds: 60,
+                        artifact_download_timeout_seconds: 60,
+                    }),
                 }],
                 preingest_upgrade_when_below: Some("1.0.0".to_string()),
+                drive_model: None,
             }],
             explicit_start_needed: Some(true),
-            ordering: vec![rpc::HostFirmwareComponentType::Bmc as i32],
+            component_ordering: vec![rpc::HostFirmwareComponentRef::from(
+                FirmwareComponentType::Bmc,
+            )],
+            ..Default::default()
         };
 
         let logged = format_upsert_host_firmware_config_request_redacted(&request);
@@ -950,6 +1240,8 @@ mod tests {
         assert!(logged.contains("[REDACTED]"));
         assert!(!logged.contains("firmware.example.invalid"));
         assert!(!logged.contains("token=secret"));
+        assert!(!logged.contains("scripts.example.invalid"));
+        assert!(!logged.contains("script-secret"));
         assert!(logged.contains("PowerEdge R760"));
         assert!(logged.contains("1.0.0"));
     }
@@ -970,10 +1262,34 @@ mod tests {
                 power_drains_needed: Some(1),
                 pre_update_resets: true,
                 preingestion_exclusive_config: Some(true),
+                upgrade_script: Some(test_upgrade_script(
+                    "https://scripts.example.invalid/cx7/upgrade.sh",
+                )),
             }],
         )
         .unwrap();
 
+        let scout = entries[0].entry.scout.as_ref().expect("scout config");
+        assert_eq!(
+            scout.script_url(),
+            Some((
+                "https://scripts.example.invalid/cx7/upgrade.sh",
+                // Stored as lowercase hex, as Scout compares it.
+                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            ))
+        );
+        assert_eq!(scout.execution_timeout_seconds, 600);
+        assert_eq!(scout.artifact_download_timeout_seconds, 300);
+        assert_eq!(
+            host_firmware_version_config_response(entries[0].entry.clone()).upgrade_script,
+            Some(rpc::HostFirmwareUpgradeScript {
+                url: "https://scripts.example.invalid/cx7/upgrade.sh".to_string(),
+                sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    .to_string(),
+                execution_timeout_seconds: 600,
+                artifact_download_timeout_seconds: 300,
+            })
+        );
         assert_eq!(entries[0].preingestion_exclusive_config, Some(true));
         let entry = &entries[0].entry;
         assert_eq!(entry.filename, None);
@@ -988,6 +1304,79 @@ mod tests {
         assert!(entry.install_only_specified);
         assert_eq!(entry.power_drains_needed, Some(1));
         assert!(entry.pre_update_resets);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn patch_ordering_from_request() {
+        let component_ref = |r#type: rpc::HostFirmwareComponentType, drive_model: Option<&str>| {
+            rpc::HostFirmwareComponentRef {
+                r#type: r#type as i32,
+                drive_model: drive_model.map(str::to_string),
+            }
+        };
+        let drive_type = FirmwareComponentType::Drive {
+            model: model::firmware::DriveModel::new("ST24000NM005H").unwrap(),
+        };
+        scenarios!(
+            run = |(legacy_ordering, component_ordering): (
+                Vec<rpc::HostFirmwareComponentType>,
+                Vec<rpc::HostFirmwareComponentRef>,
+            )| {
+                let request = rpc::UpsertHostFirmwareConfigRequest {
+                    vendor: "Lenovo".to_string(),
+                    model: "ThinkSystem HS350X V3".to_string(),
+                    ordering: legacy_ordering.into_iter().map(|t| t as i32).collect(),
+                    component_ordering,
+                    ..Default::default()
+                };
+                HostFirmwareConfigPatch::from_request(&request)
+                    .map(|patch| patch.ordering)
+                    .map_err(drop)
+            };
+            "components in order, drives by model" {
+                (vec![], vec![
+                    component_ref(rpc::HostFirmwareComponentType::Uefi, None),
+                    component_ref(rpc::HostFirmwareComponentType::Drive, Some("ST24000NM005H")),
+                ]) => Yields(vec![FirmwareComponentType::Uefi, drive_type]),
+            }
+            "a drive without its model" {
+                (vec![], vec![component_ref(rpc::HostFirmwareComponentType::Drive, None)]) => Fails,
+            }
+            "type-only ordering from a client without component_ordering" {
+                (
+                    vec![rpc::HostFirmwareComponentType::Cx7, rpc::HostFirmwareComponentType::Bmc],
+                    vec![],
+                ) => Yields(vec![FirmwareComponentType::Cx7, FirmwareComponentType::Bmc]),
+            }
+            "component_ordering wins over the type-only ordering" {
+                (
+                    vec![rpc::HostFirmwareComponentType::Bmc],
+                    vec![component_ref(rpc::HostFirmwareComponentType::Uefi, None)],
+                ) => Yields(vec![FirmwareComponentType::Uefi]),
+            }
+        );
+    }
+
+    #[test]
+    fn firmware_entries_reject_invalid_upgrade_scripts() {
+        scenarios!(
+            run = |url: &str| {
+                let mut version = test_version_config("1.0.0", true);
+                version.upgrade_script = Some(test_upgrade_script(url));
+                firmware_entry_patches_from_version_configs(FirmwareComponentType::Cx7, &[version])
+                    .map(drop)
+                    .map_err(drop)
+            };
+            "a script Scout can download" {
+                "https://scripts.example.invalid/upgrade.sh" => Yields(()),
+            }
+            // https, sha256 and timeout rules are ScoutConfig's, tested in
+            // api-model; the API adds only the required URL.
+            "a script without a URL" {
+                "" => Fails,
+            }
+        );
     }
 
     #[test]
@@ -1454,6 +1843,16 @@ mod tests {
             power_drains_needed: None,
             pre_update_resets: false,
             preingestion_exclusive_config: None,
+            upgrade_script: None,
+        }
+    }
+
+    fn test_upgrade_script(url: &str) -> rpc::HostFirmwareUpgradeScript {
+        rpc::HostFirmwareUpgradeScript {
+            url: url.to_string(),
+            sha256: "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            execution_timeout_seconds: 600,
+            artifact_download_timeout_seconds: 300,
         }
     }
 

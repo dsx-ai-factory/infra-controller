@@ -66,15 +66,13 @@ pub(crate) async fn get_expected_rack_group(
 ) -> Result<Response<rpc::ExpectedRackGroup>, Status> {
     let rack_group_id = RackGroupId::new(request.into_inner().rack_group_id);
     validate_rack_group_id(&rack_group_id).map_err(CarbideError::from)?;
-    let mut txn = api.txn_begin().await?;
-    let group = db_expected_rack_group::find_by_rack_group_id(&mut txn, &rack_group_id)
+    let group = db_expected_rack_group::find_by_rack_group_id(api.pg_pool(), &rack_group_id)
         .await
         .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "expected_rack_group",
             id: rack_group_id.to_string(),
         })?;
-    txn.commit().await?;
     Ok(Response::new(group.into()))
 }
 
@@ -82,10 +80,7 @@ pub(crate) async fn get_all_expected_rack_groups(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
-    let mut txn = api.txn_begin().await?;
-    let groups = db_expected_rack_group::find_all(&mut txn).await?;
-    txn.rollback_or_log("read-only load of all expected rack groups")
-        .await;
+    let groups = db_expected_rack_group::find_all(api.pg_pool()).await?;
     Ok(Response::new(rpc::ExpectedRackGroupList {
         expected_rack_groups: groups.into_iter().map(Into::into).collect(),
     }))
@@ -95,10 +90,7 @@ pub(crate) async fn find_ids(
     api: &Api,
     _request: Request<rpc::ExpectedRackGroupSearchFilter>,
 ) -> Result<Response<rpc::ExpectedRackGroupIdList>, Status> {
-    let mut txn = api.txn_begin().await?;
-    let rack_group_ids = db_expected_rack_group::find_ids(&mut txn).await?;
-    txn.rollback_or_log("read-only expected rack group IDs")
-        .await;
+    let rack_group_ids = db_expected_rack_group::find_ids(api.pg_pool()).await?;
     Ok(Response::new(rpc::ExpectedRackGroupIdList {
         rack_group_ids,
     }))
@@ -118,12 +110,9 @@ pub(crate) async fn find_by_ids(
     for id in &ids {
         validate_rack_group_id(id).map_err(CarbideError::from)?;
     }
-    let mut txn = api.txn_begin().await?;
-    let groups = db_expected_rack_group::find_by_ids(&mut txn, &ids)
+    let groups = db_expected_rack_group::find_by_ids(api.pg_pool(), &ids)
         .await
         .map_err(CarbideError::from)?;
-    txn.rollback_or_log("read-only load of expected rack groups by id")
-        .await;
     Ok(Response::new(rpc::ExpectedRackGroupList {
         expected_rack_groups: groups.into_iter().map(Into::into).collect(),
     }))

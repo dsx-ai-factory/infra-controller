@@ -36,7 +36,7 @@ use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
 };
-use sqlx::{FromRow, PgConnection, PgTransaction, query_as};
+use sqlx::{FromRow, PgConnection, query_as};
 
 use super::{ObjectColumnFilter, network_segment, vpc};
 use crate::db_read::DbReader;
@@ -89,7 +89,7 @@ pub async fn find_all_by_address(
 /// A dual-stack segment has one row per address family, so this lookup is not
 /// a zero-or-one relationship.
 pub async fn find_all_by_instance_id_and_segment_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     instance_id: &InstanceId,
     segment_id: &NetworkSegmentId,
 ) -> Result<Vec<InstanceAddress>, DatabaseError> {
@@ -103,7 +103,7 @@ pub async fn find_all_by_instance_id_and_segment_id(
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(instance_id)
         .bind(segment_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -303,7 +303,7 @@ fn validate(
 /// boolean used while draining a segment: it also checks machine interfaces
 /// and current or pending instance network configurations.
 pub async fn count_by_segment_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_id: &NetworkSegmentId,
 ) -> Result<usize, DatabaseError> {
     // NOTE(chet): Previously this query used an INNER JOIN with
@@ -315,7 +315,7 @@ pub async fn count_by_segment_id(
     let query = "SELECT count(*) FROM instance_addresses WHERE segment_id = $1::uuid";
     let (address_count,): (i64,) = query_as(query)
         .bind(segment_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(address_count.max(0) as usize)
@@ -337,7 +337,7 @@ pub async fn count_by_segment_id(
 /// individual scopes are narrower than this predicate; together they cover the
 /// same three reference sources.
 pub async fn segment_has_allocations(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_id: &NetworkSegmentId,
 ) -> Result<bool, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new(
@@ -362,7 +362,7 @@ pub async fn segment_has_allocations(
 
     builder
         .build_query_scalar()
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
@@ -461,8 +461,12 @@ pub async fn insert_service_address(
     Ok(address)
 }
 
-/// Tries to allocate IP addresses for a tenant network configuration
-/// Returns the updated configuration which includes allocated addresses
+/// Allocates addresses for a workload network configuration and returns its assigned resources.
+///
+/// New interfaces require Tenant or HostInband segments; other types return
+/// `InvalidArgument` after existing segment and VPC validation. Existing infrastructure
+/// bindings with addresses or SLAAC prefixes can remain during other interface edits.
+/// Callers must copy reused resources from matching persisted interfaces.
 pub async fn allocate(
     txn: &mut PgConnection,
     instance_id: InstanceId,
@@ -575,6 +579,20 @@ pub async fn allocate(
             }
         };
 
+        // Admin and Underlay segments serve infrastructure, while Tenant and
+        // HostInband serve workloads. Retained SLAAC bindings have only prefixes:
+        // `copy_existing_resources` copies them from matching stored interfaces,
+        // so keep those bindings while operators edit other interfaces.
+        if !segment.config.segment_type.is_tenant() {
+            if !iface.interface_prefixes.is_empty() {
+                continue;
+            }
+            return Err(DatabaseError::InvalidArgument(format!(
+                "network segment {} has type {:?} and cannot be used for instance workload allocation",
+                segment.id, segment.config.segment_type,
+            )));
+        }
+
         if segment.prefixes.is_empty() {
             tracing::error!(
                 network_segment_id = %segment.id,
@@ -647,11 +665,10 @@ pub async fn allocate(
                 .flat_map(|p| p.svi_ip.iter().copied())
                 .collect();
 
-            let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-                Box::new(UsedOverlayNetworkIpResolver {
-                    segment_id: segment.id,
-                    busy_ips,
-                });
+            let dhcp_handler = UsedOverlayNetworkIpResolver {
+                segment_id: segment.id,
+                busy_ips,
+            };
 
             // TODO(chet): FNN will need to override prefix_length (e.g. /30
             // for IPv4, /126 for IPv6) via InstanceInterfaceConfig. For now,
@@ -722,10 +739,7 @@ pub struct UsedOverlayNetworkIpResolver {
 }
 
 #[async_trait::async_trait]
-impl<DB> UsedIpResolver<DB> for UsedOverlayNetworkIpResolver
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+impl UsedIpResolver for UsedOverlayNetworkIpResolver {
     // DEPRECATED
     // With the introduction of `used_prefixes()` this is no
     // longer an accurate approach for finding all allocated
@@ -739,7 +753,7 @@ where
     // target the `address` column of the `instance_addresses`
     // table, in which a single /32 is stored (although, as an
     // `inet`, it could techincally also have a prefix length).
-    async fn used_ips(&self, txn: &mut DB) -> Result<Vec<IpAddr>, DatabaseError> {
+    async fn used_ips(&self, conn: impl DbReader<'_>) -> Result<Vec<IpAddr>, DatabaseError> {
         // IpAddrContainer is a small private struct used
         // for binding the result of the subsequent SQL
         // query, so we can implement FromRow and return
@@ -756,7 +770,7 @@ WHERE network_segments.id = $1::uuid";
 
         let containers: Vec<IpAddrContainer> = sqlx::query_as(query)
             .bind(self.segment_id)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -766,7 +780,10 @@ WHERE network_segments.id = $1::uuid";
     }
 
     // Keep allocated CIDRs intact and add caller reservations as host prefixes.
-    async fn used_prefixes(&self, txn: &mut DB) -> Result<Vec<IpNetwork>, DatabaseError> {
+    async fn used_prefixes(
+        &self,
+        conn: impl DbReader<'_>,
+    ) -> Result<Vec<IpNetwork>, DatabaseError> {
         // IpNetworkContainer is a small private struct used
         // for binding the result of the subsequent SQL
         // query, so we can implement FromRow and return
@@ -783,7 +800,7 @@ WHERE network_segments.id = $1::uuid";
 
         let containers: Vec<IpNetworkContainer> = sqlx::query_as(query)
             .bind(self.segment_id)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -937,16 +954,15 @@ impl AssignIpsFrom<OverlayAddressAllocation> for InstanceInterfaceConfig {
 }
 
 pub async fn allocate_svi_ip(
-    // Note: This is a PgTransaction, not a PgConnection, because we will be doing table locking,
+    // Note: This is a crate::Transaction, not a PgConnection, because we will be doing table locking,
     // which must happen in a transaction.
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<(NetworkPrefixId, IpAddr)> {
-    let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-        Box::new(UsedOverlayNetworkIpResolver {
-            segment_id: segment.id,
-            busy_ips: vec![],
-        });
+    let dhcp_handler = UsedOverlayNetworkIpResolver {
+        segment_id: segment.id,
+        busy_ips: vec![],
+    };
 
     // If either requested addresses are auto-generated, we lock the entire table.
     lock_table_for_allocation(txn.as_mut()).await?;
@@ -983,6 +999,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Verifies service addresses use offset one for both supported link families so activation
     /// and guarded cleanup derive the same `instance_addresses.address` from `link_prefix`.
@@ -1141,7 +1158,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn used_prefixes_include_busy_ips_as_host_prefixes(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) = seed_fk_fixtures(txn.as_mut(), "busy-ips").await;
         let resolver = UsedOverlayNetworkIpResolver {
             segment_id,
@@ -1305,7 +1322,7 @@ mod tests {
             vec![(NetworkSegmentId::new(), "10.88.0.20".parse().unwrap()); BIND_LIMIT / 2 + 1];
 
         let ((), query_count) = count_queries(async {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             delete_addresses_for_instance(txn.as_mut(), InstanceId::new(), &addresses)
                 .await
                 .unwrap();
@@ -1337,7 +1354,7 @@ mod tests {
         // without an executed statement, adding nothing to the count) and
         // returns it, so the persisted-count check and the rollback happen
         // outside the counted region.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) = seed_fk_fixtures(txn.as_mut(), "batch-count").await;
         txn.commit().await.unwrap();
         let rows = make_rows(instance_id, segment_id, vpc_id, K);
@@ -1345,7 +1362,7 @@ mod tests {
         // --- BEFORE: unbatched loop ---
         let (before_count, before_persisted) = {
             let (mut txn, before_count) = count_queries(async {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 insert_one_at_a_time(txn.as_mut(), &rows).await.unwrap();
                 txn
             })
@@ -1366,7 +1383,7 @@ mod tests {
         // --- AFTER: batched helper ---
         let (after_count, after_persisted) = {
             let (mut txn, after_count) = count_queries(async {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 insert_instance_addresses(txn.as_mut(), &rows)
                     .await
                     .unwrap();
@@ -1418,7 +1435,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn insert_instance_addresses_persists_all_rows(pool: sqlx::PgPool) {
         const K: usize = 4;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) =
             seed_fk_fixtures(txn.as_mut(), "persisted-rows").await;
         let rows = make_rows(instance_id, segment_id, vpc_id, K);
@@ -1465,7 +1482,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn insert_instance_addresses_empty_is_noop(pool: sqlx::PgPool) {
         let ((), count) = count_queries(async {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             insert_instance_addresses(txn.as_mut(), &[]).await.unwrap();
         })
         .await;
@@ -1477,7 +1494,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut api_connection = pool.acquire().await?;
-        let mut txn = api_connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut api_connection).await?;
         let (instance_id, segment_id, vpc_id) =
             seed_fk_fixtures(txn.as_mut(), "explicit-columns").await;
         let rows = [
@@ -1506,7 +1523,7 @@ mod tests {
         assert!(api_connection.cached_statements_size() > 0);
 
         // Keep the prepared readers alive while an unrelated column is added.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE instance_addresses ADD COLUMN test_added_column text;",
@@ -1525,7 +1542,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let first = &expected[0];
         let by_instance = find_all_by_instance_id_and_segment_id(
-            connection,
+            &mut *connection,
             &first.instance_id,
             &first.segment_id,
         )
@@ -1564,11 +1581,12 @@ mod segment_has_allocations_tests {
     };
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Seeds a Ready segment plus one machine interface bound to it, so both the
     /// old count path and the new EXISTS path see an allocation.
     async fn seed_segment_with_interface(pool: &sqlx::PgPool) -> NetworkSegmentId {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let segment_id: NetworkSegmentId = uuid::Uuid::new_v4().into();
         network_segment::persist(
             NewNetworkSegment {
@@ -1602,7 +1620,7 @@ mod segment_has_allocations_tests {
              VALUES ($1, '02:00:00:00:00:01'::macaddr, true, 'drain-test-host')",
         )
         .bind(segment_id)
-        .execute(txn.deref_mut())
+        .execute(txn.as_mut())
         .await
         .expect("seed machine interface");
 
@@ -1621,7 +1639,7 @@ mod segment_has_allocations_tests {
         let seg = segment_id;
         let pool_ref = &pool;
         let ((), old_queries) = count_queries(async {
-            let mut txn = pool_ref.begin().await.unwrap();
+            let mut txn = pool_ref.txn_begin().await.unwrap();
             let mi = crate::machine_interface::count_by_segment_id(&mut txn, &seg)
                 .await
                 .unwrap();
@@ -1633,7 +1651,7 @@ mod segment_has_allocations_tests {
 
         // New path: a single EXISTS-OR-EXISTS query.
         let (has, new_queries) = count_queries(async {
-            let mut txn = pool_ref.begin().await.unwrap();
+            let mut txn = pool_ref.txn_begin().await.unwrap();
             segment_has_allocations(&mut txn, &seg).await.unwrap()
         })
         .await;
@@ -1647,7 +1665,7 @@ mod segment_has_allocations_tests {
     /// in the same one round trip as a populated segment.
     #[crate::sqlx_test]
     async fn segment_has_allocations_false_when_empty(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let segment_id: NetworkSegmentId = uuid::Uuid::new_v4().into();
         network_segment::persist(
             NewNetworkSegment {
@@ -1687,26 +1705,26 @@ mod segment_has_allocations_tests {
     /// allocation case.
     #[crate::sqlx_test]
     async fn segment_has_allocations_sees_instance_addresses(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let segment_id: NetworkSegmentId = uuid::Uuid::new_v4().into();
 
         let machine_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
-            .execute(txn.deref_mut())
+            .execute(txn.as_mut())
             .await
             .expect("seed machine");
         let instance_id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO instances (id, machine_id) VALUES (gen_random_uuid(), $1) RETURNING id",
         )
         .bind(machine_id)
-        .fetch_one(txn.deref_mut())
+        .fetch_one(txn.as_mut())
         .await
         .expect("seed instance");
         let vpc_id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO vpcs (name, version) VALUES ('drain-test-vpc', 'v1') RETURNING id",
         )
-        .fetch_one(txn.deref_mut())
+        .fetch_one(txn.as_mut())
         .await
         .expect("seed vpc");
         sqlx::query(
@@ -1716,7 +1734,7 @@ mod segment_has_allocations_tests {
         .bind(instance_id)
         .bind(segment_id)
         .bind(vpc_id)
-        .execute(txn.deref_mut())
+        .execute(txn.as_mut())
         .await
         .expect("seed instance address");
 

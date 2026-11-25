@@ -99,6 +99,14 @@ impl TryFrom<rpc::InstanceConfig> for InstanceConfig {
                 .map_err(|e: NetworkSecurityGroupIdParseError| {
                     RpcDataConversionError::InvalidNetworkSecurityGroupId(e.value())
                 })?,
+            dhcp_option_set_id: config
+                .dhcp_option_set_id
+                .filter(|id| !id.is_empty())
+                .map(|id| {
+                    id.parse()
+                        .map_err(|_| RpcDataConversionError::InvalidUuid("DhcpOptionSetId", id))
+                })
+                .transpose()?,
             extension_services,
             nvlink,
             spxconfig,
@@ -154,6 +162,7 @@ impl TryFrom<InstanceConfig> for rpc::InstanceConfig {
             network: Some(network),
             infiniband,
             network_security_group_id: config.network_security_group_id.map(|i| i.to_string()),
+            dhcp_option_set_id: config.dhcp_option_set_id.map(|i| i.to_string()),
             dpu_extension_services: extension_services,
             nvlink,
             spxconfig,
@@ -217,6 +226,7 @@ mod tests {
             network: InstanceNetworkConfig::default(),
             infiniband: InstanceInfinibandConfig::default(),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             extension_services: InstanceExtensionServicesConfig::default(),
             nvlink: InstanceNvLinkConfig::default(),
             spxconfig: InstanceSpxConfig::default(),

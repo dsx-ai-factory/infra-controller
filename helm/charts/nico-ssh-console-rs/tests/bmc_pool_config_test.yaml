@@ -1,0 +1,89 @@
+suite: ssh-console BMC connection pool configuration
+templates:
+  - templates/configmap.yaml
+release:
+  name: test-nico
+  namespace: nico-system
+tests:
+  - it: leaves the packaged config unchanged by default
+    documentIndex: 0
+    asserts:
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'max_bmc_connections'
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'on_demand_bmc_idle_timeout'
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'max_concurrent_bmc_probes'
+
+  - it: writes every pool setting that is set ahead of the packaged config
+    set:
+      sshConsole:
+        bmcPool:
+          maxConnections: 40000
+          onDemandIdleTimeout: 900s
+          maxConcurrentProbes: 1024
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'max_bmc_connections = 40000'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'on_demand_bmc_idle_timeout = "900s"'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'max_concurrent_bmc_probes = 1024'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'listen_address = "\*:22"'
+
+  - it: sets each independently
+    set:
+      sshConsole:
+        bmcPool:
+          maxConnections: 8192
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'max_bmc_connections = 8192'
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'on_demand_bmc_idle_timeout'
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'max_concurrent_bmc_probes'
+
+  - it: rejects a connection bound that is not a positive integer
+    set:
+      sshConsole:
+        bmcPool:
+          maxConnections: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: 'sshConsole.bmcPool.maxConnections must be a positive integer'
+
+  - it: rejects a probe bound that is not a positive integer
+    set:
+      sshConsole:
+        bmcPool:
+          maxConcurrentProbes: -1
+    asserts:
+      - failedTemplate:
+          errorPattern: 'sshConsole.bmcPool.maxConcurrentProbes must be a positive integer'
+
+  - it: leaves a fully supplied config untouched
+    set:
+      configFiles.config: |
+        listen_address = "0.0.0.0:22"
+      sshConsole:
+        bmcPool:
+          maxConnections: 8192
+    documentIndex: 0
+    asserts:
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'max_bmc_connections'

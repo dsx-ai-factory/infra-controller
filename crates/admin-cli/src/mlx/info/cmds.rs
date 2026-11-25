@@ -18,6 +18,8 @@
 // info/cmds.rs
 // Command handlers for info operations.
 
+use std::fmt::Write;
+
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use libmlx::device::report::MlxDeviceReport;
 use prettytable::{Cell, Row, Table};
@@ -157,14 +159,14 @@ fn identity_report_table(report: &mlx_device_pb::MlxDeviceIdentityReport) -> Tab
         let managed_dpu = match device.managed_dpu_machine_ids.as_slice() {
             [] => "Unknown".to_string(),
             [machine_id] => machine_id.to_string(),
-            machine_ids => format!(
-                "Conflicting:\n{}",
-                machine_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
+            machine_ids => {
+                let mut output = "Conflicting:".to_string();
+                for machine_id in machine_ids {
+                    output.push('\n');
+                    write!(output, "{machine_id}").expect("writing to a String cannot fail");
+                }
+                output
+            }
         };
         table.add_row(Row::new(vec![
             Cell::new(info.map(|info| info.pci_name.as_str()).unwrap_or_default()),
@@ -196,12 +198,12 @@ fn print_devices_table(devices: &[MlxDeviceInfo]) {
     // Add device rows.
     for device in devices {
         table.add_row(Row::new(vec![
-            Cell::new(&device.pci_name_pretty()),
-            Cell::new(&device.base_mac_pretty()),
-            Cell::new(&device.psid_pretty()),
-            Cell::new(&device.device_type_pretty()),
-            Cell::new(&device.part_number_pretty()),
-            Cell::new(&device.fw_version_current_pretty()),
+            Cell::new(&device.pci_name),
+            Cell::new(&device.get_field_value_ref("base_mac")),
+            Cell::new(&device.get_field_value_ref("psid")),
+            Cell::new(&device.device_type),
+            Cell::new(&device.get_field_value_ref("part_number")),
+            Cell::new(&device.get_field_value_ref("fw_version_current")),
         ]));
     }
 
@@ -217,7 +219,7 @@ fn print_device_details_table(device: &MlxDeviceInfo) {
 
     // Add all device fields.
     for field_name in MlxDeviceInfo::get_all_fields() {
-        let value = device.get_field_value(field_name);
+        let value = device.get_field_value_ref(field_name);
         let wrapped_value = wrap_text(&value, 60);
 
         table.add_row(Row::new(vec![

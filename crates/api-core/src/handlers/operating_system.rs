@@ -315,7 +315,7 @@ pub(crate) async fn get_operating_system(
 ) -> Result<Response<rpc::OperatingSystem>, Status> {
     let id = Uuid::from(request.into_inner());
 
-    let row = db::operating_system::get(&mut api.db_reader(), id)
+    let row = db::operating_system::get(api.pg_pool(), id)
         .await
         .map_err(|e| {
             if e.is_not_found() {
@@ -507,11 +507,9 @@ pub(crate) async fn find_operating_system_ids(
 ) -> Result<Response<rpc::OperatingSystemIdList>, Status> {
     let filter = request.into_inner();
 
-    let ids = db::operating_system::list_ids(
-        &mut api.db_reader(),
-        filter.tenant_organization_id.as_deref(),
-    )
-    .await?;
+    let ids =
+        db::operating_system::list_ids(api.pg_pool(), filter.tenant_organization_id.as_deref())
+            .await?;
 
     let ids = ids.into_iter().map(OperatingSystemId::from).collect();
 
@@ -529,7 +527,7 @@ pub(crate) async fn get_operating_system_cachable_ipxe_script_artifacts(
         .ok_or_else(|| Status::invalid_argument("id is required"))?;
     let id = Uuid::from(id_proto);
 
-    let row = db::operating_system::get(&mut api.db_reader(), id)
+    let row = db::operating_system::get(api.pg_pool(), id)
         .await
         .map_err(|e| {
             if e.is_not_found() {
@@ -649,7 +647,7 @@ pub(crate) async fn find_operating_systems_by_ids(
 
     let ids: Vec<Uuid> = req.ids.iter().copied().map(Uuid::from).collect();
 
-    let rows = db::operating_system::get_many(&mut api.db_reader(), &ids).await?;
+    let rows = db::operating_system::get_many(api.pg_pool(), &ids).await?;
 
     let operating_systems: Vec<rpc::OperatingSystem> = rows
         .iter()

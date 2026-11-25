@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -556,7 +557,7 @@ type ApiGetAllInstanceTypeRequest struct {
 	tenantId                 *string
 	status                   *string
 	query                    *string
-	includeRelation          *string
+	includeRelation          *[]string
 	includeMachineAssignment *bool
 	includeAllocationStats   *bool
 	excludeUnallocated       *bool
@@ -597,8 +598,8 @@ func (r ApiGetAllInstanceTypeRequest) Query(query string) ApiGetAllInstanceTypeR
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllInstanceTypeRequest) IncludeRelation(includeRelation string) ApiGetAllInstanceTypeRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInstanceTypeRequest) IncludeRelation(includeRelation []string) ApiGetAllInstanceTypeRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -703,7 +704,15 @@ func (a *InstanceTypeAPIService) GetAllInstanceTypeExecute(r ApiGetAllInstanceTy
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.includeMachineAssignment != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeMachineAssignment", r.includeMachineAssignment, "form", "")
@@ -798,7 +807,7 @@ type ApiGetInstanceTypeRequest struct {
 	instanceTypeId            string
 	includeMachineAssociation *bool
 	includeAllocationStats    *bool
-	includeRelation           *string
+	includeRelation           *[]string
 }
 
 // Include Machine associations for each Instance Type. Can only be requested by Provider
@@ -813,8 +822,8 @@ func (r ApiGetInstanceTypeRequest) IncludeAllocationStats(includeAllocationStats
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetInstanceTypeRequest) IncludeRelation(includeRelation string) ApiGetInstanceTypeRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetInstanceTypeRequest) IncludeRelation(includeRelation []string) ApiGetInstanceTypeRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -877,7 +886,15 @@ func (a *InstanceTypeAPIService) GetInstanceTypeExecute(r ApiGetInstanceTypeRequ
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeAllocationStats", r.includeAllocationStats, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

@@ -109,6 +109,10 @@ spec:
       statement_timeout: "10min"
       idle_in_transaction_session_timeout: "15min"
       idle_session_timeout: "60min"
+      # Probe idle connections before the Service datapath expires them (kube-proxy IPVS: 900 s).
+      tcp_keepalives_idle: "300"
+      tcp_keepalives_interval: "30"
+      tcp_keepalives_count: "3"
   sidecars:
     - name: postgres-exporter
       image: "quay.io/prometheuscommunity/postgres-exporter:latest"

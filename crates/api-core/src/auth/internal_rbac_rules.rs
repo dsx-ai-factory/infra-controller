@@ -47,14 +47,12 @@ enum RulePrincipal {
     DsxExchangeConsumer,
     SiteHealthProbe,   // synthetic read-only monitoring (#5360)
     RackScaleAnalyzer, // RSA: NVLink domain and component health reports
-    PowerShelfManager, // external PSM: reads power-shelf PMC credentials only
-    NvSwitchManager,   // external NSM: reads switch BMC and NVOS credentials only
     Anonymous,         // Permitted for everything
 }
 use self::RulePrincipal::{
     Agent, Anonymous, BmcProxy, Dhcp, Dns, DsxExchangeConsumer, Flow, ForgeAdminCLI, Health,
-    Machineatron, MaintenanceJobs, NvSwitchManager, PowerShelfManager, Pxe, RackScaleAnalyzer,
-    Scout, SiteAgent, SiteHealthProbe, Ssh, SshRs,
+    Machineatron, MaintenanceJobs, Pxe, RackScaleAnalyzer, Scout, SiteAgent, SiteHealthProbe, Ssh,
+    SshRs,
 };
 
 impl InternalRBACRules {
@@ -75,6 +73,7 @@ impl InternalRBACRules {
         x.perm("DeleteDomain", vec![]);
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
+        x.perm("CancelVpcCreation", vec![SiteAgent]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
@@ -725,6 +724,11 @@ impl InternalRBACRules {
             "GetNetworkSecurityGroupAttachments",
             vec![ForgeAdminCLI, SiteAgent],
         );
+        x.perm("CreateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDhcpOptionSetIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDhcpOptionSetsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetDesiredFirmwareVersions",
             vec![ForgeAdminCLI, Machineatron, Flow, SiteHealthProbe],
@@ -844,12 +848,12 @@ impl InternalRBACRules {
             "ListMachineAttestationStatuses",
             vec![ForgeAdminCLI, SiteAgent],
         );
-        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
+        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm(
             "FindPowerShelfIds",
@@ -1133,11 +1137,6 @@ impl InternalRBACRules {
         );
         x.perm("GetComponentFirmwareStatus", vec![ForgeAdminCLI, Flow]);
         x.perm("ListComponentFirmwareVersions", vec![ForgeAdminCLI, Flow]);
-        // The handler further binds each credential kind to one of the two.
-        x.perm(
-            "GetComponentCredentials",
-            vec![PowerShelfManager, NvSwitchManager],
-        );
         x.perm("GetDPFHostSnapshot", vec![ForgeAdminCLI]);
         x.perm("GetDPFServiceVersions", vec![ForgeAdminCLI]);
         x.perm("FindPendingDPUServiceSyncIds", vec![ForgeAdminCLI]);
@@ -1266,15 +1265,6 @@ impl RuleInfo {
                     RulePrincipal::RackScaleAnalyzer => {
                         vec![Principal::SpiffeServiceIdentifier("rsa".to_string())]
                     }
-                    // External component managers (no legacy carbide- alias).
-                    // Beyond the methods open to every caller, each may call
-                    // only GetComponentCredentials.
-                    RulePrincipal::PowerShelfManager => vec![Principal::SpiffeServiceIdentifier(
-                        crate::auth::POWER_SHELF_MANAGER_SERVICE_ID.to_string(),
-                    )],
-                    RulePrincipal::NvSwitchManager => vec![Principal::SpiffeServiceIdentifier(
-                        crate::auth::NV_SWITCH_MANAGER_SERVICE_ID.to_string(),
-                    )],
                     RulePrincipal::Anonymous => vec![Principal::Anonymous],
                 })
                 .collect(),
@@ -1693,18 +1683,37 @@ mod rbac_rule_tests {
         let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
         let unrelated_service = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
 
+        // Cancellation can return an existing VPC's full configuration. Creation
+        // permission alone must not grant Machineatron that read access.
+        assert!(!InternalRBACRules::allowed_from_static(
+            "CancelVpcCreation",
+            &[Principal::SpiffeServiceIdentifier(
+                "machine-a-tron".to_string()
+            )],
+        ));
+
         // REST authorizes the caller before proxying these methods to Core as the site agent.
         for method in [
+            "CancelVpcCreation",
+            "CreateAttestationProfile",
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
             "DecommissionPowerShelf",
             "DecommissionSwitch",
+            "DeleteAttestationProfile",
             "DeleteSku",
+            "FailAttestation",
+            "GetAttestation",
+            "GetAttestationCoverage",
+            "GetAttestationProfile",
             "GetCredentialRotationStatus",
             "InsertPowerShelfHealthReport",
             "InsertRackHealthReport",
             "InsertSwitchHealthReport",
+            "ListAttestation",
+            "ListAttestationProfiles",
+            "ListMachineAttestationStatuses",
             "ListMachineHealthReports",
             "ListPowerShelfHealthReports",
             "ListRackHealthReports",
@@ -1714,7 +1723,10 @@ mod rbac_rule_tests {
             "RemoveSwitchHealthReport",
             "ReplaceSku",
             "RotateCredential",
+            "TriggerMachineAttestation",
+            "UpdateAttestationProfile",
             "UpdateSkuMetadata",
+            "WaiveAttestation",
         ] {
             assert!(
                 InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent)),
@@ -1782,46 +1794,6 @@ mod rbac_rule_tests {
                 "InsertSwitchHealthReport",
             ]
         );
-    }
-
-    /// The external power-shelf and NVSwitch managers can read component
-    /// credentials, and nothing beyond RPCs open to every caller.
-    #[test]
-    fn component_managers_only_read_component_credentials() {
-        use carbide_test_support::{Check, check_values};
-
-        let service = |name: &str| Principal::SpiffeServiceIdentifier(name.to_string());
-        let principals = [
-            service("nico-powershelf-manager"),
-            service("nico-nvswitch-manager"),
-            service("nico-flow"),
-            service("unlisted"),
-        ];
-        check_values(
-            [Check {
-                scenario: "component credential read",
-                input: "GetComponentCredentials",
-                expect: [true, true, false, false],
-            }],
-            |method| {
-                principals.each_ref().map(|principal| {
-                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(principal))
-                })
-            },
-        );
-
-        for manager in &principals[..2] {
-            let allowed_only_for_manager = |method: &&String| {
-                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(manager))
-                    && !InternalRBACRules::allowed_from_static(method, &[service("unlisted")])
-            };
-            let methods: Vec<&String> = INTERNAL_RBAC_RULES
-                .perms
-                .keys()
-                .filter(allowed_only_for_manager)
-                .collect();
-            assert_eq!(methods, ["GetComponentCredentials"], "{manager:?}");
-        }
     }
 
     #[test]
@@ -2201,10 +2173,9 @@ mod rbac_rule_tests {
             let line = line?;
             let line = line.trim();
             if line.starts_with("rpc") {
-                let mut name = line.strip_prefix("rpc").unwrap_or("why").trim().to_string();
+                let name = line.strip_prefix("rpc").unwrap_or("why").trim();
                 let offset = name.find("(").unwrap_or(name.len());
-                name.replace_range(offset.., "");
-                messages.push(name.trim().to_string());
+                messages.push(name[..offset].trim().to_string());
             }
         }
         if messages.is_empty() {

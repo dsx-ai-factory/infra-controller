@@ -23,6 +23,7 @@
 
 use carbide_kms_provider::KmsBackend;
 use carbide_secrets::credentials::Credentials;
+use db::TransactionVending as _;
 use db::work_lock_manager::WorkLock;
 use sqlx::PgPool;
 use zeroize::Zeroizing;
@@ -64,22 +65,14 @@ pub async fn import_vault_secrets(
 
     let marker_envelope =
         super::encrypt_envelope(routing, kms, VAULT_IMPORT_MARKER_PATH, b"completed").await?;
-    let mut txn = pool
-        .begin()
-        .await
-        .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
+    let mut txn = pool.txn_begin().await?;
 
     // This is the same advisory key used by the old session-lock importer.
     // Take it before the table lock so an old importer can finish its writes,
     // then recheck its marker before this batch changes anything.
     db::secrets::lock_path_advisory(&mut txn, VAULT_IMPORT_MARKER_PATH).await?;
     if db::secrets::exists(&mut *txn, VAULT_IMPORT_MARKER_PATH).await? {
-        txn.rollback().await.map_err(|e| {
-            PgSecretsError::Database(db::DatabaseError::new(
-                "roll back completed vault import",
-                e,
-            ))
-        })?;
+        txn.rollback().await?;
         return Ok(ImportResult::AlreadyComplete);
     }
 
@@ -110,9 +103,7 @@ pub async fn import_vault_secrets(
     let imported = entries.len() as u64;
     entries.push(marker_envelope.as_new_entry(VAULT_IMPORT_MARKER_PATH));
     db::secrets::insert_many(&mut txn, &entries).await?;
-    txn.commit()
-        .await
-        .map_err(|e| PgSecretsError::Database(db::DatabaseError::new("commit vault import", e)))?;
+    txn.commit().await?;
 
     Ok(ImportResult::Completed { imported, skipped })
 }

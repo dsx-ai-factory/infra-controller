@@ -420,14 +420,15 @@ fn active_host_target_and_outstanding_request_remain_independent() {
                 power_drains_needed: None,
                 started_at: accepted_at() + chrono::Duration::minutes(1),
                 deadline: accepted_at() + chrono::Duration::hours(1),
+                delivered_at: None,
                 task_json: "scout-payload-secret".into(),
-                result: Some(ScoutUpgradeResult {
+                result: Some(Box::new(ScoutUpgradeResult {
                     success: false,
                     exit_code: 1,
                     stdout: "stdout-secret".into(),
                     stderr: "stderr-secret".into(),
                     error: "error-secret".into(),
-                }),
+                })),
             };
             host.state.value = if case.assigned {
                 ManagedHostState::Assigned {

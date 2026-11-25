@@ -31,7 +31,7 @@ use db::redfish_actions::{
     ActionNotClaimed, ApprovalNotRecorded, approve_request, delete_request, fetch_request,
     find_serials, insert_request, list_requests, set_applied, update_response,
 };
-use db::{ConditionalWrite, Transaction, TransactionVending};
+use db::{ConditionalWrite, TransactionVending};
 use http::header::CONTENT_TYPE;
 use http::uri::Authority;
 use http::{HeaderMap, HeaderValue, Uri};
@@ -110,7 +110,7 @@ pub(crate) async fn redfish_browse(
         .map(|(x, y)| {
             (
                 x.to_string(),
-                String::from_utf8_lossy(y.as_bytes()).to_string(),
+                String::from_utf8_lossy(y.as_bytes()).into_owned(),
             )
         })
         .collect::<HashMap<String, String>>();
@@ -184,9 +184,9 @@ pub(crate) async fn redfish_create_action(
 ) -> Result<tonic::Response<::rpc::forge::RedfishCreateActionResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let authored_by = external_user_info(&request)?.user.ok_or(
-        CarbideError::ClientCertificateMissingInformation("external user name".to_string()),
-    )?;
+    let authored_by = external_user_info(&request)?.user.ok_or_else(|| {
+        CarbideError::ClientCertificateMissingInformation("external user name".to_string())
+    })?;
 
     let rpc_request = request.into_inner();
     let ips = rpc_request.ips.clone();
@@ -219,9 +219,9 @@ pub(crate) async fn redfish_approve_action(
 ) -> Result<tonic::Response<::rpc::forge::RedfishApproveActionResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let approver = external_user_info(&request)?.user.ok_or(
-        CarbideError::ClientCertificateMissingInformation("external user name".to_string()),
-    )?;
+    let approver = external_user_info(&request)?.user.ok_or_else(|| {
+        CarbideError::ClientCertificateMissingInformation("external user name".to_string())
+    })?;
 
     let request: model::redfish::RedfishActionId = request.into_inner().into();
 
@@ -257,9 +257,9 @@ pub(crate) async fn redfish_apply_action(
 ) -> Result<tonic::Response<::rpc::forge::RedfishApplyActionResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let applier = external_user_info(&request)?.user.ok_or(
-        CarbideError::ClientCertificateMissingInformation("external user name".to_string()),
-    )?;
+    let applier = external_user_info(&request)?.user.ok_or_else(|| {
+        CarbideError::ClientCertificateMissingInformation("external user name".to_string())
+    })?;
 
     let request: model::redfish::RedfishActionId = request.into_inner().into();
 
@@ -368,7 +368,7 @@ async fn update_response_in_tx(
     index: usize,
     response: BMCResponse,
 ) -> Result<(), tonic::Status> {
-    let mut txn = Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     update_response(request, &mut txn, response, index).await?;
     txn.commit().await?;
     Ok(())
@@ -426,7 +426,7 @@ async fn handle_request(
                     .map(|(x, y)| {
                         (
                             x.to_string(),
-                            String::from_utf8_lossy(y.as_bytes()).to_string(),
+                            String::from_utf8_lossy(y.as_bytes()).into_owned(),
                         )
                     })
                     .collect::<HashMap<String, String>>();
@@ -434,7 +434,7 @@ async fn handle_request(
                 let body = response
                     .text()
                     .await
-                    .unwrap_or("could not decode body as text".to_owned());
+                    .unwrap_or_else(|_| "could not decode body as text".to_owned());
                 Ok(BMCResponse {
                     status,
                     headers,
@@ -453,7 +453,7 @@ async fn handle_request(
             status: e
                 .status_code
                 .map(|s| s.to_string())
-                .unwrap_or("missing status".to_owned()),
+                .unwrap_or_else(|| "missing status".to_owned()),
             body: e.description,
             completed_at: DateTime::from(Local::now()),
         },
@@ -598,11 +598,10 @@ async fn create_client(
         // targets without any lookup of its own, so skipping this would
         // let the admin passthrough relay requests to arbitrary addresses
         // from the proxy's network position.
-        let mut txn = pool.txn_begin().await?;
         // Errors on an unparseable address or an IP with no inventoried BMC
         // interface -- that `Err` is the gate.
         crate::handlers::bmc_endpoint_explorer::validate_and_complete_bmc_endpoint_request(
-            txn.as_mut(),
+            pool,
             Some(rpc::forge::BmcEndpointRequest {
                 ip_address: bmc_ip.clone(),
                 mac_address: None,
@@ -610,7 +609,6 @@ async fn create_client(
             None,
         )
         .await?;
-        txn.commit().await?;
 
         let (new_authority, _) = client_authority(&bmc_ip, None, Some(passthrough.target()))
             .map_err(|error| CarbideError::internal(format!("creating url {error}")))?;
@@ -834,7 +832,6 @@ impl From<reqwest_middleware::Error> for RequestErrorInfo {
 #[cfg(test)]
 mod tests {
     use arc_swap::ArcSwap;
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::value_scenarios;
@@ -848,13 +845,15 @@ mod tests {
 
     #[test]
     fn redfish_action_result_persistence_failure_logs_and_counts() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(RedfishActionResultPersistenceFailed {
-                request_id: 42,
-                result_index: 3,
-                error: "database unavailable".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(RedfishActionResultPersistenceFailed {
+                    request_id: 42,
+                    result_index: 3,
+                    error: "database unavailable".to_string(),
+                });
         });
 
         assert_eq!(logs.len(), 1);

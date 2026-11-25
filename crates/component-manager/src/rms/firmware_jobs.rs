@@ -16,7 +16,7 @@ use tokio::time::{Instant, timeout_at};
 
 use super::{
     RmsBackend, RmsSwitchSystemImageStatusApi, RmsTrackedFirmwareJob, StagedFirmwareObject,
-    map_rms_firmware_job_state, map_rms_switch_system_image_job_state,
+    map_rms_firmware_job_state, map_rms_switch_system_image_job_state, select_firmware_job_status,
 };
 use crate::error::ComponentManagerError;
 use crate::firmware_jobs::{
@@ -209,6 +209,7 @@ impl RmsBackend {
         Ok(stream::iter(jobs)
             .map(|job| async move {
                 let state = observe_job(
+                    &self.instrumentation,
                     self.client.as_ref(),
                     self.switch_system_image_client.as_deref(),
                     &job,
@@ -250,8 +251,8 @@ async fn before_deadline<T>(
     result
 }
 
-/// Keeps only transport class and known request context. gRPC NotFound does
-/// not establish application job absence; Unimplemented identifies an unavailable protocol.
+/// Keeps only transport class and known request context. GetJobStatus defines
+/// NotFound as job absence; Unimplemented identifies an unavailable protocol.
 fn poll_error(error: RackManagerError, job: &RmsTrackedFirmwareJob) -> FirmwareJobReadError {
     let job_kind = match job {
         RmsTrackedFirmwareJob::FirmwareObject(_) => "firmware_object",
@@ -268,6 +269,10 @@ fn poll_error(error: RackManagerError, job: &RmsTrackedFirmwareJob) -> FirmwareJ
             );
             if grpc_status_code == tonic::Code::Unimplemented {
                 FirmwareJobReadError::StatusUnavailable
+            } else if grpc_status_code == tonic::Code::NotFound
+                && matches!(job, RmsTrackedFirmwareJob::FirmwareObject(_))
+            {
+                FirmwareJobReadError::JobNotFound
             } else {
                 FirmwareJobReadError::PollFailed
             }
@@ -284,11 +289,46 @@ fn poll_error(error: RackManagerError, job: &RmsTrackedFirmwareJob) -> FirmwareJ
     }
 }
 
+/// Accepts one matching firmware-object record with a recognized execution state.
+fn firmware_object_job_state_from_response(
+    response: rms::GetJobStatusResponse,
+    job_id: &str,
+) -> Result<FirmwareState, FirmwareJobReadError> {
+    select_firmware_job_status(response, job_id)
+        .map(|job| map_rms_firmware_job_state(job.execution_state))
+        .filter(|state| *state != FirmwareState::Unknown)
+        .ok_or(FirmwareJobReadError::StatusUnavailable)
+}
+
+/// Accepts recognized NVOS state evidence attributed to the requested job.
+/// A failed lookup may omit its ID; a conflicting nonempty ID is unavailable.
+fn switch_system_image_job_state_from_response(
+    response: rms::GetSwitchSystemImageJobStatusResponse,
+    job_id: &str,
+) -> Result<FirmwareState, FirmwareJobReadError> {
+    let state = map_rms_switch_system_image_job_state(&response.state);
+
+    if !response.job_id.is_empty() && response.job_id != job_id {
+        return Err(FirmwareJobReadError::StatusUnavailable);
+    }
+
+    match rms::ReturnCode::try_from(response.status) {
+        Ok(rms::ReturnCode::Failure) => Err(FirmwareJobReadError::JobNotFound),
+        Ok(rms::ReturnCode::Success)
+            if response.job_id == job_id && state != FirmwareState::Unknown =>
+        {
+            Ok(state)
+        }
+        _ => Err(FirmwareJobReadError::StatusUnavailable),
+    }
+}
+
 /// Queries the tracked protocol and accepts only matching, recognized evidence.
 /// This mapper discards free-form response/error text before returning or logging.
 /// RED measures the client call, including its local deadline. Protocol Failure
 /// or a reported Failed state remains response evidence, not a transport error.
 async fn observe_job(
+    instrumentation: &carbide_instrument::Instrumentation,
     client: &dyn RmsApi,
     system_image_client: Option<&dyn RmsSwitchSystemImageStatusApi>,
     job: &RmsTrackedFirmwareJob,
@@ -299,32 +339,33 @@ async fn observe_job(
     if Instant::now() >= deadline {
         return Err(FirmwareJobReadError::DeadlineExceeded);
     }
-    let (status, echoed_id, state) = match job {
+
+    let result = match job {
         RmsTrackedFirmwareJob::FirmwareObject(job_id) => {
             let response = red::instrumented(
+                instrumentation,
                 "rms",
-                "get_firmware_job_status",
+                "get_job_status",
                 before_deadline(deadline, async {
                     client
-                        .get_firmware_job_status(rms::GetFirmwareJobStatusRequest {
+                        .get_job_status(rms::GetJobStatusRequest {
                             job_id: job_id.clone(),
+                            include_child_job_states: false,
                         })
                         .await
                         .map_err(|error| poll_error(error, job))
                 }),
             )
             .await?;
-            (
-                response.status,
-                response.job_id,
-                map_rms_firmware_job_state(response.job_state),
-            )
+
+            firmware_object_job_state_from_response(response, job_id)
         }
         RmsTrackedFirmwareJob::SwitchSystemImage(job_id) => {
             let Some(client) = system_image_client else {
                 return Err(FirmwareJobReadError::StatusUnavailable);
             };
             let response = red::instrumented(
+                instrumentation,
                 "rms",
                 "get_switch_system_image_job_status",
                 before_deadline(deadline, async {
@@ -339,11 +380,8 @@ async fn observe_job(
                 }),
             )
             .await?;
-            (
-                response.status,
-                response.job_id,
-                map_rms_switch_system_image_job_state(&response.state),
-            )
+
+            switch_system_image_job_state_from_response(response, job_id)
         }
     };
     // RPC timing alone does not cover synchronous state normalization above.
@@ -351,18 +389,6 @@ async fn observe_job(
     if Instant::now() >= deadline {
         return Err(FirmwareJobReadError::DeadlineExceeded);
     }
-    if !echoed_id.is_empty() && echoed_id != job.job_id() {
-        return Err(FirmwareJobReadError::StatusUnavailable);
-    }
-    // Both pinned status protocols define Failure as an absent job. Neither
-    // absence nor an unrecognized response proves the update itself failed.
-    match rms::ReturnCode::try_from(status) {
-        Ok(rms::ReturnCode::Failure) => Err(FirmwareJobReadError::JobNotFound),
-        Ok(rms::ReturnCode::Success)
-            if echoed_id == job.job_id() && state != FirmwareState::Unknown =>
-        {
-            Ok(state)
-        }
-        _ => Err(FirmwareJobReadError::StatusUnavailable),
-    }
+
+    result
 }

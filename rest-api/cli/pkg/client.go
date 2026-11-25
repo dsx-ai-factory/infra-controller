@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util/redact"
 	"github.com/sirupsen/logrus"
 )
 
@@ -32,6 +33,20 @@ type Client struct {
 	TokenRefresh    func() (string, error)
 	AuthRetryMax    int
 	AuthRetryNotify func(AuthRetryEvent)
+	// RequestNotify, when set, is called once for every HTTP request the
+	// client sends, after the response body is read or the request fails.
+	RequestNotify func(RequestEvent)
+}
+
+// RequestEvent describes one finished HTTP request for RequestNotify.
+type RequestEvent struct {
+	Method string
+	// StatusCode is the response status, or 0 when no response was read.
+	StatusCode int
+	// Err is the transport or body-read failure when StatusCode is 0.
+	Err error
+	// Duration runs from sending the request to reading the full body.
+	Duration time.Duration
 }
 
 // http2StreamError matches net/http's private stream error through errors.As.
@@ -85,7 +100,7 @@ func (e *APIError) Error() string {
 	if e.Data != nil {
 		dataJSON, err := json.Marshal(e.Data)
 		if err == nil && string(dataJSON) != "null" {
-			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, string(dataJSON))
+			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, dataJSON)
 		}
 	}
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, msg)
@@ -254,6 +269,12 @@ func (c *Client) notifyAuthRetry(event AuthRetryEvent) {
 	}
 }
 
+func (c *Client) notifyRequest(event RequestEvent) {
+	if c.RequestNotify != nil {
+		c.RequestNotify(event)
+	}
+}
+
 func canReplayAfterAuthRefresh(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -303,16 +324,20 @@ func (c *Client) do(ctx context.Context, method, pathTemplate string, pathParams
 		c.Log.Debugf("Request body: %s", formatDebugBody(body))
 	}
 
+	start := time.Now()
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		c.notifyRequest(RequestEvent{Method: method, Err: err, Duration: time.Since(start)})
 		return nil, nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.notifyRequest(RequestEvent{Method: method, Err: err, Duration: time.Since(start)})
 		return nil, nil, fmt.Errorf("reading response: %w", err)
 	}
+	c.notifyRequest(RequestEvent{Method: method, StatusCode: resp.StatusCode, Duration: time.Since(start)})
 
 	if c.Debug {
 		c.Log.Debugf("API response: %s %s -> %s", method, reqURL, resp.Status)
@@ -377,7 +402,7 @@ func redactSensitiveJSONValue(value interface{}, inherited bool) {
 	switch typed := value.(type) {
 	case map[string]interface{}:
 		for key, nested := range typed {
-			sensitive := inherited || isSensitiveJSONField(key)
+			sensitive := inherited || isSensitiveJSONField(key) || isSensitiveJSONContainerField(key)
 			if sensitive && !isJSONContainer(nested) {
 				typed[key] = "<redacted>"
 				continue
@@ -386,6 +411,9 @@ func redactSensitiveJSONValue(value interface{}, inherited bool) {
 				nested,
 				inherited || isSensitiveJSONContainerField(key),
 			)
+			if redact.IsURLParentField(key) {
+				redact.NestedURLs(nested, "<redacted>")
+			}
 		}
 	case []interface{}:
 		for i, nested := range typed {
@@ -419,6 +447,10 @@ func isSensitiveJSONField(name string) bool {
 
 func isSensitiveJSONContainerField(name string) bool {
 	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(name))
+	switch normalized {
+	case "authenticationdata", "devicecredentialoverrides":
+		return true
+	}
 	for _, suffix := range []string{
 		"credential", "credentials",
 		"password", "passwords",
@@ -491,7 +523,7 @@ func ResolveToken(token, tokenCommand string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("executing token command: %w", err)
 		}
-		return strings.TrimSpace(string(out)), nil
+		return string(bytes.TrimSpace(out)), nil
 	}
 	return "", nil
 }

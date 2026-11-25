@@ -73,7 +73,7 @@ fn config_fetch_waits_after_success_failure_and_slow_response() {
             let (address, server) = run_server(state).await;
             let fetcher = PeriodicConfigFetcher::new(
                 fetcher_config(address, FETCH_INTERVAL),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .await;
             let reader = fetcher.reader();
@@ -170,7 +170,7 @@ async fn malformed_service_response_preserves_last_accepted_configuration() {
     // Accept the first valid service response before the second malformed response.
     let fetcher = PeriodicConfigFetcher::new(
         fetcher_config(address, FETCH_INTERVAL),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await;
     let reader = fetcher.reader();
@@ -219,7 +219,7 @@ async fn dropping_config_fetcher_releases_state_before_next_interval() {
     let config = fetcher_config(address, Duration::from_secs(30));
     let client_config = Arc::downgrade(&config.carbide_client_config);
     let fetcher =
-        PeriodicConfigFetcher::new(config, carbide_instrument::Instrumentation::global()).await;
+        PeriodicConfigFetcher::new(config, carbide_instrument::Instrumentation::noop()).await;
     // Allow the background task to enter its first wait. Keep no reader, which
     // would independently retain the shared state after the owner is dropped.
     tokio::task::yield_now().await;
@@ -258,7 +258,7 @@ async fn failed_initial_fetch_retries_before_host_id_lookup_expires() {
         Duration::from_secs(5),
         capture_logs_async(PeriodicConfigFetcher::new(
             config,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )),
     )
     .await
@@ -302,7 +302,7 @@ async fn failed_startup_retry_returns_to_periodic_waits() {
     let (address, server) = run_server(state).await;
     let fetcher = PeriodicConfigFetcher::new(
         fetcher_config(address, FETCH_INTERVAL),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await;
     request_times.try_recv().expect("initial request completed");
@@ -340,7 +340,7 @@ fn failed_initial_metadata_conversion_retries_once_before_periodic_waits() {
             let (address, server) = run_server(state).await;
             let fetcher = PeriodicConfigFetcher::new(
                 fetcher_config(address, FETCH_INTERVAL),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .await;
             let reader = fetcher.reader();

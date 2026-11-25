@@ -9,6 +9,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,6 +49,7 @@ import (
 // It acts as an adapter between gRPC protobuf messages and the internal managers,
 // handling protobuf conversion and delegating business logic to the InventoryManager.
 type FlowServerImpl struct {
+	firmwareReader             componentFirmwareReader     // Shared NICo client for passive firmware details
 	powerReader                componentPowerReader        // Shared NICo client for passive power details
 	inventoryManager           inventorymanager.Manager    // Business logic manager for inventory operations
 	taskManager                taskmanager.Manager         // Task manager for orchestrating task lifecycle
@@ -69,7 +71,7 @@ type FlowServerImpl struct {
 //   - taskManager: The Task manager for orchestrating task lifecycle
 //   - taskStore: The task store for task queries
 //   - operationRunManager: The operation-run manager for planning and persisting operation runs
-//   - powerReader: Shared passive Core reader, or nil when the NICo provider is absent
+//   - coreReader: Shared passive Core reader, or nil when the NICo provider is absent
 //
 // Returns:
 //   - *FlowServerImpl: A new server implementation instance
@@ -83,7 +85,7 @@ func newServerImplementation(
 	operationRunManager operationrunmanager.Manager,
 	eventRuleManager eventRuleManager,
 	dataCipher *secret.Cipher,
-	powerReader componentPowerReader,
+	coreReader componentDetailsReader,
 ) (*FlowServerImpl, error) {
 	return &FlowServerImpl{
 		inventoryManager:       inventoryManager,
@@ -94,7 +96,8 @@ func newServerImplementation(
 		operationRunManager:    operationRunManager,
 		eventRuleManager:       eventRuleManager,
 		dataCipher:             dataCipher,
-		powerReader:            powerReader,
+		powerReader:            coreReader,
+		firmwareReader:         coreReader,
 		conflictResolver:       conflict.NewResolver(taskStore),
 	}, nil
 }
@@ -1576,6 +1579,20 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	if ruleID != nil {
 		info.RuleID = ruleID.String()
 	}
+	if req.GetDeviceCredentialOverrides() != nil {
+		if !req.GetOverrideReadinessCheck() {
+			return nil, status.Error(codes.InvalidArgument, "device credential overrides require override_readiness_check")
+		}
+		for _, subTarget := range req.GetSubTargets() {
+			if subTarget == "dpu" {
+				return nil, status.Error(codes.InvalidArgument, "device credential overrides do not support DPU updates")
+			}
+		}
+		info.DeviceCredentials, err = firmwareauth.EncryptDeviceCredentials(rs.dataCipher, req.GetDeviceCredentialOverrides())
+		if err != nil {
+			return nil, firmwareAuthenticationStatusError(err)
+		}
+	}
 	err = rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {
 		return nil, firmwareAuthenticationStatusError(err)
@@ -1783,7 +1800,8 @@ func (rs *FlowServerImpl) GetComponents(
 // so this API returns quickly without calling external systems.
 //
 // If target_spec is provided, only drifts for the specified components are returned.
-// If target_spec is not provided, all drifts are returned.
+// Rack filters select parent racks; component filters narrow their components.
+// Without targets or filters, all drifts are returned.
 func (rs *FlowServerImpl) ValidateComponents(
 	ctx context.Context,
 	req *pb.ValidateComponentsRequest,
@@ -1803,6 +1821,8 @@ func (rs *FlowServerImpl) ValidateComponents(
 	var manufacturerFilter *dbquery.StringQueryInfo
 	var modelFilter *dbquery.StringQueryInfo
 	var componentTypes []devicetypes.ComponentType
+	var rackFilters []*pb.Filter
+	var hasFilters bool
 
 	if len(req.GetFilters()) > 0 {
 		for _, filter := range req.GetFilters() {
@@ -1813,7 +1833,12 @@ func (rs *FlowServerImpl) ValidateComponents(
 			if err != nil {
 				return nil, fmt.Errorf("invalid filter: %w", err)
 			}
-			if queryInfo == nil {
+			if queryInfo == nil || len(queryInfo.Patterns) == 0 {
+				continue
+			}
+			hasFilters = true
+			if _, isRackFilter := filter.GetField().(*pb.Filter_RackField); isRackFilter {
+				rackFilters = append(rackFilters, filter)
 				continue
 			}
 
@@ -1849,20 +1874,18 @@ func (rs *FlowServerImpl) ValidateComponents(
 		infoFilter = &dbquery.StringQueryInfo{Patterns: []string{}, IsWildcard: false, UseOR: false}
 	}
 
-	hasFilters := len(req.GetFilters()) > 0
-
 	targetSpec := req.GetTargetSpec()
+	isScoped := targetSpec != nil || hasFilters
 
 	var storeDrifts []inventorymanager.ComponentDrift
 	var componentIDs []uuid.UUID
 	var filteredComponentCount int32
 	var err error
 
-	if targetSpec != nil {
-		// Extract component UUIDs from target spec
-		components, extractErr := rs.extractComponentsFromTargetSpec(ctx, targetSpec)
-		if extractErr != nil {
-			return nil, fmt.Errorf("failed to extract components from target_spec: %w", extractErr)
+	if isScoped {
+		components, selectErr := rs.validationCandidates(ctx, targetSpec, rackFilters)
+		if selectErr != nil {
+			return nil, fmt.Errorf("failed to select validation components: %w", selectErr)
 		}
 
 		// Apply filters to narrow down components
@@ -1892,14 +1915,14 @@ func (rs *FlowServerImpl) ValidateComponents(
 	}
 
 	componentOrder := make(map[uuid.UUID]int, len(storeDrifts))
-	if targetSpec != nil {
+	if isScoped {
 		for index, componentID := range componentIDs {
 			componentOrder[componentID] = index
 		}
 	}
 	sort.Slice(storeDrifts, func(i, j int) bool {
 		left, right := storeDrifts[i], storeDrifts[j]
-		if left.ComponentID != nil && right.ComponentID != nil && targetSpec != nil {
+		if left.ComponentID != nil && right.ComponentID != nil && isScoped {
 			leftIndex, leftFound := componentOrder[*left.ComponentID]
 			rightIndex, rightFound := componentOrder[*right.ComponentID]
 			if leftFound && rightFound && leftIndex != rightIndex {
@@ -1911,7 +1934,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 		if leftKey != rightKey {
 			return leftKey < rightKey
 		}
-		return left.ID.String() < right.ID.String()
+		return bytes.Compare(left.ID[:], right.ID[:]) < 0
 	})
 
 	// Convert store drifts to proto response
@@ -1972,7 +1995,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 	}
 
 	// Calculate match count: if we have targeted components, matches = targeted - mismatches
-	if targetSpec != nil {
+	if isScoped {
 		matchCount = filteredComponentCount - missingCount - mismatchCount
 		if matchCount < 0 {
 			matchCount = 0
@@ -2087,8 +2110,8 @@ func (rs *FlowServerImpl) applyComponentFilters(
 }
 
 // matchesStringQuery checks if a string matches the StringQueryInfo criteria.
-// With UseOR == true the value matches if any pattern matches; with UseOR ==
-// false (AND) the value must match every pattern.
+// Exact patterns use membership matching, like StringQueryInfo.ToFilterable's IN
+// predicate. Wildcard patterns use UseOR to choose between OR and AND.
 func (rs *FlowServerImpl) matchesStringQuery(value string, query dbquery.StringQueryInfo) bool {
 	if len(query.Patterns) == 0 {
 		return true
@@ -2105,7 +2128,7 @@ func (rs *FlowServerImpl) matchesStringQuery(value string, query dbquery.StringQ
 		return rs.matchesWildcard(value, normalizedPattern)
 	}
 
-	if query.UseOR {
+	if !query.IsWildcard || query.UseOR {
 		for _, pattern := range query.Patterns {
 			if matches(pattern) {
 				return true
@@ -2173,7 +2196,7 @@ func (rs *FlowServerImpl) sortComponents(components []*component.Component, orde
 	}
 	less := func(i, j int, left, right string) bool {
 		if left == right {
-			return components[i].Info.ID.String() < components[j].Info.ID.String()
+			return bytes.Compare(components[i].Info.ID[:], components[j].Info.ID[:]) < 0
 		}
 		if effectiveOrderBy.Direction == dbquery.OrderAscending {
 			return left < right

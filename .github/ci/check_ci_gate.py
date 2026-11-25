@@ -386,6 +386,12 @@ def _is_pull_request_run(environment: Mapping[str, str]) -> bool:
     return ref.startswith(PR_REF_PREFIX)
 
 
+def _is_merge_group_event(environment: Mapping[str, str]) -> bool:
+    """Return whether we're running against a GitHub merge group."""
+
+    return environment.get("GITHUB_EVENT_NAME") == "merge_group"
+
+
 def _workflow_should_run(job_results: Mapping[str, object], output_name: str) -> bool:
     """Read `run_core_ci` or `run_rest_ci` from the `changes` job."""
 
@@ -404,6 +410,7 @@ def _core_jobs_allowed_to_skip(
 
     should_run = _workflow_should_run(job_results, "run_core_ci")
     is_pull_request = _is_pull_request_run(environment)
+    is_merge_group_event = _is_merge_group_event(environment)
     if not should_run:
         if not is_pull_request:
             raise GateInputError(
@@ -429,7 +436,7 @@ def _core_jobs_allowed_to_skip(
     if not _read_boolean_output("prepare", prepare, "machine_lifecycle_changed"):
         allowed.add("merge-manifests-machine-lifecycle-test")
 
-    if not is_pull_request:
+    if not (is_pull_request or is_merge_group_event):
         allowed.update(CORE_PR_ONLY_JOBS)
 
     repository = environment.get("GITHUB_REPOSITORY")
@@ -447,6 +454,7 @@ def _rest_jobs_allowed_to_skip(
 
     should_run = _workflow_should_run(job_results, "run_rest_ci")
     is_pull_request = _is_pull_request_run(environment)
+    is_merge_group_event = _is_merge_group_event(environment)
     if not should_run:
         if not is_pull_request:
             raise GateInputError(
@@ -454,9 +462,9 @@ def _rest_jobs_allowed_to_skip(
             )
         return set(job_results) - {"changes"}
 
-    # Both reusable build callers are direct gate dependencies, but the ref
-    # selects exactly one of them for a given run.
-    if is_pull_request:
+    # Both reusable build callers are direct gate dependencies; only the one
+    # _not_ expected for this run should be skipped.
+    if is_pull_request or is_merge_group_event:
         return {"build-and-push"}
     return {"build-and-push-pr"}
 

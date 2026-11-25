@@ -102,7 +102,7 @@ impl BfbRshimCopier {
             Credentials::UsernamePassword { username, password } => (username, password),
         };
 
-        forge_ssh::ssh::is_rshim_enabled(bmc_ip_address, username, password)
+        carbide_ssh::ssh::is_rshim_enabled(bmc_ip_address, username, password)
             .await
             .map_err(|err| BfbRshimCopyError::Other {
                 details: format!("failed query RSHIM status on on {bmc_ip_address}: {err}"),
@@ -118,7 +118,7 @@ impl BfbRshimCopier {
             Credentials::UsernamePassword { username, password } => (username, password),
         };
 
-        forge_ssh::ssh::enable_rshim(bmc_ip_address, username, password)
+        carbide_ssh::ssh::enable_rshim(bmc_ip_address, username, password)
             .await
             .map_err(|err| BfbRshimCopyError::Other {
                 details: format!("failed enable RSHIM on {bmc_ip_address}: {err}"),
@@ -272,7 +272,7 @@ impl BfbRshimCopier {
         self.check_and_enable_rshim(bmc_ip_address, &credentials)
             .await?;
 
-        forge_ssh::ssh::copy_bfb_to_bmc_rshim(
+        carbide_ssh::ssh::copy_bfb_to_bmc_rshim(
             bmc_ip_address,
             username,
             password,

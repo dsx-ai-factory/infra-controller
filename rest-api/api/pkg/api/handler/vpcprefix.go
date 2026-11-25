@@ -138,7 +138,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 
 	// Verify if vpc is ready
 	if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
-		logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request data must be in Ready state in order to create VPC prefix", apiRequest.VpcID))
+		logger.Warn().Msgf("VPC: %v specified in request data must be in Ready state in order to create VPC prefix", apiRequest.VpcID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "VPC specified in request data must be in Ready state in order to create VPC prefix", nil)
 	}
 
@@ -154,7 +154,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("The Site: %v where the VPC prefix is being created must be in Registered state in order to proceed", vpc.SiteID.String()))
+		logger.Warn().Msgf("The Site: %v where the VPC prefix is being created must be in Registered state in order to proceed", vpc.SiteID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the VPC prefix is being created must be in Registered state in order to proceed", nil)
 	}
 
@@ -193,7 +193,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 	err = cdb.WithTx(ctx, csh.dbSession, func(tx *cdb.Tx) error {
 		// acquire an advisory lock on the parent IP block ID on which there could be contention
 		// this lock is released when the transaction commits or rollsback
-		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID.String(), ipBlockID.String())), nil)
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID, ipBlockID)), nil)
 		if derr != nil {
 			// TODO add a retry here
 			logger.Error().Err(derr).Msg("Failed to acquire advisory lock on ipblock")
@@ -291,7 +291,19 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 		// Create VPC prefix in DB with the initial Core lifecycle state.
 		status := cdbm.VpcPrefixStatusProvisioning
 		statusMsg := "VPC Prefix is being provisioned on Site"
-		vpcPrefix, derr := vpcPrefixDAO.Create(ctx, tx, cdbm.VpcPrefixCreateInput{Name: apiRequest.Name, TenantOrg: org, SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, IpBlockID: &ipBlock.ID, Prefix: childPrefix.Cidr, PrefixLength: requestedPrefixLength, Status: status, CreatedBy: dbUser.ID})
+		vpcPrefix, derr := vpcPrefixDAO.Create(ctx, tx, cdbm.VpcPrefixCreateInput{
+			Name:         apiRequest.Name,
+			TenantOrg:    org,
+			SiteID:       site.ID,
+			VpcID:        vpc.ID,
+			TenantID:     tenant.ID,
+			IpBlockID:    &ipBlock.ID,
+			Labels:       apiRequest.Labels,
+			Prefix:       childPrefix.Cidr,
+			PrefixLength: requestedPrefixLength,
+			Status:       status,
+			CreatedBy:    dbUser.ID,
+		})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to create VPC prefix record in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed creating VPC prefix record", nil)
@@ -410,7 +422,7 @@ func NewGetAllVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Param siteId query string false "Site ID"
 // @Param vpcId query string true "ID of Vpc"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Vpc', 'IPBlock'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Vpc', 'IPBlock'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "IPv4 usage (interface/instance-derived; same shape as IP Block usage)"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
@@ -649,7 +661,7 @@ func NewGetVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of VPC prefix"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "IPv4 usage (interface/instance-derived; same shape as IP Block usage)"
 // @Success 200 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [get]
@@ -893,7 +905,7 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 		}
 		if tot > 0 {
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Another VPC prefix with specified name already exists for Tenant", validation.Errors{
-				"id": fmt.Errorf("%v", vps[0].ID.String()),
+				"id": fmt.Errorf("%v", vps[0].ID),
 			})
 		}
 	}
@@ -908,7 +920,21 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
 	err = cdb.WithTx(ctx, ush.dbSession, func(tx *cdb.Tx) error {
-		updated, derr := vpDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{VpcPrefixID: vpcPrefix.ID, Name: apiRequest.Name})
+		derr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString(vpcPrefix.ID.String()),
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire VPC Prefix update lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update VPC prefix, could not acquire data store lock", nil)
+		}
+
+		updated, derr := vpDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{
+			VpcPrefixID: vpcPrefix.ID,
+			Name:        apiRequest.Name,
+			Labels:      apiRequest.Labels,
+		})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating VPC prefix in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update VPC prefix", nil)

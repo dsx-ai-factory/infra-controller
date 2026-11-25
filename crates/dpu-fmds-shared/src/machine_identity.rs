@@ -17,7 +17,7 @@
 
 //! IMDS-style `GET …/meta-data/identity` (shared between carbide-agent and carbide-fmds).
 //!
-//! Defaults and numeric bounds are in [`forge_dpu_agent_utils::machine_identity`] (`defaults`, `limits`;
+//! Defaults and numeric bounds are in [`carbide_dpu_agent_utils::machine_identity`] (`defaults`, `limits`;
 //! the latter is also used by carbide-host-support validation).
 
 use std::convert::TryFrom;
@@ -29,14 +29,14 @@ use async_trait::async_trait;
 use axum::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use carbide_instrument::{Event, LabelValue};
-use forge_dpu_agent_utils::machine_identity::defaults::{
+use carbide_dpu_agent_utils::machine_identity::defaults::{
     BURST, REQUESTS_PER_SECOND, SIGN_TIMEOUT_SECS, WAIT_TIMEOUT_SECS,
 };
-use forge_dpu_agent_utils::machine_identity::limits::{
+use carbide_dpu_agent_utils::machine_identity::limits::{
     BURST_MAX, BURST_MIN, REQUESTS_PER_SECOND_MAX, REQUESTS_PER_SECOND_MIN, SIGN_TIMEOUT_SECS_MAX,
     SIGN_TIMEOUT_SECS_MIN, WAIT_TIMEOUT_SECS_MAX, WAIT_TIMEOUT_SECS_MIN,
 };
+use carbide_instrument::{Event, LabelValue};
 use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter, clock};
@@ -139,7 +139,7 @@ pub struct MachineIdentityParams {
 }
 
 impl Default for MachineIdentityParams {
-    /// Matches [`forge_dpu_agent_utils::machine_identity::defaults`] (agent `MachineIdentityConfig`
+    /// Matches [`carbide_dpu_agent_utils::machine_identity::defaults`] (agent `MachineIdentityConfig`
     /// serde and this crate).
     fn default() -> Self {
         Self {
@@ -324,7 +324,7 @@ pub async fn wait_identity_rate_limit_permit(
     Ok(())
 }
 
-/// Call Carbide `SignMachineIdentity` using [`forge_dpu_agent_utils::utils::create_forge_client`] and
+/// Call Carbide `SignMachineIdentity` using [`carbide_dpu_agent_utils::utils::create_forge_client`] and
 /// `machine_identity.sign_timeout_secs` as the overall deadline.
 pub async fn sign_machine_identity_with_forge(
     forge_api: &str,
@@ -336,7 +336,7 @@ pub async fn sign_machine_identity_with_forge(
 
     tokio::time::timeout(call_timeout, async {
         let mut client =
-            forge_dpu_agent_utils::utils::create_forge_client(forge_api, carbide_client_config)
+            carbide_dpu_agent_utils::utils::create_forge_client(forge_api, carbide_client_config)
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
         client
@@ -1002,7 +1002,7 @@ mod tests {
                 let base = base.clone();
                 let headers = headers.clone();
                 async move {
-                    let metrics = MetricsCapture::start();
+                    let metrics = MetricsCapture::owned();
                     let uri: Uri = format!(
                         "http://client/latest/meta-data/identity?status={}",
                         upstream_status.as_u16()
@@ -1014,7 +1014,7 @@ mod tests {
                         &base,
                         &uri,
                         &headers,
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     )
                     .await;
                     let status = response.status();
@@ -1221,13 +1221,13 @@ mod tests {
             .build()
             .unwrap();
         let uri: Uri = "http://client/latest/meta-data/identity".parse().unwrap();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let response = forward_sign_proxy_http(
             &client,
             &format!("http://{addr}"),
             &uri,
             &HeaderMap::new(),
-            &carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation(),
         )
         .await;
 
@@ -1266,7 +1266,7 @@ mod tests {
             .parse()
             .unwrap();
         let upstream_url = build_sign_proxy_request_url(&base, uri.query()).unwrap();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut response = None;
         let logs = capture_logs(|| {
             response = Some(runtime.block_on(async {
@@ -1284,7 +1284,7 @@ mod tests {
                 });
                 let response =
                     forward_sign_proxy_http(&client, &base, &uri, &HeaderMap::new(),
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     ).await;
                 server.await.unwrap();
                 response
@@ -1340,7 +1340,7 @@ mod tests {
                 Some(&client),
                 &uri,
                 &headers,
-                &carbide_instrument::Instrumentation::global(),
+                &carbide_instrument::Instrumentation::noop(),
             )
             .await
             .is_none()
@@ -1359,7 +1359,7 @@ mod tests {
             None,
             &uri,
             &headers,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("expected misconfiguration response");
@@ -1402,7 +1402,7 @@ mod tests {
             Some(&client),
             &uri,
             &headers,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("expected forward response");

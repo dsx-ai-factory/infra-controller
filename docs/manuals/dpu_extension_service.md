@@ -9,15 +9,116 @@ NVIDIA Infra Controller (NICo) allows you to do the following with DPU Extension
 * Upgrade or remove deployed services by updating the Instance configuration.
 * Monitor deployment status of the extension services on the Instance through instance status report.
 
-Currently, the only supported service type is **Kubernetes Pod** (`KubernetesPod`). For this service type, the service `data` field must contain a Kubernetes Pod manifest in YAML format.
+NICo supports two service types:
+
+| REST `serviceType` | Definition in the `data` string | Deployment owner |
+| --- | --- | --- |
+| `KubernetesPod` | Kubernetes Pod manifest in YAML | DPU agent |
+| `DpfHelmChart` | JSON-encoded Helm chart definition | DPF |
+
+`DpfHelmChart` services require a DPF-managed host. `KubernetesPod` services
+require a host that is not DPF-managed. Core rejects either incompatible
+attachment with `FailedPrecondition`.
+
+The [DPF Helm Chart Services](#dpf-helm-chart-services) section describes the
+Helm lifecycle and placement contract. The Pod workflow and examples in the
+remaining sections apply to `KubernetesPod` services.
+
+## DPF Helm Chart Services
+
+The site must have [DPF Enabled](dpf.md) before a `DpfHelmChart` service can be
+created. Submit it through the same DPU Extension Service REST resource with
+`serviceType: DpfHelmChart`. The `data` field remains a **string** containing
+JSON, not an embedded object or a Pod manifest.
+
+The Helm definition requires:
+
+* `repoURL`: a non-empty Helm repository URL starting with `https://` or `oci://`.
+* `chartName` and `chartVersion`: non-empty chart name and version strings.
+* `serviceID`: an immutable workload identity, unique case-insensitively
+  among active NICo-managed DPF Helm services.
+* `deployInCluster`: explicitly `false`, selecting deployment on DPUs.
+* `security`: an object with the required boolean `privileged` field.
+  Optional `spiffe: {}` enables SPIFFE; omission or `null` disables it.
+
+Optional `values` supplies chart-specific Helm values. NICo reserves
+`values.serviceDaemonSet.nodeSelector` for placement and rejects a supplied
+value. The chart must honor DPF's node-selector contract. Optional top-level
+`serviceDaemonSet` accepts labels, annotations, resources, and update strategy.
+Unknown fields in the typed definition are rejected. The
+[Helm Chart Requirements](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/design/dpf-helm-chart-extension-services.md#30-helm-chart-requirements)
+describe the chart contract and supported settings.
+
+Set the immutable deployment policy when creating the service:
+
+| `deploymentType` | Placement and instance attachment |
+| --- | --- |
+| `DemandDriven` (default when omitted or `null`) | Requires `dpuTarget`: `Primary` selects the host's primary DPU, `AllActive` selects DPUs used by instance networking, and `All` selects every attached DPU. Attach the service to instances through `dpuExtensionServiceDeployments`. |
+| `Baseline` | Deploys to all DPUs managed by DPF, without instance attachment. Omit `dpuTarget`; baseline services cannot be attached to instances. |
+
+Pre-provision chart-repository and workload image-pull Secrets at the site.
+NICo rejects `credentials` and `observability` for `DpfHelmChart`; it does not
+create, verify, rotate, or delete the referenced credentials. Follow
+[Credential Pre-provisioning](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/design/dpf-helm-chart-extension-services.md#31-credential-pre-provisioning).
+
+For example, send this body to
+`POST /v2/org/{org}/nico/dpu-extension-service` to define a demand-driven
+Helm service targeting the primary DPU. Replace the site UUID and chart
+reference with your deployment's values, and use a unique `serviceID`.
+The chart must satisfy the DPF contract described above. The escaped JSON
+inside `data` is a string in the request body:
+
+```json
+{
+  "name": "tenant-agent",
+  "serviceType": "DpfHelmChart",
+  "deploymentType": "DemandDriven",
+  "dpuTarget": "Primary",
+  "siteId": "60189e9c-7d12-438c-b9ca-6998d9c364b1",
+  "data": "{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"tenant-agent\",\"chartVersion\":\"1.0.0\",\"serviceID\":\"tenant-agent-v1\",\"deployInCluster\":false,\"security\":{\"privileged\":false}}"
+}
+```
+
+Creation is asynchronous. Poll the
+`GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}` resource
+until the service status is `Ready` before attaching it to an instance. Core
+rejects a new Helm service attachment in any other lifecycle state with
+`FailedPrecondition`. To place this demand-driven workload, attach the returned
+service ID and version through `dpuExtensionServiceDeployments`, then verify
+placement and workload health as described below.
+
+Helm services retain version number 1. API responses use the full
+configuration-version string, `V1-T<timestamp>`. A definition update replaces
+the complete JSON definition in that version and is accepted only when the
+service is `Ready`. No-op updates are rejected. NICo reconciles changes
+asynchronously through DPF; it does not create a new immutable
+Pod-style version for each change. A definition change affects every instance
+attached to that service; you cannot stage different versions per instance.
+Workloads can run different definitions while the asynchronous rollout
+converges. Rollback requires another definition update: when the service is
+`Ready`, submit the previous complete JSON definition. If reconciliation
+reports `Error` (`Failed` in Core), inspect the service status and controller
+diagnostics; another definition update is rejected while it is not `Ready`.
+Metadata-only updates do not request a DPF rollout. Remove instance attachments
+before deleting the service.
+Omit the version when deleting the service, or supply its full returned
+`V1-T<timestamp>` value. Bare `V1` is rejected. Deletion waits for DPF
+resource cleanup.
+
+For a demand-driven Helm service, instance deployment status `Running`
+means NICo applied the placement label. It does not prove that the Helm
+release or workload is healthy. Check the DPF `DPUService`, Argo CD
+Application, and workload pods as well. The
+[DPF Integration Reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/design/dpf-helm-chart-extension-services.md)
+explains reconciliation and teardown.
 
 ## Typical Workflow
 
 1. Create a DPU Extension Service with a Pod manifest (and optional registry credentials).
-2. Deploy the service by referencing it in instance config's extension service config when creating or updating an Instance.
-3. Monitor deployment status on the Instance until all DPUs report `Running`.
-4. Upgrade by creating a new service version, then updating each affected Instance to reference the new version.
-5. When deleting an instance, DPU extension services will be automatically removed from attached DPUs.
+1. Deploy the service by referencing it in instance config's extension service config when creating or updating an Instance.
+1. Monitor deployment status on the Instance until all DPUs report `Running`.
+1. Upgrade by creating a new service version, then updating each affected Instance to reference the new version.
+1. When deleting an instance, DPU extension services will be automatically removed from attached DPUs.
 
 > **Important:** Creating or updating a service definition does not automatically redeploy running Instances. To roll out a new version, update the Instance's `dpuExtensionServiceDeployments`.
 
@@ -182,7 +283,11 @@ Reference a service when creating or updating an Instance. If `version` is omitt
 * Batch create: `POST /v2/org/{org}/nico/instance/batch`
 * Update Instance: `PATCH /v2/org/{org}/nico/instance/{instanceId}`
 
-Include `dpuExtensionServiceDeployments` in the request body:
+Include `dpuExtensionServiceDeployments` in the request body. For PATCH, a
+supplied array replaces the complete desired list. Include every deployment
+you want to retain: omitting a service from that array requests its
+termination. Omitting the field preserves the existing list; an empty array
+removes all deployments.
 
 ```json
 {
@@ -200,7 +305,7 @@ During Instance provisioning, NICo waits for all configured extension services t
 ### Upgrade a Deployed DPU Extension Service for an Instance
 
 1. Update the service definition to create a new version (see [Update a DPU Extension Service](#update-a-dpu-extension-service)).
-2. Update each affected Instance to reference the new version in `dpuExtensionServiceDeployments`.
+1. Update each affected Instance to reference the new version in `dpuExtensionServiceDeployments`, including every other deployment you want to retain.
 
 The Instance remains in `Ready` state while DPUs asynchronously apply the new configuration. Monitor progress through the Instance deployment status.
 

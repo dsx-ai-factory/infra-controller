@@ -1551,6 +1551,9 @@ func TestIPBlockSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			predecessor, getErr := ipbsd.GetByID(ctx, nil, tc.ipb.ID, nil)
+			require.NoError(t, getErr)
+			previousUpdated := predecessor.Updated
 			got, err := ipbsd.Update(
 				ctx,
 				nil,
@@ -1594,9 +1597,7 @@ func TestIPBlockSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedFullGrant, got.FullGrant)
 			}
 
-			if got.Updated.String() == tc.ipb.Updated.String() {
-				t.Errorf("got.Updated = %v, want different value", got.Updated)
-			}
+			assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
@@ -1622,6 +1623,7 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 	ipb, err := ipbsd.Create(
 		ctx, nil, IPBlockCreateInput{
 			Name:                     "test1",
+			SitePrefixID:             cutil.GetPtr(uuid.New()),
 			Description:              cutil.GetPtr("description"),
 			SiteID:                   site1.ID,
 			InfrastructureProviderID: ip.ID,
@@ -1676,6 +1678,15 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, ipb3)
 
+	linkedIPB, err := ipbsd.Create(ctx, nil, IPBlockCreateInput{
+		Name: "linked-block", Description: cutil.GetPtr("retained description"),
+		SitePrefixID: cutil.GetPtr(uuid.New()), SiteID: site1.ID, InfrastructureProviderID: ip.ID,
+		TenantID: &tenant.ID, RoutingType: IPBlockRoutingTypePublic,
+		Prefix: "10.0.4.0", PrefixLength: 32, ProtocolVersion: IPBlockProtocolVersionV4,
+		Status: IPBlockStatusReady, CreatedBy: &user.ID,
+	})
+	require.NoError(t, err)
+
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
@@ -1685,12 +1696,21 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 		paramDescription    bool
 		paramTenantID       bool
 		paramDeleted        bool
+		paramSitePrefixID   bool
 		expectedUpdate      bool
 		expectedDescription *string
 		expectedTenantID    *uuid.UUID
 		expectedError       bool
 		verifyChildSpanner  bool
 	}{
+		{
+			desc:                "can clear Core link without clearing other fields",
+			ipb:                 linkedIPB,
+			paramSitePrefixID:   true,
+			expectedUpdate:      true,
+			expectedTenantID:    ipb.TenantID,
+			expectedDescription: cutil.GetPtr("retained description"),
+		},
 		{
 			desc:                "can clear description",
 			ipb:                 ipb,
@@ -1748,14 +1768,24 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 				require.ErrorIs(t, err, db.ErrDoesNotExist)
 			}
 			tmp, err := ipbsd.Clear(ctx, nil, IPBlockClearInput{
-				IPBlockID:   tc.ipb.ID,
-				Description: tc.paramDescription,
-				TenantID:    tc.paramTenantID,
-				Deleted:     tc.paramDeleted,
+				IPBlockID:    tc.ipb.ID,
+				Description:  tc.paramDescription,
+				TenantID:     tc.paramTenantID,
+				Deleted:      tc.paramDeleted,
+				SitePrefixID: tc.paramSitePrefixID,
 			})
 			assert.Equal(t, tc.expectedError, err != nil)
 			assert.NotNil(t, tmp)
 			assert.Nil(t, tmp.Deleted)
+			if tc.paramSitePrefixID {
+				preserved := *tc.ipb
+				preserved.SitePrefixID = nil
+				preserved.Updated = tmp.Updated
+				assert.Equal(t, preserved, *tmp)
+				assert.Nil(t, tmp.SitePrefixID)
+			} else {
+				assert.Equal(t, tc.ipb.SitePrefixID, tmp.SitePrefixID)
+			}
 			assert.Equal(t, tc.ipb.ID, tmp.ID)
 			assert.Equal(t, tc.ipb.Created, tmp.Created)
 			assert.Equal(t, tc.expectedDescription == nil, tmp.Description == nil)

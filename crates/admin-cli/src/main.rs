@@ -185,6 +185,17 @@ async fn main() -> color_eyre::Result<()> {
             )
             .exit();
     }
+    // Validate service commands before opening --output or contacting Core.
+    let extension_service_validation = match config.commands.as_ref() {
+        Some(CliCommand::Instance(command)) => {
+            command.validate_extension_service_arguments(config.cloud_unsafe_op.is_some())
+        }
+        Some(CliCommand::ExtensionService(command)) => command.validate_create_arguments(),
+        _ => Ok(()),
+    };
+    if let Err(error) = extension_service_validation {
+        error.exit();
+    }
     let file_config = get_config_from_file();
 
     // Log level is set from, in order of preference:
@@ -274,10 +285,10 @@ async fn main() -> color_eyre::Result<()> {
                 verified.request_timeout = Some(VERIFIED_VERSION_TIMEOUT);
                 verified.connect_retries_max = Some(0);
                 version_fallback = Some(version::VerificationFallback {
-                    api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-                        &url,
-                        &client_config,
-                    ))),
+                    api_client: ApiClient(CarbideApiClient::new(
+                        &ApiConfig::new(&url, &client_config),
+                        carbide_instrument::Instrumentation::noop(),
+                    )),
                     root_ca_path: client_config.root_ca_path.clone(),
                 });
                 verified_retry = Some(RetryConfig {
@@ -304,7 +315,10 @@ async fn main() -> color_eyre::Result<()> {
         api_config = api_config.with_retry_config(retry_config);
     }
     let ctx = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&api_config)),
+        api_client: ApiClient(CarbideApiClient::new(
+            &api_config,
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format: config.format,
             request_timeout: client_config.request_timeout,

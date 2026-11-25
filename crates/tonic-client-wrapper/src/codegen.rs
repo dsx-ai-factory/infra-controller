@@ -218,6 +218,7 @@ impl<'a> CodeGenerator<'a> {
 
             #[derive(Debug)]
             struct Inner {
+                instrumentation: ::carbide_instrument::Instrumentation,
                 connection_provider: Box<dyn ::tonic_client_wrapper::ConnectionProvider<#inner_rpc_client_type>>,
                 connection: ::tokio::sync::Mutex<Option<InnerConnection>>,
             }
@@ -229,8 +230,11 @@ impl<'a> CodeGenerator<'a> {
             }
 
             impl #wrapper_name {
-                pub fn build<P: ::tonic_client_wrapper::ConnectionProvider<#inner_rpc_client_type>>(connection_provider: P) -> Self {
+                /// Builds a client whose RED metrics use `instrumentation`.
+                /// Retain its meter provider while client calls can run.
+                pub fn build<P: ::tonic_client_wrapper::ConnectionProvider<#inner_rpc_client_type>>(connection_provider: P, instrumentation: ::carbide_instrument::Instrumentation) -> Self {
                     let inner = Inner {
+                        instrumentation,
                         connection_provider: Box::new(connection_provider),
                         connection: tokio::sync::Mutex::new(None),
                     };
@@ -460,7 +464,7 @@ impl<'a> CodeGenerator<'a> {
                     where
                         S: tonic::IntoStreamingRequest<Message = #input_type>,
                     {
-                        ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                             self.connection().await?.#method_name(request).await
                         }).await
                     }
@@ -473,7 +477,7 @@ impl<'a> CodeGenerator<'a> {
                     where
                         S: tonic::IntoStreamingRequest<Message = #input_type>,
                     {
-                        ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                             Ok(self
                                 .connection()
                                 .await?
@@ -489,7 +493,7 @@ impl<'a> CodeGenerator<'a> {
                 let token_stream = if input_is_unit {
                     quote! {
                         pub async fn #method_name(&self) -> Result<tonic::codec::Streaming<#output_type>, tonic::Status> {
-                                ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                                     Ok(self
                                         .connection()
                                         .await?
@@ -509,7 +513,7 @@ impl<'a> CodeGenerator<'a> {
                     if has_zero_fields {
                         quote! {
                             pub async fn #method_name(&self) -> Result<tonic::codec::Streaming<#output_type>, tonic::Status> {
-                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                    ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                                         Ok(self
                                             .connection()
                                             .await?
@@ -522,7 +526,7 @@ impl<'a> CodeGenerator<'a> {
                     } else {
                         quote! {
                             pub async fn #method_name<T: Into<#input_type>>(&self, request: T) -> Result<tonic::codec::Streaming<#output_type>, tonic::Status> {
-                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                    ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                                         Ok(self
                                             .connection()
                                             .await?
@@ -541,7 +545,7 @@ impl<'a> CodeGenerator<'a> {
                 let token_stream = if input_is_unit {
                     quote! {
                         pub async fn #method_name(&self) -> Result<#output_type, tonic::Status> {
-                                ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                                     Ok(self
                                         .connection()
                                         .await?
@@ -561,7 +565,7 @@ impl<'a> CodeGenerator<'a> {
                     if has_zero_fields {
                         quote! {
                             pub async fn #method_name(&self) -> Result<#output_type, tonic::Status> {
-                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                    ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                                         Ok(self
                                             .connection()
                                             .await?
@@ -574,7 +578,7 @@ impl<'a> CodeGenerator<'a> {
                     } else {
                         quote! {
                             pub async fn #method_name<T: Into<#input_type>>(&self, request: T) -> Result<#output_type, tonic::Status> {
-                                    ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
+                                    ::carbide_instrument::red::instrumented(&self.inner.instrumentation, #service_label, #operation_label, async move {
                                         Ok(self
                                             .connection()
                                             .await?
@@ -902,7 +906,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn void_rpc(&self) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "void_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "void_rpc", async move {
                             Ok(self.connection().await?.void_rpc(tonic::Request::new(crate::test::VoidRequest {})).await?.into_inner())
                         }).await
                     }
@@ -920,7 +924,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_message_rpc<T: Into<crate::test::SingleMessageRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "single_message_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "single_message_rpc", async move {
                             Ok(self.connection().await?.single_message_rpc(tonic::Request::new(request.into())).await?.into_inner())
                         }).await
                     }
@@ -938,7 +942,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_primitive_rpc<T: Into<crate::test::SinglePrimitiveRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "single_primitive_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "single_primitive_rpc", async move {
                             Ok(self.connection().await?.single_primitive_rpc(tonic::Request::new(request.into())).await?.into_inner())
                         }).await
                     }
@@ -956,7 +960,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_one_of_message_rpc<T: Into<crate::test::SingleOneOfMessageRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "single_one_of_message_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "single_one_of_message_rpc", async move {
                             Ok(self.connection().await?.single_one_of_message_rpc(tonic::Request::new(request.into())).await?.into_inner())
                         }).await
                     }
@@ -974,7 +978,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_one_of_primitive_rpc<T: Into<crate::test::SingleOneOfPrimitiveRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "single_one_of_primitive_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "single_one_of_primitive_rpc", async move {
                             Ok(self.connection().await?.single_one_of_primitive_rpc(tonic::Request::new(request.into())).await?.into_inner())
                         }).await
                     }
@@ -992,7 +996,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn multi_rpc<T: Into<crate::test::MultiRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "multi_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "multi_rpc", async move {
                             Ok(self.connection().await?.multi_rpc(tonic::Request::new(request.into())).await?.into_inner())
                         }).await
                     }
@@ -1010,7 +1014,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn extern_rpc<T: Into<crate::test::ExternRequest>>(&self, request: T) -> Result<crate::test::SomeResponse, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "extern_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "extern_rpc", async move {
                             Ok(self.connection().await?.extern_rpc(tonic::Request::new(request.into())).await?.into_inner())
                         }).await
                     }
@@ -1028,7 +1032,7 @@ mod tests {
                 wrapper.to_string(),
                 quote! {
                     pub async fn single_streaming_message_rpc<T: Into<crate::test::SingleMessageRequest>>(&self, request: T) -> Result<tonic::codec::Streaming<crate::test::SomeResponse>, tonic::Status> {
-                        ::carbide_instrument::red::instrumented("test_service", "single_streaming_message_rpc", async move {
+                        ::carbide_instrument::red::instrumented(&self.inner.instrumentation, "test_service", "single_streaming_message_rpc", async move {
                             Ok(self.connection().await?.single_streaming_message_rpc(tonic::Request::new(request.into())).await?.into_inner())
                         }).await
                     }

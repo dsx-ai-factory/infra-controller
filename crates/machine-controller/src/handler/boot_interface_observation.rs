@@ -24,7 +24,7 @@
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use chrono::{DateTime, Duration, Utc};
 use config_version::Versioned;
-use db::ConditionalWrite;
+use db::{ConditionalWrite, TransactionVending as _};
 use model::machine::{DpuMachine, HostMachine, ManagedHostState, ManagedHostStateSnapshot};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use state_controller::state_handler::{
@@ -35,7 +35,6 @@ use super::host_boot_config::{
     HostBootConfigDecision, decide_host_boot_config, inspect_host_boot_config,
 };
 use crate::context::MachineStateHandlerContextObjects;
-
 /// Returns the verified desired target after its observation interval elapses.
 fn periodic_observation_target(
     host: &HostMachine,
@@ -118,13 +117,13 @@ pub(super) async fn observe_verified_boot_interface(
         return Ok(StateHandlerOutcome::do_nothing());
     }
 
-    let redfish_client = match ctx.services.create_redfish_client_from_machine(host).await {
-        Ok(redfish_client) => redfish_client,
+    let bmc = match ctx.services.connect_bmc(host).await {
+        Ok(bmc) => bmc,
         Err(error) => {
             tracing::warn!(
                 machine_id = %host.id,
                 desired_version = %desired_boot_interface.version,
-                operation = "create_redfish_client",
+                operation = "connect_bmc",
                 error = %error,
                 "Failed to observe verified host boot configuration",
             );
@@ -132,29 +131,30 @@ pub(super) async fn observe_verified_boot_interface(
         }
     };
     let redfish_target: BootInterfaceTarget = desired_boot_interface.value.clone().into();
-    let boot_config_inspection = match inspect_host_boot_config(
-        ctx.services,
-        redfish_client.as_ref(),
-        managed_host_snapshot,
-        &redfish_target,
-    )
-    .await
-    {
-        Ok(boot_config_inspection) => boot_config_inspection,
-        Err(error) => {
-            tracing::warn!(
-                machine_id = %host.id,
-                desired_version = %desired_boot_interface.version,
-                operation = "inspect_host_boot_config",
-                error = %error,
-                "Failed to observe verified host boot configuration",
-            );
-            return Ok(StateHandlerOutcome::do_nothing());
-        }
-    };
+    let boot_config_inspection =
+        match inspect_host_boot_config(ctx.services, &bmc, managed_host_snapshot, &redfish_target)
+            .await
+        {
+            Ok(boot_config_inspection) => boot_config_inspection,
+            Err(error) => {
+                tracing::warn!(
+                    machine_id = %host.id,
+                    desired_version = %desired_boot_interface.version,
+                    operation = "inspect_host_boot_config",
+                    error = %error,
+                    "Failed to observe verified host boot configuration",
+                );
+                return Ok(StateHandlerOutcome::do_nothing());
+            }
+        };
 
     let boot_config_decision = decide_host_boot_config(boot_config_inspection);
-    let mut observation_txn = ctx.services.db_pool.begin().await?;
+    let mut observation_txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     match boot_config_decision {
         HostBootConfigDecision::Complete => {
             let observation_write = db::machine_desired_boot_interface::mark_verified(

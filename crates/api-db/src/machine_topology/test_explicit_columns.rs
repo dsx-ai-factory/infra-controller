@@ -21,6 +21,7 @@ use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn topology_queries_survive_added_columns(
@@ -31,7 +32,7 @@ async fn topology_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep prepared statements on the API connection while a migration commits.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_topologies ADD COLUMN test_added_column text;",
@@ -45,7 +46,7 @@ async fn topology_queries_survive_added_columns(
 }
 
 async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let machine_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x76; 32],

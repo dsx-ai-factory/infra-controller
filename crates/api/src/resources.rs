@@ -21,7 +21,7 @@ use std::sync::Arc;
 use carbide_api_core::bootstrap::acquire_vault_import_work_lock;
 use carbide_api_core::cfg::file::{
     BmcSiteWideRootSource, CarbideConfig, CertBackendKind, CredentialBackend, ImportSource,
-    ProviderConfig, SecretsConfig, UfmCredentialSource,
+    ProviderConfig, SecretsConfig, UfmAuthMode, UfmCredentialSource,
 };
 use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, SecretsContext};
 use carbide_kmip::KmipClientConfig;
@@ -116,7 +116,12 @@ pub(crate) async fn setup_resources(
         None
     } else {
         Some(
-            create_vault_client(&vault_config, instrumentation.clone()).wrap_err_with(|| {
+            create_vault_client(
+                &vault_config,
+                instrumentation.clone(),
+                Some((join_set, cancel_token.clone())),
+            )
+            .wrap_err_with(|| {
                 format!(
                     "vault connection settings are required by {}",
                     vault_settings.join(", ")
@@ -140,13 +145,14 @@ pub(crate) async fn setup_resources(
         trust_domain: vault_config.spiffe_trust_domain(),
         machine_base_path: vault_config.spiffe_machine_base_path(),
     };
-    let vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
+    let mut vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
         let cert_config = carbide_config.certificates.to_certificate_config()?;
         create_certificate_provider(
             &cert_config,
             vault_client.as_ref(),
             spiffe.clone(),
             instrumentation.clone(),
+            Some((join_set, cancel_token.clone())),
         )
     };
     let certificate_provider: Arc<dyn CertificateProvider> =
@@ -624,22 +630,35 @@ async fn validate_local_ufm_credentials(
     {
         return Ok(());
     }
-    for fabric in carbide_config.ib_fabrics.keys() {
+    for (fabric, definition) in &carbide_config.ib_fabrics {
+        // Explicit certificate authentication has no credential prerequisite.
+        if definition.auth == Some(UfmAuthMode::ClientCertificate) {
+            continue;
+        }
         let key = carbide_secrets::credentials::CredentialKey::UfmAuth {
             fabric: fabric.clone(),
         };
-        let mut found = false;
+        // Validate the first local entry only, matching runtime reader-chain precedence.
+        let mut local_credentials = None;
         for reader in local_readers {
-            if reader.get_credentials(&key).await?.is_some() {
-                found = true;
+            if let Some(credentials) = reader.get_credentials(&key).await? {
+                local_credentials = Some(credentials);
                 break;
             }
         }
-        if !found {
+        let Some(local_credentials) = local_credentials else {
             return Err(SecretsError::UfmCredentialReadBlocked {
                 fabric: fabric.clone(),
             }
             .into());
+        };
+        let carbide_secrets::credentials::Credentials::UsernamePassword { password, .. } =
+            local_credentials;
+        if definition.auth == Some(UfmAuthMode::Token) && password.trim().is_empty() {
+            return Err(eyre::eyre!(
+                "UFM fabric {fabric:?} sets auth = \"token\", but its local UFM credential has an \
+                 empty password"
+            ));
         }
     }
     Ok(())
@@ -727,6 +746,7 @@ async fn build_kms_backend(
                         .unwrap_or(DEFAULT_TRANSIT_MOUNT)
                         .to_string(),
                     keys.clone(),
+                    instrumentation.clone(),
                 );
                 join_set
                     .build_task()
@@ -758,10 +778,11 @@ async fn build_kms_backend(
                 // Connects now and verifies the server and every key before
                 // any DEK is wrapped; an unreachable server or an unqualified
                 // key fails the boot with a message that names the field.
-                let provider = KmipKmsProvider::connect(client_config, keys.clone())
-                    .await
-                    .map_err(eyre::Report::new)
-                    .wrap_err_with(|| format!("KMS provider {name:?}"))?;
+                let provider =
+                    KmipKmsProvider::connect(client_config, keys.clone(), instrumentation.clone())
+                        .await
+                        .map_err(eyre::Report::new)
+                        .wrap_err_with(|| format!("KMS provider {name:?}"))?;
                 Arc::new(provider)
             }
         };
@@ -1167,7 +1188,7 @@ mod tests {
     }
 
     // The zero acquire timeout fails the database step without touching the
-    // network, and the shared Vault's CA file is missing, so each error shows
+    // network or starting database tasks. A missing shared Vault CA shows
     // which check ran first: a site that names no shared Vault gets past the
     // Vault settings it lacks, and `import_from = "vault"` fails on them before
     // the database could report a completed import. The CA lookup falls back to
@@ -1176,7 +1197,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn startup_checks_shared_vault_settings_only_when_named() {
-        use CredentialBackend::Postgres;
+        use CredentialBackend::{Postgres, Vault};
 
         let _vault_cacert = EnvironmentVariableGuard::remove("VAULT_CACERT");
         let certificate_vault_ca =
@@ -1189,35 +1210,70 @@ mod tests {
             vault_cacert: Some(certificate_vault_ca.path().display().to_string()),
             namespace: None,
         };
-        let credential_config = CredentialConfig {
+        let missing_shared_vault = CredentialConfig {
             vault: VaultConfig {
                 vault_cacert: Some("/nonexistent/vault-ca.crt".to_string()),
                 ..Default::default()
             },
             ..Default::default()
         };
-        for (scenario, secrets, expected_error) in [
+        let configured_shared_vault = CredentialConfig {
+            vault: VaultConfig {
+                address: Some(dedicated_vault.address.clone()),
+                kv_mount_location: Some("secret".to_string()),
+                pki_mount_location: Some(dedicated_vault.pki_mount_location.clone()),
+                pki_role_name: Some(dedicated_vault.pki_role_name.clone()),
+                token: dedicated_vault.token.clone(),
+                vault_cacert: dedicated_vault.vault_cacert.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (scenario, secrets, certificates, credential_config, expected_error, expected_tasks) in [
             (
                 "no setting names the shared vault",
                 Some((vec![Postgres], Postgres, None)),
+                DEDICATED_VAULT,
+                &missing_shared_vault,
                 "database_pool_acquire_timeout",
+                1,
             ),
             (
                 "import_from = vault is checked before the database",
                 Some((vec![Postgres], Postgres, Some(ImportSource::Vault))),
+                DEDICATED_VAULT,
+                &missing_shared_vault,
                 "vault connection settings are required by [secrets] import_from",
+                0,
+            ),
+            (
+                "shared vault used only for certificates has one refresh task",
+                Some((vec![Postgres], Postgres, None)),
+                (false, false, CertBackendKind::SharedVault),
+                &configured_shared_vault,
+                "database_pool_acquire_timeout",
+                1,
+            ),
+            (
+                "shared credentials and dedicated certificates have separate refresh tasks",
+                Some((vec![Vault, Postgres], Postgres, None)),
+                DEDICATED_VAULT,
+                &configured_shared_vault,
+                "database_pool_acquire_timeout",
+                2,
             ),
         ] {
-            let mut config = vault_selection_config(secrets, DEDICATED_VAULT);
+            let mut config = vault_selection_config(secrets, certificates);
             config.certificates.dedicated_vault = Some(dedicated_vault.clone());
             config.database_pool_acquire_timeout = std::time::Duration::ZERO;
+            let mut join_set = JoinSet::new();
             let metrics =
                 metrics_endpoint::new_metrics_setup("resource-validation-tests", "carbide", false)
                     .expect("test metrics setup");
             let error = setup_resources(
                 &config,
-                &credential_config,
-                &mut JoinSet::new(),
+                credential_config,
+                &mut join_set,
                 &CancellationToken::new(),
                 &carbide_instrument::Instrumentation::from_meter_provider(&metrics.meter_provider),
             )
@@ -1228,6 +1284,7 @@ mod tests {
                 format!("{error:#}").contains(expected_error),
                 "{scenario}: got {error:#}"
             );
+            assert_eq!(join_set.len(), expected_tasks, "{scenario}: refresh tasks");
         }
     }
 
@@ -1446,6 +1503,110 @@ mod tests {
         )
         .await
         .expect("disabled IB management must not require dormant UFM credentials");
+    }
+
+    /// Verifies local startup applies each explicit authentication mode to the highest-priority
+    /// credential while preserving legacy empty-password selection.
+    #[tokio::test]
+    async fn local_ufm_validation_follows_explicit_auth_mode() {
+        /// Describes one authentication policy, its ordered local passwords, and any startup error.
+        #[derive(Debug)]
+        struct Case {
+            name: &'static str,
+            auth: Option<UfmAuthMode>,
+            passwords: &'static [&'static str],
+            expected_error: Option<&'static str>,
+        }
+
+        const EMPTY_TOKEN_ERROR: &str = "UFM fabric \"default\" sets auth = \"token\", but its local UFM credential has an empty password";
+        let cases = [
+            // Explicit certificate mode must start without a local credential because it never reads one.
+            Case {
+                name: "client certificate",
+                auth: Some(UfmAuthMode::ClientCertificate),
+                passwords: &[],
+                expected_error: None,
+            },
+            // Explicit token mode must retain the local credential prerequisite for its UFM token.
+            Case {
+                name: "token without credential",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &[],
+                expected_error: Some("credentials.ufm_source"),
+            },
+            // The first empty token entry must fail instead of falling through to a later valid entry.
+            Case {
+                name: "token with empty password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &["", "later-token"],
+                expected_error: Some(EMPTY_TOKEN_ERROR),
+            },
+            // Whitespace-only input differs from exact empty input but is equally invalid as a token.
+            Case {
+                name: "token with whitespace-only password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &[" \t"],
+                expected_error: Some(EMPTY_TOKEN_ERROR),
+            },
+            // A nonblank local password satisfies explicit token mode.
+            Case {
+                name: "token with nonblank password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &["token"],
+                expected_error: None,
+            },
+            // Legacy selection still uses an empty password to select the SPIFFE certificate.
+            Case {
+                name: "legacy with empty password",
+                auth: None,
+                passwords: &[""],
+                expected_error: None,
+            },
+        ];
+
+        for case in cases {
+            // Enable IB and apply the case's auth policy to the configured default fabric.
+            let mut config = carbide_api_core::test_support::default_config::get();
+            config.ib_config.get_or_insert_default().enabled = true;
+            config
+                .ib_fabrics
+                .get_mut("default")
+                .expect("default fabric")
+                .auth = case.auth;
+
+            // Build local readers in runtime priority order from the case's credential entries.
+            let key = CredentialKey::UfmAuth {
+                fabric: "default".to_string(),
+            };
+            let mut readers = Vec::<Box<dyn CredentialReader>>::new();
+            for password in case.passwords {
+                let reader = MemoryCredentialStore::default();
+                reader
+                    .set_credentials(&key, &Credentials::new("", *password))
+                    .await
+                    .unwrap_or_else(|error| panic!("{}: seed credential: {error}", case.name));
+                readers.push(Box::new(reader));
+            }
+
+            let result = validate_local_ufm_credentials(&config, &readers).await;
+
+            match case.expected_error {
+                Some(expected) => {
+                    let error = match result {
+                        Ok(()) => panic!("{}: startup unexpectedly succeeded", case.name),
+                        Err(error) => error,
+                    };
+                    assert!(
+                        error.to_string().contains(expected),
+                        "{}: {error}",
+                        case.name
+                    );
+                }
+                None => result.unwrap_or_else(|error| {
+                    panic!("{}: startup unexpectedly failed: {error}", case.name)
+                }),
+            }
+        }
     }
 
     #[tokio::test]

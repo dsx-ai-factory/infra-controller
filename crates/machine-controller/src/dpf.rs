@@ -25,12 +25,14 @@ use async_trait::async_trait;
 use carbide_dpf::types::{
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions,
-    DpuServiceObservation, DpuServiceVersion, HostDpfSnapshot, ServiceTemplateVersion,
+    DpfResourcePreconditions, DpuServiceObservation, DpuServiceVersion, HostDpfSnapshot,
+    ServiceTemplateVersion, ServiceVpcChainObservation, ServiceVpcChainRequest,
+    ServiceVpcNodeIdentity,
 };
 use carbide_dpf::{
-    AstraRoutePrefixes, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk,
-    DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo, DpuPhaseObservation, DpuWatcher, KubeRepository,
-    ResourceLabeler, node_id_from_dpu_node_cr_name,
+    AstraRoutePrefixes, BmcCredentialObservation, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL,
+    DpfError, DpfSdk, DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo, DpuPhaseObservation,
+    DpuWatcher, KubeRepository, ResourceLabeler, node_id_from_dpu_node_cr_name,
 };
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::dpu_machine_update::OutdatedDpfDpu;
@@ -49,7 +51,7 @@ use crate::io::MachineStateControllerIO;
 
 /// Label key used by [`CarbideDPFLabeler`] to stamp the carbide `MachineId` of
 /// the DPU onto its DPUDevice. Propagates to the DPU CR via DPF.
-const DPU_MACHINE_ID_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
+const DPU_MACHINE_ID_LABEL: &str = carbide_dpf::DPU_MACHINE_ID_LABEL;
 
 /// Label key used by [`CarbideDPFLabeler`] to mark a DPU device as
 /// carbide-controlled. Propagates to the DPU CR.
@@ -68,6 +70,34 @@ pub const HOST_BMC_IP_LABEL: &str = "carbide.nvidia.com/host-bmc-ip";
 #[cfg_attr(feature = "test-support", mockall::automock)]
 #[async_trait]
 pub trait DpfOperations: Send + Sync + std::fmt::Debug {
+    /// Whether the startup-cached DPF version supports per-DPU BMC credential Secrets.
+    fn supports_per_dpu_bmc_credentials(&self) -> bool;
+
+    async fn observe_bmc_credential(
+        &self,
+        device_id: &str,
+    ) -> Result<BmcCredentialObservation, DpfError>;
+
+    async fn ensure_bmc_rotation_secret(
+        &self,
+        device_id: &str,
+        version: u32,
+        password: &str,
+    ) -> Result<String, DpfError>;
+
+    async fn set_bmc_credential_reference(
+        &self,
+        observation: &BmcCredentialObservation,
+        secret_name: &str,
+    ) -> Result<(), DpfError>;
+
+    async fn delete_old_bmc_credential_secret(
+        &self,
+        device_id: &str,
+        old_secret_name: &str,
+        target_secret_name: &str,
+    ) -> Result<(), DpfError>;
+
     /// Register a DPU device using the full expected-machine entry when available.
     /// The expected-machine entry contains credentials and must not be logged.
     async fn register_dpu_device(
@@ -93,6 +123,22 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         node_id: &str,
         dpu_device_names: &[String],
     ) -> Result<(), DpfError>;
+
+    /// Delete the host's NICo-owned BMC credential Secrets after its DPF resources drain.
+    /// Returns `false` until resources and Secrets, including finalizers, are gone.
+    async fn delete_host_bmc_credential_secrets(
+        &self,
+        node_id: &str,
+        dpu_device_names: &[String],
+    ) -> Result<bool, DpfError>;
+
+    async fn bmc_credential_resources_gone(
+        &self,
+        node_id: &str,
+        device_id: &str,
+    ) -> Result<bool, DpfError>;
+
+    async fn bmc_rotation_secret_exists(&self, secret_name: &str) -> Result<bool, DpfError>;
 
     /// Read a DPU phase and terminal failure details from the same CR observation.
     ///
@@ -280,11 +326,13 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         definition: &DetachedDpuServiceChainDefinition,
     ) -> Result<DetachedDpfResourceObservation, DpfError>;
 
-    /// Apply a revision-fenced JSON Patch to one detached DPUServiceChain.
+    /// Replace the owned chain spec and stamp its observed UID using both write preconditions.
+    /// Callers must validate chain ownership, reject deleting chains, and supply the observed UID and
+    /// resource version as required by [DpfSdk::patch_detached_dpu_service_chain].
     async fn patch_detached_dpu_service_chain(
         &self,
-        name: &str,
-        patch: serde_json::Value,
+        definition: &DetachedDpuServiceChainDefinition,
+        preconditions: &DpfResourcePreconditions,
     ) -> Result<DetachedDpfResourceObservation, DpfError>;
 
     /// Delete the exact detached DPUServiceChain registration parent observed.
@@ -294,7 +342,41 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         preconditions: &DpfDeletePreconditions,
     ) -> Result<(), DpfError>;
 
+    /// Backfills this DPU's declared Node identity, rejecting reassignment and stale patches.
+    /// Callers must pair the raw device ID with its persisted DPU ID and verify the remote Node.
+    /// Each management read or patch has a ten-second deadline without automatic retries.
+    async fn ensure_dpu_device_node_identity(
+        &self,
+        dpu_device_name: &str,
+        dpu_id: DpuMachineId,
+    ) -> Result<(), DpfError>;
+
+    /// Resolves current remote Node UIDs from persisted DPU/device pairs before ServiceChain activation.
+    ///
+    /// Device IDs exclude the device- prefix. The caller must retain each returned identity before
+    /// authorizing creation and must not replace that baseline during retirement. Missing or
+    /// ambiguous mappings fail the complete lookup; this operation never changes placement.
+    /// See [DpfSdk::resolve_service_vpc_nodes] for batching and attempt deadlines.
+    async fn resolve_service_vpc_nodes(
+        &self,
+        devices: &BTreeMap<DpuMachineId, String>,
+    ) -> Result<BTreeMap<DpuMachineId, ServiceVpcNodeIdentity>, DpfError>;
+
+    /// Observes each requested chain using committed selector desire and retained Node identity.
+    ///
+    /// Results retain input order and caller request context; read failures are explicit
+    /// ReadFailure evidence.
+    /// Callers must serialize revalidation of persisted desire, request context, and retained Node identity
+    /// with concurrent changes before consuming conclusive evidence.
+    /// Callers must retain cleanup_bypass_observed as required by [DpfSdk::observe_service_vpc_chains],
+    /// which also specifies acknowledgement ordering and supported cleanup.
+    async fn observe_service_vpc_chains(
+        &self,
+        requests: &[ServiceVpcChainRequest],
+    ) -> Vec<ServiceVpcChainObservation>;
+
     /// Merge changes into a DPUDevice's DPU-cluster node labels.
+    /// Attempts to set or remove [`carbide_dpf::DPU_MACHINE_ID_LABEL`] return an error.
     async fn merge_dpu_device_node_labels(
         &self,
         dpu_device_name: &str,
@@ -451,8 +533,7 @@ fn host_bmc_ip_label_value(ip: IpAddr) -> String {
 
 /// BMC password provider backed by the Carbide credential manager.
 ///
-/// DPF needs a single site-wide BMC password (it has no per-device MAC at this
-/// layer), so this is one of the few legitimate site-wide credential consumers.
+/// DPUDevices without per-device credential references use this shared site-wide BMC password.
 /// It resolves the *current* site-wide version from
 /// `sitewide_credential_rotation.target_version` rather than reading a fixed
 /// unversioned path, so after a rotation it hands DPF the version the fleet has
@@ -483,14 +564,8 @@ impl CarbideBmcPasswordProvider {
     /// active type -- and is surfaced as an error rather than silently assuming
     /// 0, matching the rest of the rotation code.
     async fn current_sitewide_bmc_version(&self) -> Result<u32, DpfError> {
-        // Single read; needs no transaction.
-        let mut conn = self.db_pool.acquire().await.map_err(|e| {
-            DpfError::InvalidState(format!(
-                "Failed to acquire db connection for BMC rotation target: {e}"
-            ))
-        })?;
         let target_version = db::credential_rotation::current_target_version(
-            &mut conn,
+            &self.db_pool,
             db::credential_rotation::CredentialRotationType::Bmc,
         )
         .await
@@ -606,6 +681,8 @@ pub struct DpfSdkOps {
     sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
     _watcher: DpuWatcher,
     astra_route_prefixes: AstraRoutePrefixes,
+    credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
+    db_pool: PgPool,
 }
 
 impl DpfSdkOps {
@@ -614,8 +691,10 @@ impl DpfSdkOps {
         sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
         astra_route_prefixes: AstraRoutePrefixes,
         db_pool: PgPool,
+        credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
         join_set: &mut JoinSet<()>,
     ) -> std::io::Result<Self> {
+        let registration_db_pool = db_pool.clone();
         let watcher = sdk
             .watcher()
             .on_dpu_event(|event| async move {
@@ -700,6 +779,8 @@ impl DpfSdkOps {
             sdk,
             _watcher: watcher,
             astra_route_prefixes,
+            credential_reader,
+            db_pool: registration_db_pool,
         })
     }
 }
@@ -742,16 +823,12 @@ async fn enqueue_host(
         .parse()
         .map_err(|e| DpfError::InvalidState(format!("Invalid BMC MAC in node name: {e}")))?;
 
-    let host_machine_id = {
-        let mut conn = db_pool.acquire().await.map_err(|e| {
-            DpfError::InvalidState(format!("Failed to acquire database connection: {e}"))
-        })?;
-        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(&mut conn, bmc_mac)
+    let host_machine_id =
+        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(db_pool, bmc_mac)
             .await
             .map_err(|e| {
                 DpfError::InvalidState(format!("DB error looking up host by BMC MAC: {e}"))
-            })?
-    };
+            })?;
 
     let Some(host_machine_id) = host_machine_id else {
         tracing::warn!(node = %node_name, bmc_mac_address = %bmc_mac, reason, "Could not find host for DPF node");
@@ -811,9 +888,114 @@ impl std::fmt::Debug for DpfSdkOps {
     }
 }
 
-/// Delegates everything to the underlying DPF SDK.
+async fn initial_dpu_bmc_credential(
+    credential_reader: &dyn carbide_secrets::credentials::CredentialReader,
+    db_pool: &PgPool,
+    bmc_mac_address: mac_address::MacAddress,
+) -> Result<(Option<u32>, String), DpfError> {
+    use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+    use db::credential_rotation::{CredentialRotationType, device_rotation_operation_state};
+    if db::dpf_bmc_rotation::get(db_pool, bmc_mac_address)
+        .await
+        .map_err(|_| {
+            DpfError::BmcPasswordSourceUnavailable(
+                "could not read DPU BMC credential recovery state".to_string(),
+            )
+        })?
+        .is_some()
+    {
+        return Err(DpfError::BmcPasswordSourceUnavailable(
+            "DPU BMC credential recovery must complete before registration".to_string(),
+        ));
+    }
+    let state =
+        device_rotation_operation_state(db_pool, CredentialRotationType::Bmc, bmc_mac_address)
+            .await
+            .map_err(|_| {
+                DpfError::BmcPasswordSourceUnavailable(
+                    "could not read the DPU's confirmed BMC credential version".to_string(),
+                )
+            })?;
+    if state
+        .as_ref()
+        .is_some_and(|state| state.rotating_to_version.is_some())
+    {
+        return Err(DpfError::BmcPasswordSourceUnavailable(
+            "DPU BMC credential rotation is in progress".to_string(),
+        ));
+    }
+    // Missing enrollment provides no proven version; the stored per-BMC credential
+    // is still authoritative for initial registration.
+    let version = state
+        .and_then(|state| state.current_version)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            DpfError::InvalidState("invalid confirmed BMC credential version".to_string())
+        })?;
+    let key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+    };
+    let Some(Credentials::UsernamePassword { password, .. }) =
+        credential_reader.get_credentials(&key).await.map_err(|_| {
+            DpfError::BmcPasswordSourceUnavailable(
+                "could not read the DPU's established BMC credential".to_string(),
+            )
+        })?
+    else {
+        return Err(DpfError::BmcPasswordSourceUnavailable(
+            "DPU BMC credential is missing".to_string(),
+        ));
+    };
+    Ok((version, password))
+}
+
+/// Delegates operations to the underlying DPF SDK using established ingestion credentials.
 #[async_trait]
 impl DpfOperations for DpfSdkOps {
+    fn supports_per_dpu_bmc_credentials(&self) -> bool {
+        self.sdk.supports_per_dpu_bmc_credentials()
+    }
+
+    async fn observe_bmc_credential(
+        &self,
+        device_id: &str,
+    ) -> Result<BmcCredentialObservation, DpfError> {
+        self.sdk.observe_bmc_credential(device_id).await
+    }
+
+    async fn ensure_bmc_rotation_secret(
+        &self,
+        device_id: &str,
+        version: u32,
+        password: &str,
+    ) -> Result<String, DpfError> {
+        self.sdk
+            .ensure_bmc_credential_secret(device_id, Some(version), password)
+            .await
+    }
+
+    async fn set_bmc_credential_reference(
+        &self,
+        observation: &BmcCredentialObservation,
+        secret_name: &str,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .set_bmc_credential_reference(observation, secret_name)
+            .await
+    }
+
+    async fn delete_old_bmc_credential_secret(
+        &self,
+        device_id: &str,
+        old_secret_name: &str,
+        target_secret_name: &str,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .delete_old_bmc_credential_secret(device_id, old_secret_name, target_secret_name)
+            .await
+    }
+
     async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
@@ -826,6 +1008,39 @@ impl DpfOperations for DpfSdkOps {
             .as_ref()
             .filter(|_| deployment_type == DpuDeploymentType::Bf4Astra)
             .map(|machine| (machine, self.astra_route_prefixes));
+        if self.sdk.supports_per_dpu_bmc_credentials() {
+            use carbide_dpf::repository::DpuDeviceRepository;
+
+            let existing = DpuDeviceRepository::get(
+                self.sdk.repo().as_ref(),
+                &carbide_dpf::dpu_device_cr_name(&info.device_id),
+                self.sdk.namespace(),
+            )
+            .await?;
+            if existing.is_none() {
+                let bmc_mac_address = info.device_id.replace('-', ":").parse().map_err(|_| {
+                    DpfError::InvalidState("invalid DPU BMC MAC in device identity".to_string())
+                })?;
+                let (version, password) = initial_dpu_bmc_credential(
+                    self.credential_reader.as_ref(),
+                    &self.db_pool,
+                    bmc_mac_address,
+                )
+                .await?;
+                let secret_name = self
+                    .sdk
+                    .ensure_bmc_credential_secret(&info.device_id, version, &password)
+                    .await?;
+                return self
+                    .sdk
+                    .register_dpu_device_with_credential(
+                        info,
+                        astra_provisioning_inputs,
+                        &secret_name,
+                    )
+                    .await;
+            }
+        }
         self.sdk
             .register_dpu_device(info, astra_provisioning_inputs)
             .await
@@ -845,6 +1060,37 @@ impl DpfOperations for DpfSdkOps {
         dpu_device_names: &[String],
     ) -> Result<(), DpfError> {
         self.sdk.force_delete_host(node_id, dpu_device_names).await
+    }
+
+    async fn delete_host_bmc_credential_secrets(
+        &self,
+        node_id: &str,
+        dpu_device_names: &[String],
+    ) -> Result<bool, DpfError> {
+        self.sdk
+            .delete_host_bmc_credential_secrets(node_id, dpu_device_names)
+            .await
+    }
+
+    async fn bmc_credential_resources_gone(
+        &self,
+        node_id: &str,
+        device_id: &str,
+    ) -> Result<bool, DpfError> {
+        self.sdk
+            .bmc_credential_resources_gone(node_id, &[device_id.to_string()])
+            .await
+    }
+
+    async fn bmc_rotation_secret_exists(&self, secret_name: &str) -> Result<bool, DpfError> {
+        use carbide_dpf::repository::BmcCredentialRepository;
+
+        Ok(self
+            .sdk
+            .repo()
+            .get_bmc_credential_secret(secret_name, self.sdk.namespace())
+            .await?
+            .is_some())
     }
 
     async fn reprovision_dpu(
@@ -1129,10 +1375,12 @@ impl DpfOperations for DpfSdkOps {
 
     async fn patch_detached_dpu_service_chain(
         &self,
-        name: &str,
-        patch: serde_json::Value,
+        definition: &DetachedDpuServiceChainDefinition,
+        preconditions: &DpfResourcePreconditions,
     ) -> Result<DetachedDpfResourceObservation, DpfError> {
-        self.sdk.patch_detached_dpu_service_chain(name, patch).await
+        self.sdk
+            .patch_detached_dpu_service_chain(definition, preconditions)
+            .await
     }
 
     async fn delete_detached_dpu_service_chain(
@@ -1143,6 +1391,33 @@ impl DpfOperations for DpfSdkOps {
         self.sdk
             .delete_detached_dpu_service_chain(name, preconditions)
             .await
+    }
+
+    /// Forwards Node identity backfill to DpfSdk so machine reconciliation uses its fenced update.
+    async fn ensure_dpu_device_node_identity(
+        &self,
+        dpu_device_name: &str,
+        dpu_id: DpuMachineId,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .ensure_dpu_device_node_identity(dpu_device_name, dpu_id)
+            .await
+    }
+
+    /// Resolves DPU/device pairs through DpfSdk so callers can retain the actual remote Node UIDs.
+    async fn resolve_service_vpc_nodes(
+        &self,
+        devices: &BTreeMap<DpuMachineId, String>,
+    ) -> Result<BTreeMap<DpuMachineId, ServiceVpcNodeIdentity>, DpfError> {
+        self.sdk.resolve_service_vpc_nodes(devices).await
+    }
+
+    /// Reads chain evidence through DpfSdk so callers receive its ordered identity checks.
+    async fn observe_service_vpc_chains(
+        &self,
+        requests: &[ServiceVpcChainRequest],
+    ) -> Vec<ServiceVpcChainObservation> {
+        self.sdk.observe_service_vpc_chains(requests).await
     }
 
     async fn merge_dpu_device_node_labels(
@@ -1167,8 +1442,99 @@ impl DpfOperations for DpfSdkOps {
 mod bmc_password_tests {
     use carbide_secrets::MemoryCredentialStore;
     use carbide_secrets::credentials::{CredentialKey, CredentialWriter, Credentials};
+    use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 
     use super::*;
+
+    #[sqlx_test]
+    async fn initial_dpu_credential_uses_confirmed_version_and_waits_for_rotation(pool: PgPool) {
+        use carbide_secrets::credentials::BmcCredentialType;
+        use db::credential_rotation::{
+            CredentialRotationType, mark_device_rotating_to_version, record_device_enrolled,
+        };
+
+        let store = MemoryCredentialStore::default();
+        let mac = "02:00:00:00:00:01".parse().unwrap();
+        assert!(
+            initial_dpu_bmc_credential(&store, &pool, mac)
+                .await
+                .is_err()
+        );
+        let mut conn = pool.acquire().await.unwrap();
+        record_device_enrolled(&mut conn, mac, CredentialRotationType::Bmc, Some(3))
+            .await
+            .unwrap();
+        assert!(
+            initial_dpu_bmc_credential(&store, &pool, mac)
+                .await
+                .is_err()
+        );
+        store
+            .set_credentials(
+                &CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::BmcRoot {
+                        bmc_mac_address: mac,
+                    },
+                },
+                &Credentials::new("admin", "established-password"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_dpu_bmc_credential(&store, &pool, mac)
+                .await
+                .unwrap(),
+            (Some(3), "established-password".to_string())
+        );
+
+        mark_device_rotating_to_version(&mut conn, mac, CredentialRotationType::Bmc, 4)
+            .await
+            .unwrap();
+        assert!(
+            initial_dpu_bmc_credential(&store, &pool, mac)
+                .await
+                .is_err()
+        );
+
+        let retained_mac = "02:00:00:00:00:02".parse().unwrap();
+        store
+            .set_credentials(
+                &CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::BmcRoot {
+                        bmc_mac_address: retained_mac,
+                    },
+                },
+                &Credentials::new("admin", "retained-password"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_dpu_bmc_credential(&store, &pool, retained_mac)
+                .await
+                .unwrap(),
+            (None, "retained-password".to_string())
+        );
+        assert!(
+            db::credential_rotation::device_rotation_operation_state(
+                &pool,
+                CredentialRotationType::Bmc,
+                retained_mac,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        record_device_enrolled(&mut conn, retained_mac, CredentialRotationType::Bmc, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_dpu_bmc_credential(&store, &pool, retained_mac)
+                .await
+                .unwrap(),
+            (None, "retained-password".to_string())
+        );
+    }
 
     #[test]
     fn empty_password_preserves_local_v0_source_policy() {

@@ -30,10 +30,15 @@ type BatchTrayFirmwareUpdateRequest struct {
 	Filter *TrayFilter `json:"filter,omitempty"`
 	// Target firmware input serialized as a string. Its format is a contract between the caller and the component backend selected for the target. The REST API and Flow orchestration otherwise preserve this value. Flow only unwraps the optional per-tray mapping described below before passing the value to the selected component manager.  For compatibility, when Flow's compute component manager is explicitly configured as `nicolegacy` (the default is `nico`), use a compute tray endpoint without `version` or `targets` for on-demand host updates. Core selects the configured host firmware bundle.  For RMS-backed rack-scale firmware updates, use the complete SOT firmware-object JSON document, not a release version such as `24.11.0`. A SOT document is an object with `ProductName` and `Milestones` at the top level. Each milestone contains `Name`, `State`, and `BoardSKUs`; each board SKU contains `Name`, `Type`, and `Components`. Component groups contain `Software` and `Firmware` entries describing `Component`, `Version`, `Type`, `FileNames`, artifact `Locations`, and optional `SubComponents`. Obtain the complete document from the SOT release process; the abbreviated examples are not executable input. Supply a complete document covering all component types selected by the operation rule.  The string can contain either one shared firmware input for all selected trays or a JSON mapping from tray type (`compute`, `nvswitch`, `powershelf`) to firmware input. Each mapping value must satisfy its selected backend's contract. Flow forwards object values as raw JSON and unquotes string values. These exact lowercase top-level keys are reserved for per-tray mappings; a shared JSON object must not contain any of them. A missing tray type in the mapping skips that component type. A non-empty, non-layered value is forwarded unchanged. For rack-scale RMS components, an omitted, null, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
 	Version NullableString `json:"version,omitempty"`
-	// Optional subset of firmware targets to update within each matched tray. Names are lowercase and select sub-parts of the tray (BMC, BIOS, etc.). The accepted set per tray type comes from the Flow service's NICo proto bindings (which mirror Core's per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`), so the supported values track Core as new sub-parts are added:   - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos   - powershelf trays (PowerShelfComponent): currently pmc, psu   - compute trays (ComputeTrayComponent): currently bmc, bios  The default `nico` compute component manager forwards BMC and BIOS selections through `UpdateComponentFirmware`. The opt-in `nicolegacy` manager schedules the whole configured host firmware bundle; it does not honor BMC or BIOS sub-target selection. Omitted or empty means \"update everything in the bundle\" (the historical default) for compute-tray-internal targets. Unknown names are rejected. The special target `dpu`, valid only on compute trays, requests DPU reprovisioning on each matched host. Unlike the other targets, `dpu` is NOT covered by the \"omitted/empty means everything\" default — it must be listed explicitly. `version` is ignored on the `dpu` branch; the target firmware version comes from site configuration.
+	// Optional firmware sub-parts selected within the operation rule, resolved inventory and per-tray version scope. Names are matched separately for each tray type; each receives only its applicable subset. A type with no matching sub-parts skips all its rule steps, including power actions. For example, bios selects Compute and Switch BIOS and skips PowerShelf; nvos selects only Switch; dpu selects only Compute; pmc selects only PowerShelf. Each requested name must match a firmware action in this scope. Unknown names and selections with no matching devices are rejected before dispatch. Selected backend options are also checked before dispatch; a backend restriction is an error, not a reason to skip otherwise applicable devices. Hardware or backend execution errors can still cause partial completion after dispatch.  Supported names by tray type:   - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,     combined_bmc_uefi, gpu, cx7, dpu   - switch: bmc, cpld, bios, nvos   - powershelf: pmc, psu  Omitted or empty keeps backend defaults for the selected rule: compute and switch use their default firmware selection, and nico PowerShelf defaults to PMC. DPU reprovisioning requires an explicit dpu; dpu-only Compute selection skips compute-tray firmware and uses the site-configured DPU version. The opt-in nicolegacy compute manager rejects non-DPU compute sub-target selections before task creation. A version may be omitted to use configured firmware defaults for rack-scale RMS components.
 	Targets []string `json:"targets,omitempty"`
-	// Optional, write-only authentication data for firmware downloads. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	// Deprecated alias of downloadCredentials. Supply at most one non-null alias. Retained for existing clients.
+	// Deprecated
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
+	// Optional authentication for downloading firmware files, independent of device login credentials. Mutually exclusive with a non-null authenticationData. Omitted or null means no download authentication. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	DownloadCredentials NullableFirmwareAuthenticationData `json:"downloadCredentials,omitempty"`
+	// Optional device logins shared by all directly dispatched tray targets. Requires overrideReadinessCheck=true. Omitted or null preserves configured credential lookup. Rack firmware endpoints ignore this field. Unsupported for standalone compute reprovisioning, DPU updates, the Core compute backend and legacy compute controllers. NVOS logins are supported only for switches. Credentials remain encrypted in task storage and workflow payloads; backend registration may persist them in its own credential store. Supported targets must already exist in the site's Flow inventory.
+	DeviceCredentialOverrides NullableDeviceCredentialOverrides `json:"deviceCredentialOverrides,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this batch to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
 	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
@@ -202,6 +207,7 @@ func (o *BatchTrayFirmwareUpdateRequest) SetTargets(v []string) {
 }
 
 // GetAuthenticationData returns the AuthenticationData field value if set, zero value otherwise (both if not set or set to explicit null).
+// Deprecated
 func (o *BatchTrayFirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthenticationData {
 	if o == nil || IsNil(o.AuthenticationData.Get()) {
 		var ret FirmwareAuthenticationData
@@ -213,6 +219,7 @@ func (o *BatchTrayFirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthent
 // GetAuthenticationDataOk returns a tuple with the AuthenticationData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
+// Deprecated
 func (o *BatchTrayFirmwareUpdateRequest) GetAuthenticationDataOk() (*FirmwareAuthenticationData, bool) {
 	if o == nil {
 		return nil, false
@@ -230,6 +237,7 @@ func (o *BatchTrayFirmwareUpdateRequest) HasAuthenticationData() bool {
 }
 
 // SetAuthenticationData gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the AuthenticationData field.
+// Deprecated
 func (o *BatchTrayFirmwareUpdateRequest) SetAuthenticationData(v FirmwareAuthenticationData) {
 	o.AuthenticationData.Set(&v)
 }
@@ -242,6 +250,92 @@ func (o *BatchTrayFirmwareUpdateRequest) SetAuthenticationDataNil() {
 // UnsetAuthenticationData ensures that no value is present for AuthenticationData, not even an explicit nil
 func (o *BatchTrayFirmwareUpdateRequest) UnsetAuthenticationData() {
 	o.AuthenticationData.Unset()
+}
+
+// GetDownloadCredentials returns the DownloadCredentials field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchTrayFirmwareUpdateRequest) GetDownloadCredentials() FirmwareAuthenticationData {
+	if o == nil || IsNil(o.DownloadCredentials.Get()) {
+		var ret FirmwareAuthenticationData
+		return ret
+	}
+	return *o.DownloadCredentials.Get()
+}
+
+// GetDownloadCredentialsOk returns a tuple with the DownloadCredentials field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchTrayFirmwareUpdateRequest) GetDownloadCredentialsOk() (*FirmwareAuthenticationData, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DownloadCredentials.Get(), o.DownloadCredentials.IsSet()
+}
+
+// HasDownloadCredentials returns a boolean if a field has been set.
+func (o *BatchTrayFirmwareUpdateRequest) HasDownloadCredentials() bool {
+	if o != nil && o.DownloadCredentials.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDownloadCredentials gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the DownloadCredentials field.
+func (o *BatchTrayFirmwareUpdateRequest) SetDownloadCredentials(v FirmwareAuthenticationData) {
+	o.DownloadCredentials.Set(&v)
+}
+
+// SetDownloadCredentialsNil sets the value for DownloadCredentials to be an explicit nil
+func (o *BatchTrayFirmwareUpdateRequest) SetDownloadCredentialsNil() {
+	o.DownloadCredentials.Set(nil)
+}
+
+// UnsetDownloadCredentials ensures that no value is present for DownloadCredentials, not even an explicit nil
+func (o *BatchTrayFirmwareUpdateRequest) UnsetDownloadCredentials() {
+	o.DownloadCredentials.Unset()
+}
+
+// GetDeviceCredentialOverrides returns the DeviceCredentialOverrides field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchTrayFirmwareUpdateRequest) GetDeviceCredentialOverrides() DeviceCredentialOverrides {
+	if o == nil || IsNil(o.DeviceCredentialOverrides.Get()) {
+		var ret DeviceCredentialOverrides
+		return ret
+	}
+	return *o.DeviceCredentialOverrides.Get()
+}
+
+// GetDeviceCredentialOverridesOk returns a tuple with the DeviceCredentialOverrides field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchTrayFirmwareUpdateRequest) GetDeviceCredentialOverridesOk() (*DeviceCredentialOverrides, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DeviceCredentialOverrides.Get(), o.DeviceCredentialOverrides.IsSet()
+}
+
+// HasDeviceCredentialOverrides returns a boolean if a field has been set.
+func (o *BatchTrayFirmwareUpdateRequest) HasDeviceCredentialOverrides() bool {
+	if o != nil && o.DeviceCredentialOverrides.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDeviceCredentialOverrides gets a reference to the given NullableDeviceCredentialOverrides and assigns it to the DeviceCredentialOverrides field.
+func (o *BatchTrayFirmwareUpdateRequest) SetDeviceCredentialOverrides(v DeviceCredentialOverrides) {
+	o.DeviceCredentialOverrides.Set(&v)
+}
+
+// SetDeviceCredentialOverridesNil sets the value for DeviceCredentialOverrides to be an explicit nil
+func (o *BatchTrayFirmwareUpdateRequest) SetDeviceCredentialOverridesNil() {
+	o.DeviceCredentialOverrides.Set(nil)
+}
+
+// UnsetDeviceCredentialOverrides ensures that no value is present for DeviceCredentialOverrides, not even an explicit nil
+func (o *BatchTrayFirmwareUpdateRequest) UnsetDeviceCredentialOverrides() {
+	o.DeviceCredentialOverrides.Unset()
 }
 
 // GetRuleId returns the RuleId field value if set, zero value otherwise.
@@ -362,6 +456,12 @@ func (o BatchTrayFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) 
 	}
 	if o.AuthenticationData.IsSet() {
 		toSerialize["authenticationData"] = o.AuthenticationData.Get()
+	}
+	if o.DownloadCredentials.IsSet() {
+		toSerialize["downloadCredentials"] = o.DownloadCredentials.Get()
+	}
+	if o.DeviceCredentialOverrides.IsSet() {
+		toSerialize["deviceCredentialOverrides"] = o.DeviceCredentialOverrides.Get()
 	}
 	if !IsNil(o.RuleId) {
 		toSerialize["ruleId"] = o.RuleId

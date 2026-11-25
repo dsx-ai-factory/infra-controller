@@ -16,6 +16,7 @@ import unittest
 
 CHECKER = Path(__file__).resolve().parents[1] / "check-mat-service-cidr.py"
 check_service_cidr = runpy.run_path(str(CHECKER))["check_service_cidr"]
+VALUES_DIR = CHECKER.parent / "values"
 
 SITE_CONFIG = """\
 nico-api:
@@ -181,6 +182,23 @@ pods:
         with self.assertRaises(ValueError) as raised:
             check_service_cidr(io.StringIO(machines_values()), ["10.96.0.0/12"], [], "global: {}\n")
         self.assertIn("neither TOML nor Core values", str(raised.exception))
+
+    def test_shipped_values_pairs(self):
+        """Resolve every relay of a shipped machine-a-tron profile against the Core values it is paired with."""
+        cases = [
+            # One BMC segment and the underlay segment that carries the switch NVOS leases.
+            ("556 racks", "machine-a-tron-556racks.yaml", "nico-core-10k-hosts.yaml",
+             ["10.200.0.0/16", "10.201.0.0/17"]),
+            # The pods split between two BMC segments, each relay resolving to its own one.
+            ("1,112 racks", "machine-a-tron-1112racks.yaml", "nico-core-20k-hosts.yaml",
+             ["10.200.0.0/16", "10.201.0.0/16", "10.202.0.0/16"]),
+        ]
+        for name, values_name, site_name, expected_prefixes in cases:
+            with self.subTest(name=name):
+                site_config = (VALUES_DIR / site_name).read_text(encoding="utf-8")
+                with (VALUES_DIR / values_name).open(encoding="utf-8") as values:
+                    prefixes, errors = check_service_cidr(values, ["10.96.0.0/12"], [], site_config)
+                self.assertEqual(([str(prefix) for prefix in prefixes], errors), (expected_prefixes, []))
 
     def test_cli_service_cidr_sources_and_exit_status(self):
         """Resolve the ServiceCIDR from the environment or kubectl and exit nonzero on any finding."""

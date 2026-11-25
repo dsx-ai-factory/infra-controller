@@ -1,0 +1,132 @@
+suite: PXE service URL configuration
+templates: [configmap.yaml, configmap-v6.yaml, deployment.yaml, deployment-v6.yaml]
+release:
+  namespace: nico-system
+set:
+  dhcp.v6Enabled: true
+  dhcp.v6ServerIdentifier: "020000000001"
+# Pin rendered hashes so unchanged input stays stable and replacement/removal differs.
+tests:
+  - it: omits the service URL from both hook configurations by default
+    asserts: &omitted
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: '"nico-pxe-service-url"'
+        template: configmap.yaml
+      - notMatchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"nico-pxe-service-url"'
+        template: configmap-v6.yaml
+      - equal:
+          path: &checksum spec.template.metadata.annotations["checksum/config"]
+          value: 1bc41bb71c45be3e490ca68e570630dd033a07f321cfadaffad70eca3dceb3bd
+        template: deployment.yaml
+      - equal:
+          path: *checksum
+          value: f34014eca3161e9c47e327512978e8e330221156e47f19f0875c9e5c11f0b805
+        template: deployment-v6.yaml
+
+  - it: removes the service URL when the optional value is omitted
+    set:
+      config.kea.hookParameters.nicoPxeServiceUrl: null
+    asserts: *omitted
+
+  - it: passes the same service URL unchanged to both hooks
+    set:
+      config.kea.hookParameters.nicoPxeServiceUrl: http://boot.example.test:8080/
+    asserts:
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"nico-pxe-service-url": "http://boot\.example\.test:8080/"'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"nico-pxe-service-url": "http://boot\.example\.test:8080/"'
+        template: configmap-v6.yaml
+      - equal:
+          path: *checksum
+          value: &configuredV4 a9ed7f26f37489435a61f31d3548cfbc497cf4101ff673db46e22c38eedd4136
+        template: deployment.yaml
+      - equal:
+          path: *checksum
+          value: &configuredV6 d380379ab2d868850eecf271abbc6efb2f734e65d151908ba7f84986dad7615d
+        template: deployment-v6.yaml
+
+  - it: replaces both pods when the service URL changes
+    set:
+      config.kea.hookParameters.nicoPxeServiceUrl: http://replacement.example.test:8080/
+    asserts:
+      - matchRegex:
+          path: *checksum
+          pattern: &sha256 '^[a-f0-9]{64}$'
+        template: deployment.yaml
+      - notEqual:
+          path: *checksum
+          value: *configuredV4
+        template: deployment.yaml
+      - matchRegex:
+          path: *checksum
+          pattern: *sha256
+        template: deployment-v6.yaml
+      - notEqual:
+          path: *checksum
+          value: *configuredV6
+        template: deployment-v6.yaml
+
+  - it: keeps raw IPv4 configuration authoritative without overriding IPv6
+    set:
+      config.kea.hookParameters.nicoPxeServiceUrl: http://boot.example.test:8080/
+      config.keaConfigJsonRaw: &raw |
+        {"Dhcp4":{"hooks-libraries":[{"library":"/usr/lib/kea/hooks/libdhcp.so","parameters":{"nico-pxe-service-url":"http://raw.example.test"}}]}}
+    asserts:
+      - equal:
+          path: data["kea_config.json"]
+          value: *raw
+        template: configmap.yaml
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"nico-pxe-service-url": "http://boot\.example\.test:8080/"'
+        template: configmap-v6.yaml
+      - equal:
+          path: *checksum
+          value: &rawV4 4e14a8fe018498f6a2bc81e2e1a07f76d45f7653b7e9ff0fe261349abffec56c
+        template: deployment.yaml
+
+  - it: replaces the IPv4 pod when the raw configuration changes
+    set:
+      config.keaConfigJsonRaw: '{"Dhcp4":{"hooks-libraries":[{"library":"/usr/lib/kea/hooks/libdhcp.so","parameters":{"nico-pxe-service-url":"http://replacement.example.test"}}]}}'
+    asserts:
+      - matchRegex:
+          path: *checksum
+          pattern: *sha256
+        template: deployment.yaml
+      - notEqual:
+          path: *checksum
+          value: *rawV4
+        template: deployment.yaml
+
+  - it: does not checksum externally managed IPv4 configuration
+    set:
+      config.enabled: false
+      config.kea.hookParameters.nicoPxeServiceUrl: http://boot.example.test:8080/
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: configmap.yaml
+      - notExists:
+          path: *checksum
+        template: deployment.yaml
+      - equal:
+          path: *checksum
+          value: *configuredV6
+        template: deployment-v6.yaml
+
+  - it: does not inject the structured service URL into a raw IPv4 configuration
+    set:
+      config.kea.hookParameters.nicoPxeServiceUrl: http://boot.example.test:8080/
+      config.keaConfigJsonRaw: '{"Dhcp4":{}}'
+    asserts:
+      - notMatchRegex:
+          path: data["kea_config.json"]
+          pattern: '"nico-pxe-service-url"'
+        template: configmap.yaml

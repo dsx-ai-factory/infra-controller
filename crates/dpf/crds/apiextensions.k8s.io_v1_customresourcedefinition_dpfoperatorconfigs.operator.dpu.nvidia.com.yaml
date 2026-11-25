@@ -61,9 +61,9 @@ spec:
                     type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   installer:
@@ -73,14 +73,15 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -128,24 +129,27 @@ spec:
                     type: object
                 type: object
               coreDNS:
-                description: CoreDNS is the configuration for CoreDNS serving Kamaji
-                  DPU clusters with a Keepalived endpoint.
+                description: |-
+                  CoreDNS is the configuration for CoreDNS serving Kamaji DPU clusters with
+                  a Keepalived endpoint.
                 properties:
                   deployment:
                     description: |-
                       Deployment contains the configuration for the CoreDNS deployment.
-                      It contains the image for the CoreDNS container and its resource requirements.
+                      It contains the image for the CoreDNS container and its resource
+                      requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -197,22 +201,24 @@ spec:
                     type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   upstreamNameservers:
                     description: |-
-                      UpstreamNameservers is passed to the CoreDNS forward plugin for names outside the cluster domain.
-                      It accepts the same space-separated nameserver or resolv.conf path syntax as the CoreDNS chart.
+                      UpstreamNameservers is passed to the CoreDNS forward plugin for names
+                      outside the cluster domain. It accepts the same space-separated
+                      nameserver or resolv.conf path syntax as the CoreDNS chart.
                     minLength: 1
                     type: string
                 type: object
               deploymentMode:
                 description: |-
                   DeploymentMode selects zero-trust vs host-trusted deployment alignment.
-                  Required: operators must set this explicitly; provisioning controllers propagate this to DPU.status.deploymentMode.
+                  Required: operators must set this explicitly; provisioning controllers
+                  propagate this to DPU.status.deploymentMode.
                 enum:
                 - zero-trust
                 - host-trusted
@@ -227,14 +233,15 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -302,19 +309,21 @@ spec:
                 properties:
                   controller:
                     description: |-
-                      Controller contains the configuration for the DPU Service controller component.
-                      It contains the image for the controller and its resource requirements.
+                      Controller contains the configuration for the DPU Service controller
+                      component. It contains the image for the controller and its resource
+                      requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -362,12 +371,13 @@ spec:
                     type: object
                   defaultServiceDaemonSetMaxUnavailable:
                     description: |-
-                      DefaultServiceDaemonSetMaxUnavailable specifies the fallback maxUnavailable for
-                      ServiceDaemonSet rolling updates. It defaults to 30000 and is applied when
-                      serviceDaemonSet.updateStrategy is omitted or its rollingUpdate.maxUnavailable
-                      is unset and maxSurge is unset or zero. If maxSurge is nonzero, an omitted maxUnavailable
-                      is left unset. Explicit maxUnavailable values and OnDelete strategies
-                      are preserved. Lower this value to limit the number of unavailable pods during updates.
+                      DefaultServiceDaemonSetMaxUnavailable specifies the fallback
+                      maxUnavailable for ServiceDaemonSet rolling updates. It defaults to 30000
+                      and is applied when serviceDaemonSet.updateStrategy is omitted or its
+                      rollingUpdate.maxUnavailable is unset and maxSurge is unset or zero. If
+                      maxSurge is nonzero, an omitted maxUnavailable is left unset. Explicit
+                      maxUnavailable values and OnDelete strategies are preserved. Lower this
+                      value to limit the number of unavailable pods during updates.
                     format: int32
                     minimum: 1
                     type: integer
@@ -377,16 +387,23 @@ spec:
                     type: boolean
                   disableDPUReadyTaints:
                     description: |-
-                      DisableDPUReadyTaints is a full taint kill-switch for the DPUReady controller.
-                      When set to true, no taint managed by this controller (NoSchedule for critical
-                      DPUServices, or NoExecute for HostNetworkReady) is added, removed, or otherwise
-                      touched on host worker nodes.
+                      DisableDPUReadyTaints is a full taint kill-switch for the DPUReady
+                      controller. When set to true, no taint managed by this controller
+                      (NoSchedule for critical DPUServices, or NoExecute for HostNetworkReady)
+                      is added, removed, or otherwise touched on host worker nodes.
                     type: boolean
                   disableHostNetworkReadyNoExecuteTaints:
                     description: |-
-                      DisableHostNetworkReadyNoExecuteTaints disables NoExecute taints on host worker nodes
-                      based on HostNetworkReady. When unset or true, the feature is disabled (safe default).
-                      Set to false to enable NoExecute tainting when HostNetworkReady != True.
+                      DisableHostNetworkReadyNoExecuteTaints disables NoExecute taints on host
+                      worker nodes based on HostNetworkReady. When unset or true, the feature
+                      is disabled (safe default). Set to false to enable NoExecute tainting
+                      when HostNetworkReady != True.
+                    type: boolean
+                  disableTracing:
+                    description: |-
+                      DisableTracing stops the controller from exporting trace spans although
+                      tracing is configured. The controller then also stops passing the trace
+                      context on to the objects it creates, so a trace ends at this controller.
                     type: boolean
                   image:
                     description: |-
@@ -421,26 +438,27 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                     type: object
                   daemon:
                     description: |-
-                      Daemon is the configuration for the Flannel Daemon component.
-                      It contains the image for the Flannel Daemon container and its resource requirements.
+                      Daemon is the configuration for the Flannel Daemon component. It contains
+                      the image for the Flannel Daemon container and its resource requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -492,9 +510,9 @@ spec:
                     type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   image:
@@ -522,9 +540,11 @@ spec:
                 type: object
               imagePullSecrets:
                 description: |-
-                  List of secret names which are used to pull images for DPF system components and DPUServices.
-                  These secrets must be in the same namespace as the DPF Operator Config and should be created before the config is created.
-                  System reconciliation will not proceed until these secrets are available.
+                  List of secret names which are used to pull images for DPF system
+                  components and DPUServices. These secrets must be in the same namespace
+                  as the DPF Operator Config and should be created before the config is
+                  created. System reconciliation will not proceed until these secrets
+                  are available.
                 items:
                   type: string
                 type: array
@@ -533,19 +553,21 @@ spec:
                 properties:
                   controller:
                     description: |-
-                      Controller contains the configuration for the Kamaji Cluster Manager component.
-                      It contains the image for the controller and its resource requirements.
+                      Controller contains the configuration for the Kamaji Cluster Manager
+                      component. It contains the image for the controller and its resource
+                      requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -597,33 +619,37 @@ spec:
                     type: boolean
                   dpuClusterImages:
                     description: |-
-                      DPUClusterImages configures the images of Kamaji-managed DPU clusters.
-                      It is applied only when a Kamaji cluster is first created and is not changed for existing clusters.
+                      DPUClusterImages configures the images of Kamaji-managed DPU clusters. It
+                      is applied only when a Kamaji cluster is first created and is not changed
+                      for existing clusters.
                     properties:
                       addonsRepository:
                         description: |-
-                          AddonsRepository is the image repository the addon images of the DPU cluster, e.g. kube-proxy, are
-                          pulled from. For example, for the repository example.com/k8s, kube-proxy is pulled from
-                          example.com/k8s/kube-proxy.
-                          The Kamaji defaults are used if this is not set.
+                          AddonsRepository is the image repository the addon images of the DPU
+                          cluster, e.g. kube-proxy, are pulled from. For example, for the
+                          repository example.com/k8s, kube-proxy is pulled from
+                          example.com/k8s/kube-proxy. The Kamaji defaults are used if this is
+                          not set.
                         maxLength: 255
                         pattern: ^(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*$
                         type: string
                       hostedControlPlaneRepository:
                         description: |-
-                          HostedControlPlaneRepository is the image repository the hosted control plane images of the DPU cluster are
-                          pulled from: kube-apiserver, kube-controller-manager and kube-scheduler. For example, for the
-                          repository example.com/k8s, kube-apiserver is pulled from example.com/k8s/kube-apiserver.
-                          This is registry.k8s.io by default.
+                          HostedControlPlaneRepository is the image repository the hosted control
+                          plane images of the DPU cluster are pulled from: kube-apiserver,
+                          kube-controller-manager and kube-scheduler. For example, for the
+                          repository example.com/k8s, kube-apiserver is pulled from
+                          example.com/k8s/kube-apiserver. This is registry.k8s.io by default.
                         maxLength: 255
                         pattern: ^(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*$
                         type: string
                     type: object
                   etcdEncryptionAtRest:
                     description: |-
-                      EtcdEncryptionAtRest configures encryption at rest for the etcd datastore of
-                      Kamaji-managed DPU clusters. The provider selection is applied only when a
-                      Kamaji cluster is first created and is not changed for existing clusters.
+                      EtcdEncryptionAtRest configures encryption at rest for the etcd datastore
+                      of Kamaji-managed DPU clusters. The provider selection is applied only
+                      when a Kamaji cluster is first created and is not changed for existing
+                      clusters.
                     properties:
                       provider:
                         description: Provider selects the encryption-at-rest provider.
@@ -633,25 +659,29 @@ spec:
                         type: string
                       staticKey:
                         description: |-
-                          StaticKey configures the staticKey provider. It is required when provider is staticKey and
-                          must not be set otherwise.
+                          StaticKey configures the staticKey provider. It is required when provider
+                          is staticKey and must not be set otherwise.
                         properties:
                           automaticRotationDisabled:
                             description: |-
-                              AutomaticRotationDisabled disables automatic staticKey rotation for existing Kamaji clusters.
-                              In-flight rotations stop at the next stable checkpoint; encryption at rest remains enabled.
+                              AutomaticRotationDisabled disables automatic staticKey rotation for
+                              existing Kamaji clusters. In-flight rotations stop at the next stable
+                              checkpoint; encryption at rest remains enabled.
                             type: boolean
                           keySecretRef:
                             description: |-
-                              KeySecretRef selects the AES-GCM key from a Secret in the DPFOperatorConfig namespace.
-                              The referenced Secret value must be base64-encoded AES key text whose decoded length is 16,
-                              24, or 32 bytes. For Kubernetes manifests, use stringData.key with the output of
-                              `openssl rand -base64 32`. For External Secrets, configure the external value or template so
-                              the resulting Kubernetes Secret data decodes to that base64 text, not to raw key bytes.
-                              The referenced key is used as the desired static key source. Changing the referenced
-                              Secret value triggers automatic rotation for existing staticKey-encrypted Kamaji clusters.
-                              The per-cluster rendered encryption configuration must be backed up together with the
-                              cluster etcd backup because Kubernetes encrypted data references encryption config key names.
+                              KeySecretRef selects the AES-GCM key from a Secret in the
+                              DPFOperatorConfig namespace. The referenced Secret value must be
+                              base64-encoded AES key text whose decoded length is 16, 24, or 32 bytes.
+                              For Kubernetes manifests, use stringData.key with the output of
+                              `openssl rand -base64 32`. For External Secrets, configure the external
+                              value or template so the resulting Kubernetes Secret data decodes to that
+                              base64 text, not to raw key bytes. The referenced key is used as the
+                              desired static key source. Changing the referenced Secret value triggers
+                              automatic rotation for existing staticKey-encrypted Kamaji clusters. The
+                              per-cluster rendered encryption configuration must be backed up together
+                              with the cluster etcd backup because Kubernetes encrypted data references
+                              encryption config key names.
                             properties:
                               key:
                                 description: Key is the key within the Secret data
@@ -704,12 +734,16 @@ spec:
                 properties:
                   disable:
                     description: |-
-                      Disable controls whether monitoring resources are installed.
-                      When enabled (default), the controller:
-                      - Creates ServiceMonitors for Kamaji clusters to scrape control-plane metrics.
-                      - Deploys kube-state-metrics as a DPUService to expose metrics for custom resources.
-                      - Deploys node-problem-detector as a DaemonSet on DPU nodes to detect and report node-level problems.
-                      - Deploys opentelemetry-collector as a DaemonSet on DPU nodes to collect and forward logs.
+                      Disable controls whether monitoring resources are installed. When enabled
+                      (default), the controller:
+                      - Creates ServiceMonitors for Kamaji clusters to scrape
+                        control-plane metrics.
+                      - Deploys kube-state-metrics as a DPUService to expose metrics for
+                        custom resources.
+                      - Deploys node-problem-detector as a DaemonSet on DPU nodes to detect and
+                        report node-level problems.
+                      - Deploys opentelemetry-collector as a DaemonSet on DPU nodes to collect
+                        and forward logs.
                     type: boolean
                   kubeStateMetrics:
                     description: KubeStateMetrics is the configuration for kube-state-metrics
@@ -717,18 +751,20 @@ spec:
                       daemon:
                         description: |-
                           Daemon contains the configuration for the kube-state-metrics component.
-                          It contains the image for kube-state-metrics and its resource requirements.
+                          It contains the image for kube-state-metrics and its resource
+                          requirements.
                         properties:
                           image:
                             description: |-
-                              Image is a reference to a container image.
-                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                              Image is a reference to a container image. If neither a tag nor a digest is
+                              set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
                             description: |-
-                              Resources defines the memory and CPU resource requests and limits for the component.
-                              This field is optional, and if not set, the component will use the default resource.
+                              Resources defines the memory and CPU resource requests and limits for the
+                              component. This field is optional, and if not set, the component will use
+                              the default resource.
                             properties:
                               limits:
                                 description: Limits defines the resource limits for
@@ -780,9 +816,9 @@ spec:
                         type: boolean
                       helmChart:
                         description: |-
-                          HelmChart overrides the helm chart used by the ServiceSet controller.
-                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                          OCI registry or a web-based repository.
+                          HelmChart overrides the helm chart used by the ServiceSet controller. The
+                          URL must begin with either 'oci://' or 'https://', ensuring it points to
+                          a valid OCI registry or a web-based repository.
                         pattern: ^(oci://|https://).+$
                         type: string
                     type: object
@@ -791,19 +827,21 @@ spec:
                     properties:
                       daemon:
                         description: |-
-                          Daemon contains the configuration for the node-problem-detector component.
-                          It contains the image for node-problem-detector and its resource requirements.
+                          Daemon contains the configuration for the node-problem-detector
+                          component. It contains the image for node-problem-detector and its
+                          resource requirements.
                         properties:
                           image:
                             description: |-
-                              Image is a reference to a container image.
-                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                              Image is a reference to a container image. If neither a tag nor a digest is
+                              set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
                             description: |-
-                              Resources defines the memory and CPU resource requests and limits for the component.
-                              This field is optional, and if not set, the component will use the default resource.
+                              Resources defines the memory and CPU resource requests and limits for the
+                              component. This field is optional, and if not set, the component will use
+                              the default resource.
                             properties:
                               limits:
                                 description: Limits defines the resource limits for
@@ -855,9 +893,9 @@ spec:
                         type: boolean
                       helmChart:
                         description: |-
-                          HelmChart overrides the helm chart used by the ServiceSet controller.
-                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                          OCI registry or a web-based repository.
+                          HelmChart overrides the helm chart used by the ServiceSet controller. The
+                          URL must begin with either 'oci://' or 'https://', ensuring it points to
+                          a valid OCI registry or a web-based repository.
                         pattern: ^(oci://|https://).+$
                         type: string
                     type: object
@@ -866,19 +904,21 @@ spec:
                     properties:
                       daemon:
                         description: |-
-                          Daemon contains the configuration for the opentelemetry-collector component.
-                          It contains the image for opentelemetry-collector and its resource requirements.
+                          Daemon contains the configuration for the opentelemetry-collector
+                          component. It contains the image for opentelemetry-collector and its
+                          resource requirements.
                         properties:
                           image:
                             description: |-
-                              Image is a reference to a container image.
-                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                              Image is a reference to a container image. If neither a tag nor a digest is
+                              set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
                             description: |-
-                              Resources defines the memory and CPU resource requests and limits for the component.
-                              This field is optional, and if not set, the component will use the default resource.
+                              Resources defines the memory and CPU resource requests and limits for the
+                              component. This field is optional, and if not set, the component will use
+                              the default resource.
                             properties:
                               limits:
                                 description: Limits defines the resource limits for
@@ -930,30 +970,32 @@ spec:
                         type: boolean
                       helmChart:
                         description: |-
-                          HelmChart overrides the helm chart used by the ServiceSet controller.
-                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                          OCI registry or a web-based repository.
+                          HelmChart overrides the helm chart used by the ServiceSet controller. The
+                          URL must begin with either 'oci://' or 'https://', ensuring it points to
+                          a valid OCI registry or a web-based repository.
                         pattern: ^(oci://|https://).+$
                         type: string
                       logging:
                         description: |-
-                          Logging contains the configuration for the opentelemetry-collector logging component.
-                          If not specified, logging will not be streamed.
+                          Logging contains the configuration for the opentelemetry-collector
+                          logging component. If not specified, logging will not be streamed.
                         properties:
                           caSecretRef:
                             description: |-
-                              CASecretRef references a Secret that contains the PEM-encoded CA certificate bundle
-                              (under the "ca.crt" key) used to verify the endpoint's TLS certificate. Set it when the
-                              endpoint serves a certificate issued by a private CA. The Secret may live in any namespace,
-                              for example alongside the endpoint's cert-manager Certificate; if its namespace is empty,
-                              the DPFOperatorConfig namespace is used.
-                              If not specified, TLS endpoints are verified against the system CA pool.
-                              Changes to the Secret content are applied on the next reconciliation of the DPFOperatorConfig.
+                              CASecretRef references a Secret that contains the PEM-encoded CA
+                              certificate bundle (under the "ca.crt" key) used to verify the endpoint's
+                              TLS certificate. Set it when the endpoint serves a certificate issued by
+                              a private CA. The Secret may live in any namespace, for example
+                              alongside the endpoint's cert-manager Certificate; if its namespace is
+                              empty, the DPFOperatorConfig namespace is used. If not specified, TLS
+                              endpoints are verified against the system CA pool. Changes to the Secret
+                              content are applied on the next reconciliation of the DPFOperatorConfig.
                             properties:
                               key:
                                 description: |-
-                                  Key is the Secret data key that holds the PEM-encoded CA certificate bundle.
-                                  If unset, "ca.crt" is used, matching the key that cert-manager writes.
+                                  Key is the Secret data key that holds the PEM-encoded CA certificate
+                                  bundle. If unset, "ca.crt" is used, matching the key that cert-manager
+                                  writes.
                                 maxLength: 253
                                 minLength: 1
                                 type: string
@@ -965,8 +1007,8 @@ spec:
                                 type: string
                               namespace:
                                 description: |-
-                                  Namespace is the namespace of the Secret holding the CA certificate bundle.
-                                  If unset, the DPFOperatorConfig namespace is used.
+                                  Namespace is the namespace of the Secret holding the CA certificate
+                                  bundle. If unset, the DPFOperatorConfig namespace is used.
                                 maxLength: 63
                                 minLength: 1
                                 type: string
@@ -975,12 +1017,12 @@ spec:
                             type: object
                           endpoint:
                             description: |-
-                              Endpoint is the OTLP endpoint data is sent to. This could be the management cluster's
-                              opentelemetry-collector endpoint.
-                              If not specified, nothing will be exported for this signal.
-                              For the http transport the endpoint must include the scheme, e.g. "https://host:4318".
-                              For the grpc transport the endpoint is "host:4317", optionally prefixed with a
-                              scheme ("https://host:4317") to enforce TLS.
+                              Endpoint is the OTLP endpoint data is sent to. This could be the
+                              management cluster's opentelemetry-collector endpoint. If not specified,
+                              nothing will be exported for this signal. For the http transport the
+                              endpoint must include the scheme, e.g. "https://host:4318". For the grpc
+                              transport the endpoint is "host:4317", optionally prefixed with a scheme
+                              ("https://host:4317") to enforce TLS.
                             type: string
                           transport:
                             description: Transport is the OTLP transport used to export
@@ -998,23 +1040,26 @@ spec:
                           rule: '!has(self.caSecretRef) || !self.endpoint.startsWith(''http://'')'
                       metrics:
                         description: |-
-                          Metrics contains the configuration for the opentelemetry-collector metrics component.
-                          If not specified, metrics will not be streamed from DPU clusters.
+                          Metrics contains the configuration for the opentelemetry-collector
+                          metrics component. If not specified, metrics will not be streamed from
+                          DPU clusters.
                         properties:
                           caSecretRef:
                             description: |-
-                              CASecretRef references a Secret that contains the PEM-encoded CA certificate bundle
-                              (under the "ca.crt" key) used to verify the endpoint's TLS certificate. Set it when the
-                              endpoint serves a certificate issued by a private CA. The Secret may live in any namespace,
-                              for example alongside the endpoint's cert-manager Certificate; if its namespace is empty,
-                              the DPFOperatorConfig namespace is used.
-                              If not specified, TLS endpoints are verified against the system CA pool.
-                              Changes to the Secret content are applied on the next reconciliation of the DPFOperatorConfig.
+                              CASecretRef references a Secret that contains the PEM-encoded CA
+                              certificate bundle (under the "ca.crt" key) used to verify the endpoint's
+                              TLS certificate. Set it when the endpoint serves a certificate issued by
+                              a private CA. The Secret may live in any namespace, for example
+                              alongside the endpoint's cert-manager Certificate; if its namespace is
+                              empty, the DPFOperatorConfig namespace is used. If not specified, TLS
+                              endpoints are verified against the system CA pool. Changes to the Secret
+                              content are applied on the next reconciliation of the DPFOperatorConfig.
                             properties:
                               key:
                                 description: |-
-                                  Key is the Secret data key that holds the PEM-encoded CA certificate bundle.
-                                  If unset, "ca.crt" is used, matching the key that cert-manager writes.
+                                  Key is the Secret data key that holds the PEM-encoded CA certificate
+                                  bundle. If unset, "ca.crt" is used, matching the key that cert-manager
+                                  writes.
                                 maxLength: 253
                                 minLength: 1
                                 type: string
@@ -1026,8 +1071,8 @@ spec:
                                 type: string
                               namespace:
                                 description: |-
-                                  Namespace is the namespace of the Secret holding the CA certificate bundle.
-                                  If unset, the DPFOperatorConfig namespace is used.
+                                  Namespace is the namespace of the Secret holding the CA certificate
+                                  bundle. If unset, the DPFOperatorConfig namespace is used.
                                 maxLength: 63
                                 minLength: 1
                                 type: string
@@ -1036,12 +1081,12 @@ spec:
                             type: object
                           endpoint:
                             description: |-
-                              Endpoint is the OTLP endpoint data is sent to. This could be the management cluster's
-                              opentelemetry-collector endpoint.
-                              If not specified, nothing will be exported for this signal.
-                              For the http transport the endpoint must include the scheme, e.g. "https://host:4318".
-                              For the grpc transport the endpoint is "host:4317", optionally prefixed with a
-                              scheme ("https://host:4317") to enforce TLS.
+                              Endpoint is the OTLP endpoint data is sent to. This could be the
+                              management cluster's opentelemetry-collector endpoint. If not specified,
+                              nothing will be exported for this signal. For the http transport the
+                              endpoint must include the scheme, e.g. "https://host:4318". For the grpc
+                              transport the endpoint is "host:4317", optionally prefixed with a scheme
+                              ("https://host:4317") to enforce TLS.
                             type: string
                           transport:
                             description: Transport is the OTLP transport used to export
@@ -1059,23 +1104,27 @@ spec:
                           rule: '!has(self.caSecretRef) || !self.endpoint.startsWith(''http://'')'
                       tracing:
                         description: |-
-                          Tracing contains the configuration for exporting distributed traces from DPF controllers.
-                          If not specified, DPF controllers will not export trace spans.
+                          Tracing is where the DPU clusters export their trace spans. The collector
+                          forwards the spans it receives locally, and the sfc-controller sends its
+                          own. The DPUs must reach it, so use the address of a management cluster
+                          node, not a cluster-local Service. If not specified, none are exported.
                         properties:
                           caSecretRef:
                             description: |-
-                              CASecretRef references a Secret that contains the PEM-encoded CA certificate bundle
-                              (under the "ca.crt" key) used to verify the endpoint's TLS certificate. Set it when the
-                              endpoint serves a certificate issued by a private CA. The Secret may live in any namespace,
-                              for example alongside the endpoint's cert-manager Certificate; if its namespace is empty,
-                              the DPFOperatorConfig namespace is used.
-                              If not specified, TLS endpoints are verified against the system CA pool.
-                              Changes to the Secret content are applied on the next reconciliation of the DPFOperatorConfig.
+                              CASecretRef references a Secret that contains the PEM-encoded CA
+                              certificate bundle (under the "ca.crt" key) used to verify the endpoint's
+                              TLS certificate. Set it when the endpoint serves a certificate issued by
+                              a private CA. The Secret may live in any namespace, for example
+                              alongside the endpoint's cert-manager Certificate; if its namespace is
+                              empty, the DPFOperatorConfig namespace is used. If not specified, TLS
+                              endpoints are verified against the system CA pool. Changes to the Secret
+                              content are applied on the next reconciliation of the DPFOperatorConfig.
                             properties:
                               key:
                                 description: |-
-                                  Key is the Secret data key that holds the PEM-encoded CA certificate bundle.
-                                  If unset, "ca.crt" is used, matching the key that cert-manager writes.
+                                  Key is the Secret data key that holds the PEM-encoded CA certificate
+                                  bundle. If unset, "ca.crt" is used, matching the key that cert-manager
+                                  writes.
                                 maxLength: 253
                                 minLength: 1
                                 type: string
@@ -1087,8 +1136,8 @@ spec:
                                 type: string
                               namespace:
                                 description: |-
-                                  Namespace is the namespace of the Secret holding the CA certificate bundle.
-                                  If unset, the DPFOperatorConfig namespace is used.
+                                  Namespace is the namespace of the Secret holding the CA certificate
+                                  bundle. If unset, the DPFOperatorConfig namespace is used.
                                 maxLength: 63
                                 minLength: 1
                                 type: string
@@ -1097,12 +1146,12 @@ spec:
                             type: object
                           endpoint:
                             description: |-
-                              Endpoint is the OTLP endpoint data is sent to. This could be the management cluster's
-                              opentelemetry-collector endpoint.
-                              If not specified, nothing will be exported for this signal.
-                              For the http transport the endpoint must include the scheme, e.g. "https://host:4318".
-                              For the grpc transport the endpoint is "host:4317", optionally prefixed with a
-                              scheme ("https://host:4317") to enforce TLS.
+                              Endpoint is the OTLP endpoint data is sent to. This could be the
+                              management cluster's opentelemetry-collector endpoint. If not specified,
+                              nothing will be exported for this signal. For the http transport the
+                              endpoint must include the scheme, e.g. "https://host:4318". For the grpc
+                              transport the endpoint is "host:4317", optionally prefixed with a scheme
+                              ("https://host:4317") to enforce TLS.
                             type: string
                           transport:
                             description: Transport is the OTLP transport used to export
@@ -1119,6 +1168,118 @@ spec:
                             endpoint
                           rule: '!has(self.caSecretRef) || !self.endpoint.startsWith(''http://'')'
                     type: object
+                  tracing:
+                    description: |-
+                      Tracing configures how the DPF controllers export trace spans. It applies
+                      even when disable is true. If not specified, the controllers of the
+                      management cluster export none.
+                    properties:
+                      disableControllerTraces:
+                        description: |-
+                          DisableControllerTraces stops all DPF controllers from exporting trace
+                          spans and keeps the configuration. It takes precedence over
+                          disableTracing of the individual controllers. The collector still
+                          forwards the spans it receives locally.
+                        type: boolean
+                      otlp:
+                        description: |-
+                          Otlp is the OTLP export configuration of the controllers of the
+                          management cluster, so its endpoint can be a cluster-local Service. If
+                          not specified, these controllers export no trace spans.
+                        properties:
+                          caSecretRef:
+                            description: |-
+                              CASecretRef references a Secret that contains the PEM-encoded CA
+                              certificate bundle (under the "ca.crt" key) used to verify the endpoint's
+                              TLS certificate. Set it when the endpoint serves a certificate issued by
+                              a private CA. The Secret may live in any namespace, for example
+                              alongside the endpoint's cert-manager Certificate; if its namespace is
+                              empty, the DPFOperatorConfig namespace is used. If not specified, TLS
+                              endpoints are verified against the system CA pool. Changes to the Secret
+                              content are applied on the next reconciliation of the DPFOperatorConfig.
+                            properties:
+                              key:
+                                description: |-
+                                  Key is the Secret data key that holds the PEM-encoded CA certificate
+                                  bundle. If unset, "ca.crt" is used, matching the key that cert-manager
+                                  writes.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name is the name of the Secret holding
+                                  the CA certificate bundle.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              namespace:
+                                description: |-
+                                  Namespace is the namespace of the Secret holding the CA certificate
+                                  bundle. If unset, the DPFOperatorConfig namespace is used.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          endpoint:
+                            description: |-
+                              Endpoint is the OTLP endpoint data is sent to. This could be the
+                              management cluster's opentelemetry-collector endpoint. If not specified,
+                              nothing will be exported for this signal. For the http transport the
+                              endpoint must include the scheme, e.g. "https://host:4318". For the grpc
+                              transport the endpoint is "host:4317", optionally prefixed with a scheme
+                              ("https://host:4317") to enforce TLS.
+                            type: string
+                          transport:
+                            description: Transport is the OTLP transport used to export
+                              data to the endpoint.
+                            enum:
+                            - http
+                            - grpc
+                            type: string
+                        required:
+                        - endpoint
+                        type: object
+                        x-kubernetes-validations:
+                        - message: caSecretRef cannot be used with a plaintext http://
+                            endpoint
+                          rule: '!has(self.caSecretRef) || !self.endpoint.startsWith(''http://'')'
+                      recordIdleReconciles:
+                        description: |-
+                          RecordIdleReconciles exports the spans of idle reconciles. A reconcile
+                          is idle when it starts at the resourceVersion the last successful
+                          reconcile of the object left behind, for example a requeue or a resync.
+                          An idle reconcile that fails or changes its object is always exported.
+                          When not set, idle reconciles are not exported.
+                        type: boolean
+                      recordUnchangedReconciles:
+                        description: |-
+                          RecordUnchangedReconciles exports the spans of reconciles that changed
+                          nothing on their object, did not fail and have no child spans. Such a
+                          span only says that the reconcile ran. When not set, they are not
+                          exported.
+                        type: boolean
+                      rolloutTimeout:
+                        description: |-
+                          RolloutTimeout is how long a change may take to become ready before its
+                          rollout span is exported as timed out. When not set, it is one hour. Set
+                          it to 0s to turn the timeout off, so a rollout ends once the change is
+                          ready or a newer change replaces it.
+                        format: duration
+                        pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
+                        type: string
+                      samplingPercent:
+                        description: |-
+                          SamplingPercent is the share of the traces generated by the DPF
+                          controllers that is exported, in percent. The decision is made per trace,
+                          so all spans of a change are kept or dropped together. When not set, all
+                          of them are kept.
+                        format: int32
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                    type: object
                 type: object
               multus:
                 description: Multus is the configuration for Multus
@@ -1130,14 +1291,15 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -1189,9 +1351,9 @@ spec:
                     type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   image:
@@ -1216,10 +1378,10 @@ spec:
                   controlPlaneMTU:
                     default: 1500
                     description: |-
-                      ControlPlaneMTU is the MTU value to be set on the management network.
-                      In zero-trust mode this value is applied to the DPU OOB interface (oob_net0), which does not
-                      support jumbo frames; it must not exceed 1500 when deploymentMode is zero-trust.
-                      The default is 1500.
+                      ControlPlaneMTU is the MTU value to be set on the management network. In
+                      zero-trust mode this value is applied to the DPU OOB interface
+                      (oob_net0), which does not support jumbo frames; it must not exceed 1500
+                      when deploymentMode is zero-trust. The default is 1500.
                     maximum: 9216
                     minimum: 1280
                     type: integer
@@ -1227,8 +1389,8 @@ spec:
                     default: br-dpu
                     description: |-
                       DPUNodeOOBBridgeName is the name of the Linux bridge on the host used for
-                      out-of-band DPU management traffic. If not specified, defaults to "br-dpu".
-                      This setting applies only to host-trusted deployments.
+                      out-of-band DPU management traffic. If not specified, defaults to
+                      "br-dpu". This setting applies only to host-trusted deployments.
                     maxLength: 15
                     minLength: 1
                     pattern: ^[a-z][a-z0-9-]*$
@@ -1244,25 +1406,28 @@ spec:
                 type: object
               nodeSRIOVDevicePluginController:
                 description: |-
-                  NodeSRIOVDevicePluginController is the configuration for the NodeSRIOVDevicePlugin controller.
-                  This controller manages per-node SRIOV device plugin pods based on DPU configurations.
-                  The controller is disabled by default.
+                  NodeSRIOVDevicePluginController is the configuration for the
+                  NodeSRIOVDevicePlugin controller. This controller manages per-node SRIOV
+                  device plugin pods based on DPU configurations. The controller is
+                  disabled by default.
                 properties:
                   controller:
                     description: |-
-                      Controller contains the configuration for the NodeSRIOVDevicePlugin controller component.
-                      It contains the image for the controller and its resource requirements.
+                      Controller contains the configuration for the NodeSRIOVDevicePlugin
+                      controller component. It contains the image for the controller and its
+                      resource requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -1315,27 +1480,34 @@ spec:
                     properties:
                       defaultResourcePrefix:
                         description: |-
-                          DefaultResourcePrefix is the default resource prefix for the SRIOV device plugin resources.
-                          Defaults to "nvidia.com".
+                          DefaultResourcePrefix is the default resource prefix for the SRIOV device
+                          plugin resources. Defaults to "nvidia.com".
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                       image:
                         description: |-
-                          Image overrides the container image for the SRIOV device plugin.
-                          If neither a tag nor a digest is set, the tag and digest of the default image are used.
+                          Image overrides the container image for the SRIOV device plugin. If
+                          neither a tag nor a digest is set, the tag and digest of the default
+                          image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       initImage:
                         description: |-
-                          InitImage overrides the container image for the init container
-                          that generates device plugin configuration.
-                          If neither a tag nor a digest is set, the tag and digest of the default image are used.
+                          InitImage overrides the container image for the init container that
+                          generates device plugin configuration. If neither a tag nor a digest is
+                          set, the tag and digest of the default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                     type: object
                   disable:
                     description: Disable ensures the component is not deployed when
                       set to true.
+                    type: boolean
+                  disableTracing:
+                    description: |-
+                      DisableTracing stops the controller from exporting trace spans although
+                      tracing is configured. The controller then also stops passing the trace
+                      context on to the objects it creates, so a trace ends at this controller.
                     type: boolean
                   replicas:
                     default: 2
@@ -1352,19 +1524,21 @@ spec:
                 properties:
                   controller:
                     description: |-
-                      Controller contains the configuration for the NVIPAM controller component.
-                      It contains the image for the controller and its resource requirements.
+                      Controller contains the configuration for the NVIPAM controller
+                      component. It contains the image for the controller and its resource
+                      requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -1416,9 +1590,9 @@ spec:
                     type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   image:
@@ -1436,14 +1610,15 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -1505,104 +1680,121 @@ spec:
                   rule: '!has(self.image) || !has(self.controller) || !has(self.controller.image)'
               overrides:
                 description: |-
-                  Overrides exposes a set of fields which impact the recommended behavior of the DPF Operator.
-                  These fields should only be set for advanced use cases. The fields here have no stability guarantees.
+                  Overrides exposes a set of fields which impact the recommended behavior of
+                  the DPF Operator. These fields should only be set for advanced use cases.
+                  The fields here have no stability guarantees.
                 properties:
                   argoCDNamespace:
                     description: |-
-                      ArgoCDNamespace is the namespace where ArgoCD is deployed.
-                      AppProjects and cluster secrets required by DPF will be created in this namespace.
+                      ArgoCDNamespace is the namespace where ArgoCD is deployed. AppProjects
+                      and cluster secrets required by DPF will be created in this namespace.
                       Defaults to the namespace of the DPFOperatorConfig.
                     maxLength: 63
                     minLength: 1
                     type: string
                   dpuCNIBinPath:
                     description: |-
-                      DPUCNIBinPath is the path at which the CNI binaries will be installed to on the DPU.
-                      This is /opt/cni/bin by default.
-                      This setting does not change where kubelet is configured to use the CNI from.
+                      DPUCNIBinPath is the path at which the CNI binaries will be installed to
+                      on the DPU. This is /opt/cni/bin by default. This setting does not change
+                      where kubelet is configured to use the CNI from.
                     type: string
                   dpuCNIPath:
                     description: |-
-                      DPUCNIConfigPath is the path to which the CNI config files will be installed on the DPU.
-                      This is /etc/cni/net.d by default.
-                      This setting does not change where kubelet is configured to read the CNI config from.
+                      DPUCNIConfigPath is the path to which the CNI config files will be
+                      installed on the DPU. This is /etc/cni/net.d by default. This setting
+                      does not change where kubelet is configured to read the CNI config from.
                     type: string
                   dpuLinkerCachePath:
                     description: |-
-                      DPULinkerCachePath is the path on the DPU at which the prebuilt dynamic-linker cache
-                      file can be found. When set, this file is mounted read-only into the SFC Controller
-                      container so that host OVS binaries can resolve shared libraries using the DPU's
-                      linker configuration. If not set, no linker cache mount is added.
-                      This setting does not change where components are installed. Installation location fixed in the BFB.
+                      DPULinkerCachePath is the path on the DPU at which the prebuilt
+                      dynamic-linker cache file can be found. When set, this file is mounted
+                      read-only into the SFC Controller container so that host OVS binaries
+                      can resolve shared libraries using the DPU's linker configuration. If
+                      not set, no linker cache mount is added. This setting does not change
+                      where components are installed. Installation location fixed in the BFB.
                     minLength: 1
                     type: string
                   dpuOpenvSwitchBinPath:
                     description: |-
-                      DPUOpenvSwitchBinPath is the path at which the openvSwitch bin directory can be found on the DPU node.
-                      This is /usr/bin/ by default.
-                      This setting does not change where components are installed. Installation location fixed in the BFB.
+                      DPUOpenvSwitchBinPath is the path at which the openvSwitch bin directory
+                      can be found on the DPU node. This is /usr/bin/ by default. This setting
+                      does not change where components are installed. Installation location
+                      fixed in the BFB.
                     type: string
                   dpuOpenvSwitchRunPath:
                     description: |-
-                      DPUOpenvSwitchPath is the path at which the openvSwitch run directory can be found on the DPU.
-                      This is /var/run/openvswitch by default.
-                      This setting does not change where components are installed. Installation location fixed in the BFB.
+                      DPUOpenvSwitchPath is the path at which the openvSwitch run directory can
+                      be found on the DPU. This is /var/run/openvswitch by default. This
+                      setting does not change where components are installed. Installation
+                      location fixed in the BFB.
                     type: string
                   dpuOpenvSwitchSystemSharedLib64Path:
                     description: |-
-                      DPUOpenvSwitchSystemSharedLib64Path is the path at which the system lib64 used by OVS components can be found on the DPU.
-                      If this field is not set, no lib64 volume mount will be configured in the SFC Controller component.
-                      This setting does not change where components are installed. Installation location fixed in the BFB.
+                      DPUOpenvSwitchSystemSharedLib64Path is the path at which the system lib64
+                      used by OVS components can be found on the DPU. If this field is not set,
+                      no lib64 volume mount will be configured in the SFC Controller component.
+                      This setting does not change where components are installed. Installation
+                      location fixed in the BFB.
                     minLength: 1
                     type: string
                   dpuOpenvSwitchSystemSharedPath:
                     description: |-
-                      DPUOpenvSwitchSystemSharedLibPath is the path at which the system lib used by OVS components can be found on the DPU.
-                      This is /lib by default.
-                      This setting does not change where components are installed. Installation location fixed in the BFB.
+                      DPUOpenvSwitchSystemSharedLibPath is the path at which the system lib
+                      used by OVS components can be found on the DPU. This is /lib by default.
+                      This setting does not change where components are installed. Installation
+                      location fixed in the BFB.
                     type: string
                   dpuOptLibraryPath:
                     description: |-
-                      DPUOptLibraryPath is the path on the DPU at which an additional library directory
-                      can be found. When set, this directory is mounted read-only into the SFC Controller
-                      container. Useful on distributions that install vendor libraries outside the standard
-                      paths (e.g. /usr/opt on RHCOS BFB). If not set, no additional library directory is mounted.
-                      This setting does not change where components are installed. Installation location fixed in the BFB.
+                      DPUOptLibraryPath is the path on the DPU at which an additional library
+                      directory can be found. When set, this directory is mounted read-only
+                      into the SFC Controller container. Useful on distributions that install
+                      vendor libraries outside the standard paths (e.g. /usr/opt on RHCOS
+                      BFB). If not set, no additional library directory is mounted. This
+                      setting does not change where components are installed. Installation
+                      location fixed in the BFB.
                     minLength: 1
                     type: string
                   flannelSkipCNIConfigInstallation:
                     description: |-
-                      FlannelSkipCNIConfigInstallation controls whether Flannel should skip CNI config installation.
-                      This is true by default, meaning Flannel does not manage its own CNI configuration.
-                      Set to false if you want Flannel to install a CNI configuration.
+                      FlannelSkipCNIConfigInstallation controls whether Flannel should skip CNI
+                      config installation. This is true by default, meaning Flannel does not
+                      manage its own CNI configuration. Set to false if you want Flannel to
+                      install a CNI configuration.
                     type: boolean
                   kubernetesAPIServerPort:
                     description: |-
-                      KubernetesAPIServerPort is the port the Kubernetes API server is accessible at.
-                      This setting is usually used together with the kubernetesAPIServerVIP setting. It enables specific underlying
-                      components deployed directly or indirectly by the DPF Operator to reach the Kubernetes API Server when the
-                      ClusterIP Kubernetes Service is not functional.
+                      KubernetesAPIServerPort is the port the Kubernetes API server is
+                      accessible at. This setting is usually used together with the
+                      kubernetesAPIServerVIP setting. It enables specific underlying
+                      components deployed directly or indirectly by the DPF Operator to reach
+                      the Kubernetes API Server when the ClusterIP Kubernetes Service is
+                      not functional.
                     type: integer
                   kubernetesAPIServerVIP:
                     description: |-
-                      KubernetesAPIServerVIP is the VIP the Kubernetes API server is accessible at.
-                      This setting enables specific underlying components deployed directly or indirectly by the DPF Operator to reach
-                      the Kubernetes API Server when the ClusterIP Kubernetes Service is not functional.
-                      If set, it should be set to an IP to ensure that components work even if DNS is not available in the cluster.
+                      KubernetesAPIServerVIP is the VIP the Kubernetes API server is accessible
+                      at. This setting enables specific underlying components deployed
+                      directly or indirectly by the DPF Operator to reach the Kubernetes API
+                      Server when the ClusterIP Kubernetes Service is not functional. If set,
+                      it should be set to an IP to ensure that components work even if DNS is
+                      not available in the cluster.
                     type: string
                   paused:
-                    description: Paused disables all reconciliation of the DPFOperatorConfig
-                      when set to true.
+                    description: |-
+                      Paused disables all reconciliation of the DPFOperatorConfig when set to
+                      true.
                     type: boolean
                   provisioningIssuerCASecretName:
                     description: |-
-                      ProvisioningIssuerCASecretName overrides the CA secret of the provisioning Issuer during a
-                      rotation. The provisioning certificates are signed by the platform intermediate CA now, and a
-                      rotation of it is driven by cert-manager rather than by repointing an Issuer, so this only
-                      still pins the provisioning Issuer of the CA chain the platform intermediate CA is taking
-                      over from, on a cluster the upgrade has not finished migrating. It has no effect once that
-                      chain is gone, which is every cluster installed since.
+                      ProvisioningIssuerCASecretName overrides the CA secret of the
+                      provisioning Issuer during a rotation. The provisioning certificates are
+                      signed by the platform intermediate CA now, and a rotation of it is
+                      driven by cert-manager rather than by repointing an Issuer, so this only
+                      still pins the provisioning Issuer of the CA chain the platform
+                      intermediate CA is taking over from, on a cluster the upgrade has not
+                      finished migrating. It has no effect once that chain is gone, which
+                      is every cluster installed since.
 
                       Deprecated: This field is deprecated and will be removed with v31.0.0.
                     minLength: 1
@@ -1621,14 +1813,15 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -1680,9 +1873,9 @@ spec:
                     type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   image:
@@ -1699,45 +1892,54 @@ spec:
                     set, but not both
                   rule: '!has(self.image) || !has(self.cni) || !has(self.cni.image)'
               provisioningController:
-                description: ProvisioningController is the configuration for the ProvisioningController
+                description: |-
+                  ProvisioningController is the configuration for the
+                  ProvisioningController
                 properties:
                   bfCFGTemplateConfigMap:
                     description: |-
-                      BFCFGTemplateConfigMap is the name of a configMap containing a template for the BF.cfg file used by the DPU controller.
-                      By default the provisioning controller use a hardcoded BF.cfg e.g. https://github.com/NVIDIA/doca-platform/blob/release-v24.10/internal/provisioning/controllers/dpu/bfcfg/bf.cfg.template
-                      Note: Replacing the bf.cfg is an advanced use case. The default bf.cfg is designed for most use cases.
+                      BFCFGTemplateConfigMap is the name of a configMap containing a template
+                      for the BF.cfg file used by the DPU controller. By default the
+                      provisioning controller use a hardcoded BF.cfg e.g.
+                      https://github.com/NVIDIA/doca-platform/blob/release-v24.10/internal/provisioning/controllers/dpu/bfcfg/bf.cfg.template
+                      Note: Replacing the bf.cfg is an advanced use case. The default bf.cfg is
+                      designed for most use cases.
 
-                      Deprecated: BFCFGTemplateConfigMap is deprecated and will be removed in a future release.
-                      Use enableDynamicBFCFGTemplates instead for custom bf.cfg templates.
+                      Deprecated: BFCFGTemplateConfigMap is deprecated and will be removed in
+                      a future release. Use enableDynamicBFCFGTemplates instead for custom
+                      bf.cfg templates.
                     type: string
                   bfbPVCName:
                     description: |-
-                      BFBPersistentVolumeClaimName is the name of the PersistentVolumeClaim used by dpf-provisioning-controller
-                      If not provided, the controller will use local host storage (hostPath)
+                      BFBPersistentVolumeClaimName is the name of the PersistentVolumeClaim
+                      used by dpf-provisioning-controller If not provided, the controller will
+                      use local host storage (hostPath)
                     type: string
                   bmcServerCertRenewBefore:
                     description: |-
-                      BMCServerCertRenewBefore is how long before expiry DPF rotates the DPU BMC mTLS
-                      server certificate.
-                      When unset, the provisioning controller defaults to 720h (30 days).
+                      BMCServerCertRenewBefore is how long before expiry DPF rotates the DPU
+                      BMC mTLS server certificate. When unset, the provisioning controller
+                      defaults to 720h (30 days).
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
                   controller:
                     description: |-
-                      Controller contains the configuration for the Provisioning controller component.
-                      It contains the image for the controller and its resource requirements.
+                      Controller contains the configuration for the Provisioning controller
+                      component. It contains the image for the controller and its resource
+                      requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -1792,41 +1994,64 @@ spec:
                     description: Disable ensures the component is not deployed when
                       set to true.
                     type: boolean
+                  disableTracing:
+                    description: |-
+                      DisableTracing stops the controller from exporting trace spans although
+                      tracing is configured. The controller then also stops passing the trace
+                      context on to the objects it creates, so a trace ends at this controller.
+                    type: boolean
                   dmsTimeout:
-                    description: DMSTimeout is the max time in seconds within which
-                      a DMS API must respond, 0 is unlimited
+                    description: |-
+                      DMSTimeout is the max time in seconds within which a DMS API must
+                      respond, 0 is unlimited
+                    minimum: 1
+                    type: integer
+                  dpuDeviceMaxConcurrentReconciles:
+                    description: |-
+                      DPUDeviceMaxConcurrentReconciles specifies the maximum number of
+                      DPUDevice objects that the provisioning DPUDevice controller may
+                      reconcile concurrently. Reconciles for the same DPUDevice remain
+                      serialized by the controller workqueue, and other controllers in the
+                      provisioning manager are not affected.
+                      When unset, the provisioning controller defaults to 1, matching the
+                      previous single-worker behavior. It is independent of
+                      DPUMaxConcurrentReconciles, which applies to the DPU controller only.
+                    format: int32
                     minimum: 1
                     type: integer
                   dpuMaxConcurrentReconciles:
                     default: 1
                     description: |-
-                      DPUMaxConcurrentReconciles specifies the maximum number of DPU objects that the
-                      provisioning DPU controller may reconcile concurrently. Reconciles for the same
-                      DPU remain serialized by the controller workqueue.
-                      When unset, the provisioning controller defaults to 1, matching the previous
-                      single-worker behavior. Raise this to overlap I/O-bound provisioning of different DPUs.
+                      DPUMaxConcurrentReconciles specifies the maximum number of DPU objects
+                      that the provisioning DPU controller may reconcile concurrently.
+                      Reconciles for the same DPU remain serialized by the controller
+                      workqueue. When unset, the provisioning controller defaults to 1,
+                      matching the previous single-worker behavior. Raise this to overlap
+                      I/O-bound provisioning of different DPUs.
                     format: int32
                     minimum: 1
                     type: integer
                   enableDynamicBFCFGTemplates:
                     description: |-
-                      EnableDynamicBFCFGTemplates enables runtime discovery of bf.cfg templates via ConfigMaps.
-                      When enabled, the provisioning controller discovers ConfigMaps by matching labels for BFB
-                      name/namespace and DPUCluster name/namespace. Mutually exclusive with bfCFGTemplateConfigMap.
+                      EnableDynamicBFCFGTemplates enables runtime discovery of bf.cfg templates
+                      via ConfigMaps. When enabled, the provisioning controller discovers
+                      ConfigMaps by matching labels for BFB name/namespace and DPUCluster
+                      name/namespace. Mutually exclusive with bfCFGTemplateConfigMap.
                     type: boolean
                   firmwareUpdateTimeout:
                     description: |-
-                      FirmwareUpdateTimeout is the maximum time allowed for BF4 firmware update in zero-trust mode.
-                      If the update exceeds this timeout, the DPU will transition to an error state.
-                      When unset, the provisioning controller defaults to 45m.
+                      FirmwareUpdateTimeout is the maximum time allowed for BF4 firmware update
+                      in zero-trust mode. If the update exceeds this timeout, the DPU will
+                      transition to an error state. When unset, the provisioning controller
+                      defaults to 45m.
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
                   hostAgentDNSPolicy:
                     description: |-
-                      HostAgentDNSPolicy sets the DNS policy for the hostagent pod.
-                      Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'.
-                      Defaults to 'ClusterFirstWithHostNet'.
+                      HostAgentDNSPolicy sets the DNS policy for the hostagent pod. Valid
+                      values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or
+                      'None'. Defaults to 'ClusterFirstWithHostNet'.
                     enum:
                     - ClusterFirstWithHostNet
                     - ClusterFirst
@@ -1852,8 +2077,9 @@ spec:
                           Deprecated: Use InstallViaHostAgent instead.
                         type: object
                       installViaHostAgent:
-                        description: InstallViaHostAgent is the interface used to
-                          install the BFB via HostAgent
+                        description: |-
+                          InstallViaHostAgent is the interface used to install the BFB via
+                          HostAgent
                         type: object
                       installViaRedfish:
                         description: InstallViaRedfish is the interface used to install
@@ -1883,10 +2109,11 @@ spec:
                             type: string
                           discoveredDPUDeviceBMCFactoryResetPolicy:
                             description: |-
-                              DiscoveredDPUDeviceBMCFactoryResetPolicy is the BMC factory reset policy DPUDiscovery
-                              sets on the DPUDevices it creates. It is applied at creation time only: changing it
-                              does not affect DPUDevices that already exist, and it is not consulted when a
-                              DPUDevice is reconciled. When unset, the discovery controller uses OnInitialization.
+                              DiscoveredDPUDeviceBMCFactoryResetPolicy is the BMC factory reset policy
+                              DPUDiscovery sets on the DPUDevices it creates. It is applied at creation
+                              time only: changing it does not affect DPUDevices that already exist, and
+                              it is not consulted when a DPUDevice is reconciled. When unset, the
+                              discovery controller uses OnInitialization.
                             enum:
                             - OnInitialization
                             - Never
@@ -1907,8 +2134,9 @@ spec:
                   maxDPUParallelInstallations:
                     default: 50
                     description: |-
-                      MaxDPUParallelInstallations specifies the maximum number of DPUs that can be provisioned concurrently.
-                      A DPU is removed from the concurrent provisioning count as soon as it finishes the "OS Installing" phase and
+                      MaxDPUParallelInstallations specifies the maximum number of DPUs that
+                      can be provisioned concurrently. A DPU is removed from the concurrent
+                      provisioning count as soon as it finishes the "OS Installing" phase and
                       enters the "Rebooting" phase of its provisioning lifecycle.
                     format: int32
                     minimum: 1
@@ -1916,32 +2144,36 @@ spec:
                   maxUnavailableDPUNodes:
                     default: 50
                     description: |-
-                      MaxUnavailableDPUNodes is the maximum number of DPUNodes that are unavailable during the node effect period.
-                      It is also used as the maximum number of unavailable DPUs when controlling DPUSet rolling-update deletion.
+                      MaxUnavailableDPUNodes is the maximum number of DPUNodes that are
+                      unavailable during the node effect period. It is also used as the maximum
+                      number of unavailable DPUs when controlling DPUSet rolling-update
+                      deletion.
                     format: int32
                     minimum: 1
                     type: integer
                   multiDPUOperationsSyncWaitTime:
                     default: 30s
                     description: |-
-                      MultiDPUOperationsSyncWaitTime is the wait time between DPUs sync operations on the same node.
-                      It would take effect only on DPUNode objects which contain more than one DPU.
+                      MultiDPUOperationsSyncWaitTime is the wait time between DPUs sync
+                      operations on the same node. It would take effect only on DPUNode objects
+                      which contain more than one DPU.
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
                   nodeEffectRemovalTimeout:
                     description: |-
-                      NodeEffectRemovalTimeout is the maximum time allowed for the Node Effect Removal phase.
-                      If the DPUNodeMaintenance CR still has requestors after this timeout, the DPU will transition to an error state.
-                      When unset, the provisioning controller defaults to 0s (timeout disabled).
+                      NodeEffectRemovalTimeout is the maximum time allowed for the Node Effect
+                      Removal phase. If the DPUNodeMaintenance CR still has requestors after
+                      this timeout, the DPU will transition to an error state. When unset, the
+                      provisioning controller defaults to 0s (timeout disabled).
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
                   nodeJoinTokenTTL:
                     description: |-
-                      NodeJoinTokenTTL is the lifetime of the kubeadm bootstrap token created for
-                      a DPU node to join its DPUCluster. When unset, the provisioning controller
-                      defaults to 3h.
+                      NodeJoinTokenTTL is the lifetime of the kubeadm bootstrap token created
+                      for a DPU node to join its DPUCluster. When unset, the provisioning
+                      controller defaults to 3h.
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
@@ -1950,26 +2182,28 @@ spec:
                       rule: self == null || duration(self) > duration('0s')
                   osInstallRetries:
                     description: |-
-                      OSInstallRetries is the maximum number of retryable OS installation attempts in zero-trust mode
-                      before the DPU transitions to Error. Attempts are counted in-process and reset on controller restart.
-                      When unset, the provisioning controller defaults to 2.
+                      OSInstallRetries is the maximum number of retryable OS installation
+                      attempts in zero-trust mode before the DPU transitions to Error.
+                      Attempts are counted in-process and reset on controller restart. When
+                      unset, the provisioning controller defaults to 2.
                     format: int32
                     minimum: 1
                     type: integer
                   osInstallTimeout:
                     description: |-
-                      OSInstallTimeout is the maximum time allowed for OS installation.
-                      If the installation exceeds this timeout, the DPU will transition to an error state.
-                      When unset, the provisioning controller defaults to 60m.
+                      OSInstallTimeout is the maximum time allowed for OS installation. If the
+                      installation exceeds this timeout, the DPU will transition to an error
+                      state. When unset, the provisioning controller defaults to 60m.
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
                   preInstallAgentRegistrationTimeout:
                     default: 30s
                     description: |-
-                      PreInstallAgentRegistrationTimeout is how long Initializing waits for the in-band dpu-agent
-                      to set preInstall.agentReported on a recreated DPU CR (reprovision). When the timeout elapses,
-                      provisioning continues without agent-assisted pre-install for this cycle.
+                      PreInstallAgentRegistrationTimeout is how long Initializing waits for the
+                      in-band dpu-agent to set preInstall.agentReported on a recreated DPU CR
+                      (reprovision). When the timeout elapses, provisioning continues without
+                      agent-assisted pre-install for this cycle.
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
@@ -1978,19 +2212,25 @@ spec:
                     properties:
                       address:
                         description: |-
-                          Address is the address used to access the BFB Registry. The address must start with "http://" or "https://".
-                          By default, the BFB Registry can be accessed via its Service.
-                          For non-kubernetes environments, this must be set due to the lack of kubelet on worker nodes.
-                          For zero-trust environments, this must be set so that the BFB Registry can be accessed from DPU BMC.
+                          Address is the address used to access the BFB Registry. The address must
+                          start with "http://" or "https://". By default, the BFB Registry can be
+                          accessed via its Service. For non-kubernetes environments, this must be
+                          set due to the lack of kubelet on worker nodes. For zero-trust
+                          environments, this must be set so that the BFB Registry can be accessed
+                          from DPU BMC.
 
-                          Deprecated: Address is deprecated and will be removed in a future release.
+                          Deprecated: Address is deprecated and will be removed in a future
+                          release.
                         pattern: ^https?://
                         type: string
                       loadBalancerAddress:
                         description: |-
-                          LoadBalancerAddress is the address of the load balancer for the BFB Registry which the hostagent/redfish use to fetch the BFB and generated bf.cfg.
-                          To enable the load balancer, you need to deploy your own load balancer controller and configure the LoadBalancerAddress field.
-                          Then check the bfb-registry nodeport service and make your load balancer controller to distribute the requests to the bfb-registry nodeport.
+                          LoadBalancerAddress is the address of the load balancer for the BFB
+                          Registry which the hostagent/redfish use to fetch the BFB and generated
+                          bf.cfg. To enable the load balancer, you need to deploy your own load
+                          balancer controller and configure the LoadBalancerAddress field. Then
+                          check the bfb-registry nodeport service and make your load balancer
+                          controller to distribute the requests to the bfb-registry nodeport.
                         pattern: ^https?://
                         type: string
                       port:
@@ -2021,31 +2261,28 @@ spec:
                   rule: '!(has(self.bfCFGTemplateConfigMap) && has(self.enableDynamicBFCFGTemplates)
                     && self.enableDynamicBFCFGTemplates)'
               security:
-                description: Security groups configuration for security-related components
-                  managed by the DPF Operator.
+                description: |-
+                  Security groups configuration for security-related components managed by
+                  the DPF Operator.
                 properties:
                   certManagement:
                     description: |-
-                      CertManagement configures the certificate authority that the provisioning certificates of DPF
-                      chain up to, and the trust bundle their consumers validate peers against. If unset, DPF signs
-                      them with a self-signed CA of its own.
+                      CertManagement configures the certificate authority that the provisioning
+                      certificates of DPF chain up to, and the trust bundle their consumers
+                      validate peers against. If unset, DPF signs them with a self-signed CA
+                      of its own.
                     properties:
                       trustBundleConfigMapName:
                         default: dpf-ca-trust-bundle
                         description: |-
-                          TrustBundleConfigMapName is the ConfigMap holding the CA certificate(s) that DPF components
-                          validate their peers against.
+                          TrustBundleConfigMapName is the ConfigMap holding the CA certificate(s)
+                          that DPF components validate their peers against. Who maintains its
+                          content depends on the authority the PKI is anchored to, see the
+                          External Certificate Authority guide.
 
-                          Name it when the chart is anchored to an authority of your own, the mode in which the content of
-                          the bundle is yours to provide. With the self-signed root of DPF the operator generates the
-                          content itself, under this name. To trust additional CAs alongside the root of DPF, merge them
-                          into the ConfigMap directly, DPF preserves certificates it did not add.
-
-                          The name is fixed once the config exists. It reaches each DPU in the provisioning configuration
-                          it is installed with, so renaming it later would leave the DPUs already provisioned reading a
-                          ConfigMap DPF no longer maintains, holding trust material that silently stops being updated.
-                          That is enforced on the spec rather than here, because leaving this field out falls back to a
-                          name too, and a rule on the field cannot see a rename that adds or removes it.
+                          The name is fixed once the config exists, enforced by a rule on the spec
+                          rather than on this field, which cannot see a rename that adds or
+                          removes it.
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
@@ -2053,9 +2290,9 @@ spec:
                     type: object
                   kata:
                     description: |-
-                      Kata is the configuration for Kata Containers.
-                      Kata Containers provides VM-based isolation for untrusted workloads on DPU nodes.
-                      This component is disabled by default; set disable to false to enable.
+                      Kata is the configuration for Kata Containers. Kata Containers provides
+                      VM-based isolation for untrusted workloads on DPU nodes. This component
+                      is disabled by default; set disable to false to enable.
                     properties:
                       containerdConfigFileName:
                         description: |-
@@ -2069,8 +2306,8 @@ spec:
                         properties:
                           image:
                             description: |-
-                              Image is a reference to a container image.
-                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                              Image is a reference to a container image. If neither a tag nor a digest is
+                              set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                         type: object
@@ -2080,9 +2317,9 @@ spec:
                         type: boolean
                       helmChart:
                         description: |-
-                          HelmChart overrides the helm chart used by the ServiceSet controller.
-                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                          OCI registry or a web-based repository.
+                          HelmChart overrides the helm chart used by the ServiceSet controller. The
+                          URL must begin with either 'oci://' or 'https://', ensuring it points to
+                          a valid OCI registry or a web-based repository.
                         pattern: ^(oci://|https://).+$
                         type: string
                       nodeSelector:
@@ -2118,11 +2355,11 @@ spec:
                       currently implements this by applying the PrivilegedPodEnforcement
                       ValidatingAdmissionPolicy to DPUService workloads.
 
-                      Setting it to false does not fully opt out of enforcement: the policy and its
-                      binding are kept, but the binding is switched from Deny to Audit, so privileged
-                      pods are no longer denied and are only recorded in the audit log. The allowlist
-                      is kept populated so the audit log only flags pods that would otherwise be
-                      denied.
+                      Setting it to false does not fully opt out of enforcement: the policy and
+                      its binding are kept, but the binding is switched from Deny to Audit, so
+                      privileged pods are no longer denied and are only recorded in the audit
+                      log. The allowlist is kept populated so the audit log only flags pods
+                      that would otherwise be denied.
 
                       The objects are intentionally not deleted to avoid a Kubernetes paramRef
                       informer bug (https://github.com/kubernetes/kubernetes/issues/133827).
@@ -2131,12 +2368,14 @@ spec:
                     type: boolean
                   spiffe:
                     description: |-
-                      spiffe configures the SPIFFE-based DPU Agent identity flow. Edits are accepted post-bootstrap
-                      but do NOT retro-apply to already-provisioned DPUs.
+                      spiffe configures the SPIFFE-based DPU Agent identity flow. Edits are
+                      accepted post-bootstrap but do NOT retro-apply to
+                      already-provisioned DPUs.
                     properties:
                       csiDriver:
-                        description: csiDriver contains the configuration for the
-                          SPIFFE CSI driver deployed to the DPU clusters.
+                        description: |-
+                          csiDriver contains the configuration for the SPIFFE CSI driver deployed
+                          to the DPU clusters.
                         properties:
                           driver:
                             description: |-
@@ -2145,121 +2384,129 @@ spec:
                             properties:
                               image:
                                 description: |-
-                                  Image is a reference to a container image.
-                                  If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                                  Image is a reference to a container image. If neither a tag nor a digest is
+                                  set, the tag and digest of the component's default image are used.
                                 pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                                 type: string
                             type: object
                           nodeDriverRegistrar:
                             description: |-
-                              nodeDriverRegistrar contains the configuration for the node-driver-registrar container
-                              that registers the SPIFFE CSI driver with the kubelet.
-                              It contains the image for the container.
+                              nodeDriverRegistrar contains the configuration for the
+                              node-driver-registrar container that registers the SPIFFE CSI driver with
+                              the kubelet. It contains the image for the container.
                             properties:
                               image:
                                 description: |-
-                                  Image is a reference to a container image.
-                                  If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                                  Image is a reference to a container image. If neither a tag nor a digest is
+                                  set, the tag and digest of the component's default image are used.
                                 pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                                 type: string
                             type: object
                         type: object
                       dpuAgentExchangedSPIFFEIDTemplate:
                         description: |-
-                          DPUAgentExchangedSPIFFEIDTemplate renders the post-exchange SPIFFE ID subject. It receives
-                          the same Go template data as DPUAgentSPIFFEIDTemplate.
-                          The rendered identity may use a different trust domain and must depend on the DPU serial.
+                          DPUAgentExchangedSPIFFEIDTemplate renders the post-exchange SPIFFE ID
+                          subject. It receives the same Go template data as
+                          DPUAgentSPIFFEIDTemplate. The rendered identity may use a different trust
+                          domain and must depend on the DPU serial.
                         maxLength: 2048
                         minLength: 1
                         type: string
                       dpuAgentSPIFFEIDTemplate:
                         description: |-
-                          DPUAgentSPIFFEIDTemplate renders the local SPIFFE workload identity registered with SPIRE.
-                          It uses Go text/template syntax and receives TrustDomain, normalized SerialNumber, DPUMeta,
-                          DPUSpec, DPUDeviceMeta, and DPUDeviceSpec. Metadata labels and annotations can be accessed
-                          with the built-in index function.
-                          The rendered identity must use SPIRETrustDomain and depend on the DPU serial.
+                          DPUAgentSPIFFEIDTemplate renders the local SPIFFE workload identity
+                          registered with SPIRE. It uses Go text/template syntax and receives
+                          TrustDomain, normalized SerialNumber, DPUMeta, DPUSpec, DPUDeviceMeta,
+                          and DPUDeviceSpec. Metadata labels and annotations can be accessed with
+                          the built-in index function. The rendered identity must use
+                          SPIRETrustDomain and depend on the DPU serial.
                         maxLength: 2048
                         minLength: 1
                         type: string
                       dpuServiceExchangedSPIFFEIDTemplate:
                         description: |-
-                          DPUServiceExchangedSPIFFEIDTemplate renders the post-exchange DPUService subject. It
-                          receives the same template data as DPUServiceSPIFFEIDTemplate and may use a different trust
-                          domain.
-                          DPF renders and validates it so the identity layout is declared in one place, but does not
-                          consume it: unlike the DPU Agent, a DPUService identity is never presented back to DPF.
+                          DPUServiceExchangedSPIFFEIDTemplate renders the post-exchange DPUService
+                          subject. It receives the same template data as DPUServiceSPIFFEIDTemplate
+                          and may use a different trust domain. DPF renders and validates it so the
+                          identity layout is declared in one place, but does not consume it: unlike
+                          the DPU Agent, a DPUService identity is never presented back to DPF.
                         maxLength: 2048
                         minLength: 1
                         type: string
                       dpuServiceSPIFFEIDTemplate:
                         description: |-
-                          DPUServiceSPIFFEIDTemplate renders the identity registered with SPIRE for a DPUService that
-                          opts in through its own spec.security.spiffe. It receives TrustDomain, normalized
-                          SerialNumber, Namespace and ServiceID, plus DPUMeta, DPUSpec, DPUServiceMeta and
-                          DPUServiceSpec.
-                          The rendered identity must use SPIRETrustDomain and depend on the namespace, the service ID
-                          and the DPU serial, which together identify one DPUService workload. Dropping any of them
-                          hands a single SVID to distinct workloads, and nothing detects that later: SPIRE keys
-                          entries on the identity, the parent and the selectors, so two DPUServices differing only in
-                          namespace produce two entries carrying the same identity. A label cannot stand in for the
-                          namespace, since nothing ties one to the other.
+                          DPUServiceSPIFFEIDTemplate renders the identity registered with SPIRE for
+                          a DPUService that opts in through its own spec.security.spiffe. It
+                          receives TrustDomain, normalized SerialNumber, Namespace and ServiceID,
+                          plus DPUMeta, DPUSpec, DPUServiceMeta and DPUServiceSpec. The rendered
+                          identity must use SPIRETrustDomain and depend on the namespace, the
+                          service ID and the DPU serial, which together identify one DPUService
+                          workload. Dropping any of them hands a single SVID to distinct workloads,
+                          and nothing detects that later: SPIRE keys entries on the identity, the
+                          parent and the selectors, so two DPUServices differing only in namespace
+                          produce two entries carrying the same identity. A label cannot stand in
+                          for the namespace, since nothing ties one to the other.
                         maxLength: 2048
                         minLength: 1
                         type: string
                       kubeAPIAudience:
                         description: |-
-                          KubeAPIAudience is the audience claim the DPU Agent's JWT-SVID must carry; it must match an
-                          entry in the kube-apiserver AuthenticationConfiguration.audiences[] (owned out-of-band).
+                          KubeAPIAudience is the audience claim the DPU Agent's JWT-SVID must
+                          carry; it must match an entry in the kube-apiserver
+                          AuthenticationConfiguration.audiences[] (owned out-of-band).
                         maxLength: 512
                         minLength: 1
                         type: string
                       spireControllerManagerClassName:
                         description: |-
-                          spireControllerManagerClassName selects the SPIRE controller-manager instance that renders
-                          DPF ClusterStaticEntries.
+                          spireControllerManagerClassName selects the SPIRE controller-manager
+                          instance that renders DPF ClusterStaticEntries.
                         maxLength: 253
                         minLength: 1
                         type: string
                       spireOIDCURL:
                         description: |-
-                          SPIREOIDCURL is the OIDC discovery (issuer) URL of the pre-installed SPIRE Server.
-                          The matching kube-apiserver AuthenticationConfiguration.jwt[].issuer value is applied out-of-band.
+                          SPIREOIDCURL is the OIDC discovery (issuer) URL of the pre-installed
+                          SPIRE Server. The matching kube-apiserver
+                          AuthenticationConfiguration.jwt[].issuer value is applied out-of-band.
                         maxLength: 2048
                         minLength: 1
                         type: string
                       spireServerAddress:
                         description: |-
-                          SPIREServerAddress is the address of the pre-installed SPIRE Server in host:port form
-                          (e.g. "spire-server.spire-system.svc:8081").
+                          SPIREServerAddress is the address of the pre-installed SPIRE Server in
+                          host:port form (e.g. "spire-server.spire-system.svc:8081").
                         maxLength: 263
                         minLength: 1
                         type: string
                       spireTrustDomain:
                         description: |-
-                          SPIRETrustDomain is the SPIRE-internal trust domain (e.g. "cs.internal") embedded in the
-                          DPU Agent SVID URI.
+                          SPIRETrustDomain is the SPIRE-internal trust domain (e.g. "cs.internal")
+                          embedded in the DPU Agent SVID URI.
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                       tokenExchangeEndpoint:
                         description: |-
-                          tokenExchangeEndpoint exchanges the SPIRE JWT-SVID before the DSX SPIFFE Helper writes it.
-                          When omitted, the DSX SPIFFE Helper writes the SPIRE JWT-SVID directly.
-                          The returned token's audience must match kubeAPIAudience, or the kube-apiserver rejects the
-                          DPU Agent. Only https: the JWT-SVID is sent here as a bearer credential.
+                          tokenExchangeEndpoint exchanges the SPIRE JWT-SVID before the DSX SPIFFE
+                          Helper writes it. When omitted, the DSX SPIFFE Helper writes the SPIRE
+                          JWT-SVID directly. The returned token's audience must match
+                          kubeAPIAudience, or the kube-apiserver rejects the DPU Agent. Only https:
+                          the JWT-SVID is sent here as a bearer credential.
                         maxLength: 2048
                         pattern: ^https://[^[:space:]"\\]+$
                         type: string
                       trustBundle:
-                        description: trustBundle references a ConfigMap holding the
-                          initial SPIRE trust bundle.
+                        description: |-
+                          trustBundle references a ConfigMap holding the initial SPIRE trust
+                          bundle.
                         properties:
                           format:
                             default: pem
-                            description: Format selects data["bundle.pem"] or data["bundle.spiffe"]
-                              and the matching SPIRE Agent parser.
+                            description: |-
+                              Format selects data["bundle.pem"] or data["bundle.spiffe"] and the
+                              matching SPIRE Agent parser.
                             enum:
                             - pem
                             - spiffe
@@ -2271,8 +2518,9 @@ spec:
                             minLength: 1
                             type: string
                           namespace:
-                            description: Namespace is the namespace of the ConfigMap
-                              holding the SPIRE trust bundle.
+                            description: |-
+                              Namespace is the namespace of the ConfigMap holding the SPIRE trust
+                              bundle.
                             maxLength: 63
                             minLength: 1
                             type: string
@@ -2297,18 +2545,20 @@ spec:
                         >= 1 && int(self.spireServerAddress.split('':'')[1]) <= 65535)'
                   vaultKMS:
                     description: |-
-                      VaultKMS is the configuration for the standalone Vault/OpenBao KMS plugin component.
-                      It is deployed as a DaemonSet on control-plane nodes and is disabled by default.
-                      The plugin is used for encryption at rest for DPUClusters.
+                      VaultKMS is the configuration for the standalone Vault/OpenBao KMS plugin
+                      component. It is deployed as a DaemonSet on control-plane nodes and is
+                      disabled by default. The plugin is used for encryption at rest
+                      for DPUClusters.
                     properties:
                       address:
                         description: |-
                           Address is the Vault/OpenBao server address.
-                          WARNING: Changing this field does not automatically rotate the encryption key or
-                          re-encrypt existing DPU cluster secrets. Do not change it while active DPU clusters
-                          depend on this KMS plugin unless the new endpoint provides access to the key material
-                          used by the previous endpoint. Otherwise, those clusters will be unable to decrypt
-                          their existing secrets, causing an outage.
+                          WARNING: Changing this field does not automatically rotate the encryption
+                          key or re-encrypt existing DPU cluster secrets. Do not change it while
+                          active DPU clusters depend on this KMS plugin unless the new endpoint
+                          provides access to the key material used by the previous endpoint.
+                          Otherwise, those clusters will be unable to decrypt their existing
+                          secrets, causing an outage.
                         maxLength: 2048
                         minLength: 1
                         pattern: ^https://.+$
@@ -2321,9 +2571,9 @@ spec:
                             description: AppRole configures AppRole auth.
                             properties:
                               authEngineMountPath:
-                                description: AuthEngineMountPath optionally overrides
-                                  the Vault auth engine mount path. It is not the
-                                  transit mount.
+                                description: |-
+                                  AuthEngineMountPath optionally overrides the Vault auth engine mount
+                                  path. It is not the transit mount.
                                 maxLength: 512
                                 minLength: 1
                                 type: string
@@ -2338,8 +2588,9 @@ spec:
                                 minLength: 1
                                 type: string
                               secretName:
-                                description: SecretName is the name of the Secret
-                                  holding the AppRole role ID and secret ID.
+                                description: |-
+                                  SecretName is the name of the Secret holding the AppRole role ID and
+                                  secret ID.
                                 minLength: 1
                                 type: string
                             required:
@@ -2351,16 +2602,16 @@ spec:
                             description: JWT configures JWT auth.
                             properties:
                               authEngineMountPath:
-                                description: AuthEngineMountPath optionally overrides
-                                  the Vault auth engine mount path. It is not the
-                                  transit mount.
+                                description: |-
+                                  AuthEngineMountPath optionally overrides the Vault auth engine mount
+                                  path. It is not the transit mount.
                                 maxLength: 512
                                 minLength: 1
                                 type: string
                               jwtSecretRef:
-                                description: JWTSecretRef selects the JWT presented
-                                  to Vault from a Secret in the DPFOperatorConfig
-                                  namespace.
+                                description: |-
+                                  JWTSecretRef selects the JWT presented to Vault from a Secret in the
+                                  DPFOperatorConfig namespace.
                                 properties:
                                   key:
                                     description: Key is the key within the Secret
@@ -2388,15 +2639,16 @@ spec:
                             properties:
                               audience:
                                 description: |-
-                                  Audience optionally sets the audience for the projected Kubernetes service account token.
-                                  Use this when the Vault Kubernetes auth role is configured with bound audiences.
+                                  Audience optionally sets the audience for the projected Kubernetes
+                                  service account token. Use this when the Vault Kubernetes auth role is
+                                  configured with bound audiences.
                                 maxLength: 512
                                 minLength: 1
                                 type: string
                               authEngineMountPath:
-                                description: AuthEngineMountPath optionally overrides
-                                  the Vault auth engine mount path. It is not the
-                                  transit mount.
+                                description: |-
+                                  AuthEngineMountPath optionally overrides the Vault auth engine mount
+                                  path. It is not the transit mount.
                                 maxLength: 512
                                 minLength: 1
                                 type: string
@@ -2421,8 +2673,9 @@ spec:
                             description: Token configures token auth.
                             properties:
                               tokenSecretRef:
-                                description: TokenSecretRef selects the Vault token
-                                  from a Secret in the DPFOperatorConfig namespace.
+                                description: |-
+                                  TokenSecretRef selects the Vault token from a Secret in the
+                                  DPFOperatorConfig namespace.
                                 properties:
                                   key:
                                     description: Key is the key within the Secret
@@ -2444,9 +2697,9 @@ spec:
                             description: Userpass configures userpass auth.
                             properties:
                               authEngineMountPath:
-                                description: AuthEngineMountPath optionally overrides
-                                  the Vault auth engine mount path. It is not the
-                                  transit mount.
+                                description: |-
+                                  AuthEngineMountPath optionally overrides the Vault auth engine mount
+                                  path. It is not the transit mount.
                                 maxLength: 512
                                 minLength: 1
                                 type: string
@@ -2495,19 +2748,21 @@ spec:
                         - message: jwt must only be set when method is jwt
                           rule: self.method == 'jwt' || !has(self.jwt)
                       daemon:
-                        description: Daemon contains the image and resource overrides
-                          for the KMS plugin DaemonSet.
+                        description: |-
+                          Daemon contains the image and resource overrides for the KMS plugin
+                          DaemonSet.
                         properties:
                           image:
                             description: |-
-                              Image is a reference to a container image.
-                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                              Image is a reference to a container image. If neither a tag nor a digest is
+                              set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
                             description: |-
-                              Resources defines the memory and CPU resource requests and limits for the component.
-                              This field is optional, and if not set, the component will use the default resource.
+                              Resources defines the memory and CPU resource requests and limits for the
+                              component. This field is optional, and if not set, the component will use
+                              the default resource.
                             properties:
                               limits:
                                 description: Limits defines the resource limits for
@@ -2559,21 +2814,23 @@ spec:
                         type: boolean
                       loginTimeoutSeconds:
                         description: |-
-                          LoginTimeoutSeconds optionally overrides the maximum time for one Vault token check cycle, including authentication, in seconds.
-                          This is an advanced setting. The plugin default should work for most environments.
+                          LoginTimeoutSeconds optionally overrides the maximum time for one Vault
+                          token check cycle, including authentication, in seconds. This is an
+                          advanced setting. The plugin default should work for most environments.
                           Must be at least 1 second.
                         format: int32
                         minimum: 1
                         type: integer
                       namespace:
                         description: |-
-                          Namespace optionally configures the Vault/OpenBao namespace used for requests.
-                          This is a Vault/OpenBao namespace, not a Kubernetes namespace.
-                          WARNING: Changing this field does not automatically rotate the encryption key or
-                          re-encrypt existing DPU cluster secrets. Do not change it while active DPU clusters
-                          depend on this KMS plugin unless the new namespace provides access to the key material
-                          used by the previous namespace. Otherwise, those clusters will be unable to decrypt
-                          their existing secrets, causing an outage.
+                          Namespace optionally configures the Vault/OpenBao namespace used for
+                          requests. This is a Vault/OpenBao namespace, not a Kubernetes namespace.
+                          WARNING: Changing this field does not automatically rotate the encryption
+                          key or re-encrypt existing DPU cluster secrets. Do not change it while
+                          active DPU clusters depend on this KMS plugin unless the new namespace
+                          provides access to the key material used by the previous namespace.
+                          Otherwise, those clusters will be unable to decrypt their existing
+                          secrets, causing an outage.
                         maxLength: 512
                         minLength: 1
                         type: string
@@ -2583,8 +2840,8 @@ spec:
                         properties:
                           caConfigMapRef:
                             description: |-
-                              CACertConfigMapRef selects a CA bundle key from a ConfigMap used to verify the
-                              Vault/OpenBao server certificate. It is mounted as a file.
+                              CACertConfigMapRef selects a CA bundle key from a ConfigMap used to
+                              verify the Vault/OpenBao server certificate. It is mounted as a file.
                             properties:
                               key:
                                 description: Key is the key within the ConfigMap data
@@ -2602,20 +2859,23 @@ spec:
                         type: object
                       tokenCheckIntervalSeconds:
                         description: |-
-                          TokenCheckIntervalSeconds optionally overrides how often the plugin checks and renews the current Vault token, in seconds.
-                          This is an advanced setting. The plugin default should work for most environments.
+                          TokenCheckIntervalSeconds optionally overrides how often the plugin
+                          checks and renews the current Vault token, in seconds. This is an
+                          advanced setting. The plugin default should work for most environments.
                           Must be at least 5 seconds.
                         format: int32
                         minimum: 5
                         type: integer
                       transit:
                         description: |-
-                          Transit configures the Vault Transit secrets engine used for encrypt/decrypt.
-                          WARNING: Changing this field does not automatically rotate the encryption key or
-                          re-encrypt existing DPU cluster secrets. Do not change it while active DPU clusters
-                          depend on this KMS plugin unless the new Transit configuration provides access to all
-                          key material used by the previous configuration. Otherwise, those clusters will be
-                          unable to decrypt their existing secrets, causing an outage.
+                          Transit configures the Vault Transit secrets engine used for
+                          encrypt/decrypt.
+                          WARNING: Changing this field does not automatically rotate the encryption
+                          key or re-encrypt existing DPU cluster secrets. Do not change it while
+                          active DPU clusters depend on this KMS plugin unless the new Transit
+                          configuration provides access to all key material used by the previous
+                          configuration. Otherwise, those clusters will be unable to decrypt their
+                          existing secrets, causing an outage.
                         properties:
                           keyName:
                             description: KeyName is the Transit key used for encrypt
@@ -2645,19 +2905,21 @@ spec:
                 properties:
                   controller:
                     description: |-
-                      Controller contains the configuration for the ServiceChainSet controller component.
-                      It contains the image for the controller and its resource requirements.
+                      Controller contains the configuration for the ServiceChainSet controller
+                      component. It contains the image for the controller and its resource
+                      requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -2707,16 +2969,23 @@ spec:
                     description: Disable ensures the component is not deployed when
                       set to true.
                     type: boolean
+                  disableTracing:
+                    description: |-
+                      DisableTracing stops the controller from exporting trace spans although
+                      tracing is configured. The controller then also stops passing the trace
+                      context on to the objects it creates, so a trace ends at this controller.
+                    type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   image:
                     description: |-
-                      Image overrides the container image used by the ServiceChainSet Controller.
+                      Image overrides the container image used by the ServiceChainSet
+                      Controller.
 
                       Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
@@ -2746,14 +3015,15 @@ spec:
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -2803,11 +3073,17 @@ spec:
                     description: Disable ensures the component is not deployed when
                       set to true.
                     type: boolean
+                  disableTracing:
+                    description: |-
+                      DisableTracing stops the controller from exporting trace spans although
+                      tracing is configured. The controller then also stops passing the trace
+                      context on to the objects it creates, so a trace ends at this controller.
+                    type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   image:
@@ -2820,9 +3096,11 @@ spec:
                     type: string
                   secureFlowDeletionTimeout:
                     description: |-
-                      SecureFlowDeletionTimeout controls the timeout for which the API server is unreachable after which all the flows
-                      are deleted to prevent unintended packet leaks. It has effect when is greater than zero.
-                      Value must be in units accepted by Go time.ParseDuration https://golang.org/pkg/time/#ParseDuration.
+                      SecureFlowDeletionTimeout controls the timeout for which the API server
+                      is unreachable after which all the flows are deleted to prevent
+                      unintended packet leaks. It has effect when is greater than zero. Value
+                      must be in units accepted by Go time.ParseDuration
+                      https://golang.org/pkg/time/#ParseDuration.
                     type: string
                 type: object
                 x-kubernetes-validations:
@@ -2834,19 +3112,21 @@ spec:
                 properties:
                   configInit:
                     description: |-
-                      ConfigInit contains the configuration for the SR-IOV Device Plugin config-init container.
-                      It contains the image for the init container and its resource requirements.
+                      ConfigInit contains the configuration for the SR-IOV Device Plugin
+                      config-init container. It contains the image for the init container and
+                      its resource requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -2894,19 +3174,21 @@ spec:
                     type: object
                   deviceplugin:
                     description: |-
-                      DevicePlugin contains the configuration for the SRIOV Device Plugin component.
-                      It contains the image for the controller and its resource requirements.
+                      DevicePlugin contains the configuration for the SRIOV Device Plugin
+                      component. It contains the image for the controller and its resource
+                      requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -2958,14 +3240,15 @@ spec:
                     type: boolean
                   helmChart:
                     description: |-
-                      HelmChart overrides the helm chart used by the ServiceSet controller.
-                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                      OCI registry or a web-based repository.
+                      HelmChart overrides the helm chart used by the ServiceSet controller. The
+                      URL must begin with either 'oci://' or 'https://', ensuring it points to
+                      a valid OCI registry or a web-based repository.
                     pattern: ^(oci://|https://).+$
                     type: string
                   image:
                     description: |-
-                      Image overrides the container image used by the SRIOV Device Plugin container.
+                      Image overrides the container image used by the SRIOV Device Plugin
+                      container.
 
                       Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `deviceplugin` instead.
@@ -2981,19 +3264,21 @@ spec:
                 properties:
                   controller:
                     description: |-
-                      Controller contains the configuration for the Static Cluster Manager controller component.
-                      It contains the image for the controller and its resource requirements.
+                      Controller contains the configuration for the Static Cluster Manager
+                      controller component. It contains the image for the controller and its
+                      resource requirements.
                     properties:
                       image:
                         description: |-
-                          Image is a reference to a container image.
-                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                          Image is a reference to a container image. If neither a tag nor a digest is
+                          set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
                         description: |-
-                          Resources defines the memory and CPU resource requests and limits for the component.
-                          This field is optional, and if not set, the component will use the default resource.
+                          Resources defines the memory and CPU resource requests and limits for the
+                          component. This field is optional, and if not set, the component will use
+                          the default resource.
                         properties:
                           limits:
                             description: Limits defines the resource limits for the
@@ -3178,29 +3463,34 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
               security:
                 description: |-
-                  Security records what the operator has rolled out for the security-related components it
-                  manages. It is grouped the way spec.security groups their configuration, so that what was
-                  asked for and what is in effect are read at the same path.
+                  Security records what the operator has rolled out for the
+                  security-related components it manages. It is grouped the way
+                  spec.security groups their configuration, so that what was asked for and
+                  what is in effect are read at the same path.
                 properties:
                   certManagement:
-                    description: CertManagement records what the operator has rolled
-                      out for the provisioning PKI.
+                    description: |-
+                      CertManagement records what the operator has rolled out for the
+                      provisioning PKI.
                     properties:
                       anchor:
                         description: |-
-                          Anchor is the certificate authority the provisioning PKI has been rolled out against, recorded
-                          once the platform intermediate CA has been applied under it and every peer that has to validate
-                          the chain below it trusts that chain.
+                          Anchor is the certificate authority the provisioning PKI has been rolled
+                          out against, recorded once the platform intermediate CA has been applied
+                          under it and every peer that has to validate the chain below it trusts
+                          that chain.
 
-                          It is what the anchor chosen in the dpf-operator Helm chart is compared against, so a change of
-                          authority is reported for as long as the rollout of it is outstanding rather than only by the
-                          reconcile that first observed it.
+                          It is what the anchor chosen in the dpf-operator Helm chart is compared
+                          against, so a change of authority is reported for as long as the rollout
+                          of it is outstanding rather than only by the reconcile that
+                          first observed it.
 
                           Nothing rolled out yet is reported by leaving it out altogether.
                         properties:
@@ -3212,8 +3502,8 @@ spec:
                             type: string
                           kind:
                             description: |-
-                              Kind of the issuer, either Issuer for one in the namespace of the DPFOperatorConfig or
-                              ClusterIssuer for a cluster scoped one.
+                              Kind of the issuer, either Issuer for one in the namespace of the
+                              DPFOperatorConfig or ClusterIssuer for a cluster scoped one.
                             enum:
                             - Issuer
                             - ClusterIssuer
@@ -3226,15 +3516,17 @@ spec:
                         type: object
                       trustBundleHash:
                         description: |-
-                          TrustBundleHash is the hash the CA trust bundle carried when Anchor was recorded as rolled
-                          out, refreshed by every reconcile that rolls the same authority out again.
+                          TrustBundleHash is the hash the CA trust bundle carried when Anchor was
+                          recorded as rolled out, refreshed by every reconcile that rolls the same
+                          authority out again.
 
-                          It is the reference point a change of authority is measured against. cert-manager reissues the
-                          platform intermediate CA on its own schedule, so the bundle published at the moment such a
-                          change is observed is still the one every peer already trusts, and convergence measured
-                          against it would call the rotation over before a single peer had seen the new chain. Recording
-                          it stops there for as long as the rotation is outstanding, which leaves it holding exactly
-                          that bundle.
+                          It is the reference point a change of authority is measured against.
+                          cert-manager reissues the platform intermediate CA on its own schedule,
+                          so the bundle published at the moment such a change is observed is still
+                          the one every peer already trusts, and convergence measured against it
+                          would call the rotation over before a single peer had seen the new chain.
+                          Recording it stops there for as long as the rotation is outstanding,
+                          which leaves it holding exactly that bundle.
 
                           No bundle published yet is reported by leaving it out altogether.
                         maxLength: 128
@@ -3244,8 +3536,8 @@ spec:
                 type: object
               targetVersion:
                 description: |-
-                  TargetVersion is the version of the DPF Operator that is being deployed. It differs from
-                  Version while an upgrade is in progress.
+                  TargetVersion is the version of the DPF Operator that is being deployed.
+                  It differs from Version while an upgrade is in progress.
                 type: string
               version:
                 description: Version is the version of the DPF Operator that is currently

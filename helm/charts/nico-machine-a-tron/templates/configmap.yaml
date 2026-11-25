@@ -2,17 +2,6 @@
 {{- $namespace := include "nico-machine-a-tron.namespace" . }}
 {{- $baseName := include "nico-machine-a-tron.name" . }}
 
-{{/*
-Build ordered list of pod names for consistent MAC address indexing
-*/}}
-{{- $podList := list }}
-{{- range $podName, $podConfig := .Values.pods }}
-{{- if and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0)) }}
-{{- $podList = append $podList $podName }}
-{{- end }}
-{{- end }}
-{{- $podList = $podList | sortAlpha }}
-
 {{/* Machine defaults */}}
 {{- $defaults := .Values.machineDefaults | default dict }}
 {{/* MAC address pool config */}}
@@ -34,6 +23,12 @@ Build ordered list of pod names for consistent MAC address indexing
 {{- $hwMacHostBits := $hwMacRanges.hostBits | default 24 }}
 {{- $hwMacRangeHostBits := $hwMacRanges.rangeHostBits | default 8 }}
 
+{{- $dhcpRelayEnabled := include "nico-machine-a-tron.dhcpRelayEnabled" . }}
+{{- $podIndices := dict }}
+{{- if or $macPoolEnabled $hwMacRangesEnabled $dhcpRelayEnabled }}
+{{- $podIndices = include "nico-machine-a-tron.podIndices" . | fromYaml }}
+{{- end }}
+
 {{/* Mock BMC passwords: explicit values win over the site credentials Secret */}}
 {{- $sitePassword := include "nico-machine-a-tron.siteBmcRootPassword" . }}
 {{- $hostPassword := .Values.machineATron.hostBmcPassword | default $sitePassword }}
@@ -47,23 +42,11 @@ Skip unconfigured pods
 {{- continue }}
 {{- end }}
 
-{{/* Get pod index for MAC address pool */}}
-{{- $podIndex := 0 }}
-{{- range $i, $p := $podList }}
-{{- if eq $p $podName }}
-{{- $podIndex = $i }}
-{{- end }}
-{{- end }}
-
-{{/* Validate pod index fits in single byte for MAC address */}}
-{{- if ge $podIndex 256 }}
-{{- fail (printf "Too many pods: pod index %d exceeds maximum 255 for MAC address generation" $podIndex) }}
-{{- end }}
+{{- $podIndex := get $podIndices $podName | int }}
 
 {{- $name := printf "%s-%s" $baseName $podName }}
 
 {{/* Calculate DHCP relay IP for this pod (used in [dhcp] and machine configs) */}}
-{{- $dhcpRelayEnabled := include "nico-machine-a-tron.dhcpRelayEnabled" $root }}
 {{- $relayIP := "" }}
 {{- if $dhcpRelayEnabled }}
 {{- $relayIP = include "nico-machine-a-tron.dhcpRelayIP" (dict "baseIP" $root.Values.dhcpRelay.baseIP "podIndex" $podIndex) }}

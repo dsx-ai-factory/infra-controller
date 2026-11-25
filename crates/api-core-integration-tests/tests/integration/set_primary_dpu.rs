@@ -143,11 +143,11 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
         DpuMachineId,
         DpuMachineId,
     ) = {
-        let mut txn = env.db_txn().await;
-        let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
-            .await?
-            .remove(&host_id)
-            .expect("host should have interface rows");
+        let interfaces =
+            db::machine_interface::find_by_machine_ids(&env.api().database_connection, &[host_id])
+                .await?
+                .remove(&host_id)
+                .expect("host should have interface rows");
         let original_primary = interfaces
             .iter()
             .find(|interface| interface.primary_interface)
@@ -164,7 +164,6 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
         let stale_dpu_id = stale_interface
             .attached_dpu_machine_id
             .expect("the non-primary interface should be DPU-backed");
-        txn.commit().await?;
         (
             original_primary.id,
             stale_interface.id,
@@ -187,7 +186,7 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
             .await?
             .expect("ingestion should initialize the desired target");
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.api().database_connection)
         .await?;
 
@@ -209,17 +208,14 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
     );
 
     let primary_ids = {
-        let mut txn = env.db_txn().await;
-        let primary_ids = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
+        db::machine_interface::find_by_machine_ids(&env.api().database_connection, &[host_id])
             .await?
             .remove(&host_id)
             .expect("host should still have interface rows")
             .into_iter()
             .filter(|interface| interface.primary_interface)
             .map(|interface| interface.id)
-            .collect::<Vec<_>>();
-        txn.commit().await?;
-        primary_ids
+            .collect::<Vec<_>>()
     };
     assert_eq!(primary_ids, vec![original_primary_id]);
     let desired_after =
@@ -236,7 +232,7 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
             WHERE object_id = $1
         )",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.api().database_connection)
     .await?;
     assert!(

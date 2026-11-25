@@ -168,12 +168,14 @@ pub(super) async fn allocate(
                     tracing::info!("  Created: {:?}", instance);
                 }
             }
+            Err(error) if !allocate_request.extension_services.is_empty() => return Err(error),
             Err(e) => {
                 tracing::error!("Batch allocate failed: {}", e);
             }
         }
     } else {
         // Sequential mode: partial success allowed
+        let mut service_allocation_error = None;
         for i in 0..number {
             let next_machine = match &prefetched_machines {
                 Some(cache) => {
@@ -215,8 +217,15 @@ pub(super) async fn allocate(
                 }
                 Err(e) => {
                     tracing::info!("allocate failed with {} ", e);
+                    if !allocate_request.extension_services.is_empty() {
+                        // Report an unsuccessful service request after attempting the remaining allocations.
+                        service_allocation_error.get_or_insert(e);
+                    }
                 }
             };
+        }
+        if let Some(error) = service_allocation_error {
+            return Err(error);
         }
     }
     Ok(())

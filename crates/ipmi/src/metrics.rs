@@ -126,9 +126,9 @@ mod tests {
         ];
 
         for case in cases {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let logs = capture_logs(|| {
-                count_ipmi_command(case.command, &case.result, &Instrumentation::global())
+                count_ipmi_command(case.command, &case.result, metrics.instrumentation())
             });
 
             assert_eq!(

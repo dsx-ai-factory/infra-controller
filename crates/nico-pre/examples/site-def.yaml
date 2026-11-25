@@ -1,0 +1,131 @@
+# site-def.yaml: the statement of intent for one NICo site. Read only by nico-pre.
+# setup.sh, the ISO builder, and nico-api never read it. No secret values; name the source.
+# Key names follow the provider guide's Appendix A; values are illustrative.
+schemaVersion: 1
+
+site:
+  name: site1
+  datacenter: dc1
+  dnsZone: site1.dc1.example.net
+  apiHostname: api.site1.dc1.example.net   # the external name of the Core API; must resolve to the API VIP
+  uuidSource: setup                # setup mints and seeds it | fixed: <uuid>
+  description: first NICo site in dc1       # optional, never checked
+
+collaterals:                       # paths relative to this file; nico-pre-config reads them
+  cpDpuSiteYaml: ./control-plane-dpu/site.yaml
+  helmPrereqsValues: ./helm-prereqs/values.yaml
+  coreValues: ./helm-prereqs/values/nico-core.yaml     # carries the NICo TOML
+  restValues: ./helm-prereqs/values/nico-rest.yaml
+  siteAgentValues: ./helm-prereqs/values/nico-site-agent.yaml
+  metallbConfig: ./helm-prereqs/values/metallb-config.yaml
+  expectedMachines: ./expected-machines.yaml           # needed from step 7
+results: ./results                 # output only; one JSON result per checklist and run
+
+decisions:                         # one key per register entry; value = the option's short name, a list for `Any of` entries
+  # Stated: recorded nowhere else. REQUIRED unless implied by another answer.
+  staging-host: Air-gapped with a transfer path
+  # external-registry-access: Not applicable           # implied by staging-host; state it only to pin it
+  build-host: Yes
+  dpu-in-the-site-controllers: BF3 DPU in DPU mode
+  managed-host-kinds-in-the-fleet: [DPU hosts booting through the DPU on the Admin segment]
+  # Derived: read from the collaterals and the setup section. Uncomment to pin.
+  optional-components: [REST group]                   # pinned: no RMS box, so rms and rack-profiles are implied Not applicable
+  # dpf: Install                                        # from setup.command (no --skip-dpf)
+  # credential-store: Vault KV                          # from the [secrets] table in the TOML
+
+hosts:
+  jumphost: { name: dc1-jump, address: 203.0.113.10 }
+  stagingHost: { address: 10.10.0.5, sshUser: nico }
+  buildHost: { address: build.example.net }             # outside the site in this mode
+  registryHost:
+    url: registry.site1.dc1.example.net
+    caSource: file:./certs/registry-ca.pem              # the CA, not a secret
+  bmcProbeHost: 10.10.250.20                            # in the BMC segment; runs the probe container
+  probeHosts:                                           # optional; fabric vantage points before the controllers are up
+    admin: 10.10.60.250                                 # a host on the admin segment
+    hostInband: [{ name: rack1, address: 10.10.72.250 }]  # one per hostInband segment, by its name
+  siteControllers:                                      # model selects the HCL firmware pins in step 3
+    - { hostName: sc1, hostSerial: ABC1231, model: Dell R760, nodeId: 1, bmc: 10.10.248.49, dpuBmc: 10.10.248.52, p0Mac: "aa:bb:cc:dd:ee:01",
+        dpuSsh: { address: 10.10.248.55, user: ubuntu },  # optional; the DPU's OS over its OOB address, for the fabric checks
+        uplinks: [{ port: p0, tor: dc1-tor-01, torPort: Ethernet1/1 }, { port: p1, tor: dc1-tor-02, torPort: Ethernet1/1 }] }  # optional; what LLDP should report
+    - { hostName: sc2, hostSerial: ABC1232, model: Dell R760, nodeId: 2, bmc: 10.10.248.50, dpuBmc: 10.10.248.53, p0Mac: "aa:bb:cc:dd:ee:02",
+        dpuSsh: { address: 10.10.248.56, user: ubuntu },
+        uplinks: [{ port: p0, tor: dc1-tor-01, torPort: Ethernet1/2 }, { port: p1, tor: dc1-tor-02, torPort: Ethernet1/2 }] }
+    - { hostName: sc3, hostSerial: ABC1233, model: Dell R760, nodeId: 3, bmc: 10.10.248.51, dpuBmc: 10.10.248.54, p0Mac: "aa:bb:cc:dd:ee:03",
+        dpuSsh: { address: 10.10.248.57, user: ubuntu },
+        uplinks: [{ port: p0, tor: dc1-tor-01, torPort: Ethernet1/3 }, { port: p1, tor: dc1-tor-02, torPort: Ethernet1/3 }] }
+    # Plain-NIC site controllers (dpu-in-the-site-controllers: no DPU) add their ToR peers, since
+    # MetalLB peers with the ToRs directly and nothing derives those addresses:
+    #   torPeers: [{ address: 10.10.248.1, asn: 65034 }, { address: 10.10.248.2, asn: 65034 }]
+
+network:
+  datacenterAsn: 65034
+  bgpAsnStart: 4244766860            # MetalLB advertises from here, node i peers as start + i,
+  bgpAsnEnd: 4244767060              # the rest is the per-DPU pool ([pools.fnn-asn], one ASN per DPU); asnLayout overrides the convention
+  siteControllerMtuSize: 9000
+  forgeControlPlanePrefix: 10.10.248.88/29
+  forgeServiceVipPrefix: 10.10.126.192/27
+  forgeDpuLoopbackPrefix: 10.10.63.128/26   # loopbacks of the control-plane DPUs (one per site controller); managed DPUs draw from the TOML's [pools.lo-ip]
+  forgeOverlayPrefixes: [10.10.64.0/22]
+  segments:                        # every other segment: prefix, gateway, MTU; the comment names the site-yaml key it is compared with
+    admin:           { prefix: 10.10.60.0/24, gateway: 10.10.60.1, mtu: 9000 }        # forgeAdminNetworkPrefix
+    controlPlaneOob: { prefix: 10.10.248.48/28, gateway: 10.10.248.62, mtu: 1500 }    # forgeControlPlaneIpmiPrefixes
+    managedHostBmc:                                                                   # forgeManagedHostIpmiSwitches
+      - { switchName: dc1-m01-ipmitor-01, prefix: 10.10.250.0/25, gateway: 10.10.250.1, mtu: 1500 }
+      - { switchName: dc1-m02-ipmitor-01, prefix: 10.10.250.128/25, gateway: 10.10.250.129, mtu: 1500 }
+    hostInband:                                                                       # one per rack when the DPU policy is nic or ignore
+      - { name: rack1, prefix: 10.10.72.0/23, gateway: 10.10.72.1, mtu: 9000 }
+  kubernetes: { podCidr: 10.233.64.0/18, serviceCidr: 10.233.0.0/18, apiVip: 10.10.126.193 }
+  nameServer: 10.10.0.11
+  unboundForwardAddresses: [10.10.0.11, 10.10.0.12]
+  ntpServers: [10.10.0.21, 10.10.0.22]
+  pathMtu: 9000
+  defaultRoute: bgp                # optional; bgp (learnt from the ToRs) | static
+  pools:
+    vlan: { start: 100, end: 501 }
+    vni: { start: 1024500, end: 1024800 }
+    externalVpcVni: { start: 51000, end: 51008 }
+  fnn:
+    controlPlaneVni: 60020
+    adminVpcVni: 60100
+    vpcVrfLoopbackPrefix: 10.10.255.0/24
+    poolsVpcVni: [{ start: 60101, end: 61124 }]
+    routeTargets: { managedNodeBmc: 900, siteController: 50100, adminNetwork: 50400, jumphost: 101 }
+  # Optional pins of values the tool derives; a pinned value that the collateral contradicts is a ✗.
+  # denyPrefixes: [10.10.63.64/29, 10.10.248.48/28, 10.10.250.0/25, 10.10.250.128/25]
+  # serviceVips: { api: 10.10.126.208, dhcp: 10.10.126.194, dns0: 10.10.126.195, dns1: 10.10.126.196, pxe: 10.10.126.197, sshConsole: 10.10.126.198 }
+
+counts: { hosts: 128, dpus: 128, tenants: 8, racks: 4 }
+
+fleet:                             # what NICo will manage; selects BIOS profiles, firmware thresholds, and seed entries
+  hosts:
+    - { model: Dell XE9680, gpu: H100, count: 128 }
+  dpu: { model: BlueField-3 B3220, generation: BF3 }
+
+versions:
+  infraController: v2026.10.15     # release tag of the checkout and the Core image
+  nicoRest: v1.2.0
+  nvRms: v0.8.0
+  docaPlatform: v26.4.0
+  bfb: bf-bundle-3.2.2-125_26.02_ubuntu-22.04_prod.bfb
+  doca: 3.2.2
+  hbn: 3.2.2
+  kubernetesBaseline: v1.30.4
+
+credentials:                       # by source only; read from step 7 (ingestion readiness)
+  bmcRoot: { from: file, path: ~/.nico/site1/bmc-root }   # the site-wide BMC root password NICo pushes to every BMC
+  uefi: { from: env, name: NICO_SITE_UEFI_PASSWORD }
+
+setup:                             # what you will run; secrets by source, never by value
+  command: ./setup.sh -y --core-values values/nico-core.yaml --metallb-config values/metallb-config.yaml --skip-rms
+  env:
+    KUBECONFIG: ~/.kube/site1
+    NICO_IMAGE_REGISTRY: registry.site1.dc1.example.net/nico
+    NICO_CORE_IMAGE_TAG: v2026.10.15
+    NICO_REST_IMAGE_TAG: v1.2.0
+    REGISTRY_PULL_USERNAME: nico-pull
+    REGISTRY_PULL_SECRET: { from: env }                 # supplied at run time, never written here
+    NICO_DPF_DPU_INTERFACE: ens1f0np0
+    NICO_DPF_DPU_CLUSTER_VIP: 10.10.126.200
+    NICO_DPF_BMC_ROOT_PASSWORD: { from: file, path: ~/.nico/site1/bmc-root }
+    NICO_DPF_HELM_REPO_CARBIDE: oci://registry.site1.dc1.example.net/nico-charts

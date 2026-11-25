@@ -23,9 +23,6 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-[lib]
-name = "forge_dpu_fmds_shared"
-
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["macros"] }

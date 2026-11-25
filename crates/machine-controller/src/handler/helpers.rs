@@ -183,8 +183,7 @@ impl DpuDiscoveringStateHelper for DpuDiscoveringState {
         match current_state {
             ManagedHostState::DpuDiscoveringState { dpu_states } => {
                 let mut states = dpu_states.states.clone();
-                let entry = states.entry(*dpu_id).or_insert(self.clone());
-                *entry = self;
+                states.insert(*dpu_id, self);
 
                 Ok(ManagedHostState::DpuDiscoveringState {
                     dpu_states: DpuDiscoveringStates { states },
@@ -219,8 +218,7 @@ impl DpuInitStateHelper for DpuInitState {
         match current_state {
             ManagedHostState::DPUInit { dpu_states } => {
                 let mut states = dpu_states.states.clone();
-                let entry = states.entry(*dpu_id).or_insert(self.clone());
-                *entry = self;
+                states.insert(*dpu_id, self);
 
                 Ok(ManagedHostState::DPUInit {
                     dpu_states: DpuInitStates { states },

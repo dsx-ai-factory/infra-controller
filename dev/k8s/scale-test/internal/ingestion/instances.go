@@ -390,7 +390,7 @@ func (t *InstanceTest) run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 		return out, err
 	}
 	in.d.Cohort = map[string]any{"path": planName, "sha256": hash, "count": len(in.plan.Cohort)}
-	in.evidence, err = openEvidence(t.cfg.Journal.Dir, t.cfg.RunID)
+	in.evidence, err = openEvidence(t.cfg.Journal.Dir, t.cfg.RunID, 256<<20)
 	if err != nil {
 		return out, err
 	}

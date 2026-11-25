@@ -116,8 +116,9 @@ The provider instance total is unavailable because the REST API has no
 provider-scoped instance count. Other supported totals are collected
 independently of that capability.
 
-Firmware targets and update limits remain unavailable. Their filters answer
-422 `field_unavailable`, and `/v1/config` serves them as `null`. Tenant
+Firmware targets and update limits require the config reader
+(`state.readers.nicoConfig`, below). With it disabled, their filters answer
+422 `field_unavailable` and `/v1/config` serves them as `null`. Tenant
 allocation and REST unit reads require the optional instance fixture below.
 
 Each reader publishes one immutable snapshot per count family. A family is
@@ -133,8 +134,9 @@ one snapshot per family.
 The state readers need a nico-api client certificate that maps to an external
 user (`nicoApiClientCert.existingSecret`, keys `ca.crt`, `tls.crt`,
 `tls.key`): the SPIFFE identity may call only `FindMachineIds`,
-`FindMachinesByIds` `FindHostStatesByIds`, `GetDesiredFirmwareVersions` and `ListHostFirmware`. REST identities take client
-credentials, a bearer token in a Secret, or a token file.
+`FindMachinesByIds`, `FindHostStatesByIds`, `GetDesiredFirmwareVersions` and
+`ListHostFirmware`. REST identities take client credentials, a bearer token
+in a Secret, or a token file.
 
 The nico-api reader runs by default once state is on; the REST reader stays
 off until its inputs exist. Hosts are read with the compact host read
@@ -312,7 +314,8 @@ read, allocation is null. Failed reads retain the old value and its error.
 Unit/count sweep metadata adds `lastAttemptSucceeded` and
 `lastAttemptError`. Failed attempts do not refresh the retained snapshot's
 source times. Before the first good unit read, 503 includes any recorded,
-sanitized source failure. Require success, a matching process and bounded source age.
+sanitized source failure. Require success, a matching process and bounded
+source age.
 A complete REST scan is bounded to 200,000 rows and 64 MiB across pages,
 rejecting duplicate IDs, missing pages and changing totals. REST pages share
 no transaction. Repeat full agreement after writes settle, and never infer
@@ -326,3 +329,30 @@ reader before enabling it. Disabled charts omit `nico_config` so older
 probe images still parse their configuration. Config-only reads require
 `nicoApiClientCert.existingSecret`, using the existing `state.nicoApi`
 target, TLS and call caps. Deploy compatible NICo permissions first.
+
+Firmware observation uses three bounded NICo configuration reads per sweep.
+`/v1/config` exposes canonical targets, inventory regexes, nullable policy
+settings and a content revision. A failed attempt retains the last successful
+content and its original read times. Config filters require the reader.
+
+Compact host units include nullable update windows, policy evidence and every
+matched firmware inventory entry. `firmwareConfig` identifies the configuration
+pinned before and after the host read. Missing, stale or changed configuration
+keeps normal host data available with unknown firmware phases.
+
+`carbide_site_health_probe_hosts_firmware{vendor,model,component,phase,ready}`
+counts each host once for BMC and UEFI, with explicit zeros for observed
+vendor/model pairs. Phase is
+`unknown`, `behind`, `updating`, `failed` or `current`. Ready additionally requires
+native Ready, done and allocatable. Versions and IDs never become labels.
+The unlabeled `carbide_site_health_probe_firmware_config_revision` and
+`carbide_site_health_probe_host_firmware_config_revision` gauges preserve
+configuration provenance without creating revision label sets.
+
+`/v1/count` and `/v1/units` accept `type=host`, exact `vendor` and `model`,
+`firmwareComponent=bmc|uefi`, and optional `firmwarePhase`/`firmwareReady`.
+Each completed source read stays fresh for twice its reader interval after
+it finishes; the reader timeout bounds sweep duration.
+Disabled config or full-only reads return 422. Missing, failed or stale source
+evidence returns 503. Firmware phases describe observations, not authorization
+to upgrade. Existing readers and commands work with the config reader disabled.

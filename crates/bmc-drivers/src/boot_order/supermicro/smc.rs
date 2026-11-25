@@ -46,16 +46,21 @@ fn names_adapter(name: &str, mac: &str) -> bool {
             .contains(&mac.to_ascii_uppercase())
 }
 
-/// Whether the BMC rejected a `Boot.BootOrder` write because this model has
-/// no such property.
-fn boot_order_unknown(error: &PlatformError) -> bool {
-    matches!(
-        error,
-        PlatformError::Bmc { status: 400, message_id, message }
-            if (message.contains("PropertyUnknown")
-                || message_id.as_deref().is_some_and(|id| id.contains("PropertyUnknown")))
-                && message.contains("BootOrder")
-    )
+/// Whether the BMC rejected a standard boot order request. Models without a
+/// usable `Boot.BootOrder` answer its reads and writes with a 400, whatever
+/// the message, and order boot through the fixed boot order instead.
+fn standard_boot_order_rejected(error: &PlatformError) -> bool {
+    matches!(error, PlatformError::Bmc { status: 400, .. })
+}
+
+/// Whether the fixed boot order boots the adapter with `mac` first.
+async fn fixed_status<B: Bmc>(cx: &OpCx<'_, B>, mac: &str) -> Result<bool, PlatformError> {
+    let resource = fixed_boot_order(cx).await?;
+    Ok(fixed_adapter_is_first(
+        resource.fixed_boot_order().unwrap_or_default(),
+        resource.uefi_network().unwrap_or_default(),
+        mac,
+    ))
 }
 
 async fn fixed_boot_order<B: Bmc>(cx: &OpCx<'_, B>) -> Result<SmcFixedBootOrder<B>, PlatformError> {
@@ -219,14 +224,15 @@ impl<B: Bmc> BootOrder<B> for SmcBootOrder {
         let mac = cx.boot_interface_mac(selector).await?;
         let order = boot_order(cx.system().await?);
         let boot_interface_first = if order.is_empty() {
-            let resource = fixed_boot_order(cx).await?;
-            fixed_adapter_is_first(
-                resource.fixed_boot_order().unwrap_or_default(),
-                resource.uefi_network().unwrap_or_default(),
-                &mac,
-            )
+            fixed_status(cx, &mac).await?
         } else {
-            standard_adapter_is_first(&order, &cx.boot_options().await?, &mac)
+            match cx.boot_options().await {
+                Ok(options) => standard_adapter_is_first(&order, &options, &mac),
+                Err(error) if standard_boot_order_rejected(&error) => {
+                    fixed_status(cx, &mac).await?
+                }
+                Err(error) => return Err(error),
+            }
         };
         Ok(BootOrderStatus {
             boot_interface_first,
@@ -266,7 +272,9 @@ impl<B: Bmc> BootOrder<B> for SmcBootOrder {
         match standard_adapter_first(cx, &mac).await {
             Ok(Some(outcome)) => Ok(outcome),
             Ok(None) => fixed_adapter_first(cx, &mac).await,
-            Err(error) if boot_order_unknown(&error) => fixed_adapter_first(cx, &mac).await,
+            Err(error) if standard_boot_order_rejected(&error) => {
+                fixed_adapter_first(cx, &mac).await
+            }
             Err(error) => Err(error),
         }
     }
@@ -274,6 +282,7 @@ impl<B: Bmc> BootOrder<B> for SmcBootOrder {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
     use serde_json::json;
 
     use super::*;
@@ -356,18 +365,22 @@ mod tests {
     }
 
     #[test]
-    fn only_property_unknown_boot_order_rejections_fall_back_to_the_fixed_boot_order() {
-        let rejected = PlatformError::Bmc {
-            status: 400,
-            message_id: Some("Base.1.4.PropertyUnknown".to_string()),
+    fn every_400_falls_back_to_the_fixed_boot_order() {
+        let bmc = |status: u16, message_id: &str| PlatformError::Bmc {
+            status,
+            message_id: Some(message_id.to_string()),
             message: "The property BootOrder is not in the list of valid properties".to_string(),
         };
-        assert!(boot_order_unknown(&rejected));
-        let other = PlatformError::Bmc {
-            status: 400,
-            message_id: Some("Base.1.4.PropertyValueNotInList".to_string()),
-            message: "BootOrder".to_string(),
-        };
-        assert!(!boot_order_unknown(&other));
+        value_scenarios!(run = |error: PlatformError| standard_boot_order_rejected(&error);
+            "a rejected request" {
+                bmc(400, "Base.1.4.PropertyUnknown") => true,
+                bmc(400, "Base.1.4.PropertyValueNotInList") => true,
+            }
+            "any other failure" {
+                bmc(404, "Base.1.4.ResourceMissingAtURI") => false,
+                bmc(500, "Base.1.4.InternalError") => false,
+                PlatformError::Unsupported => false,
+            }
+        );
     }
 }

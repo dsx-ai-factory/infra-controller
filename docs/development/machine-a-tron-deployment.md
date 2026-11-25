@@ -32,8 +32,13 @@ guide explains each step.
    `dpf-operator-system` namespace. The Core install in the next step needs both:
    `nico-api.dpf.rbacCreate: true` in the simulation values renders a Role in
    that namespace, and `[dpf] enabled = true` makes nico-api expect the CRDs
-   at startup. The Makefile default `IMG=dpf-sim-controller:dev` is a local
-   name that no cluster can pull, so pass the image explicitly:
+   at startup. nico-api also reads `status.version` of the
+   `DPFOperatorConfig` named `dpfoperatorconfig` at startup and exits when it
+   is missing. The running simulator creates that object and writes the
+   version. A nico-api that starts before the simulator restarts until the
+   version is there, and `setup.sh` fails after waiting 600 seconds for it.
+   The Makefile default `IMG=dpf-sim-controller:dev` is a local name that no
+   cluster can pull, so pass the image explicitly:
 
    ```bash
    DPF_SIM_IMAGE="${NICO_IMAGE_REGISTRY}/dpf-sim-controller:$(git rev-parse --short HEAD)"
@@ -116,9 +121,10 @@ cycle). Repeating `helm upgrade --install` with the same values is always safe.
   [Why Cross-Compilation Is Required](#why-cross-compilation-is-required).
 - A container registry you can push to and the cluster can pull from
   (referenced through `NICO_IMAGE_REGISTRY`, the same convention as `setup.sh`)
-- The DPF simulator deployed in `dpf-operator-system` before the Core
+- The DPF simulator running in `dpf-operator-system` before the Core
   install, as in [Quick Path](#quick-path) step 1. The simulation Core values
-  render a Role in that namespace
+  render a Role in that namespace, and nico-api reads the `DPFOperatorConfig`
+  the simulator creates there
 - A NICo Core site deployed by `helm-prereqs/setup.sh`, which installs the
   cert-manager ClusterIssuer and the External Secrets Operator (ESO) the chart
   relies on
@@ -233,9 +239,10 @@ The `nico-roots` copy needs no action. ESO resyncs it through the namespace labe
 
 ## Site Credentials
 
-site-explorer's `check_preconditions` requires three site-default credentials
-before it explores any endpoint: the site-wide BMC root and the DPU and host
-Unified Extensible Firmware Interface (UEFI) defaults. `siteCredentials` in
+Before each periodic pass, site-explorer loads the current site-wide BMC root
+password and rotation version once. A load failure stops that pass before
+endpoint exploration. The DPU and host Unified Extensible Firmware Interface
+(UEFI) defaults are loaded by the operations that use them. `siteCredentials` in
 `helm-prereqs/values.yaml` renders all three as a Kubernetes Secret that
 nico-api reads as its credential file ahead of Vault. This is the only
 supported path on a machine-a-tron site. Refer to
@@ -484,6 +491,7 @@ section Per-pod Services). NICo dials each BMC IP directly, with no
 | `machine-a-tron-10racks.yaml` | 10 GB200 NVL72 racks, one per pod, behind the protocol gateway (180 hosts x 2 DPUs, 90 switches, 80 power shelves) |
 | `machine-a-tron-250racks.yaml` | 250 GB200 NVL72 racks, 25 per pod across 10 pods, behind the protocol gateway (4,500 hosts x 2 DPUs, 2,250 switches, 2,000 power shelves) |
 | `machine-a-tron-556racks.yaml` | 556 GB200 NVL72 racks, 24 or 25 per pod across 23 pods, behind the protocol gateway with per-pod Services (10,008 hosts x 2 DPUs, 5,004 switches, 4,448 power shelves). Core values: `nico-core-10k-hosts.yaml` |
+| `machine-a-tron-1112racks.yaml` | 1,112 GB200 NVL72 racks, 24 or 25 per pod across 45 pods, behind the protocol gateway with per-pod Services and two BMC segments (20,016 hosts x 2 DPUs, 10,008 switches, 8,896 power shelves). Core values: `nico-core-20k-hosts.yaml`. Needs the cluster changes in [20,000-Host Simulated Fleet](machine-a-tron-scale-testing.md#cluster-prerequisites) |
 | `machine-a-tron-scale-4500.yaml` | 4,500 hosts x 2 DPUs across 3 pods, one BMC segment per pod |
 | `machine-a-tron-scale-4500-proxy.yaml` | 4,500 hosts x 2 DPUs in one pod behind one shared proxy Service, without the controller |
 
@@ -910,7 +918,13 @@ DPUs (13,500 BMCs). A 250-rack site needs 17,750 BMC addresses, so widen
 556-rack fleet needs 39,476, which `nico-core-10k-hosts.yaml` ships as a
 `/16`. Do not widen further than needed. The allocator materializes the whole
 host space per request while holding the fleet-wide admin-segment lock, about
-three times slower at a `/16` than at a `/18`.
+three times slower at a `/16` than at a `/18`. The 1,112-rack fleet needs
+78,952, more than one `/16` holds, so `nico-core-20k-hosts.yaml` declares a
+second `/16` BMC segment and `machine-a-tron-1112racks.yaml` relays the BMC
+DHCP of its first 23 pods to one gateway and of the other 22 to the other.
+nico-api serves a relayed request from the segment whose prefix contains the
+relay address, so the two prefixes must be disjoint and each gateway must lie
+in exactly one of them.
 
 Symptoms of overflow: `No IP addresses left in prefix ...` with machines stuck
 in `BmcInit` (OOB), `No IP addresses left in prefix <admin-cidr>` at creation
@@ -1104,7 +1118,7 @@ gone. Rerun the loop until
 each kind.
 
 `make -C dev/k8s/dpf-sim-controller undeploy` removes the simulator itself and
-leaves the DPF CRDs in place.
+leaves the DPF CRDs and the `DPFOperatorConfig` in place.
 
 ### Per-BMC Vault Credentials
 
@@ -1136,7 +1150,9 @@ kubectl get secret nico-vault-token -n nico-system -o jsonpath='{.data.token}' |
 `setup.sh --skip-dpf --core-values values/nico-core-simulation.yaml` recreates
 the site from scratch, including the database and Vault. Uninstall machine-a-tron and
 delete the DPF CRs first. `clean.sh` does not cover the machine-a-tron
-namespace.
+namespace. It deletes `dpf-operator-system` and the DPF CRDs, which removes
+the simulator and its `DPFOperatorConfig`, so repeat
+[Quick Path](#quick-path) step 1 before `setup.sh`.
 
 ## Non-Obvious Fixes
 
@@ -1162,5 +1178,5 @@ namespace.
 | `Refusing to create managed host, expected machines entry not found` | No `expected_machines` row for the discovered BMC MAC | Set `machineATron.registerExpectedMachines: true` (default) so machine-a-tron auto-registers them |
 | `Refusing to create managed host`; machine-a-tron logs `PermissionDenied` on registration | nico-api release predates the `Machineatron` → `AddExpectedMachine` RBAC grant | Upgrade nico-api. There is no fallback |
 | `SIGSEGV` compiling `aws-lc-sys` | QEMU emulates the `.S` assembler, which crashes | True cross-compilation (native arm64 host → x86_64 target) instead of QEMU |
-| site-explorer aborts with `MissingCredentials .../uefi-metadata-items/auth` | kvSeeds create the UEFI creds with **empty** passwords, which fail validation | Enable `siteCredentials`. Empty `uefi` passwords are generated on install |
+| UEFI operations fail with `MissingCredentials .../uefi-metadata-items/auth` | kvSeeds create the UEFI creds with **empty** passwords, which fail validation | Enable `siteCredentials`. Empty `uefi` passwords are generated on install |
 | site-explorer aborts with `MissingCredentials machines/bmc/site/root` | Site BMC root cred not in default `kvSeeds` | Enable `siteCredentials` in `helm-prereqs/values.yaml` ([Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret)) |

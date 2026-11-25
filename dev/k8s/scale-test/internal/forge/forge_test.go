@@ -230,3 +230,41 @@ func errText(err error) string {
 	}
 	return err.Error()
 }
+
+func TestFirmwareIdentity(t *testing.T) {
+	for _, name := range []string{"nico-flow", "carbide-flow", "machine-a-tron", "other", ""} {
+		t.Run(name, func(t *testing.T) {
+			uri := ""
+			if name != "" {
+				uri = "spiffe://nico.local/ns/forge/sa/" + name
+			}
+			cert, key, _ := leaf(t, uri, nil)
+			allowed := true
+			_, err := checkClientIdentity(cert, Settings{firmware: true})
+			is(t, err == nil, allowed, "firmware principal")
+			_, err = CheckIdentity(cert, settings)
+			is(t, err == nil, name == WriteService, "ingestion principal unchanged")
+			dir := t.TempDir()
+			for file, data := range map[string][]byte{"tls.crt": cert, "tls.key": key, "ca.crt": cert} {
+				if err := os.WriteFile(filepath.Join(dir, file), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := Settings{CertDir: dir, Spiffe: settings, firmware: true}
+			c, err := DialFirmware("https://forge.test", s)
+			is(t, err == nil, allowed, "dial principal")
+			if c != nil {
+				_ = c.Close()
+			}
+		})
+	}
+	for _, content := range [][]byte{make([]byte, (1<<20)+1)} {
+		path := filepath.Join(t.TempDir(), "oversized")
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readFile(path); err == nil {
+			t.Fatal("oversized credential accepted")
+		}
+	}
+}

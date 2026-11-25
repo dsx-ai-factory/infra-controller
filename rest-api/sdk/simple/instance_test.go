@@ -478,6 +478,17 @@ func TestInstanceManagerDeleteWarnsWhenInstanceLookupFails(t *testing.T) {
 	assert.Equal(t, "failed to get Instance; skipping SSH Key Group cleanup", logEntry["message"])
 }
 
+func newJSONResponseClient(t *testing.T, response string) *Client {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := io.WriteString(w, response)
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+	return newSimpleTestClient(server.URL)
+}
+
 func newSimpleTestClient(baseURL string) *Client {
 	apiConfig := standard.NewConfiguration()
 	apiConfig.Servers = standard.ServerConfigurations{

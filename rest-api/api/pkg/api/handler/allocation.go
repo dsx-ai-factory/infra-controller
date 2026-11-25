@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,7 +168,7 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 		// Acquire an advisory lock on Allocation creation for Site - this is needed because of checks:
 		// - For IM, a Tenant pool is created only if this is the first Allocation
 		// - a TenantSite record is created if this is the first Allocation
-		lockID := fmt.Sprintf("%s-%s-%s", ip.ID.String(), site.ID.String(), tenant.ID.String())
+		lockID := fmt.Sprintf("%s-%s-%s", ip.ID, site.ID, tenant.ID)
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock to create Allocation")
@@ -223,10 +224,10 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, "Error retrieving Instance Type in Allocation Constraint in request", nil)
 				}
 				if it.SiteID != nil && *it.SiteID != site.ID {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to Site specified in request", it.ID.String()), nil)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to Site specified in request", it.ID), nil)
 				}
 				if it.InfrastructureProviderID != ip.ID {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to current Provider", it.ID.String()), nil)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to current Provider", it.ID), nil)
 				}
 
 				// Check if there are Machines which are available for Allocation
@@ -262,7 +263,7 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, "Error retrieving IPBlock in Allocation Constraint in request", nil)
 				}
 				if ipb.SiteID != site.ID {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("IP Block: %s in Allocation Constraint doesn't belong Site specified in request", ipb.ID.String()), nil)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("IP Block: %s in Allocation Constraint doesn't belong Site specified in request", ipb.ID), nil)
 				}
 				serr = ipb.ValidateChildPrefixLength(ac.ConstraintValue)
 				if serr != nil {
@@ -370,8 +371,6 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 		// Create the Allocation Constraints in DB
 		acDAO := cdbm.NewAllocationConstraintDAO(cah.dbSession)
 		dbacsRet = []cdbm.AllocationConstraint{}
-		imAcAdd := []cdbm.AllocationConstraint{}
-		imAcUpd := []cdbm.AllocationConstraint{}
 		for _, ac := range dbacs {
 			retac, serr := acDAO.Create(ctx, tx, cdbm.AllocationConstraintCreateInput{
 				AllocationID:      a.ID,
@@ -387,15 +386,10 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation Constraint entry for Allocation", nil)
 			}
 			dbacsRet = append(dbacsRet, *retac)
-			_, cnt, derr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, cah.dbSession, ip, site, tenant, &ac.ResourceTypeID)
+			_, _, derr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, cah.dbSession, ip, site, tenant, &ac.ResourceTypeID)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error getting Allocation Constraints")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation, db error", nil)
-			}
-			if cnt > 1 {
-				imAcUpd = append(imAcUpd, *retac)
-			} else if cnt == 1 {
-				imAcAdd = append(imAcAdd, *retac)
 			}
 
 			switch ac.ResourceType {
@@ -506,16 +500,16 @@ func NewGetAllAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param infrastructureProviderId query string false "Deprecated: ID of InfrastructureProvider"
-// @Param tenantId query string false "Filter by Tenant ID (Provider role only; for Tenant role the tenant is inferred from org membership and this param is ignored)"
-// @Param siteId query string false "ID of Site"
-// @Param resourceType query string false "Filter by resource type e.g. 'InstanceType', 'IPBlock'"
-// @Param resourceTypeId query string false "ID of ResourceType"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
+// @Param tenantId query []string false "Filter by Tenant ID (Provider role only; for Tenant role the tenant is inferred from org membership and this param is ignored)" collectionFormat(multi)
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param resourceType query []string false "Filter by resource type e.g. 'InstanceType', 'IPBlock'" collectionFormat(multi)
+// @Param resourceTypeId query []string false "ID of ResourceType" collectionFormat(multi)
+// @Param status query []string false "Filter Allocations by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one Status." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param constraintType query string false "Filter by constraint type e.g. 'Reserved', 'OnDemand', 'Preemptible'"
-// @Param constraintValue query integer false "Filter by constraint value"
-// @Param id query string false "ID of Allocation"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param constraintType query []string false "Filter by constraint type e.g. 'Reserved', 'OnDemand', 'Preemptible'" collectionFormat(multi)
+// @Param constraintValue query []int false "Filter by constraint value" collectionFormat(multi)
+// @Param id query []string false "ID of Allocation" collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -588,7 +582,7 @@ func (gaah GetAllAllocationHandler) Handle(c echo.Context) error {
 		for _, status := range statusQuery {
 			_, ok := cdbm.AllocationStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				statusError := validation.Errors{
 					"status": errors.New(status),
 				}
@@ -840,7 +834,7 @@ func NewGetAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Param id path string true "ID of Allocation"
 // @Param infrastructureProviderId query string false "Deprecated: ID of InfrastructureProvider"
 // @Param tenantId query string false "Deprecated: ID of Tenant"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIAllocation
 // @Router /v2/org/{org}/nico/allocation/{id} [get]
 func (gah GetAllocationHandler) Handle(c echo.Context) error {
@@ -1041,7 +1035,7 @@ func (uah UpdateAllocationHandler) Handle(c echo.Context) error {
 			// check and the subsequent Update are atomic — without it, two
 			// concurrent renames to the same name could both observe
 			// tot == 0 and one would fall through to a DB unique-violation 500.
-			lockID := fmt.Sprintf("alloc-rename-%s-%s", existingA.TenantID.String(), existingA.SiteID.String())
+			lockID := fmt.Sprintf("alloc-rename-%s-%s", existingA.TenantID, existingA.SiteID)
 			serr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("unable to acquire advisory lock to update Allocation name")
@@ -1236,7 +1230,7 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 
 		// take an advisory lock on allocation api - this is needed because, we are checking the allocation constraint counts
 		// to delete the tenant pool below.
-		lockID := fmt.Sprintf("%s-%s-%s", ip.ID.String(), a.SiteID.String(), a.TenantID.String())
+		lockID := fmt.Sprintf("%s-%s-%s", ip.ID, a.SiteID, a.TenantID)
 		derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock to delete Allocation")
@@ -1262,9 +1256,6 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 		vpDAO := cdbm.NewVpcPrefixDAO(dah.dbSession)
 		ipbDAO := cdbm.NewIPBlockDAO(dah.dbSession)
 
-		imAcDel := []cdbm.AllocationConstraint{}
-		imAcUpd := []cdbm.AllocationConstraint{}
-
 		ipamStorage := ipam.NewIpamStorage(dah.dbSession.DB, tx.GetBunTx())
 
 		// Since we are going to lock on multiple AllocationConstraints, we need a consistent order
@@ -1273,13 +1264,7 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 		// for a single allocation, so this should be cleaned up once allocations and
 		// constraints have merged into a single object.
 		slices.SortFunc(acs, func(a, b cdbm.AllocationConstraint) int {
-			if a.ResourceTypeID.String() < b.ResourceTypeID.String() {
-				return -1
-			}
-			if a.ResourceTypeID.String() > b.ResourceTypeID.String() {
-				return 1
-			}
-			return 0
+			return bytes.Compare(a.ResourceTypeID[:], b.ResourceTypeID[:])
 		})
 		for _, ac := range acs {
 			switch ac.ResourceType {
@@ -1343,21 +1328,16 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 						fmt.Sprintf(
 							"Deleting this Allocation as specified would result in %d total Machines for Instance Type ID: %s allocated to Tenant, less than Tenant's active Instance count: %d for the Instance Type",
 							totalConstraintValue-deletedConstraintValue,
-							ac.ResourceTypeID.String(),
+							ac.ResourceTypeID,
 							iCount,
 						),
 						nil,
 					)
 				}
-				_, acCnt, serr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, dah.dbSession, a.InfrastructureProvider, a.Site, a.Tenant, &ac.ResourceTypeID)
+				_, _, serr = common.GetAllAllocationConstraintsForInstanceType(ctx, tx, dah.dbSession, a.InfrastructureProvider, a.Site, a.Tenant, &ac.ResourceTypeID)
 				if serr != nil {
 					logger.Error().Err(serr).Msg("error getting Allocation Constraints")
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Allocation, DB error", nil)
-				}
-				if acCnt > 1 {
-					imAcUpd = append(imAcUpd, ac)
-				} else if acCnt == 1 {
-					imAcDel = append(imAcDel, ac)
 				}
 			case cdbm.AllocationResourceTypeIPBlock:
 				// check if the tenant has subnets or VpcPrefixes using this ipblock

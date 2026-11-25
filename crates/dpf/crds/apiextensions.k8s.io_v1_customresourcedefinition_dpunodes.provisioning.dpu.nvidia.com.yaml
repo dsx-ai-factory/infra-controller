@@ -57,7 +57,8 @@ spec:
                 type: array
               nodeDMSAddress:
                 description: |-
-                  The IP address and port where the DMS is exposed. Only applicable if dpuInstallInterface is set to gNOI.
+                  The IP address and port where the DMS is exposed. Only applicable if
+                  dpuInstallInterface is set to gNOI.
 
                   Deprecated: this field is no longer used.
                 properties:
@@ -79,16 +80,17 @@ spec:
                 description: |-
                   Defines the method for rebooting the host.
                   One of the following options can be chosen for this field:
-                     - "external": Reboot the host via an external means, not controlled by the
-                       DPU controller.
+                     - "external": Reboot the host via an external means, not controlled
+                       by the DPU controller.
                      - "script": Reboot the host by executing a custom script.
                      - "hostAgent": Use the host agent to reboot the host.
                      - "none": Do not reboot a host through the DPUNode.
                   "hostAgent" is the default value.
                 properties:
                   external:
-                    description: Reboot the host via an external means, not controlled
-                      by the DPU controller.
+                    description: |-
+                      Reboot the host via an external means, not controlled by the DPU
+                      controller.
                     type: object
                   gNOI:
                     description: |-
@@ -106,9 +108,10 @@ spec:
                     type: object
                   script:
                     description: |-
-                      Reboot the host by executing a custom script. This field defined which ConfigMap store the custom script.
-                      The ConfigMap should include a pod template of Job object under the `pod-template` key.
-                      That pod template will be put in a Job object to be executed.
+                      Reboot the host by executing a custom script. This field defined which
+                      ConfigMap store the custom script. The ConfigMap should include a pod
+                      template of Job object under the `pod-template` key. That pod template
+                      will be put in a Job object to be executed.
                     properties:
                       name:
                         minLength: 1
@@ -131,8 +134,9 @@ spec:
             description: DPUNodeStatus defines the observed state of DPUNode
             properties:
               conditions:
-                description: Conditions represent the latest available observations
-                  of an object's state.
+                description: |-
+                  Conditions represent the latest available observations of an object's
+                  state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -189,8 +193,9 @@ spec:
                   type: object
                 type: array
               dpuInstallInterface:
-                description: The name of the interface which will be used to install
-                  the bfb image, can be one of hostAgent,redfish
+                description: |-
+                  The name of the interface which will be used to install the bfb image,
+                  can be one of hostAgent,redfish
                 enum:
                 - gNOI
                 - hostAgent
@@ -199,7 +204,8 @@ spec:
               kubeNodeRef:
                 description: |-
                   The name of the Kubernetes Node object that this DPUNode represents.
-                  This field is optional and only relevant if the x86 host is part of the DPF Kubernetes cluster.
+                  This field is optional and only relevant if the x86 host is part of the
+                  DPF Kubernetes cluster.
                 type: string
                 x-kubernetes-validations:
                 - message: KubeNodeRef is immutable

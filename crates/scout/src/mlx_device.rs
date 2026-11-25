@@ -1933,7 +1933,7 @@ fn load_and_compare_profile(
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs, capture_logs_async};
     use carbide_test_support::{Check, check_values};
     use libmlx::firmware::config::{FirmwareSpec, FlashOptions, FlashSpec};
@@ -2020,10 +2020,12 @@ mod tests {
                 report: Default::default(),
                 diagnostic: Some("firmware tool exited unsuccessfully".to_string()),
             };
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let logs = capture_logs(|| {
                 if observations.observe(device, &operation) {
-                    emit(ScoutMlxFirmwareReceiptFailed::observed(device, &operation));
+                    metrics
+                        .instrumentation()
+                        .emit(ScoutMlxFirmwareReceiptFailed::observed(device, &operation));
                 }
             });
             assert_eq!(
@@ -2150,7 +2152,10 @@ mod tests {
             [("operation", operation), ("failure_stage", failure_stage)]
         }
 
-        fn invoke(self) -> mlx_device_pb::MlxDeviceStreamError {
+        fn invoke(
+            self,
+            instrumentation: &carbide_instrument::Instrumentation,
+        ) -> mlx_device_pb::MlxDeviceStreamError {
             let directory = firmware_state_directory();
             let config = SupervisorConfig {
                 state_directory: directory.path().to_path_buf(),
@@ -2166,7 +2171,7 @@ mod tests {
                             serializable_profile: None,
                         },
                         &mut access,
-                        &carbide_instrument::Instrumentation::global(),
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_profile_compare_response::Reply::Error(
@@ -2183,7 +2188,7 @@ mod tests {
                             serializable_profile: None,
                         },
                         &mut access,
-                        &carbide_instrument::Instrumentation::global(),
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_profile_sync_response::Reply::Error(
@@ -2197,7 +2202,7 @@ mod tests {
                         mlx_device_pb::MlxDeviceRegistryShowRequest {
                             registry_name: REGISTRY.to_string(),
                         },
-                        &carbide_instrument::Instrumentation::global(),
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_registry_show_response::Reply::Error(
@@ -2214,7 +2219,7 @@ mod tests {
                             variables: Vec::new(),
                         },
                         &mut access,
-                        &carbide_instrument::Instrumentation::global(),
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_query_response::Reply::Error(
@@ -2231,7 +2236,7 @@ mod tests {
                             assignments: Vec::new(),
                         },
                         &mut access,
-                        &carbide_instrument::Instrumentation::global(),
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_compare_response::Reply::Error(
@@ -2248,7 +2253,7 @@ mod tests {
                             assignments: Vec::new(),
                         },
                         &mut access,
-                        &carbide_instrument::Instrumentation::global(),
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_set_response::Reply::Error(
@@ -2265,7 +2270,7 @@ mod tests {
                             assignments: Vec::new(),
                         },
                         &mut access,
-                        &carbide_instrument::Instrumentation::global(),
+                        instrumentation,
                     );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_sync_response::Reply::Error(
@@ -2406,12 +2411,12 @@ mod tests {
                 },
             ],
             |fixture| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let mut response = mlx_device_pb::MlxDeviceStreamError {
                     status: 0,
                     message: String::new(),
                 };
-                let logs = capture_logs(|| response = fixture.invoke());
+                let logs = capture_logs(|| response = fixture.invoke(metrics.instrumentation()));
                 let events = logs
                     .iter()
                     .filter_map(|log| {
@@ -2499,7 +2504,7 @@ mod tests {
             "",
             None,
             &SupervisorConfig::default(),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect_err("missing operation identity must reject");
@@ -2586,7 +2591,7 @@ mod tests {
                     published = Some(request);
                     std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
                 },
-                &carbide_instrument::Instrumentation::global(),
+                &carbide_instrument::Instrumentation::noop(),
             )
             .await;
             let report = published
@@ -2975,7 +2980,7 @@ mod tests {
                     published = Some(request);
                     std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
                 },
-                &carbide_instrument::Instrumentation::global(),
+                &carbide_instrument::Instrumentation::noop(),
             ))
             .await;
 
@@ -3151,7 +3156,7 @@ mod tests {
                     ),
                 ])
             };
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             crate::collect_and_publish_mlx_observations(
                 &machine_id,
                 commands(),
@@ -3159,7 +3164,7 @@ mod tests {
                 None,
                 |_| panic!("deferred automatic commands must not even discover the card"),
                 |_| async { panic!("deferred automatic commands must not publish a report") },
-                &carbide_instrument::Instrumentation::global(),
+                metrics.instrumentation(),
             )
             .await;
             assert_eq!(
@@ -3189,7 +3194,7 @@ mod tests {
                         "fixture ends before mutation".into(),
                     ))
                 },
-                &carbide_instrument::Instrumentation::global(),
+                metrics.instrumentation(),
             )
             .await;
             assert_eq!(queries, 3, "{scenario}");
@@ -3227,7 +3232,7 @@ mod tests {
             &config,
             None,
             |_| panic!("Noop must not discover hardware"),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -3262,7 +3267,7 @@ mod tests {
                     "fixture ends before mutation".into(),
                 ))
             },
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -3319,7 +3324,7 @@ mod tests {
                     },
                 ))
             },
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
         assert_eq!(
@@ -3377,7 +3382,7 @@ mod tests {
     async fn startup_device_report_retries_until_published() {
         use std::os::unix::fs::OpenOptionsExt;
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let directory = firmware_state_directory();
         let claim = directory.path().join("mutation.json");
         std::fs::OpenOptions::new()
@@ -3403,7 +3408,7 @@ mod tests {
                 panic!("inventory must defer while firmware owns hardware")
             }),
             |_| async { panic!("a deferred inventory must not be published") },
-            &carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation(),
         )
         .await;
         assert!(pending);
@@ -3419,7 +3424,7 @@ mod tests {
                 ))
             }),
             |_| async { panic!("a failed inventory query must not publish a report") },
-            &carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation(),
         )
         .await;
         assert!(pending);
@@ -3474,7 +3479,7 @@ mod tests {
                     requests.push(request);
                     std::future::ready(publish_result)
                 },
-                &carbide_instrument::Instrumentation::global(),
+                metrics.instrumentation(),
             )
             .await;
             assert_eq!(pending, expected_pending);
@@ -3488,7 +3493,7 @@ mod tests {
             &mut pending,
             async { panic!("an already published inventory must not be queried again") },
             |_| async { panic!("an already published inventory must not be republished") },
-            &carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation(),
         )
         .await;
         assert!(!pending);
@@ -3884,7 +3889,7 @@ mod tests {
             let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
                 .parse()
                 .unwrap();
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let mut published = Vec::new();
             let mut logs = Vec::new();
             for poll in 0..if recovering { 3 } else { 1 } {
@@ -3938,7 +3943,7 @@ mod tests {
                             published.push(request);
                             std::future::ready(response)
                         },
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     ))
                     .await;
                 logs.extend(poll_logs);
@@ -4063,7 +4068,6 @@ mod tests {
                     case.name,
                 );
             }
-            drop(metrics);
             stop.cancel();
             tokio::time::timeout(std::time::Duration::from_secs(5), server)
                 .await

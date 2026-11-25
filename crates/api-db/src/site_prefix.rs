@@ -102,7 +102,7 @@ async fn lock_site_prefix_id(
         )
     "#;
     sqlx::query(query)
-        .bind(site_prefix_id.to_string())
+        .bind(sqlx::types::Text(site_prefix_id))
         .execute(txn)
         .await
         .map(|_| ())
@@ -315,7 +315,7 @@ async fn lock_configured_reconciliation(txn: &mut PgConnection) -> DatabaseResul
 }
 
 /// Prevents configured SitePrefix reconciliation from changing the operator
-/// namespace while a legacy VpcPrefix request resolves its exact root.
+/// namespace while a prefix request validates its containing roots.
 ///
 /// This namespace lock covers the zero-row case that row locks cannot protect.
 pub async fn lock_operator_managed_site_prefix_attachments(
@@ -480,12 +480,12 @@ pub async fn find_by_id_for_vpc_prefix_attachment(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
-/// Locks every operator-managed SitePrefix containing a legacy VpcPrefix.
+/// Locks every operator-managed SitePrefix containing the requested prefix.
 ///
-/// Results are ordered deterministically, but the caller must require exactly
-/// one match. In particular, it must not guess between nested operator roots.
-/// Lifecycle state is deliberately not filtered so Core can reject a more
-/// specific or otherwise matching root that has begun retirement.
+/// VpcPrefix attachment requires exactly one match, without guessing between
+/// nested roots. Direct NetworkPrefix admission requires any Ready match because
+/// it has no exact SitePrefix parent. Results are ordered deterministically and
+/// include retiring roots so callers can enforce these distinct lifecycle rules.
 pub async fn find_legacy_operator_managed_for_vpc_prefix_attachment(
     txn: &mut PgConnection,
     prefix: IpNetwork,
@@ -699,21 +699,55 @@ pub async fn operator_managed_prefixes_exist(db: impl DbReader<'_>) -> DatabaseR
 /// Configured-root reconciliation retains removed roots in `Deleting` while
 /// their children drain. Soft-deleted VpcPrefixes may remain referenced by
 /// generated segments, while VPC-attached direct NetworkPrefixes remain until
-/// their segment is hard-deleted. Callers preserve routing isolation until the
-/// last child of either kind is physically removed. Legacy rows without exact
-/// lineage conservatively retain every containing operator root rather than
-/// guessing between nested roots.
+/// their segment is hard-deleted. A direct prefix retains Ready containing
+/// operator roots, or every containing retiring operator root when no Ready
+/// operator root fully covers it. Legacy VpcPrefixes without exact lineage
+/// conservatively retain every containing operator root rather than guessing
+/// between nested roots.
 pub async fn find_operator_managed_prefixes_with_retained_vpc_prefixes(
     db: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<IpNetwork>> {
-    let query = r#"
+    find_retained_operator_prefixes(db, None).await
+}
+
+/// Checks one operator root using the same child-retention rules as routing.
+///
+/// Missing roots and roots outside Ready or Deleting return false. A caller
+/// deciding final removal holds the routing and root row locks through deletion.
+pub async fn operator_managed_prefix_has_retained_children(
+    db: impl DbReader<'_>,
+    site_prefix_id: SitePrefixId,
+) -> DatabaseResult<bool> {
+    Ok(!find_retained_operator_prefixes(db, Some(site_prefix_id))
+        .await?
+        .is_empty())
+}
+
+async fn find_retained_operator_prefixes(
+    db: impl DbReader<'_>,
+    site_prefix_id: Option<SitePrefixId>,
+) -> DatabaseResult<Vec<IpNetwork>> {
+    let mut query = QueryBuilder::new(
+        r#"
         -- Keep routing coverage through soft deletion; either kind of child can
         -- still supply tenant routes until its owning row is physically deleted.
         SELECT site_prefix.prefix
         FROM site_prefixes AS site_prefix
-        WHERE site_prefix.authority = $1
-          AND site_prefix.lifecycle_state IN ($2, $3)
-          AND (
+        WHERE site_prefix.authority = "#,
+    );
+    query
+        .push_bind(SitePrefixAuthority::OperatorManaged)
+        .push(" AND site_prefix.lifecycle_state IN (")
+        .push_bind(SitePrefixLifecycleState::Ready)
+        .push(", ")
+        .push_bind(SitePrefixLifecycleState::Deleting)
+        .push(")");
+    if let Some(id) = site_prefix_id {
+        query.push(" AND site_prefix.id = ").push_bind(id);
+    }
+    query.push(
+        r#"
+        AND (
               EXISTS (
                   SELECT 1
                   FROM network_vpc_prefixes AS vpc_prefix
@@ -736,17 +770,35 @@ pub async fn find_operator_managed_prefixes_with_retained_vpc_prefixes(
                   WHERE network_prefix.vpc_prefix_id IS NULL
                     AND network_segment.vpc_id IS NOT NULL
                     AND site_prefix.prefix >>= network_prefix.prefix
+                    -- Ready operator coverage can replace a retired root for a
+                    -- direct prefix, which has no exact parent to preserve.
+                    AND (site_prefix.lifecycle_state = "#,
+    );
+    query
+        .push_bind(SitePrefixLifecycleState::Ready)
+        .push(
+            r#"
+                        OR NOT EXISTS (
+                            SELECT 1 FROM site_prefixes AS ready_root
+                            WHERE ready_root.authority = site_prefix.authority
+                              AND ready_root.lifecycle_state = "#,
+        )
+        .push_bind(SitePrefixLifecycleState::Ready)
+        .push(
+            r#"
+                              AND ready_root.prefix >>= network_prefix.prefix
+                        )
+                    )
               )
           )
         ORDER BY site_prefix.prefix
-    "#;
-    sqlx::query_scalar(query)
-        .bind(SitePrefixAuthority::OperatorManaged)
-        .bind(SitePrefixLifecycleState::Ready)
-        .bind(SitePrefixLifecycleState::Deleting)
+        "#,
+        );
+    query
+        .build_query_scalar()
         .fetch_all(db)
         .await
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| DatabaseError::query(query.sql(), error))
 }
 
 /// Counts every tenant-managed row for one tenant. Rows remain in this count
@@ -934,10 +986,11 @@ pub async fn retire_tenant_managed(
     Ok(site_prefix)
 }
 
-/// Physically removes a retired tenant root after its exact children are gone.
+/// Physically removes a retired root after no child requires its coverage.
 ///
-/// The caller holds the routing and parent row locks and verifies that the root
-/// is TenantManaged and Deleting. The child foreign key prevents premature removal.
+/// The caller holds the routing and parent row locks, verifies that the root is
+/// Deleting, and checks its authority-specific retention rules. The child foreign
+/// key also prevents removal while exact VpcPrefix references remain.
 pub async fn final_delete(
     site_prefix_id: SitePrefixId,
     txn: &mut PgConnection,
@@ -1022,15 +1075,18 @@ pub async fn find_by_ids(
 /// `find_isolation_hosts` selects hosts using
 /// [`ManagedHostStateSnapshot::needs_site_prefix_isolation`].
 /// When the caller's site policy does not require isolation, no hosts are selected.
-pub async fn find_isolation_hosts(
-    txn: &mut PgConnection,
+pub async fn find_isolation_hosts<DB>(
+    conn: &mut DB,
     isolation_required: bool,
-) -> DatabaseResult<Vec<ManagedHostStateSnapshot>> {
+) -> DatabaseResult<Vec<ManagedHostStateSnapshot>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     if !isolation_required {
         return Ok(Vec::new());
     }
 
-    let mut hosts = crate::managed_host::load_all(txn, LoadSnapshotOptions::default())
+    let mut hosts = crate::managed_host::load_all(conn, LoadSnapshotOptions::default())
         .await?
         .into_iter()
         .filter(ManagedHostStateSnapshot::needs_site_prefix_isolation)
@@ -1043,13 +1099,13 @@ pub async fn find_isolation_hosts(
 /// Returns the initial protection request time, or None for an unrequested or
 /// missing root. Once recorded, this time does not change during readiness.
 pub async fn isolation_requested_at(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     site_prefix_id: SitePrefixId,
 ) -> DatabaseResult<Option<DateTime<Utc>>> {
     let query = "SELECT isolation_requested_at FROM site_prefixes WHERE id = $1";
     sqlx::query_scalar(query)
         .bind(site_prefix_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map(Option::flatten)
         .map_err(|error| DatabaseError::query(query, error))
@@ -1077,7 +1133,7 @@ pub async fn request_isolation(
         ));
     }
 
-    if let Some(requested_at) = isolation_requested_at(txn, site_prefix.id).await? {
+    if let Some(requested_at) = isolation_requested_at(&mut *txn, site_prefix.id).await? {
         return Ok(ConditionalWrite::Applied(requested_at));
     }
 
@@ -1165,6 +1221,7 @@ mod tests {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     fn tenant_managed(prefix: &str, tenant_organization_id: &str) -> NewTenantManagedSitePrefix {
         NewTenantManagedSitePrefix {
@@ -1182,7 +1239,7 @@ mod tests {
         pool: &sqlx::PgPool,
         tenant_organization_id: &str,
     ) -> Result<(), DatabaseError> {
-        let mut txn = crate::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         crate::tenant::create_and_persist(
             tenant_organization_id.to_string(),
             Metadata {
@@ -1202,7 +1259,7 @@ mod tests {
         value: NewTenantManagedSitePrefix,
         quota_limit: u32,
     ) -> Result<CreateResult, DatabaseError> {
-        let mut txn = crate::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         let result = create_tenant_managed(value, quota_limit, txn.as_pgconn()).await?;
         txn.commit().await?;
         Ok(result)
@@ -1212,7 +1269,7 @@ mod tests {
         pool: &sqlx::PgPool,
         site_prefix_id: SitePrefixId,
     ) -> Result<Vec<model::state_history::StateHistoryRecord>, DatabaseError> {
-        let mut txn = crate::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         crate::state_history::for_object(
             txn.as_pgconn(),
             crate::state_history::StateHistoryTableId::SitePrefix,
@@ -1231,7 +1288,7 @@ mod tests {
         assert!(api_connection.cached_statements_size() > 0);
 
         let mut migration_connection = pool.acquire().await?;
-        let mut migration = migration_connection.begin().await?;
+        let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE site_prefixes
@@ -1250,7 +1307,7 @@ mod tests {
         connection: &mut PgConnection,
         prefix: IpNetwork,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         reconcile_configured(&mut txn, &[prefix]).await?;
         let [operator]: [SitePrefix; 1] =
             find_legacy_operator_managed_for_vpc_prefix_attachment(&mut txn, prefix)
@@ -1362,7 +1419,7 @@ mod tests {
         let equivalent_noncanonical_prefix: IpNetwork = "10.1.2.3/8".parse()?;
         let other_configured_prefix: IpNetwork = "192.168.0.0/16".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(
             &mut txn,
             &[
@@ -1374,7 +1431,7 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let tenant_prefix =
             create_tenant_managed(tenant_managed("10.0.0.0/8", "tenant-a"), 8, &mut txn)
                 .await?
@@ -1399,7 +1456,7 @@ mod tests {
         let configured_id = configured_before.id;
         assert_eq!(history(&pool, configured_id).await?.len(), 1);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[other_configured_prefix, configured_prefix]).await?;
         txn.commit().await?;
 
@@ -1419,7 +1476,7 @@ mod tests {
         );
         assert_eq!(history(&pool, configured_id).await?.len(), 1);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[]).await?;
         txn.commit().await?;
 
@@ -1440,7 +1497,7 @@ mod tests {
         );
         assert_eq!(history(&pool, configured_id).await?.len(), 2);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[configured_prefix]).await?;
         txn.commit().await?;
 
@@ -1458,11 +1515,11 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let prefix: IpNetwork = "10.0.0.0/8".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         insert(NewSitePrefix::configured(prefix), &mut txn).await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let error = insert(NewSitePrefix::configured(prefix), &mut txn)
             .await
             .unwrap_err();
@@ -1484,7 +1541,7 @@ mod tests {
         create_tenant(&pool, "tenant-b").await?;
 
         let prefix: IpNetwork = "10.0.0.0/8".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[prefix]).await?;
         let tenant_a = create_tenant_managed(tenant_managed("10.0.0.0/8", "tenant-a"), 8, &mut txn)
             .await?
@@ -1514,7 +1571,7 @@ mod tests {
         let ipv6_prefix: IpNetwork = "2001:db8::/32".parse()?;
         let replacement_prefix: IpNetwork = "198.51.100.0/24".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[public_prefix, nested_prefix, ipv6_prefix]).await?;
         txn.commit().await?;
 
@@ -1535,7 +1592,7 @@ mod tests {
             .unwrap()
             .id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[replacement_prefix]).await?;
         txn.commit().await?;
 
@@ -1555,7 +1612,7 @@ mod tests {
             SitePrefixLifecycleState::Ready
         );
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[replacement_prefix, public_prefix]).await?;
         txn.commit().await?;
 
@@ -1574,7 +1631,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         async fn reconcile(pool: sqlx::PgPool, prefix: IpNetwork) -> DatabaseResult<()> {
-            let mut txn = crate::Transaction::begin(&pool).await?;
+            let mut txn = pool.txn_begin().await?;
             reconcile_configured(txn.as_pgconn(), &[prefix]).await?;
             txn.commit().await
         }
@@ -1603,7 +1660,7 @@ mod tests {
             pool: sqlx::PgPool,
             value: NewTenantManagedSitePrefix,
         ) -> Result<SitePrefix, DatabaseError> {
-            let mut txn = crate::Transaction::begin(&pool).await?;
+            let mut txn = pool.txn_begin().await?;
             match create_tenant_managed(value, 8, txn.as_pgconn()).await {
                 Ok(result) => {
                     txn.commit().await?;
@@ -1769,7 +1826,7 @@ mod tests {
             if_version_match: Some(created.version),
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let updated = update_tenant_metadata(&update, created.version, &mut txn).await?;
         txn.commit().await?;
         assert_eq!(updated.metadata, updated_metadata);
@@ -1778,7 +1835,7 @@ mod tests {
         assert_ne!(updated.version, created.version);
         assert_eq!(history(&pool, created.id).await?.len(), 1);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let stale_error = update_tenant_metadata(&update, created.version, &mut txn)
             .await
             .unwrap_err();
@@ -1796,7 +1853,7 @@ mod tests {
             id: created.id,
             tenant_organization_id: "tenant-a".parse()?,
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let current = find_by_id_for_update(&mut txn, created.id).await?.unwrap();
         let deleting = retire_tenant_managed(&retire, &current, &mut txn).await?;
         txn.commit().await?;
@@ -1806,7 +1863,7 @@ mod tests {
         );
         assert_ne!(deleting.version, updated.version);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let current = find_by_id_for_update(&mut txn, created.id).await?.unwrap();
         let retry = retire_tenant_managed(&retire, &current, &mut txn).await?;
         txn.commit().await?;
@@ -1889,7 +1946,7 @@ mod tests {
         let specific_prefix: IpNetwork = "172.16.0.0/16".parse()?;
         let vpc_prefix: IpNetwork = "172.16.1.0/24".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[broad_prefix, specific_prefix]).await?;
         let specific_id: SitePrefixId =
             sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
@@ -1929,7 +1986,7 @@ mod tests {
         let ambiguous_prefix: IpNetwork = "172.16.1.0/24".parse()?;
         let missing_prefix: IpNetwork = "192.0.2.0/24".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(
             &mut txn,
             &[unique_root, ambiguous_broad_root, ambiguous_specific_root],
@@ -2092,7 +2149,7 @@ mod tests {
         let broad_root: IpNetwork = "10.0.0.0/8".parse()?;
         let specific_root: IpNetwork = "10.1.0.0/16".parse()?;
         let unrelated_root: IpNetwork = "192.0.2.0/24".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Reconstruct persisted predecessor roots after the target config has
         // removed its final root.
@@ -2129,6 +2186,23 @@ mod tests {
         expected.sort_by_cached_key(ToString::to_string);
         assert_eq!(retained, expected);
 
+        // Ready replacement coverage cannot resolve an unassigned child's lineage.
+        reconcile_configured(&mut txn, &[specific_root]).await?;
+        let broad_root_id: SitePrefixId =
+            sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
+                .bind(broad_root)
+                .fetch_one(&mut *txn)
+                .await?;
+        let mut retained =
+            find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?;
+        retained.sort_by_cached_key(ToString::to_string);
+        assert_eq!(
+            retained, expected,
+            "a Ready replacement must not release an unparented VpcPrefix's retiring root"
+        );
+        assert!(operator_managed_prefix_has_retained_children(&mut *txn, broad_root_id).await?);
+        reconcile_configured(&mut txn, &[]).await?;
+
         // Hard deletion ends route retention, while persisted deleting roots
         // continue to require startup lineage preflight.
         sqlx::query("DELETE FROM network_vpc_prefixes WHERE id = $1")
@@ -2146,6 +2220,87 @@ mod tests {
         Ok(())
     }
 
+    /// Direct prefixes transfer operator coverage only to a Ready root that
+    /// contains the entire prefix, even if a tenant root also covers it.
+    #[crate::sqlx_test]
+    async fn direct_prefix_retention_uses_ready_operator_coverage(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_tenant(&pool, "tenant-a").await?;
+        let broad: IpNetwork = "10.0.2.0/24".parse()?;
+        let replacement: IpNetwork = "10.0.2.128/25".parse()?;
+        let partial: IpNetwork = "10.0.2.128/27".parse()?;
+        let mut txn = pool.txn_begin().await?;
+        reconcile_configured(&mut txn, &[broad, replacement, partial]).await?;
+        let tenant_root =
+            create_tenant_managed(tenant_managed("10.0.2.0/24", "tenant-a"), 8, &mut txn)
+                .await?
+                .site_prefix;
+        sqlx::query("UPDATE site_prefixes SET lifecycle_state = $1 WHERE id = $2")
+            .bind(SitePrefixLifecycleState::Ready)
+            .bind(tenant_root.id)
+            .execute(&mut *txn)
+            .await?;
+        let vpc_id = carbide_uuid::vpc::VpcId::new();
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(vpc_id)
+        .bind("direct-prefix-retention")
+        .bind("tenant-a")
+        .bind(ConfigVersion::initial())
+        .execute(&mut *txn)
+        .await?;
+        let segment_id = carbide_uuid::network::NetworkSegmentId::new();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, vpc_id, version, network_segment_type, can_stretch)
+             VALUES ($1, $2, $3, $4, $5, false)",
+        )
+        .bind(segment_id)
+        .bind("direct-prefix-retention")
+        .bind(vpc_id)
+        .bind(ConfigVersion::initial())
+        .bind(model::network_segment::NetworkSegmentType::Tenant)
+        .execute(&mut *txn).await?;
+        sqlx::query("INSERT INTO network_prefixes (segment_id, prefix) VALUES ($1, $2)")
+            .bind(segment_id)
+            .bind("10.0.2.128/26".parse::<IpNetwork>()?)
+            .execute(&mut *txn)
+            .await?;
+
+        for (scenario, configured, expected) in [
+            (
+                "ready roots retain coverage",
+                vec![broad, replacement],
+                vec![broad, replacement],
+            ),
+            (
+                "ready replacement releases retired root",
+                vec![replacement],
+                vec![replacement],
+            ),
+            (
+                "partial coverage cannot release retired roots",
+                vec![partial],
+                vec![broad, replacement],
+            ),
+            (
+                "ready tenant coverage cannot replace operator coverage",
+                vec![],
+                vec![broad, replacement],
+            ),
+        ] {
+            reconcile_configured(&mut txn, &configured).await?;
+            assert_eq!(
+                find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?,
+                expected,
+                "{scenario}",
+            );
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
     /// Retains operator coverage through child soft deletion, while exact tenant
     /// lineage keeps a containing operator root from claiming unrelated children.
     #[crate::sqlx_test]
@@ -2157,8 +2312,9 @@ mod tests {
 
         let ready_root: IpNetwork = "10.0.0.0/8".parse()?;
         let retiring_root: IpNetwork = "172.16.0.0/12".parse()?;
+        let replacement_root: IpNetwork = "172.16.0.0/16".parse()?;
         let operator_root_covering_tenant_child: IpNetwork = "192.168.0.0/15".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(
             &mut txn,
             &[
@@ -2226,6 +2382,31 @@ mod tests {
             .await?;
         }
 
+        // A generated prefix follows its tenant-owned VpcPrefix rather than
+        // retaining a geometrically containing operator root as a direct prefix.
+        let tenant_segment_id = carbide_uuid::network::NetworkSegmentId::new();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, vpc_id, version, network_segment_type, can_stretch)
+             VALUES ($1, $2, $3, $4, $5, false)",
+        )
+        .bind(tenant_segment_id)
+        .bind("tenant-parented-prefix")
+        .bind(vpc_id)
+        .bind(ConfigVersion::initial())
+        .bind(model::network_segment::NetworkSegmentType::Tenant)
+        .execute(&mut *txn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO network_prefixes (segment_id, prefix, vpc_prefix_id, vpc_prefix)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(tenant_segment_id)
+        .bind("192.168.1.0/29".parse::<IpNetwork>()?)
+        .bind(tenant_child_id)
+        .bind("192.168.1.0/24".parse::<IpNetwork>()?)
+        .execute(&mut *txn)
+        .await?;
+
         // Only exact operator ownership should contribute roots at this point.
         let mut retained =
             find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?;
@@ -2235,6 +2416,41 @@ mod tests {
         assert_eq!(
             retained, expected,
             "exact tenant-managed lineage must not geometrically retain a covering operator root"
+        );
+        for (id, retained) in [
+            (root_id(ready_root), true),
+            (root_id(retiring_root), true),
+            (root_id(operator_root_covering_tenant_child), false),
+            (tenant_root.id, false),
+            (SitePrefixId::new(), false),
+        ] {
+            assert_eq!(
+                operator_managed_prefix_has_retained_children(&mut *txn, id).await?,
+                retained,
+                "retention must be scoped to operator root {id}"
+            );
+        }
+
+        // A new Ready root covers the child but cannot replace its exact parent.
+        reconcile_configured(
+            &mut txn,
+            &[
+                ready_root,
+                replacement_root,
+                operator_root_covering_tenant_child,
+            ],
+        )
+        .await?;
+        let mut retained =
+            find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?;
+        retained.sort_by_cached_key(ToString::to_string);
+        assert_eq!(
+            retained, expected,
+            "a Ready replacement must not release an exact VpcPrefix's retiring parent"
+        );
+        assert!(
+            operator_managed_prefix_has_retained_children(&mut *txn, root_id(retiring_root))
+                .await?
         );
 
         // Soft deletion leaves the row available to generated segments that are draining.
@@ -2258,6 +2474,10 @@ mod tests {
         assert_eq!(
             find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?,
             vec![ready_root]
+        );
+        assert!(
+            !operator_managed_prefix_has_retained_children(&mut *txn, root_id(retiring_root))
+                .await?
         );
 
         txn.commit().await?;

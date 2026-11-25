@@ -13,6 +13,7 @@ use model::tenant::{TenantNicFirmwareConfig, TenantOrganizationId};
 use sqlx::PgConnection;
 use sqlx::types::Json;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[derive(sqlx::FromRow)]
@@ -41,7 +42,7 @@ struct CaptureRow {
 /// before [`persist`]. Results are ordered by instance ID; repeated IDs produce
 /// one result, and a missing requested instance returns `NotFoundError`.
 pub async fn capture(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     instance_ids: &[InstanceId],
 ) -> DatabaseResult<Vec<(InstanceId, InstanceNicFirmwareSnapshot)>> {
     if instance_ids.is_empty() {
@@ -93,7 +94,7 @@ pub async fn capture(
     "#;
     let rows: Vec<CaptureRow> = sqlx::query_as(query)
         .bind(instance_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     let captured_ids: HashSet<_> = rows.iter().map(|row| row.id).collect();
@@ -164,6 +165,8 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
     use crate::test_support::postgres::wait_for_blocked_query;
 
     /// Creates a minimal persisted allocation so tests exercise the production
@@ -230,7 +233,7 @@ mod tests {
     /// legacy NULL into a claim that allocation captured absence.
     #[crate::sqlx_test]
     async fn captured_absence_is_distinct_from_legacy_and_missing_tenants(pool: PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let missing_org: TenantOrganizationId = "missing-tenant".parse().unwrap();
         let tenant = crate::tenant::create_and_persist(
             "registered-tenant".into(),
@@ -295,7 +298,7 @@ mod tests {
     /// and prevents a second capture from replacing that history.
     #[crate::sqlx_test]
     async fn captured_profiles_survive_selection_edits_and_catalog_deletion(pool: PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let tenant = crate::tenant::create_and_persist(
             "firmware-tenant".into(),
             Metadata::default(),
@@ -381,7 +384,7 @@ mod tests {
         persist(&mut txn, instance_id, &snapshot).await.unwrap();
         txn.commit().await.unwrap();
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let mut replacement = allocation.config.clone();
         replacement.entries[0].firmware.version = "28.42.1000".into();
         replacement.entries[0].image.sha256 = "cd".repeat(32);
@@ -463,7 +466,7 @@ mod tests {
             (6, "registered selected tenant", true),
         ] {
             let organization_id: TenantOrganizationId = format!("tenant-{index}").parse().unwrap();
-            let mut setup = pool.begin().await.unwrap();
+            let mut setup = pool.txn_begin().await.unwrap();
             let profile = create_profile(&mut setup, &format!("profile-{index}")).await;
             let previous_tenant = if registered {
                 let tenant = crate::tenant::create_and_persist(
@@ -491,13 +494,13 @@ mod tests {
                 create_instance(&mut setup, index, &organization_id).await;
             setup.commit().await.unwrap();
 
-            let mut allocation = pool.begin().await.unwrap();
+            let mut allocation = pool.txn_begin().await.unwrap();
             sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
                 .bind(machine_id)
                 .execute(&mut *allocation)
                 .await
                 .unwrap();
-            let mut writer = pool.begin().await.unwrap();
+            let mut writer = pool.txn_begin().await.unwrap();
             let tenant_version = match &previous_tenant {
                 Some(tenant) => tenant.version,
                 None => {
@@ -554,7 +557,7 @@ mod tests {
             allocation.commit().await.unwrap();
             writer.commit().await.unwrap();
 
-            let mut read = pool.begin().await.unwrap();
+            let mut read = pool.txn_begin().await.unwrap();
             sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
                 .bind(machine_id)
                 .execute(&mut *read)
@@ -580,7 +583,7 @@ mod tests {
     /// capture waits for the profile relation, protecting the one-statement boundary.
     #[crate::sqlx_test]
     async fn capture_keeps_tenant_selection_and_profile_contents_in_one_snapshot(pool: PgPool) {
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         let tenant = crate::tenant::create_and_persist(
             "coherent-tenant".into(),
             Metadata::default(),
@@ -603,13 +606,13 @@ mod tests {
             create_instance(&mut setup, 8, &tenant.organization_id).await;
         setup.commit().await.unwrap();
 
-        let mut allocation = pool.begin().await.unwrap();
+        let mut allocation = pool.txn_begin().await.unwrap();
         sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
             .bind(machine_id)
             .execute(&mut *allocation)
             .await
             .unwrap();
-        let mut writer = pool.begin().await.unwrap();
+        let mut writer = pool.txn_begin().await.unwrap();
         sqlx::query("LOCK TABLE nic_firmware_profiles IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *writer)
             .await
@@ -634,7 +637,12 @@ mod tests {
         let change = async {
             // pg_stat_activity can truncate SQL text before the profile join.
             // Match the capture's prefix while still requiring this writer's lock.
-            wait_for_blocked_query(&pool, writer_pid, "SELECT i.id, i.tenant_org").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                writer_pid,
+                "SELECT i.id, i.tenant_org",
+            )
+            .await;
             // A split reader has already read the old tenant selection before
             // its profile query blocks. Replacing that selection and editing the
             // old profile together would give that reader a pair that never existed.
@@ -681,7 +689,7 @@ mod tests {
     /// instance cannot regain a snapshot through the capture writer.
     #[crate::sqlx_test]
     async fn release_clears_selection_context_and_prevents_recapture(pool: PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let organization_id = "released-tenant".parse().unwrap();
         let (instance_id, _) = create_instance(&mut txn, 7, &organization_id).await;
         let (_, snapshot) = capture(&mut txn, &[instance_id])

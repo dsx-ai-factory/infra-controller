@@ -21,7 +21,7 @@
 		<tr>
 			<td>
 				<a href="/admin/vpc/{{ vpc.id }}">{% if vpc.metadata.name.is_empty() %}{{ vpc.id }}{% else %}{{ vpc.metadata.name }}{% endif %}</a>
-				{% if !vpc.metadata.name.is_empty() %}<span class="cell-sub">{{ vpc.id }}</span>{% endif %}
+				{% if !vpc.metadata.name.is_empty() %}<code class="cell-chip cell-chip-id">{{ vpc.id }}</code>{% endif %}
 			</td>
 			<td>
 				<a href="/admin/tenant/{{ vpc.tenant_organization_id }}">{{ vpc.tenant_organization_id }}</a>

@@ -3,7 +3,7 @@
 
 use bmc_vendor::BMCVendor;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
-use db::test_support::postgres::wait_for_blocked_query;
+use db::TransactionVending as _;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::ExpectedMachineData;
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -23,6 +23,7 @@ use model::test_support::power_shelf_config;
 
 use super::super::{FirmwareRequestSource, host_expectations, machine};
 use super::*;
+use crate::tests::wait_for_blocked_query;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -170,7 +171,7 @@ async fn seed_firmware_context(
     let switch_id = SwitchId::from(uuid::Uuid::from_u128(201));
     let endpointless_switch_id = SwitchId::from(uuid::Uuid::from_u128(203));
     let shelf_id = PowerShelfId::from(uuid::Uuid::from_u128(201));
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = db::rack::create(
         &mut txn,
         &rack_id,
@@ -830,7 +831,7 @@ async fn context_snapshot_is_consistent_and_releases_its_healthy_session(
     let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&reader)
         .await?;
-    let mut writer = pool.begin().await?;
+    let mut writer = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE explored_endpoints IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *writer)
         .await?;

@@ -30,6 +30,7 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     CredentialKey, CredentialReader, CredentialWriter, Credentials,
 };
+use db::TransactionVending as _;
 use db::work_lock_manager::{self, AcquireLockError, KeepaliveConfig, WorkLockManagerHandle};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -140,7 +141,7 @@ async fn start_test_work_lock_manager(pool: &sqlx::PgPool) -> (WorkLockManagerHa
         &mut tasks,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("start work lock manager");
@@ -285,7 +286,7 @@ async fn set_after_create_absence_check_remains_current(pool: sqlx::PgPool) {
 
     // Run `insert_if_missing`'s steps separately so the setter can run
     // after the absence check but before the insert.
-    let mut create_txn = pool.begin().await.expect("begin create transaction");
+    let mut create_txn = pool.txn_begin().await.expect("begin create transaction");
     db::secrets::lock_path(&mut create_txn, &path)
         .await
         .expect("lock credential path for create");
@@ -381,6 +382,49 @@ async fn delete_removes_all_journal_entries(pool: sqlx::PgPool) {
     assert!(mgr.get_history(&key).await.expect("history").is_empty());
 }
 
+/// Verifies a real UFM deletion clears its journal without preventing a later token from becoming
+/// the current credential.
+#[crate::sqlx_test]
+async fn ufm_credential_can_be_set_after_delete(pool: sqlx::PgPool) {
+    // Build a Postgres manager and seed the UFM key with its original token.
+    let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+    let mgr = manager(
+        &pool,
+        catch_all_routing("k1"),
+        kms_with_keys(&[("k1", 1)]),
+        &test_meter,
+    );
+    let key = ufm_key("fabric");
+    mgr.set_credentials(&key, &cred("", "token-before-delete"))
+        .await
+        .expect("set original UFM token");
+
+    // Delete every journal row, then recreate the same key with a different token.
+    mgr.delete_credentials(&key)
+        .await
+        .expect("delete UFM credential");
+    // `delete-ufm` must stay successful when nothing is stored.
+    mgr.delete_credentials(&key)
+        .await
+        .expect("delete missing UFM credential");
+    mgr.set_credentials(&key, &cred("", "token-after-delete"))
+        .await
+        .expect("set replacement UFM token");
+
+    // The replacement must be readable and must be the only remaining journal entry.
+    assert_eq!(
+        mgr.get_credentials(&key).await.expect("get replacement"),
+        Some(cred("", "token-after-delete"))
+    );
+    assert_eq!(
+        mgr.get_history(&key)
+            .await
+            .expect("replacement history")
+            .len(),
+        1
+    );
+}
+
 // Verifies that the journal order is true write order even when two
 // entries record the identical created_at (Postgres fixes now() per
 // transaction): the second insert wins, by seq, not by chance.
@@ -390,7 +434,7 @@ async fn second_write_wins_on_created_at_ties(pool: sqlx::PgPool) {
     let routing = catch_all_routing("k1");
     let path = "tie/test/path";
 
-    let mut txn = pool.begin().await.expect("begin");
+    let mut txn = pool.txn_begin().await.expect("begin");
     let first = super::encrypt_envelope(&routing, kms.as_ref(), path, b"\"first\"")
         .await
         .expect("encrypt first");
@@ -463,8 +507,8 @@ async fn delete_by_id_restores_previous_credential(pool: sqlx::PgPool) {
 }
 
 // Verifies the empty-password tombstone behavior the Vault reader
-// established: several delete flows "delete" by writing an empty password,
-// and reads must answer None for it.
+// established: the site-wide BMC root delete flow "deletes" by writing an
+// empty password, and reads must answer None for it.
 #[crate::sqlx_test]
 async fn empty_password_reads_as_none(pool: sqlx::PgPool) {
     let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
@@ -546,7 +590,7 @@ async fn bulk_secret_write_blocks_create_before_exists_check(pool: sqlx::PgPool)
         kms_with_keys(&[("k1", 1)]),
         &test_meter,
     );
-    let mut bulk_txn = pool.begin().await.expect("begin bulk transaction");
+    let mut bulk_txn = pool.txn_begin().await.expect("begin bulk transaction");
     db::secrets::lock_for_bulk_write(&mut bulk_txn)
         .await
         .expect("lock secrets for bulk write");
@@ -639,7 +683,10 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
     // Model a create from an older replica: it takes the path advisory lock,
     // checks for an existing entry, and does not request its table-write lock
     // until the later INSERT.
-    let mut legacy_txn = pool.begin().await.expect("begin legacy create transaction");
+    let mut legacy_txn = pool
+        .txn_begin()
+        .await
+        .expect("begin legacy create transaction");
     db::secrets::lock_path_advisory(&mut legacy_txn, &path)
         .await
         .expect("take legacy path advisory lock");
@@ -680,7 +727,7 @@ async fn create_waiting_on_path_lock_does_not_block_bulk_write(pool: sqlx::PgPoo
     .await
     .expect("create did not wait on the legacy path lock");
 
-    let mut bulk_txn = pool.begin().await.expect("begin bulk transaction");
+    let mut bulk_txn = pool.txn_begin().await.expect("begin bulk transaction");
     sqlx::query("SET LOCAL lock_timeout = '250ms'")
         .execute(&mut *bulk_txn)
         .await
@@ -917,7 +964,7 @@ async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx
         &mut work_lock_tasks,
         pool.clone(),
         keepalive_config,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("start owner work lock manager");
@@ -925,7 +972,7 @@ async fn stale_vault_import_owner_cannot_write_or_mark_after_takeover(pool: sqlx
         &mut work_lock_tasks,
         pool.clone(),
         keepalive_config,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("start replacement work lock manager");

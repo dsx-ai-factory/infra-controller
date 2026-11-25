@@ -22,10 +22,10 @@ use futures::future::try_join_all;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::network_segment::NetworkSegmentControllerState;
-use sqlx::Acquire;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Barrier;
 
+use crate::TransactionVending as _;
 use crate::test_support::network_segment::admin_segment;
 
 // Keep occupancy fixed as the prefix grows. Each allocation is rolled back
@@ -50,7 +50,7 @@ async fn benchmark_host_allocation(pool: sqlx::PgPool) -> Result<(), Box<dyn std
     let mac: MacAddress = "02:ff:00:00:00:01".parse()?;
 
     for (cidr, gateway, occupied, first_occupied) in cases {
-        let mut fixture = pool.begin().await?;
+        let mut fixture = pool.txn_begin().await?;
         let mut config = admin_segment("ALLOCATION_BENCHMARK", cidr, gateway, 2);
         if config.prefixes[0].prefix.is_ipv6() {
             config.prefixes[0].gateway = None;
@@ -136,7 +136,7 @@ LIMIT $6;
                 }
             }
 
-            let mut attempt = fixture.begin().await?;
+            let mut attempt = crate::Transaction::begin_inner(&mut fixture).await?;
             let started = Instant::now();
             let interface = super::create(
                 &mut attempt,
@@ -179,7 +179,7 @@ async fn benchmark_concurrent_host_allocation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     const ALLOCATIONS: usize = 48;
-    let mut fixture = pool.begin().await?;
+    let mut fixture = pool.txn_begin().await?;
     let segment = crate::network_segment::persist(
         admin_segment(
             "CONCURRENT_ALLOCATION_BENCHMARK",
@@ -221,7 +221,7 @@ async fn benchmark_concurrent_host_allocation(
         .await?;
     let mut transactions = Vec::with_capacity(ALLOCATIONS);
     for _ in 0..ALLOCATIONS {
-        transactions.push(allocation_pool.begin().await?);
+        transactions.push(allocation_pool.txn_begin().await?);
     }
     let barrier = Barrier::new(ALLOCATIONS + 1);
     let allocations = try_join_all(
@@ -262,7 +262,7 @@ async fn benchmark_concurrent_host_allocation(
     assert_eq!(results.len(), ALLOCATIONS);
 
     let mut conn = pool.acquire().await?;
-    let persisted = super::find_all(&mut conn).await?;
+    let persisted = super::find_all(&mut *conn).await?;
     assert_eq!(persisted.len(), ALLOCATIONS);
     assert_eq!(
         persisted
@@ -283,7 +283,7 @@ async fn benchmark_concurrent_host_allocation(
         .collect::<HashSet<_>>();
     assert_eq!(addresses.len(), ALLOCATIONS);
     assert_eq!(
-        crate::machine_interface_address::find_reserved(&mut conn, None, None).await?,
+        crate::machine_interface_address::find_reserved(&mut *conn, None, None).await?,
         reservations
     );
 

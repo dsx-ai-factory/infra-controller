@@ -22,6 +22,7 @@ pub mod nvlink;
 pub mod spx;
 pub mod tenant_config;
 
+use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,9 @@ pub struct InstanceConfig {
 
     /// Configures the security group
     pub network_security_group_id: Option<NetworkSecurityGroupId>,
+
+    /// DHCP option set that overrides the VPC's and NICo's DHCP values
+    pub dhcp_option_set_id: Option<DhcpOptionSetId>,
 
     /// Configures instance extension services
     #[serde(default)]

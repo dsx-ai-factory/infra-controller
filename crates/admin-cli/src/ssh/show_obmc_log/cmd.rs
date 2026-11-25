@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use forge_ssh::ssh::read_obmc_console_log;
+use carbide_ssh::ssh::read_obmc_console_log;
 
 use super::super::common::SshArgs;
 use crate::errors::{CarbideCliError, CarbideCliResult};

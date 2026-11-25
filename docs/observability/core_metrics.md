@@ -20,7 +20,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_api_db_span_query_time_milliseconds</td><td>histogram</td><td>Total time the request spent inside a span on database transactions</td></tr>
 <tr><td>carbide_api_grpc_server_duration_milliseconds</td><td>histogram</td><td>Processing time for a request on the carbide API server</td></tr>
 <tr><td>carbide_api_host_admin_address_reconcile_failures_total</td><td>counter</td><td>Number of host admin address reconciliations that failed after a discovery committed</td></tr>
-<tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is running</td></tr>
+<tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is ready to serve requests; mirrors /ready</td></tr>
 <tr><td>carbide_api_secrets_request_duration_milliseconds</td><td>histogram</td><td>Duration of Postgres secrets operations, in milliseconds.</td></tr>
 <tr><td>carbide_api_secrets_requests_failed_total</td><td>counter</td><td>Number of failed Postgres secrets operations.</td></tr>
 <tr><td>carbide_api_secrets_requests_succeeded_total</td><td>counter</td><td>Number of successful Postgres secrets operations.</td></tr>
@@ -283,6 +283,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_host_reprovision_retries_total</td><td>counter</td><td>Number of times a failed host firmware upgrade was retried during host reprovisioning</td></tr>
 <tr><td>carbide_hosts_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_hosts_by_sku_count</td><td>gauge</td><td>Number of hosts by SKU and device type (&#39;unknown&#39; for hosts without SKU)</td></tr>
+<tr><td>carbide_hosts_dpu_service_sync_oldest_pending_age_seconds</td><td>gauge</td><td>Age in seconds of the oldest outstanding DPUService rollout hold, measured from when the hold was first requested, by whether the host is past the SLA of its current state (above_sla) and whether an instance is allocated on it (in_use); 0 when no hold is outstanding</td></tr>
+<tr><td>carbide_hosts_dpu_service_sync_pending_count</td><td>gauge</td><td>Number of hosts whose DPUService rollout hold is still outstanding, by whether the host is past the SLA of its current state (above_sla) and whether an instance is allocated on it (in_use)</td></tr>
 <tr><td>carbide_hosts_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_hosts_health_status_count</td><td>gauge</td><td>Number of managed hosts in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_hosts_in_use_count</td><td>gauge</td><td>Number of hosts actively used by tenants as instances in the NICo deployment</td></tr>
@@ -313,6 +315,9 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_ib_partitions_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_ib_partitions</td></tr>
 <tr><td>carbide_ib_partitions_per_state</td><td>gauge</td><td>Number of carbide_ib_partitions in the system with a given state</td></tr>
 <tr><td>carbide_ib_partitions_per_state_above_sla</td><td>gauge</td><td>Number of carbide_ib_partitions currently in a state longer than the SLA allows</td></tr>
+<tr><td>carbide_ib_partitions_state_entered_total</td><td>counter</td><td>Number of times objects of type carbide_ib_partitions have entered a certain state</td></tr>
+<tr><td>carbide_ib_partitions_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_ib_partitions have exited a certain state</td></tr>
+<tr><td>carbide_ib_partitions_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_ib_partitions have spent in a certain state</td></tr>
 <tr><td>carbide_ib_partitions_total</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_ib_partitions whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_ipmi_commands_total</td><td>counter</td><td>Number of IPMI command executions, by command and outcome.</td></tr>
@@ -404,6 +409,12 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_network_segments_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_network_segments have spent in a certain state</td></tr>
 <tr><td>carbide_network_segments_total</td><td>gauge</td><td>Number of carbide_network_segments in the system</td></tr>
 <tr><td>carbide_network_segments_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_network_segments whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
+<tr><td>carbide_nvlink_domains_count</td><td>gauge</td><td>Number of carbide_nvlink_domains in the system</td></tr>
+<tr><td>carbide_nvlink_domains_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_nvlink_domains in the system</td></tr>
+<tr><td>carbide_nvlink_domains_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_nvlink_domains</td></tr>
+<tr><td>carbide_nvlink_domains_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_nvlink_domains</td></tr>
+<tr><td>carbide_nvlink_domains_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_nvlink_domains</td></tr>
+<tr><td>carbide_nvlink_domains_total</td><td>gauge</td><td>Number of carbide_nvlink_domains in the system</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_groups_total</td><td>counter</td><td>Number of machine groups (chassis or rack) the partition monitor finished, by outcome</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>Time consumed for one monitor iteration</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_iteration_overruns_total</td><td>counter</td><td>Number of partition monitor iterations that ran longer than monitor_run_interval</td></tr>

@@ -74,7 +74,7 @@ pub(crate) struct DpaCommandSendFailed {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{
         ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
     };
@@ -120,14 +120,14 @@ mod tests {
     fn dpa_command_results_pair_their_log_with_latency() {
         value_scenarios!(
             run = |case| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| match case {
-                    CommandCase::Sent => emit(DpaCommandSent {
+                    CommandCase::Sent => metrics.instrumentation().emit(DpaCommandSent {
                         latency: Duration::from_micros(12_500),
                         revision: "revision-42".to_string(),
                         vni: 901,
                     }),
-                    CommandCase::Failed => emit(DpaCommandSendFailed {
+                    CommandCase::Failed => metrics.instrumentation().emit(DpaCommandSendFailed {
                         latency: Duration::from_millis(375),
                         error: "UnregisteredType(\"SetVni\")".to_string(),
                         payload: "SetVni { metadata: Some(...) }".to_string(),
@@ -214,8 +214,8 @@ mod tests {
     /// both command results.
     #[test]
     fn dpa_command_histogram_exposition_stays_stable() {
-        let metrics = MetricsCapture::start();
-        emit(DpaCommandSent {
+        let metrics = MetricsCapture::owned();
+        metrics.instrumentation().emit(DpaCommandSent {
             latency: Duration::from_millis(125),
             revision: "revision-42".to_string(),
             vni: 901,

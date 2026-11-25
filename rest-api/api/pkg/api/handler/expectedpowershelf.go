@@ -234,7 +234,7 @@ func NewGetAllExpectedPowerShelfHandler(dbSession *cdb.Session, cfg *config.Conf
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "ID of Site (optional, filters results to specific site)"
 // @Param pageNumber query integer false "Page number of results returned"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} []model.APIExpectedPowerShelf
@@ -398,7 +398,7 @@ func NewGetExpectedPowerShelfHandler(dbSession *cdb.Session, cfg *config.Config)
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Expected Power Shelf"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIExpectedPowerShelf
 // @Router /v2/org/{org}/nico/expected-power-shelf/{id} [get]
 func (gepsh GetExpectedPowerShelfHandler) Handle(c echo.Context) error {
@@ -436,7 +436,7 @@ func (gepsh GetExpectedPowerShelfHandler) Handle(c echo.Context) error {
 	expectedPowerShelf, err := epsDAO.Get(ctx, nil, expectedPowerShelfID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Power Shelf from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Power Shelf due to DB error", nil)
@@ -556,7 +556,7 @@ func (uepsh UpdateExpectedPowerShelfHandler) Handle(c echo.Context) error {
 	expectedPowerShelf, err := epsDAO.Get(ctx, nil, expectedPowerShelfID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Power Shelf from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Power Shelf due to DB error", nil)
@@ -719,7 +719,7 @@ func (depsh DeleteExpectedPowerShelfHandler) Handle(c echo.Context) error {
 	expectedPowerShelf, err := epsDAO.Get(ctx, nil, expectedPowerShelfID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Power Shelf from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Power Shelf due to DB error", nil)
