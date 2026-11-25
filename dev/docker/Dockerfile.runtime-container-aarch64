@@ -79,7 +79,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		libprotoc32 \
 		libssh-4 \
 		libudev1 \
-		nginx=1.22.1-9+deb12u11 \
+		nginx \
 		openipmi \
 		openssh-client \
 		openssh-server \
@@ -90,13 +90,13 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 
 # Replace vulnerable Debian-packaged freeipmi 1.6.10 (CVE-2026-85506,
 # CVE-2026-85509, CVE-2026-85508, CVE-2026-85504, CVE-2026-85507) with
-# source-built 1.6.20. Copy all source-built libraries, purge Debian
-# packages so scanners no longer report the old version, then re-link.
+# source-built 1.6.20. Copy all source-built libraries and update dpkg
+# metadata so scanners report the fixed version.
 COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/ /tmp/freeipmi-libs/
-RUN dpkg --purge --force-depends libfreeipmi17 freeipmi-common libipmimonitoring6 || true && \
-	find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
+RUN find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
 		-exec cp {} /usr/lib/aarch64-linux-gnu/ \; && \
 	rm -rf /tmp/freeipmi-libs && \
+	sed -i '/^Package: \(libfreeipmi17\|freeipmi-common\|libipmimonitoring6\)$/,/^$/{s/^Version: .*/Version: 1.6.20-0local1/;s/^Source: freeipmi.*/Source: freeipmi (1.6.20-0local1)/;}' /var/lib/dpkg/status && \
 	ldconfig
 
 RUN test "$(dpkg-query -W -f='${Version}' kea-dhcp6-server)" = "${KEA_VERSION}" && \

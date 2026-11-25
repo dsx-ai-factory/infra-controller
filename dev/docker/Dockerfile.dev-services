@@ -160,14 +160,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # Replace vulnerable Debian-packaged freeipmi 1.6.10 with source-built 1.6.20.
-# Copy all source-built libraries, purge Debian packages so scanners no
-# longer report the old version, then re-link with ldconfig.
+# Copy all source-built libraries and update dpkg metadata so scanners
+# report the fixed version without breaking package dependencies.
 COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/ /tmp/freeipmi-libs/
 RUN triplet=$(uname -m | sed 's/x86_64/x86_64-linux-gnu/' | sed 's/aarch64/aarch64-linux-gnu/') && \
-	dpkg --purge --force-depends libfreeipmi17 freeipmi-common libipmimonitoring6 || true && \
 	find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
 		-exec cp {} "/usr/lib/${triplet}/" \; && \
 	rm -rf /tmp/freeipmi-libs && \
+	sed -i '/^Package: \(libfreeipmi17\|freeipmi-common\|libipmimonitoring6\)$/,/^$/{s/^Version: .*/Version: 1.6.20-0local1/;s/^Source: freeipmi.*/Source: freeipmi (1.6.20-0local1)/;}' /var/lib/dpkg/status && \
 	ldconfig
 
 RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea
@@ -245,10 +245,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Replace vulnerable Debian-packaged freeipmi 1.6.10 with source-built 1.6.20.
 COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/ /tmp/freeipmi-libs/
 RUN triplet=$(uname -m | sed 's/x86_64/x86_64-linux-gnu/' | sed 's/aarch64/aarch64-linux-gnu/') && \
-	dpkg --purge --force-depends libfreeipmi17 freeipmi-common libipmimonitoring6 || true && \
 	find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
 		-exec cp {} "/usr/lib/${triplet}/" \; && \
 	rm -rf /tmp/freeipmi-libs && \
+	sed -i '/^Package: \(libfreeipmi17\|freeipmi-common\|libipmimonitoring6\)$/,/^$/{s/^Version: .*/Version: 1.6.20-0local1/;s/^Source: freeipmi.*/Source: freeipmi (1.6.20-0local1)/;}' /var/lib/dpkg/status && \
 	ldconfig
 
 RUN mkdir -p /opt/machine-a-tron/bin /tmp/machine-a-tron-data
@@ -275,10 +275,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ipmitool libude
 # Replace vulnerable Debian-packaged freeipmi 1.6.10 with source-built 1.6.20.
 COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/ /tmp/freeipmi-libs/
 RUN triplet=$(uname -m | sed 's/x86_64/x86_64-linux-gnu/' | sed 's/aarch64/aarch64-linux-gnu/') && \
-	dpkg --purge --force-depends libfreeipmi17 freeipmi-common libipmimonitoring6 || true && \
 	find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
 		-exec cp {} "/usr/lib/${triplet}/" \; && \
 	rm -rf /tmp/freeipmi-libs && \
+	sed -i '/^Package: \(libfreeipmi17\|freeipmi-common\|libipmimonitoring6\)$/,/^$/{s/^Version: .*/Version: 1.6.20-0local1/;s/^Source: freeipmi.*/Source: freeipmi (1.6.20-0local1)/;}' /var/lib/dpkg/status && \
 	ldconfig
 
 RUN mkdir -p /opt/carbide
