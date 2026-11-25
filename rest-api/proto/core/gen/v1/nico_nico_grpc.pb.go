@@ -1193,7 +1193,9 @@ type ForgeClient interface {
 	CreateNvLinkDomain(ctx context.Context, in *CreateNvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error)
 	// Declarations without controller state are removed immediately. In Created or Discovering,
 	// the controller removes the domain and releases its positions on reconciliation.
-	// From Maintenance onward, deletion enters Deleting and positions stay reserved pending teardown.
+	// In other lifecycle states, deletion enters or remains in Deleting. Hardware teardown is
+	// unimplemented, so these domains remain in Deleting with positions reserved.
+	// Teardown is tracked in https://github.com/dsx-ai-factory/infra-controller/issues/7819.
 	// Until removal, the declaration blocks changes to its group's racks, deletion of its group,
 	// and site-wide ExpectedRackGroup replacement or erase.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
@@ -8177,7 +8179,9 @@ type ForgeServer interface {
 	CreateNvLinkDomain(context.Context, *CreateNvLinkDomainRequest) (*NvLinkDomain, error)
 	// Declarations without controller state are removed immediately. In Created or Discovering,
 	// the controller removes the domain and releases its positions on reconciliation.
-	// From Maintenance onward, deletion enters Deleting and positions stay reserved pending teardown.
+	// In other lifecycle states, deletion enters or remains in Deleting. Hardware teardown is
+	// unimplemented, so these domains remain in Deleting with positions reserved.
+	// Teardown is tracked in https://github.com/dsx-ai-factory/infra-controller/issues/7819.
 	// Until removal, the declaration blocks changes to its group's racks, deletion of its group,
 	// and site-wide ExpectedRackGroup replacement or erase.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.

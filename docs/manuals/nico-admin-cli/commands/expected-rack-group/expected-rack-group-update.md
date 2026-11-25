@@ -12,8 +12,8 @@ existing expected rack group
 ```text
 nico-admin-cli expected-rack-group update <--protocol>
 <--topology> [--rack] [--meta-name]
-[--meta-description] [--label] [--extended]
-[--sort-by] [-h|--help] <RACK_GROUP_ID>
+[--meta-description] [--label] [-h|--help]
+<RACK_GROUP_ID>
 ```
 
 ## DESCRIPTION
@@ -55,24 +55,6 @@ Metadata description (at most 1024 bytes). Defaults to empty
 
 Metadata label as KEY:VALUE; repeat for each label. Omission supplies no
 labels
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
-`--sort-by <SORT_BY> [default: primary-id]`
-
-Sort output by specified field
-
-*Possible values:*
-
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
 
 `-h, --help`
 

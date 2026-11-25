@@ -638,7 +638,7 @@ Restores factory defaults on a switch tray. Only Provider Admins can call this e
 - `nvos` clears the NVOS configuration and reboots the switch.
 - `sdn` restores the SDN configuration to factory defaults.
 
-Only an ingested switch can be reset. The request returns `409` if a conflicting task is Pending or Running on the switch's rack. The reset task fails without resetting the switch if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. This check cannot be overridden.
+Only an ingested switch can be reset. The request returns `409` if a conflicting task is Pending or Running on the switch's rack. Flow checks rack readiness before submitting the reset. The reset task fails without resetting the switch if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. This check cannot be overridden. After submission, Flow polls the reset outcome without rechecking rack readiness.
 
 The reset runs in the background. A `202` response returns the reset task ID in `taskIds`; it means the task was created, not that the switch accepted or completed the reset. Use the Task APIs to see whether the task completed, failed, or was terminated. If the task fails before any reset is submitted, read the task message for the reason. When available, the task report provides additional details. A completed task means the Site reported the reset as finished, not that the switch is back in service. NICo does not restore the switch configuration or re-ingest the switch afterwards.
 

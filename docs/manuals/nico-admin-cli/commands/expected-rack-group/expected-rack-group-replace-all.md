@@ -11,8 +11,7 @@ rack groups from a JSON file
 
 ```text
 nico-admin-cli expected-rack-group replace-all
-<-f|--filename> [--extended] [--sort-by]
-[-h|--help]
+<-f|--filename> [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -30,33 +29,18 @@ preserves the referenced group or the declaration is pending deletion.
 JSON inventory file. Missing racks/metadata default to empty.
 
 The root object contains expected_rack_groups, an array of objects with
-rack_group_id, topology, racks, and metadata. The optional
+rack_group_id, protocol, topology, racks, and metadata. The optional
 expected_rack_groups_count must match the array length. An empty array
 clears all groups.
 
 Each rack has rack_id and members; each member requires type,
 manufacturer, id, and cartridge_index. cartridge_index must be an
-integer from 0 to 4294967295. Metadata contains name, description, and
-labels as an array of {key, value} objects. Export a compatible file
-with --format json expected-rack-group show.
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
-`--sort-by <SORT_BY> [default: primary-id]`
-
-Sort output by specified field
-
-*Possible values:*
-
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+integer from 0 to 4294967295. Each group requires a protocol string. Use
+an empty string to leave it unspecified. Metadata contains name,
+description, and labels as an array of {key, value} objects. To export
+the full list, run --format json expected-rack-group show without a
+group ID. For legacy members, fill missing or null cartridge_index
+values with valid indexes from your inventory before replacement.
 
 `-h, --help`
 

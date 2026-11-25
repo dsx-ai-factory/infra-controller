@@ -299,6 +299,10 @@ For more DPU-specific troubleshooting (Secure Boot configuration, BMC password r
 
 ## Managing the Expected Machines Table
 
+The operations below make incremental changes. See
+[Expected Inventory](expected-inventory.md) for the complete resource model,
+site-wide replacement, and removal and recovery workflows.
+
 ### Listing and Filtering
 
 ```bash
@@ -336,7 +340,10 @@ associations, omit `skuId` or set it to `null` in every item.
 To dump the current table as JSON:
 
 ```bash
-nicocli expected-machine list --all --output json
+nicocli expected-machine list --site-id <site-id> --all --output json
 ```
 
-Suitable for backup or import-into-another-site workflows.
+For a Site-specific inventory export, include `--site-id` with the Site UUID.
+To prepare a [recovery payload](expected-inventory.md#removal-and-recovery),
+convert the exported records to the create-request shape and supply the
+credentials from your protected source.

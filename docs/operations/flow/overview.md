@@ -25,3 +25,39 @@ When `orderBy` is omitted, results are ordered by name ascending with an
 immutable unique identifier as the tie-breaker. See
 [Rack-Level Administration](../../manuals/rack_level_admin.md#rest-api)
 for endpoint links.
+
+## Task completion and recovery
+
+Follow each returned task with
+[GET /task/{id}](api:GET/v2/org/:org/nico/task/:id). Pass the same `siteId` as a
+query parameter. A task-creation response confirms that Flow accepted the
+operation. Inspect `status`, `message`, and available reports, then verify the
+device state before retrying a failed or interrupted operation. If you
+[cancel the task](api:POST/v2/org/:org/nico/task/:id/cancel), pass `siteId` in
+the JSON body. Both endpoints return HTTP 404 if the task ID does not exist.
+
+Flow checks persisted pending and running tasks with saved execution IDs
+at startup and on a one-minute background interval. This interval is not a
+completion deadline: a sweep can take longer, and failed lookups are retried
+on later sweeps. When Temporal has closed an execution without Flow's normal
+final status update, Flow records its terminal outcome and releases the task's
+scheduling occupancy. Waiting work can then advance under the usual conflict
+rules.
+
+| Temporal execution result | REST task status after reconciliation |
+| :------------------------ | :------------------------------------ |
+| Completed | `Succeeded` |
+| Failed | `Failed` |
+| Canceled, terminated, or timed out | `Terminated` |
+| Saved run missing, with no live successor found | `Failed`; the message requests manual inspection |
+
+For a known closed execution, the finish time comes from Temporal. For a
+missing execution, it is the time Flow observed the absence, rather than a
+hardware completion time. A live successor keeps the task active. Lookup
+errors leave the task active for retry.
+
+Reconciliation preserves the last activity reports; it cannot reconstruct
+unreported device outcomes, roll back commands, or prove that hardware work
+has stopped. Cancellation and emergency preemption likewise require checking
+the actual device before resubmitting work. See
+[leakage interruption and recovery](../leak-detection-handling.md#interrupted-operations-and-recovery).

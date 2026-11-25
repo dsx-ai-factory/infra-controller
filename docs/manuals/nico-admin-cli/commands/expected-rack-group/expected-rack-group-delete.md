@@ -10,8 +10,8 @@ group
 ## SYNOPSIS
 
 ```text
-nico-admin-cli expected-rack-group delete [--extended]
-[--sort-by] [-h|--help] <RACK_GROUP_ID>
+nico-admin-cli expected-rack-group delete [-h|--help]
+<RACK_GROUP_ID>
 ```
 
 ## DESCRIPTION
@@ -22,24 +22,6 @@ Deletion fails while NVLink domain declarations reference the group. A
 pending domain deletion continues to block group deletion.
 
 ## OPTIONS
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
-`--sort-by <SORT_BY> [default: primary-id]`
-
-Sort output by specified field
-
-*Possible values:*
-
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
 
 `-h, --help`
 

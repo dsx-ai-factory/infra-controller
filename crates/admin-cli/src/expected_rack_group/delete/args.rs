@@ -19,6 +19,11 @@ use carbide_uuid::rack::RackGroupId;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
+// Inherited output flags are accepted but have no effect on writes.
+#[command(defer = |cmd| cmd.mut_args(|arg| match arg.get_id().as_str() {
+    "extended" | "sort_by" => arg.hide(true),
+    _ => arg,
+}))]
 #[command(after_long_help = "\
 EXAMPLES:
 
