@@ -103,6 +103,18 @@ impl BackendBios<'_> {
             Self::Drivers(_) => Ok(true),
         }
     }
+
+    /// See [`Bios::reset`].
+    pub async fn reset(&self) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => client
+                .reset_bios()
+                .await
+                .map(|()| DriverOutcome::complete())
+                .map_err(platform_error),
+            Self::Drivers(bios) => bios.reset().await,
+        }
+    }
 }
 
 #[cfg(test)]

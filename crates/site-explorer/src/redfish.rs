@@ -45,6 +45,7 @@ use model::site_explorer::{
 };
 use nv_redfish::account::ManagerAccountCreate;
 use nv_redfish::computer_system::ComputerSystem;
+use nv_redfish::core::EntityTypeRef as _;
 use nv_redfish::manager::Manager;
 use nv_redfish::schema::secure_boot::SecureBootUpdate;
 
@@ -661,13 +662,7 @@ impl RedfishClient {
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
     ) -> Result<ComputerSystem<RedfishBmc>, EndpointExplorationError> {
-        let (nv_pool, credentials) = self.nv_pool_and_credentials(BmcAccess::Established(bmc));
-        let root = nv_pool
-            .service_root(bmc_ip_address, credentials)
-            .await
-            .map_err(|err| EndpointExplorationError::Other {
-                details: format!("Cannot Redfish service root: {err}"),
-            })?;
+        let root = self.established_service_root(bmc_ip_address, bmc).await?;
         primary_system(&root)
             .await?
             .ok_or_else(|| EndpointExplorationError::Other {
@@ -675,35 +670,31 @@ impl RedfishClient {
             })
     }
 
-    /// The manager exploration records: the host system's, or the first for a
-    /// BMC that lists no systems, such as a power shelf.
+    /// The manager exploration records, for calls without an explored report
+    /// to select drivers from; see [`primary_manager`].
     async fn host_manager(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
     ) -> Result<Manager<RedfishBmc>, EndpointExplorationError> {
+        let root = self.established_service_root(bmc_ip_address, bmc).await?;
+        let system = primary_system(&root).await?;
+        primary_manager(&root, system.as_ref(), bmc_ip_address).await
+    }
+
+    /// An established BMC's service root over plain Redfish.
+    async fn established_service_root(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc: EstablishedBmc,
+    ) -> Result<Arc<ServiceRoot>, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(BmcAccess::Established(bmc));
-        let root = nv_pool
+        nv_pool
             .service_root(bmc_ip_address, credentials)
             .await
             .map_err(|err| EndpointExplorationError::Other {
                 details: format!("Cannot Redfish service root: {err}"),
-            })?;
-        let no_managers = || EndpointExplorationError::Other {
-            details: format!("BMC {bmc_ip_address} lists no managers"),
-        };
-        let mut managers = root
-            .managers()
-            .await
-            .map_err(nv_error("managers"))?
-            .ok_or_else(no_managers)?
-            .members()
-            .await
-            .map_err(nv_error("managers members"))?;
-        let system = primary_system(&root).await?;
-        let index = bmc_explorer::primary_manager_index(&managers, system.as_ref())
-            .ok_or_else(no_managers)?;
-        Ok(managers.swap_remove(index))
+            })
     }
 
     /// Turns secure boot off for the next boot. A platform without secure boot
@@ -897,38 +888,76 @@ impl RedfishClient {
         Ok(())
     }
 
+    /// Whether the BMC is a DGX Viking: AMI firmware whose host system is
+    /// `DGX` and whose manager is `BMC`. The drivers backend reads these over
+    /// plain Redfish, choosing the system and manager as exploration does.
     pub(super) async fn is_viking(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
     ) -> Result<bool, EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        let service_root = client.get_service_root().await.map_err(map_redfish_error)?;
-        let system = client.get_system().await.map_err(map_redfish_error)?;
-        let manager = client.get_manager().await.map_err(map_redfish_error)?;
-        Ok(
-            service_root.vendor().unwrap_or(RedfishVendor::Unknown) == RedfishVendor::AMI
-                && system.id == "DGX"
-                && manager.id == "BMC",
-        )
+        if self.driver_connector.is_none() {
+            let client = self
+                .create_established_redfish_client(bmc_ip_address, bmc, None)
+                .await
+                .map_err(map_redfish_client_creation_error)?;
+            return Ok(client
+                .get_service_root()
+                .await
+                .map_err(map_redfish_error)?
+                .vendor()
+                .unwrap_or(RedfishVendor::Unknown)
+                == RedfishVendor::AMI
+                && client.get_system().await.map_err(map_redfish_error)?.id == "DGX"
+                && client.get_manager().await.map_err(map_redfish_error)?.id == "BMC");
+        }
+        let root = self.established_service_root(bmc_ip_address, bmc).await?;
+        if !root
+            .vendor()
+            .is_some_and(|vendor| vendor.inner().eq_ignore_ascii_case("AMI"))
+        {
+            return Ok(false);
+        }
+        let Some(system) = primary_system(&root)
+            .await?
+            .filter(|system| system.raw().id == "DGX")
+        else {
+            return Ok(false);
+        };
+        let manager = primary_manager(&root, Some(&system), bmc_ip_address).await?;
+        Ok(manager.raw().id == "BMC")
     }
 
+    /// Clears a DGX Viking's host BIOS NVRAM through the drivers an
+    /// identifying `report` selects. Without one, as after a first failed
+    /// exploration, the drivers backend sends the NVIDIA UpdateService OEM
+    /// action over plain Redfish.
     pub(super) async fn clear_nvram(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let Some(connector) = &self.driver_connector else {
+            let client = self
+                .create_established_redfish_client(bmc_ip_address, bmc, None)
+                .await
+                .map_err(map_redfish_client_creation_error)?;
+            return client.clear_nvram().await.map_err(map_redfish_error);
+        };
+        let Some(report) = identifying(report) else {
+            let root = self.established_service_root(bmc_ip_address, bmc).await?;
+            return clear_host_bios_nvram(&root).await;
+        };
+        let bmc =
+            Self::connect_drivers(connector, bmc_ip_address, bmc.bmc_mac_address, report, None)
+                .await?;
+        bmc.bios()
+            .map_err(|error| map_platform_error(error.into()))?
+            .clear_nvram()
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.clear_nvram().await.map_err(map_redfish_error)?;
-        Ok(())
+            .map(drop)
+            .map_err(map_platform_error)
     }
 
     pub(super) async fn create_bmc_user(
@@ -1075,6 +1104,58 @@ async fn primary_system(
         .await
         .map_err(nv_error("systems members"))?;
     Ok(bmc_explorer::primary_system_index(&systems).map(|index| systems.swap_remove(index)))
+}
+
+/// The manager exploration records: the primary `system`'s, or the first for
+/// a BMC that lists no systems, such as a power shelf.
+async fn primary_manager(
+    root: &ServiceRoot,
+    system: Option<&ComputerSystem<RedfishBmc>>,
+    bmc_ip_address: SocketAddr,
+) -> Result<Manager<RedfishBmc>, EndpointExplorationError> {
+    let no_managers = || EndpointExplorationError::Other {
+        details: format!("BMC {bmc_ip_address} lists no managers"),
+    };
+    let mut managers = root
+        .managers()
+        .await
+        .map_err(nv_error("managers"))?
+        .ok_or_else(no_managers)?
+        .members()
+        .await
+        .map_err(nv_error("managers members"))?;
+    let index = bmc_explorer::primary_manager_index(&managers, system).ok_or_else(no_managers)?;
+    Ok(managers.swap_remove(index))
+}
+
+/// Clears the host BIOS NVRAM through the NVIDIA UpdateService OEM action, as
+/// the Viking BIOS driver does, for a BMC no explored report identifies.
+async fn clear_host_bios_nvram(root: &ServiceRoot) -> Result<(), EndpointExplorationError> {
+    let unsupported = || EndpointExplorationError::Other {
+        details: "the BMC offers no NVIDIA UpdateService ClearNVRAM action".to_string(),
+    };
+    let service = root
+        .update_service()
+        .await
+        .map_err(nv_error("update service"))?
+        .ok_or_else(unsupported)?;
+    let host_bios = format!(
+        "{}/HostBIOS_0",
+        service
+            .raw()
+            .firmware_inventory
+            .as_ref()
+            .ok_or_else(unsupported)?
+            .odata_id()
+    );
+    service
+        .oem_nvidia_actions()
+        .map_err(nv_error("NVIDIA update service actions"))?
+        .ok_or_else(unsupported)?
+        .clear_nvram(vec![host_bios])
+        .await
+        .map(drop)
+        .map_err(nv_error("clear NVRAM"))
 }
 
 /// Classifies an nv-redfish failure in `context` the way exploration does.
@@ -1328,6 +1409,7 @@ mod tests {
     use axum::http::{Method, StatusCode};
     use axum::middleware::{self, Next};
     use axum::response::IntoResponse;
+    use bmc_mock::injection::{Action, Rule, RuleId, Selector};
     use bmc_mock::test_support::{
         dell_poweredge_r750_router_with_event_limits, delta_powershelf_router,
         host_router_with_auth, nvidia_gh200_swapped_managers_router, record_writes, serve_https,
@@ -1349,7 +1431,7 @@ mod tests {
     use model::site_explorer::{
         ComputerSystem as ExploredSystem, Manager as ExploredManager, ServiceRoot,
     };
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::{
         BmcAccess, BmcCredentialType, BootInterfaceTarget, CredentialKey, DriverConnector,
@@ -1815,6 +1897,114 @@ mod tests {
             credentials,
             actions,
         }
+    }
+
+    /// Under the drivers backend, remediation recognizes a DGX Viking over
+    /// plain Redfish and clears its NVRAM through the drivers an identifying
+    /// report selects, or else with the NVIDIA UpdateService OEM action the
+    /// Viking BIOS driver sends.
+    #[tokio::test]
+    async fn drivers_backend_identifies_a_viking_and_clears_it_through_its_report() {
+        const CLEAR_NVRAM: &str =
+            "/redfish/v1/UpdateService/Actions/Oem/NvidiaUpdateService.ClearNVRAM";
+        let (router, state) = host_router_with_auth(HardwareType::NvidiaDgxH100);
+        state
+            .account_service_state
+            .change_factory_default_password("password");
+        state.injection.upsert(Rule {
+            id: RuleId::from("clear-nvram-advertised"),
+            selector: Selector::Path {
+                method: Some("GET".to_string()),
+                glob: "/redfish/v1/UpdateService".to_string(),
+            },
+            action: Action::JsonMerge(json!({
+                "Actions": {"Oem": {"#NvidiaUpdateService.ClearNVRAM": {"target": CLEAR_NVRAM}}}
+            })),
+            remaining: None,
+        });
+        state.injection.upsert(Rule {
+            id: RuleId::from("clear-nvram-accepted"),
+            selector: Selector::Path {
+                method: Some("POST".to_string()),
+                glob: CLEAR_NVRAM.to_string(),
+            },
+            action: Action::Status(StatusCode::NO_CONTENT.as_u16()),
+            remaining: None,
+        });
+        let DriversBmc {
+            _server,
+            address,
+            client,
+            credentials,
+            actions,
+        } = drivers_bmc(router);
+        let mac: MacAddress = "02:00:00:00:00:0e".parse().unwrap();
+
+        let bmc = || established(mac, credentials.clone());
+        let failed =
+            EndpointExplorationReport::new_with_error(EndpointExplorationError::Unreachable {
+                details: None,
+            });
+        let identified = |vendor: Option<&str>| EndpointExplorationReport {
+            service_root: Some(ServiceRoot {
+                vendor: vendor.map(str::to_string),
+                ..Default::default()
+            }),
+            systems: vec![ExploredSystem {
+                id: "DGX".to_string(),
+                ..Default::default()
+            }],
+            managers: vec![ExploredManager {
+                id: "BMC".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let viking = identified(Some("AMI"));
+        let other_platform = identified(None);
+
+        assert!(client.is_viking(address, bmc()).await.expect("identifies"));
+        for (scenario, report, clears) in [
+            ("never explored: plain Redfish", None, true),
+            (
+                "a first failed exploration: plain Redfish",
+                Some(&failed),
+                true,
+            ),
+            ("an explored Viking: its BIOS driver", Some(&viking), true),
+            (
+                "a report naming another platform: its drivers, which cannot",
+                Some(&other_platform),
+                false,
+            ),
+        ] {
+            actions.lock().unwrap().clear();
+            let result = client.clear_nvram(address, bmc(), report).await;
+            assert_eq!(result.is_ok(), clears, "{scenario}: {result:?}");
+            let actions = actions.lock().unwrap();
+            if !clears {
+                assert!(actions.is_empty(), "{scenario}: {actions:?}");
+                continue;
+            }
+            let [(path, body)] = &actions[..] else {
+                panic!("{scenario}: expected one ClearNVRAM action: {actions:?}")
+            };
+            assert_eq!(path, CLEAR_NVRAM, "{scenario}");
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap(),
+                json!({"Targets": ["/redfish/v1/UpdateService/FirmwareInventory/HostBIOS_0"]}),
+                "{scenario}"
+            );
+        }
+
+        let dell = drivers_bmc(dell_router());
+        assert!(
+            !dell
+                .client
+                .is_viking(dell.address, established(mac, dell.credentials.clone()))
+                .await
+                .expect("checks a Dell")
+        );
     }
 
     /// Under the drivers backend, a power call without a report that

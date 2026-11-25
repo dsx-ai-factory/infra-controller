@@ -3064,7 +3064,11 @@ impl SiteExplorer {
         let bmc_target_addr = SocketAddr::new(endpoint.address, bmc_target_port);
 
         self.bmc_client
-            .clear_nvram(bmc_target_addr, endpoint.iface)
+            .clear_nvram(
+                bmc_target_addr,
+                endpoint.iface,
+                endpoint.last_explored.map(|explored| &explored.report),
+            )
             .await
             .map_err(|err| {
                 SiteExplorerError::internal(format!(

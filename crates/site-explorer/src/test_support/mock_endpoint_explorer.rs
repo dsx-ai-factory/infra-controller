@@ -421,6 +421,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _bmc_ip_address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
     }

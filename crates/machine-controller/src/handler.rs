@@ -2736,11 +2736,10 @@ impl MachineStateHandler {
             "Enabling Astra on NIC {nic_index}"
         );
 
-        // Create the redfish client from the machine snapshot.
-        let redfish_client = ctx
-            .services
-            .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-            .await?;
+        let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+        let super_nic = bmc
+            .super_nic()
+            .map_err(|e| platform_error("super_nic", e.into()))?;
 
         let legacy_nic = cx9_nics
             .iter()
@@ -2753,10 +2752,10 @@ impl MachineStateHandler {
                 ))
             })?
         } else {
-            let mac_address = redfish_client
-                .get_spx_nic_mac_address(nic_index)
+            let mac_address = super_nic
+                .mac_address(nic_index)
                 .await
-                .map_err(|e| redfish_error("get_spx_nic_mac_address", e))?
+                .map_err(|e| platform_error("super_nic.mac_address", e))?
                 .ok_or_else(|| StateHandlerError::MissingData {
                     object_id: mh_snapshot.host_snapshot.id.to_string(),
                     missing: "spx_nic_mac_address",
@@ -2824,10 +2823,10 @@ impl MachineStateHandler {
         };
 
         // Now enable EastWestControlEnabled on this card.
-        redfish_client
-            .set_spx_nic_east_west_control_enabled(nic_index, true)
+        super_nic
+            .set_east_west_control(nic_index, true)
             .await
-            .map_err(|e| redfish_error("set_spx_nic_east_west_control_enabled", e))?;
+            .map_err(|e| platform_error("super_nic.set_east_west_control", e))?;
 
         // We have successfully enabled EastWestControlEnabled on this card.
         // Now add an entry for this NIC in the dpa_interface table.
@@ -8944,12 +8943,8 @@ impl StateHandler for HostMachineStateHandler {
 
                     // GB200 SBIOS can rebuild a stale UEFI HTTP option only when
                     // `hostusb0` is configured before the platform setup reboot.
-                    gb200_host_interface::repair_gb200_host_interface_if_needed(
-                        ctx,
-                        redfish_client.as_ref(),
-                        mh_snapshot,
-                    )
-                    .await?;
+                    gb200_host_interface::repair_gb200_host_interface_if_needed(ctx, mh_snapshot)
+                        .await?;
 
                     handle_host_init_boot_config_stage(
                         ctx,

@@ -58,7 +58,9 @@ nv-redfish = { workspace = true, features = [
   "accounts",
   "computer-systems",
   "managers",
+  "oem-nvidia",
   "secure-boot",
+  "update-service",
 ] }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
