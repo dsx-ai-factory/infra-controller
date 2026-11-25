@@ -99,23 +99,27 @@ done
 # shellcheck disable=SC2329 # Called by _dpf_installed_version.
 kubectl() {
     case "${FAKE_CRD}:$1 $2" in
-        "present:get crd") echo "customresourcedefinition.apiextensions.k8s.io/dpfoperatorconfigs.operator.dpu.nvidia.com" ;;
-        "present:get dpfoperatorconfigs.operator.dpu.nvidia.com") printf '%s' "${FAKE_VERSION}" ;;
+        "present:get crd" | "no-object:get crd") echo "customresourcedefinition.apiextensions.k8s.io/dpfoperatorconfigs.operator.dpu.nvidia.com" ;;
+        "present:get dpfoperatorconfigs.operator.dpu.nvidia.com") printf 'dpfoperatorconfig:%s' "${FAKE_VERSION}" ;;
+        "no-object:get dpfoperatorconfigs.operator.dpu.nvidia.com") ;;
         "absent:get crd") ;;
         *) return 1 ;;
     esac
 }
 pinned_release="v${_DPF_PINNED_LINE}.0"
 source_release="v${_DPF_UPGRADE_SOURCE_LINE}.0"
-# name | operator image tag this run installs | DPF CRD (present, absent, or
-# error) | status.version | finding
+# name | operator image tag this run installs | DPF CRD (present, no-object,
+# absent, or error) | status.version | finding (none, error, or a warning
+# substring)
 cases=(
     "fresh cluster without the DPF CRD|${pinned_release}|absent||none"
+    "DPF CRD without a DPFOperatorConfig|${pinned_release}|no-object||none"
     "previous release line|${pinned_release}|present|${source_release}|none"
-    "prerelease on the pinned line|${pinned_release}|present|${pinned_release}-rc.6|none"
+    "prerelease on the pinned line|${pinned_release}|present|${pinned_release}-rc.6|a prerelease of ${pinned_release}"
+    "empty status.version|${pinned_release}|present||has no status.version"
     "older release line|${pinned_release}|present|v26.4.0|error"
     "tag on another release line is not checked|${source_release}|present|v26.4.0|none"
-    "cluster read failure|${pinned_release}|error||warning"
+    "cluster read failure|${pinned_release}|error||Could not read DPFOperatorConfig"
 )
 for row in "${cases[@]}"; do
     IFS='|' read -r name tag FAKE_CRD FAKE_VERSION finding <<< "${row}"
@@ -133,9 +137,9 @@ for row in "${cases[@]}"; do
             [[ -z "${warnings}" && "${errors}" == *"reports DPF ${FAKE_VERSION} "*"upgrade DPF to v${_DPF_UPGRADE_SOURCE_LINE}.x first"*"docs/manuals/upgrade.md"* ]] \
                 || fail "${name}: want one error that names ${FAKE_VERSION}, v${_DPF_UPGRADE_SOURCE_LINE}.x, and docs/manuals/upgrade.md, got errors '${errors}' and warnings '${warnings}'"
             ;;
-        warning)
-            [[ -z "${errors}" && "${warnings}" == *"Could not read DPFOperatorConfig"* ]] \
-                || fail "${name}: want one warning about the unread DPFOperatorConfig, got errors '${errors}' and warnings '${warnings}'"
+        *)
+            [[ -z "${errors}" && ${#WARNINGS[@]} -eq 1 && "${warnings}" == *"${finding}"* ]] \
+                || fail "${name}: want one warning containing '${finding}', got errors '${errors}' and warnings '${warnings}'"
             ;;
     esac
 done
@@ -144,7 +148,7 @@ unset -f kubectl
 # ---------------------------------------------------------------------------
 # setup.sh: the wait for the operator version before Core.
 # ---------------------------------------------------------------------------
-extract_functions "${SCRIPT_DIR}/setup.sh" _dpf_release_key _wait_for_dpf_operator_version
+extract_functions "${SCRIPT_DIR}/setup.sh" _dpf_release_key _dpf_prerelease _dpf_version_at_floor _wait_for_dpf_operator_version
 
 precheck_message="stub pre-upgrade validation message"
 # Answers the reads of _wait_for_dpf_operator_version: the status pair of each
@@ -177,6 +181,9 @@ cases=(
     "tag without a release waits for the recorded target;custom-image;v26.8.0|v30.0.0 v30.0.0|v30.0.0;2;"
     "operator does not finish;v30.0.0;v26.8.0|v30.0.0;0;${precheck_message}"
     "image tag ahead of the build TAG;v30.1.0;v30.0.0|v30.0.0;0;built with TAG=v30.0.0"
+    "prerelease of the release in the tag does not pass;v30.0.0;v30.0.0-rc.4|v30.0.0-rc.4;0;built with TAG=v30.0.0-rc.4"
+    "prerelease tag accepts the same prerelease;v30.0.0-rc.4;v30.0.0-rc.4|v30.0.0-rc.4;1;"
+    "prerelease above the release in the tag passes;v30.0.0;v30.0.1-rc.1|v30.0.1-rc.1;1;"
     "release with a leading zero and a digit above 7;v0.1.8;v0.1.8|v0.1.8;1;"
 )
 for row in "${cases[@]}"; do
