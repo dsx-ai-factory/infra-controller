@@ -19,12 +19,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
-use bmc_runtime::{ConnectedBmc, ExploredBmcRefError, ExploredConnectError};
+use bmc_runtime::{ExploredBmcRefError, ExploredConnectError};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_redfish::nv_redfish::RedfishBmc;
+use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
@@ -60,12 +59,6 @@ pub struct MachineStateHandlerServices {
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
     /// Connects moved BMC operations through the site's `bmc_backend`.
     pub bmc_connector: BmcConnector,
-    /// Credential-lifecycle operations (password set/rotate/clear,
-    /// candidate validation). A sealed trait implemented only by the direct
-    /// pool, so handing these to a wrapper pool is a compile error (a
-    /// wrong-pool guard, not a wire-path guarantee -- see
-    /// [`BmcCredentialOps`]).
-    pub bmc_credential_ops: Arc<dyn BmcCredentialOps>,
     /// An implementation of the IPMITool that understands how to reboot a machine
     pub ipmi_tool: Arc<dyn IPMITool>,
     /// Configuration used by MachineStateHandler.
@@ -95,6 +88,7 @@ pub struct MachineStateHandlerServices {
     pub dpu_bmc_service_rotation_gate: RotationGate,
     /// Startup-cached DPF capability; DPF owns BF4 service-account passwords when true.
     pub dpf_per_dpu_bmc_credentials: bool,
+    pub dpf_rotation_locks: Option<db::work_lock_manager::WorkLockManagerHandle>,
     /// Short-TTL cache of the site-wide NIC lockdown IKM rotation aggregate,
     /// shared across this replica's per-object ticks. Family-scoped to
     /// `lockdown_ikm` and keyed by each NIC's MAC.
@@ -188,23 +182,7 @@ impl MachineStateHandlerServices {
         })
     }
 
-    /// Connects to `machine`'s BMC through the drivers; `None`, without
-    /// connecting, when the site runs libredfish.
-    pub(crate) async fn connect_drivers(
-        &self,
-        machine: &Machine<impl MachineIdSubtypeTrait>,
-    ) -> Result<Option<Box<ConnectedBmc<RedfishBmc>>>, StateHandlerError> {
-        if !matches!(self.bmc_connector, BmcConnector::Drivers(_)) {
-            return Ok(None);
-        }
-        Ok(match self.connect_bmc(machine).await? {
-            BackendBmc::Drivers(bmc) => Some(bmc),
-            BackendBmc::Libredfish(_) => None,
-        })
-    }
-
-    /// Resolves a machine's BMC access info; credential-lifecycle call sites
-    /// hand this to [`BmcCredentialOps`], which builds its own direct client.
+    /// Resolves a machine's BMC access info.
     pub(crate) async fn bmc_access_info_for_machine(
         &self,
         machine: &Machine<impl MachineIdSubtypeTrait>,

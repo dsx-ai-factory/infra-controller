@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use carbide_instrument::Instrumentation;
 use carbide_resource_pool::ResourcePoolRegistry;
-use carbide_uuid::machine::{HostMachineId, MachineId, PredictedHostMachineId};
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
 use db::machine_interface::MachineInterfaces;
@@ -93,6 +93,7 @@ pub struct MachineCreator {
 struct HostDpuResources<'a> {
     existing_host: Option<HostMachineId>,
     reservations: Vec<DpuLoopbackReservation>,
+    reservations_by_dpu: HashMap<DpuMachineId, usize>,
     loopbacks: Vec<PreparedDpuLoopback<'a>>,
     asns: Vec<PreparedDpuAsn<'a>>,
 }
@@ -335,13 +336,19 @@ impl MachineCreator {
                 .dpus
                 .iter()
                 .filter(|dpu| {
-                    dpu.os_mac_addresses()
-                        .any(|mac| mac == reservation.dpu_oob_net0_mac_address)
+                    dpu.report.dpu_oob_mac_address() == Some(reservation.dpu_oob_net0_mac_address)
                 })
                 .collect::<Vec<_>>();
             let [dpu] = matching.as_slice() else {
+                let reported_macs = explored_host
+                    .dpus
+                    .iter()
+                    .filter_map(|dpu| dpu.report.dpu_oob_mac_address())
+                    .map(|mac| mac.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return Err(SiteExplorerError::internal(format!(
-                    "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs); defer creation",
+                    "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs; selected OS/admin MACs: [{reported_macs}]); defer creation",
                     reservation.dpu_oob_net0_mac_address,
                     matching.len()
                 )));
@@ -412,6 +419,7 @@ impl MachineCreator {
         let mut resources = HostDpuResources {
             existing_host,
             reservations,
+            reservations_by_dpu,
             loopbacks: Vec::with_capacity(preparations.len()),
             asns: Vec::with_capacity(preparations.len()),
         };
@@ -668,6 +676,10 @@ impl MachineCreator {
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
+            let reservation = resources
+                .reservations_by_dpu
+                .get(dpu_machine_id)
+                .map(|&index| &resources.reservations[index]);
             self.create_dpu(&mut txn, dpu_report)
                 .await?
                 .ok_or_else(|| {
@@ -677,6 +689,21 @@ impl MachineCreator {
                     ))
                 })?;
 
+            // Creating a DPU leaves an already-owned interface alone. Before
+            // committing a reservation, require the same ownership as a restore.
+            if let Some(reservation) = reservation
+                && !db::machine_interface::dpu_owns_oob_mac(
+                    txn.as_pgconn(),
+                    dpu_machine_id,
+                    reservation.dpu_oob_net0_mac_address,
+                )
+                .await?
+            {
+                return Err(SiteExplorerError::internal(format!(
+                    "cannot verify ownership of loopback MAC {} for DPU {dpu_machine_id}; defer creation",
+                    reservation.dpu_oob_net0_mac_address,
+                )));
+            }
             let host_machine_id = self
                 .attach_dpu_to_host(&mut txn, &managed_host, dpu_report, machine_data)
                 .await?;

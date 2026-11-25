@@ -2523,11 +2523,7 @@ mod tests {
                 self.inner.publish(family, snap);
                 let mut published = self.published.lock().unwrap();
                 published.push((family, meta, units));
-                let secs = |at: SystemTime| {
-                    at.duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs_f64()
-                };
+                let secs = crate::state_metrics::unix_seconds;
                 for (family, meta, units) in published.iter().rev().fold(
                     Vec::<(Family, SweepMeta, usize)>::new(),
                     |mut newest, row| {

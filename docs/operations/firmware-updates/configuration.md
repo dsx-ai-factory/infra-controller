@@ -628,15 +628,45 @@ existing connector retries also remain within that deadline. The `direct` mode
 has no artifact transfer retries. Neither deadline interrupts a filesystem
 write already in progress; blocked storage can keep staging running longer.
 
-Core's [download size and time limits](#firmware-downloads) independently apply
-to a `site_cache` origin fetch. Its default HTTP size limit is 4 GiB; the
-supervisor accepts at most 16 GiB per artifact in either mode. Each active cache
+Core's [download limits](#firmware-downloads) also apply to a `site_cache`
+origin fetch. The default HTTP size limit is 4 GiB. The firmware supervisor
+accepts at most 16 GiB per artifact in either mode. Each active cache
 transfer reserves `downloads.max_download_bytes` against
-`nic_firmware_cache_capacity_bytes`. A busy shared worker pool delays even
-cached artifacts: Core returns HTTP `202` with `Retry-After: 5`. That wait, or a
-cold cache fill, can exhaust Scout's deadline before configuration or image
-burn. An accepted Core transfer can continue filling its cache after the client
-stops waiting; a later attempt can find it ready.
+`nic_firmware_cache_capacity_bytes`.
+
+For `site_cache`, Core sends `Retry-After: 5` with each of the following responses.
+
+| Response | What Core is waiting for or reporting |
+| --- | --- |
+| `202` | The shared download workers are busy, all 32 cache reader leases are in use, a transfer is in progress, or a replacement is waiting for readers of the old file. This can apply to a cached image or configuration artifact. |
+| `502` | A cache I/O operation failed, or an origin transfer failed, including a mismatch with the expected checksum. Core discards a bad download and reports the recorded transfer failure once on a later admitted poll. |
+| `503` | All 32 route request slots are occupied, the cache is full, the saved operation state is invalid or unavailable, its database transaction times out or fails to release the retention lock, or Core is shutting down. Full request slots can reject a request before Core checks the saved operation. Open response bodies hold their request slots until completion, read error or disconnect. |
+
+**Builds with [the NIC firmware cache reader change][cache-reader]** can also
+return `202` when the authorized request is ready to hand off its snapshot
+but the blocking worker has not started. That GET starts no download. Its
+preparation can keep the request slot until Core reaps the worker. A cached
+file that fails its checksum also returns `202` after Core removes its
+pathname or finds it already gone or replaced. A cleanup error returns
+`502`. On the next poll Core checks
+the saved operation again. If it still authorizes the artifact, Core uses
+the digests retained by NIC operations outside `Failed` to reserve space
+for a replacement. A completed check that denies the artifact returns `404`
+and the supervisor stops polling. Before this cache reader change, Core can
+reserve a replacement in the request that finds the corrupt file or return
+`502` if a reader holds it.
+
+To identify the serving build, check the `git_sha` for `carbide-api` in
+the [`nico-admin-cli version` output][version-command]. During a rolling update this
+identifies only the responding replica. Use each replica's build record if
+its commit is unavailable, and check whether the build includes the linked
+change. A cold fill or repeated retries can exhaust the supervisor's deadline
+before it applies the configuration or burns the image. An accepted Core
+transfer can finish after the host's HTTP request ends. A later authorized
+request can use the verified file while it remains cached.
+
+[cache-reader]: https://github.com/dsx-ai-factory/infra-controller/pull/9513
+[version-command]: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/version/version.md
 
 Each Core process needs its own `firmware_global.firmware_download_cache_directory`;
 sharing one between processes is unsupported. Managed NIC content uses its
@@ -649,6 +679,24 @@ The default Helm chart uses per-pod `emptyDir` storage, so replacing the Core
 pod also removes its cache. Refer to the
 [managed cache contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/firmware/README.md#managed-artifact-cache)
 for ownership and retention.
+
+On builds with [the cache reader change][cache-reader], repeated `502` responses
+for the same digest on the same Core replica can mean the cached file stays
+unreadable. Check that replica's logs for `NIC firmware artifact cache I/O failed`
+and the underlying error. Fix any volume or read-permission problem first.
+If the file remains unreadable, confirm that Core can fetch the bytes
+matching the saved operation's SHA-256 from its original source.
+
+- **Default Helm cache (`emptyDir`).** Follow the Site's maintenance procedure
+  to replace the affected Core pod. Replacing the pod clears its entire cache.
+- **Persistent cache volume.** If you can access the volume while Core is
+  stopped, follow the Site's maintenance procedure to stop the owning Core
+  process and wait for its cache work to drain. Keep the owner stopped while
+  you move only `digest-v1/<lowercase SHA-256>` from the configured cache
+  directory to a location outside `digest-v1`. Start Core after the move.
+
+In either case, a later request that the host's saved operation still
+authorizes can fetch and verify the replacement.
 
 Use matching Core, Scout, and supervisor builds before enabling `site_cache`
 operations. Scout advertises code support; that does not certify its transport
@@ -737,15 +785,13 @@ copies require additional storage. Choose limits for your artifact sizes,
 source performance, and available cache storage; these are not measured site
 capacity guarantees.
 
-When all workers are busy, Core defers the artifact check to the next poll. This
-applies even when the artifact is already cached or a recorded download failure
-is waiting to be reported. Core does not queue the check, and it does not count
-saturation as a firmware failure.
-Managed-host and pre-ingestion workflows remain waiting for artifact
-availability; the debug message
-"Firmware download workers are busy; deferring artifact check" identifies
-saturation. A slot remains occupied until verification and cleanup finish, even
-after the requesting controller iteration stops waiting. HTTP deadlines do not
+When all download workers are busy, legacy managed-host and pre-ingestion
+checks return immediately without queuing a waiter or consuming a recorded
+failure. They retry on their next controller iteration, even for a cached
+artifact. These paths log
+"Firmware download workers are busy; deferring artifact check". A download
+worker remains occupied until verification and cleanup finish, even after the
+requesting controller iteration stops waiting. HTTP deadlines do not
 bound local copying, checksum verification, or cleanup.
 
 An HTTP timeout, size-limit violation, or transfer error prevents publication of

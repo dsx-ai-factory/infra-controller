@@ -395,7 +395,7 @@ where
         }
         model::resource_pool::ResourcePoolEntryState::Allocated { .. } => {
             Err(CarbideError::FailedPrecondition(format!(
-                "loopback address {value_text} is already allocated to another DPU"
+                "cannot verify that the DPU with OS/admin MAC {intended_dpu_oob_net0_mac} owns allocated loopback address {value_text}"
             )))
         }
     }
@@ -415,11 +415,7 @@ async fn pool_owner_is_dpu_oob_net0_mac(
         );
         return Ok(false);
     };
-    let interfaces =
-        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_oob_net0_mac).await?;
-    Ok(interfaces
-        .iter()
-        .any(|interface| interface.machine_id == Some(owner_id.into())))
+    Ok(db::machine_interface::dpu_owns_oob_mac(txn, &owner_id, intended_dpu_oob_net0_mac).await?)
 }
 
 /// Replace-all recreates parent rows. Preserve loopbacks that an older client
@@ -455,8 +451,7 @@ fn preserve_omitted_dpu_loopback_reservations(
 /// currently purely used by the expected_machines.json import path only, but
 /// lives here so it shares the same validation codepath as the API handler --
 /// including rejecting a DPU loopback reservation whose address is outside its
-/// pool, auto-assignable, or already allocated, rather than deferring that
-/// failure to DPU discovery.
+/// pool, auto-assignable, or allocated without proof of ownership by the intended DPU.
 pub(crate) async fn create_missing_from(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,

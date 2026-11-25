@@ -381,15 +381,9 @@ pub(crate) async fn delete_credential(
         rpc::CredentialType::Ufm => {
             if let Some(username) = req.username {
                 api.credential_manager
-                    .set_credentials(
-                        &CredentialKey::UfmAuth {
-                            fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
-                        },
-                        &Credentials::UsernamePassword {
-                            username: username.clone(),
-                            password: "".to_string(),
-                        },
-                    )
+                    .delete_credentials(&CredentialKey::UfmAuth {
+                        fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
+                    })
                     .await
                     .map_err(|error| {
                         map_credential_mutation_error(

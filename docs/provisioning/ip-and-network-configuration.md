@@ -379,7 +379,8 @@ Use `[networks.<name>]` blocks in `siteConfig` or the file specified by
 `initial_objects_file` to define the network segments that `nico-api` creates
 at startup. It creates missing segments and saves their initial definitions.
 Editing these definitions and restarting `nico-api` does not update existing
-segments.
+segments. To add IPv6 without replacing an IPv4 BMC segment, refer to
+[Add IPv6 to an Existing BMC Underlay](dhcpv6-deployment.md#add-ipv6-to-an-existing-bmc-underlay).
 
 A network prefix identifies a range of IP addresses using CIDR notation, such
 as `192.0.2.0/24` for IPv4 or `2001:db8:1::/64` for IPv6. An IPv4-only segment

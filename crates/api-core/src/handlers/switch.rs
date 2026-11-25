@@ -143,8 +143,8 @@ fn populate_switch_inventory(
 ) {
     status.serial_number = report
         .and_then(|report| report.switch_chassis())
-        .and_then(|chassis| chassis.serial_number.as_deref())
-        .map(|serial| serial.trim().to_string());
+        .and_then(|chassis| chassis.inventory_serial_number())
+        .map(str::to_owned);
     status.power_state = report
         .and_then(|report| report.systems.first())
         .map(|system| {

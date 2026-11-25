@@ -446,6 +446,10 @@ pub enum BmcCredentialType {
     BmcRoot {
         bmc_mac_address: MacAddress,
     },
+    DpfBmcRotation {
+        operation_id: [u8; 16],
+        candidate: DpfBmcRotationCandidate,
+    },
     // BMC Specific Forge-Admin Credentials
     BmcForgeAdmin {
         bmc_mac_address: MacAddress,
@@ -471,6 +475,12 @@ pub enum BmcCredentialType {
     SiteWideDpuBmcServiceVersioned {
         version: u32,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum DpfBmcRotationCandidate {
+    Previous,
+    Target,
 }
 
 impl BmcCredentialType {
@@ -897,6 +907,19 @@ impl CredentialKey {
                 }
                 BmcCredentialType::BmcRoot { bmc_mac_address } => {
                     Cow::from(format!("machines/bmc/{bmc_mac_address}/root"))
+                }
+                BmcCredentialType::DpfBmcRotation {
+                    operation_id,
+                    candidate,
+                } => {
+                    let suffix = match candidate {
+                        DpfBmcRotationCandidate::Previous => "previous",
+                        DpfBmcRotationCandidate::Target => "target",
+                    };
+                    Cow::from(format!(
+                        "machines/bmc/dpf-rotation/{}/{suffix}",
+                        hex::encode(operation_id)
+                    ))
                 }
                 BmcCredentialType::BmcForgeAdmin { bmc_mac_address } => Cow::from(format!(
                     "machines/bmc/{bmc_mac_address}/forge-admin-account"

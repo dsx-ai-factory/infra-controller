@@ -1223,32 +1223,33 @@ fn verify_sha256(filename: &Path, checksum: &str) -> Result<(), Report> {
         return Ok(());
     }
 
-    let mut file = std::fs::File::open(filename)?;
-    verify_sha256_file(&mut file, &checksum)
-}
-
-/// Binds bytes to their expected SHA-256 identity and detects corruption. This
-/// is not publisher authentication or a substitute for firmware signatures.
-/// Reads from the file's current position and leaves its cursor at EOF.
-pub(crate) fn verify_sha256_file(file: &mut File, checksum: &str) -> Result<(), Report> {
-    let mut context = Sha256::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let read = std::io::Read::read(file, &mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        context.update(&buffer[..read]);
-    }
-
-    let checksum_actual = hex::encode(context.finalize());
-
+    let file = std::fs::File::open(filename)?;
+    let checksum_actual = hex::encode(sha256_file::<std::io::Error>(&file, || Ok(()))?);
     if checksum_actual != checksum {
         return Err(eyre!(
             "checksum mismatch: expected {checksum} downloaded {checksum_actual}"
         ));
     }
     Ok(())
+}
+
+/// Check the caller's lifecycle before each read from the current position.
+/// A blocking read already in progress must finish. The digest identifies
+/// the bytes without authenticating their publisher.
+pub(crate) fn sha256_file<E: From<std::io::Error>>(
+    mut file: impl std::io::Read,
+    mut before_read: impl FnMut() -> Result<(), E>,
+) -> Result<[u8; 32], E> {
+    let mut context = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        before_read()?;
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(context.finalize().into());
+        }
+        context.update(&buffer[..read]);
+    }
 }
 
 #[cfg(test)]

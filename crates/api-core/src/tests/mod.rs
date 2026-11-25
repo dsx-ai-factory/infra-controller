@@ -52,6 +52,7 @@ mod ib_instance;
 mod ib_machine;
 mod ib_partition_find;
 mod ib_partition_lifecycle;
+mod ib_partition_remote;
 mod instance;
 mod instance_allocate;
 mod instance_batch_allocate;

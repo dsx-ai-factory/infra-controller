@@ -7,8 +7,7 @@
 
 use std::collections::HashSet;
 
-use model::nvlink_domain::{NvLinkDomain, NvLinkDomainMember};
-use model::rack_type::RackCapabilityType;
+use model::nvlink_domain::{NvLinkDomain, NvLinkDomainMember, NvLinkDomainMemberType};
 use uuid::Uuid;
 
 use crate::errors::RpcDataConversionError;
@@ -43,13 +42,10 @@ impl TryFrom<forge::CreateNvLinkDomainRequest> for NvLinkDomain {
             let slot_index = value
                 .slot_index
                 .ok_or(RpcDataConversionError::MissingArgument("slot_index"))?;
-            let component_type: RackCapabilityType = value
+            let component_type: NvLinkDomainMemberType = value
                 .component_type
                 .parse()
                 .map_err(|_| invalid("component_type must be Compute or Switch"))?;
-            if component_type == RackCapabilityType::PowerShelf {
-                return Err(invalid("component_type must be Compute or Switch"));
-            }
             if !unique.insert((rack_index, slot_index, value.component_type)) {
                 return Err(invalid("duplicate member position"));
             }
@@ -138,7 +134,7 @@ mod tests {
         assert_eq!(domain.name, None);
         assert_eq!(
             domain.members[0].component_type,
-            RackCapabilityType::Compute
+            NvLinkDomainMemberType::Compute
         );
         let wire: forge::NvLinkDomain = domain.into();
         assert_eq!(wire.members[0].rack_index, Some(0));

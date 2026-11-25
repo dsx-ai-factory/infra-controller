@@ -332,6 +332,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 model: Some("PowerEdge R750".to_string()),
                 part_number: Some("SB27A42862".to_string()),
                 serial_number: Some(value.serial),
+                assemblies: Vec::new(),
                 network_adapters,
                 compute_tray_index: None,
                 physical_slot_number: None,

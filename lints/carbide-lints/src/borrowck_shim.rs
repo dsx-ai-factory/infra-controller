@@ -85,7 +85,7 @@ impl BorrowckShim {
             TxnHeldAcrossAwait::default().check_closure_locals(tcx, closure);
 
             if matches!(coroutine_source, CoroutineSource::Block) {
-                // For `async move { ... }` blocks, check any "upvars" (locals defined in the
+                // For explicit async blocks, check any "upvars" (locals defined in the
                 // parent scope and referenced inside the closure.) This requires distinct logic
                 // and so is a separate function.
                 TxnHeldAcrossAwait::default().check_closure_upvars(tcx, closure);

@@ -454,6 +454,138 @@ mod tests {
         assert!(!err.to_string().contains("new-secret"));
     }
 
+    fn root_accounts(
+        sim: &Arc<RedfishSim>,
+        password: &str,
+        vendor: RedfishVendor,
+    ) -> LibredfishAccounts {
+        LibredfishAccounts {
+            pool: sim.clone(),
+            host: "127.0.0.1".to_string(),
+            port: Some(443),
+            credentials: Credentials::new("root", password),
+            report_vendor: Some(vendor),
+        }
+    }
+
+    /// The change goes through an uninitialized client, because factory BMCs
+    /// refuse the reads vendor initialization makes until their password
+    /// changes; only the policy client afterward carries the vendor.
+    #[tokio::test]
+    async fn libredfish_root_password_change_uses_an_unknown_client_then_the_vendor() {
+        for vendor in [
+            RedfishVendor::LiteOnPowerShelf,
+            RedfishVendor::DeltaPowerShelf,
+            RedfishVendor::NvidiaDpu,
+            RedfishVendor::NvidiaGBx00,
+            RedfishVendor::Dell,
+            RedfishVendor::Hpe,
+            RedfishVendor::AMI,
+            RedfishVendor::GigaComputingAMI,
+        ] {
+            let sim = Arc::new(RedfishSim::default());
+            sim.seed_user("root", "factory_pass");
+            BackendAccounts::Libredfish(&root_accounts(&sim, "factory_pass", vendor))
+                .change_password("root", "site_pass")
+                .await
+                .expect("changes the root password");
+            BackendAccounts::Libredfish(&root_accounts(&sim, "site_pass", vendor))
+                .apply_default_policy("root", "site_pass")
+                .await
+                .expect("applies the vendor policy");
+
+            assert_eq!(
+                sim.user_password("root").as_deref(),
+                Some("site_pass"),
+                "{vendor}"
+            );
+            assert_eq!(
+                sim.create_client_calls()
+                    .into_iter()
+                    .map(|call| call.vendor)
+                    .collect::<Vec<_>>(),
+                vec![Some(RedfishVendor::Unknown), Some(vendor)],
+                "{vendor}",
+            );
+        }
+    }
+
+    /// AMI BMCs that refuse the by-username change with
+    /// `PasswordChangeRequired` are changed through the account the BMC names,
+    /// or account id `2` when it names none.
+    #[tokio::test]
+    async fn libredfish_ami_password_change_required_targets_the_named_account() {
+        struct Case {
+            account_uri: Option<&'static str>,
+            seeded_account: Option<&'static str>,
+            expected: Result<&'static str, PlatformError>,
+        }
+        let cases = [
+            Case {
+                account_uri: None,
+                seeded_account: Some("2"),
+                expected: Ok("2"),
+            },
+            Case {
+                account_uri: Some("/redfish/v1/AccountService/Accounts/4"),
+                seeded_account: Some("4"),
+                expected: Ok("4"),
+            },
+            Case {
+                account_uri: None,
+                seeded_account: None,
+                expected: Err(PlatformError::UserNotFound {
+                    identifier: "2".to_string(),
+                }),
+            },
+        ];
+        for case in cases {
+            let sim = Arc::new(RedfishSim::default());
+            sim.seed_user("root", "factory_pass");
+            if let Some(account) = case.seeded_account {
+                sim.seed_user(account, "factory_pass");
+            }
+            sim.set_password_change_required(true, case.account_uri);
+
+            let result = BackendAccounts::Libredfish(&root_accounts(
+                &sim,
+                "factory_pass",
+                RedfishVendor::AMI,
+            ))
+            .change_password("root", "site_pass")
+            .await;
+            match case.expected {
+                Ok(account) => {
+                    result.expect("changes the named account");
+                    assert_eq!(sim.user_password(account).as_deref(), Some("site_pass"));
+                }
+                Err(expected) => assert_eq!(result.expect_err("no fallback account"), expected),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn libredfish_password_change_rejects_unknown_vendors_and_skips_sushy() {
+        let sim = Arc::new(RedfishSim::default());
+        sim.seed_user("root", "factory_pass");
+
+        let err = BackendAccounts::Libredfish(&root_accounts(
+            &sim,
+            "factory_pass",
+            RedfishVendor::Unknown,
+        ))
+        .change_password("root", "site_pass")
+        .await
+        .expect_err("an unknown vendor has no dispatch");
+        assert_eq!(err, platform_error(libredfish::RedfishError::MissingVendor));
+
+        BackendAccounts::Libredfish(&root_accounts(&sim, "factory_pass", RedfishVendor::Sushy))
+            .change_password("root", "site_pass")
+            .await
+            .expect("the Sushy emulator has no AccountService to change");
+        assert_eq!(sim.user_password("root").as_deref(), Some("factory_pass"));
+    }
+
     #[tokio::test]
     async fn libredfish_accounts_list_classifies_auth_failures() {
         let sim = Arc::new(RedfishSim::default());

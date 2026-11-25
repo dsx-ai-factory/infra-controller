@@ -118,6 +118,11 @@ where
     T: ToString + FromStr + Send + Sync + 'static,
     T::Err: std::error::Error + Send + Sync + 'static,
 {
+    /// Returns whether preparing an allocation can reserve capacity with a provider.
+    pub fn uses_provider(&self) -> bool {
+        self.backend.remote().is_some()
+    }
+
     /// `prepare_allocation` gets an allocation ready for the entity transaction.
     /// Finish any caller transaction first: remote preparation commits its own
     /// request before waiting for the provider. Integrated performs no I/O here.
@@ -529,8 +534,9 @@ where
     /// is retried here, every 100ms, using the same saved request and authority.
     /// Recovery skips held leases; this caller waits because it needs the result.
     /// A remote value must fit `T`; conversion failure requests cancellation.
-    /// Foreground failures save cancellation, including when the caller stops
-    /// waiting; allow cleanup to finish before preparing another attempt.
+    /// A foreground error or cancellation signal requests cleanup. If the
+    /// caller drops this future, recovery cancels the unattached request after
+    /// its attachment deadline. Wait for cleanup before starting another attempt.
     /// An interrupted controller can replay its Pending request with the same
     /// desire and inputs.
     /// Consumer-specific value and policy checks remain with callers.
@@ -666,6 +672,16 @@ where
             AllocationState::Integrated { .. } => None,
             AllocationState::Remote { assignment, .. } => assignment.route_target_policy.as_ref(),
         }
+    }
+
+    /// `with_integrated_owner` records the creation-time name for Integrated
+    /// inventory. Provider allocations keep the permanent entity ID supplied
+    /// at preparation, even if the entity is renamed.
+    pub fn with_integrated_owner(mut self, name: &str) -> Self {
+        if let AllocationState::Integrated { owner_id, .. } = &mut self.state {
+            name.clone_into(owner_id);
+        }
+        self
     }
 
     /// `allocate` reserves or attaches the value in the caller's transaction.

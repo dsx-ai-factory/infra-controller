@@ -94,6 +94,7 @@ func (s *Session) registerFetchers() {
 	})
 	s.Resolver.RegisterFetcher("ip-block", s.fetchIPBlocks)
 	s.Resolver.RegisterFetcher("network-security-group", s.fetchNSGs)
+	s.Resolver.RegisterFetcher("dhcp-option-set", s.fetchDhcpOptionSets)
 	s.Resolver.RegisterFetcher("audit", s.fetchAudits)
 	s.Resolver.RegisterFetcher("ssh-key", s.fetchSSHKeys)
 	s.Resolver.RegisterFetcher("ssh-key-group", s.fetchSSHKeyGroups)
@@ -654,6 +655,25 @@ func (s *Session) fetchNSGs(ctx context.Context) ([]NamedItem, error) {
 		q["siteId"] = s.Scope.SiteID
 	}
 	items, err := s.fetchAll(ctx, apiPath(s, "network-security-group"), q)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		result[i] = NamedItem{
+			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
+			Labels: extractLabels(m), Raw: m,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchDhcpOptionSets(ctx context.Context) ([]NamedItem, error) {
+	q := map[string]string{}
+	if s.Scope.SiteID != "" {
+		q["siteId"] = s.Scope.SiteID
+	}
+	items, err := s.fetchAll(ctx, apiPath(s, "dhcp-option-set"), q)
 	if err != nil {
 		return nil, err
 	}

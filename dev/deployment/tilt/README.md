@@ -199,6 +199,48 @@ Prometheus stores metrics on a 2 GiB persistent volume and retains them for 24
 hours. Its UI at `http://localhost:19090` also shows discovered endpoints under
 **Status > Targets**.
 
+## Tempo monitoring
+
+Open [**Grafana → NICo → Tempo / Overview**](http://localhost:13000/d/nico-tempo-overview)
+for scrape health, ingestion rates, discarded spans by reason, live traces and
+limit utilization, CPU/memory, backend block bytes, completion queues, query
+latency, and metrics-generator/remote-write health. The dashboard is provisioned
+by Tilt and refreshes every 30 seconds. Namespace and instance selectors scope
+it to the Tempo scrape targets. Query panels populate when search/trace APIs are
+used; absent failure counters show zero only while scraping is healthy. Backend
+block bytes include compacted blocks awaiting deletion and exclude WAL and
+filesystem overhead, so they are not PVC utilization.
+
+Grafana's [official Tempo mixin](https://github.com/grafana/tempo/tree/v3.1.1/operations/tempo-mixin-compiled/dashboards)
+assumes distributed component jobs and cluster labels. The checked-in overview
+uses this single-binary deployment's `job="tempo"` labels and direct metrics,
+without additional recording rules.
+
+The observability profile installs Tempo's ServiceMonitor, scraping `/metrics`
+every 30 seconds. Prometheus evaluates `TempoDown` after two minutes of failed
+or missing scrapes, `TempoDiscardingSpans` after two minutes of a positive five-minute discard
+rate (grouped by reason), and `TempoLiveTraceLimitPressure` after five minutes
+above 80% of the configured positive live-trace limit. These rules appear in the
+Prometheus **Alerts** UI; Alertmanager is disabled in this local profile, so they
+do not send notifications. Live-trace pressure compares each instance's busiest
+tenant with the default limit; per-tenant limit overrides require adapting the rule.
+
+Useful Prometheus queries:
+
+```promql
+up{job="tempo"}
+sum by (reason) (rate(tempo_discarded_spans_total[5m]))
+rate(tempo_distributor_spans_received_total[5m])
+rate(tempo_distributor_bytes_received_total[5m])
+tempo_live_store_live_traces
+process_resident_memory_bytes{job="tempo"}
+```
+
+Tempo's generated span metrics and service graphs count sampled traffic. Use
+application metrics for total request counts and failure rates. Head sampling
+reduces source export volume but can omit errors; this profile does not deploy
+a tail-sampling collector.
+
 ## Dashboards
 
 Tilt provisions the checked-in **NICo Core Health**, **NICo / Site Overview**,

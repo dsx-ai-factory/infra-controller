@@ -62,12 +62,9 @@ async fn resolve_host_uefi_clear_credentials(
         crate::handlers::uefi::host_uefi_clear_credential_key(api.pg_pool(), bmc_mac_address)
             .await
             .ok()?;
-    crate::handlers::uefi::read_uefi_credentials(
-        api.bmc_credential_ops.credential_reader(),
-        &clear_key,
-    )
-    .await
-    .ok()
+    crate::handlers::uefi::read_uefi_credentials(api.credential_manager.as_ref(), &clear_key)
+        .await
+        .ok()
 }
 
 pub(crate) async fn find_machine_ids(
@@ -493,12 +490,16 @@ async fn force_delete_cleanup_txn(
     dpu_machines: &[DpuMachine],
     identities: &HashMap<MachineId, db::machine::MachineCreationIdentity>,
     request: &rpc::AdminForceDeleteMachineRequest,
+    dpf_lease: Option<&db::work_lock_manager::WorkLock>,
 ) -> Result<rpc::AdminForceDeleteMachineResponse, CarbideError> {
     let mut response = rpc::AdminForceDeleteMachineResponse::default();
     // Admission permit BEFORE the transaction: waiters on the admin-segment
     // advisory lock must queue in memory, not on open pool connections.
     let _admin_admission = db::machine_interface::admin_lock_admission().await;
     let mut txn = api.txn_begin().await?;
+    if let Some(lease) = dpf_lease {
+        lease.fence_transaction(&mut txn).await?;
+    }
 
     // Advisory-lock the admin segments exclusively before any row locks so
     // the deletion follows the allocator lock order -- segment advisory lock
@@ -875,6 +876,26 @@ async fn force_delete_cleanup_txn(
             &mut txn,
             &dhcp_suppression_macs,
             BmcSuppressionSubsystem::Dhcp,
+        )
+        .await?;
+    }
+
+    if let Some(host) = host_machine
+        && host.config.dpf.used_for_ingestion
+        && current_machine_ids.contains(host.id.as_machine_id())
+    {
+        db::dpf_bmc_rotation::detach(&mut txn, &host.id.to_string(), &bmc_macs).await?;
+        let recovering = db::dpf_bmc_rotation::detached_macs(&mut *txn, &bmc_macs).await?;
+        let released = bmc_macs
+            .iter()
+            .copied()
+            .filter(|mac| !recovering.contains(mac))
+            .collect::<Vec<_>>();
+        db::bmc_suppression::delete_many_for_source(
+            &mut txn,
+            &released,
+            BmcSuppressionSubsystem::SiteExplorer,
+            BmcSuppressionSource::BmcCredentialRotation,
         )
         .await?;
     }
@@ -1273,6 +1294,37 @@ pub(crate) async fn admin_force_delete_machine(
         }
     }
 
+    // Keep a concurrent delete from doing DPF work against a replacement host.
+    let dpf_lease = if let Some(host) = &host_machine
+        && host.config.dpf.used_for_ingestion
+    {
+        let lease = match api
+            .work_lock_manager_handle
+            .try_acquire_lock(db::dpf_bmc_rotation::work_key(host.id))
+            .await
+        {
+            Ok(lease) => lease,
+            Err(db::work_lock_manager::AcquireLockError::WorkAlreadyLocked(_)) => {
+                response.all_done = false;
+                return Ok(Response::new(response));
+            }
+            Err(error) => return Err(CarbideError::internal(error.to_string()).into()),
+        };
+        let live =
+            db::machine::find_one(api.pg_pool(), &host.id, MachineSearchConfig::default()).await?;
+        let live_identity =
+            db::machine::MachineCreationIdentity::capture(api.pg_pool(), host.id.as_machine_id())
+                .await?;
+        if !live.is_some_and(|live| {
+            matches!(live.state.value, ManagedHostState::ForceDeletion)
+                && live_identity.created() == identities[host.id.as_machine_id()].created()
+        }) {
+            return Ok(Response::new(response));
+        }
+        Some(lease)
+    } else {
+        None
+    };
     if let Some(machine) = &host_machine {
         if let Some(ref ops) = api.dpf_sdk
             && !dpu_machines.is_empty()
@@ -1378,12 +1430,16 @@ pub(crate) async fn admin_force_delete_machine(
                             // force-delete.
                             let clear_credentials =
                                 resolve_host_uefi_clear_credentials(api, bmc_mac_address).await;
-                            if let Some(clear_credentials) = clear_credentials {
-                                match api
-                                    .bmc_credential_ops
-                                    .clear_host_uefi_password(&access, clear_credentials)
-                                    .await
-                                {
+                            if let Some(Credentials::UsernamePassword {
+                                password: current_password,
+                                ..
+                            }) = clear_credentials
+                            {
+                                let clear_result = async {
+                                    bmc.bios()?.clear_uefi_password(&current_password).await
+                                }
+                                .await;
+                                match clear_result {
                                     Ok(_) => {
                                         // The UEFI password was reset on the device, so the host no
                                         // longer carries the site-wide UEFI value: drop the host_uefi
@@ -1455,6 +1511,7 @@ pub(crate) async fn admin_force_delete_machine(
             &dpu_machines,
             &identities,
             &request,
+            dpf_lease.as_ref(),
         )
         .await
         {
@@ -1490,6 +1547,16 @@ pub(crate) async fn admin_force_delete_machine(
             clear_bmc_credentials(api, machine).await?;
         }
         for dpu_machine in &dpu_machines {
+            // Recovery may already have recorded the active credential and
+            // started removing its saved copies. Keep that credential usable.
+            if dpf_lease.is_some()
+                && let Some(mac) = dpu_machine.status.bmc_info.mac
+                && db::dpf_bmc_rotation::get(api.pg_pool(), mac)
+                    .await?
+                    .is_some_and(|recovery| recovery.detached && !recovery.patch_pending)
+            {
+                continue;
+            }
             clear_bmc_credentials(api, dpu_machine).await?;
         }
     }

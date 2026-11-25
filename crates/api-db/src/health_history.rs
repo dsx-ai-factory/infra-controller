@@ -345,6 +345,51 @@ mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn machine_health_history_retains_newest_250_records(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Exercise the migrated machine retention trigger without provisioning a host.
+        let mut conn = pool.acquire().await?;
+        let object_id = "machine-health-history-retention-test";
+        const EXPECTED_LIMIT: usize = 250;
+        let reports: Vec<_> = (0..=EXPECTED_LIMIT)
+            .map(|i| health_with_alert(&format!("Alert{i}")))
+            .collect();
+
+        for report in &reports[..EXPECTED_LIMIT] {
+            persist(&mut conn, HealthHistoryTableId::Machine, &object_id, report).await?;
+        }
+        assert_eq!(
+            count_records(&mut conn, HealthHistoryTableId::Machine, object_id).await,
+            EXPECTED_LIMIT
+        );
+
+        persist(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &object_id,
+            &reports[EXPECTED_LIMIT],
+        )
+        .await?;
+
+        let records = find_by_object_ids(
+            &mut *conn,
+            HealthHistoryTableId::Machine,
+            &[object_id],
+            None,
+            None,
+        )
+        .await?
+        .remove(object_id)
+        .expect("machine health history must exist after insertion");
+        let retained_reports: Vec<_> = records.into_iter().map(|record| record.health).collect();
+        let expected_reports: Vec<_> = reports.into_iter().skip(1).rev().collect();
+        assert_eq!(retained_reports, expected_reports);
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn switch_health_history_dedup_and_retention(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {

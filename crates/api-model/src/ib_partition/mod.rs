@@ -42,6 +42,11 @@ pub struct IbPartitionSearchFilter {
     pub name: Option<String>,
 }
 
+/// `PKEY_ALLOCATION_SLOT` identifies a partition's PKey in saved allocation
+/// requests. Creation and cleanup must use the same slot to retain ownership
+/// across metadata changes and controller restarts.
+pub const PKEY_ALLOCATION_SLOT: &str = "pkey";
+
 /// Represents an InfiniBand Partition Key
 /// Partition Keys are 16 bit values valid up to a value of 0x7fff
 /// Partition Keys are serialized as strings, since the hex represenation is

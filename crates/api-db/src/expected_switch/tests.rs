@@ -624,16 +624,18 @@ async fn test_find_rms_identities_by_bmc_macs(
 /// The backfill seeds `expected_switch_nvos_interfaces` from the legacy
 /// `nvos_mac_addresses` array, marking each switch's first MAC as primary. A
 /// single-MAC switch gets that MAC as primary; an empty array leaves no rows.
+/// Dropping the legacy column preserves these ports and their primary flags.
 #[crate::sqlx_test]
 async fn backfill_marks_each_switchs_first_nvos_mac_primary(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool.txn_begin().await?;
 
-    // Restore the predecessor state: expected_switches populated through the
-    // legacy array column, with the interface table still empty for these rows.
+    // Recreate the legacy column to exercise the historical backfill after all
+    // migrations have run. The transaction rolls this schema change back.
     sqlx::raw_sql(
-        "INSERT INTO expected_switches
+        "ALTER TABLE expected_switches ADD COLUMN nvos_mac_addresses macaddr[];
+         INSERT INTO expected_switches
              (serial_number, bmc_mac_address, bmc_username, bmc_password, nvos_mac_addresses)
          VALUES
              ('BF-MULTI',  '02:00:00:00:0e:01', 'admin', 'pw',
@@ -656,6 +658,24 @@ async fn backfill_marks_each_switchs_first_nvos_mac_primary(
     ))
     .execute(txn.as_mut())
     .await?;
+
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261124002135_drop_expected_switches_nvos_mac_addresses.sql"
+    ))
+    .execute(txn.as_mut())
+    .await?;
+
+    let legacy_column_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'expected_switches'
+               AND column_name = 'nvos_mac_addresses'
+         )",
+    )
+    .fetch_one(txn.as_mut())
+    .await?;
+    assert!(!legacy_column_exists);
 
     // The ordinality-1 MAC is primary even though it sorts after the other one,
     // so a wrong primary would reorder this primary-first projection.

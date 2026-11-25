@@ -156,6 +156,7 @@ pub(crate) fn component_name(name: &str) -> Option<&str> {
         "GPU" | "gpu" => "gpu",
         "HGX BMC" | "hgxbmc" => "hgxbmc",
         "CX7" | "cx7" => "cx7",
+        "CX8" | "cx8" => "cx8",
         drive
             if drive
                 .strip_prefix("drive-")

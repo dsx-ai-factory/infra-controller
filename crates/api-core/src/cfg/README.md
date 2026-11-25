@@ -72,7 +72,7 @@ compatibility parsing does not restore their former behavior.
 | `bmc_session_lockout_threshold` | `u32` | `3` | `security` | Consecutive BMC HTTP 401/403 responses before session-token login attempts stop for that BMC. |
 | `bmc_max_sessions_per_caller` | `usize` | `4` | `security` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Values below 1 are treated as 1. |
 | `bmc_proxy` | `Option<BmcProxyConfig>` | — | `security` | Routes this instance's ordinary BMC Redfish traffic — including established-endpoint credentialed exploration — through nico-bmc-proxy. Credential setup and rotation, session minting, exploration's anonymous vendor probes, and component-manager compute-tray power control (explicit per-endpoint credentials) always stay direct. |
-| `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. When `ib_config.enabled = true`, v2.4 accepts at most one fabric, named `default`. Each fabric accepts optional `backend` and `remote_pool` selectors with the [ResourcePoolConfig](#resourcepoolconfig) rules, using `ib_fabrics.<fabric>.pkey` as its logical pool name. When InfiniBand management is disabled, selectors are still validated, but fabric configuration alone creates no PKey binding; existing pool inventory can still receive a missing binding. |
+| `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. When `ib_config.enabled = true`, v2.4 accepts at most one fabric, named `default`. Each fabric accepts optional `backend` and `remote_pool` selectors with the [ResourcePoolConfig](#resourcepoolconfig) rules, using `ib_fabrics.<fabric>.pkey` as its logical pool name. The optional `auth` setting selects `"client_certificate"` or `"token"`; omission preserves credential-based selection. An `auth` change needs a Core restart. When InfiniBand management is disabled, selectors are still validated, but fabric configuration alone creates no PKey binding; existing pool inventory can still receive a missing binding. |
 | `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. Also the default NMX-C TLS authority; see [NvLinkConfig](#nvlinkconfig). |
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | `machines` | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
 | `max_concurrent_machine_updates` | `Option<i32>` | — | `machines` | **Deprecated.** Use `machine_updater` instead. |
@@ -96,6 +96,7 @@ compatibility parsing does not restore their former behavior.
 | `ib_partition_state_controller` | `IbPartitionStateControllerConfig` | *(see below)* | `hardware` | IB partition state controller timing. |
 | `dpa_interface_state_controller` | `DpaInterfaceStateControllerConfig` | *(see below)* | `networking` | DPA interface state controller timing. |
 | `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional automatic rack firmware and switch NVOS updates, and primary-switch mTLS service selection. |
+| `nvlink_domain_state_controller` | `NvLinkDomainStateControllerConfig` | *(see below)* | `hardware` | NVLink Domain state controller timing, configured independently of the Rack controller. |
 | `power_shelf_state_controller` | `PowerShelfStateControllerConfig` | *(see below)* | `hardware` | Power shelf state controller timing and optional rack firmware reprovisioning. |
 | `switch_state_controller` | `SwitchStateControllerConfig` | *(see below)* | `hardware` | Switch state controller timing and per-switch mTLS service selection. |
 | `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing and cancellation timeout (see [SpdmStateControllerConfig](#spdmstatecontrollerconfig)). |
@@ -642,6 +643,16 @@ disabled in v2.4.
 | `client_cert_file` | `Option<PathBuf>` | — | Path to a PEM client certificate chain. Must be configured together with `client_key_file`. |
 | `client_key_file` | `Option<PathBuf>` | — | Path to a PEM client private key file. Must be configured together with `client_cert_file`. |
 
+### `IbFabricDefinition`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `endpoints` | `Vec<String>` | **required** | UFM endpoint URLs. |
+| `auth` | `Option<UfmAuthMode>` | — | UFM authentication mode. `"client_certificate"` uses the default SPIFFE client certificate files and reads no UFM credential. `"token"` requires a stored, nonblank UFM token. When omitted, an empty or whitespace-only password selects the client certificate, any other password is a token, and a missing credential is an error. |
+| `pkeys` | `Vec<Range>` | **required** | P_Key ranges available to the fabric. |
+| `backend` | `Option<String>` | — | Named resource-pool backend for this fabric's P_Keys. |
+| `remote_pool` | `Option<String>` | — | Provider lookup name for this fabric's P_Key pool. |
+
 ### `IBFabricConfig`
 
 | Field | Type | Default | Description |
@@ -736,12 +747,12 @@ to keep the previous behavior.
 | `concurrent_explorations` | `u64` | `100` | Max nodes explored in parallel. `0` is treated as `1`. |
 | `explorations_per_run` | `u64` | `360` | Max nodes explored per run. |
 | `exploration_timeouts_before_prevent_allocations` | `u32` | `3` | Explorations of a BMC in a row that must time out before its `BmcExplorationFailure` alert prevents allocations. Other exploration errors prevent allocations immediately. `1` blocks on the first timeout. Until then the BMC is re-explored ahead of the routine refresh. |
-| `create_machines` | `bool` | `true` | When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true. Dynamically toggleable. |
+| `create_machines` | `bool` | `true` | When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true. BMC preingestion is independent of this setting. Dynamically toggleable. |
 | `machines_created_per_run` | `u64` | `100` | Max ManagedHosts created per run. `0` creates none. |
 | `machine_creation_concurrency` | `u64` | `4` | ManagedHosts created at the same time within one run, each in its own transaction under its own admin-lock admission permit. Clamped to at most one below `admin_lock_admission_permits`, and still `1` when the permit count is `1`, in which case that single creation holds the only permit while it runs. `1` creates hosts one after another and `0` is treated as `1`. Read at startup. A change needs a restart. |
 | `switch_and_power_shelf_pass_interval` | `Duration` | `15m` | Minimum time between extra identify-and-create passes for switches and power shelves whose endpoints have completed preingestion while a run is still creating hosts. A pass starts once the interval has elapsed since the run started or since the previous pass and the in-flight host creations have finished. The pass also runs at the end of every run, and `switches_created_per_run` and `power_shelves_created_per_run` count across all passes of a run. `0s` disables the extra passes. Read at startup. A change needs a restart. |
 | `machine_creation_timeout` | `Duration` | `30m` | Deadline of one ManagedHost creation attempt, counted from the moment the attempt holds its admin-lock admission permit. It covers acquiring a pool connection, the creation transaction, and the after-commit admin address repair together. A transaction still running at the deadline fails the attempt (`outcome="failed"` on `carbide_site_explorer_managed_host_creation_latency_milliseconds`), releases the permit, and closes the database connection instead of returning it to the pool. A later run retries the host. PostgreSQL may still finish the abandoned statement, including a `COMMIT` already sent, so a failed attempt can leave the host created, which the next run then skips, and the abandoned session holds its locks until that statement ends. A repair still running at the deadline leaves the host created and is counted by `carbide_site_explorer_host_admin_address_reconcile_failures_total`. It also closes its connection, and its session holds its locks until its statement ends. The host reconciler runs the same repair for each host with DPUs that it revisits, including a host created in the same run, under the same deadline, counted from the repair's own admission permit. The deadline bounds nothing else. The attempt's work before admission (its reads, DPU loopback and ASN preparation, and the wait for the permit), the reconciler's own transaction, and the other database work of a run are outside it. Keep the value above the PostgreSQL `statement_timeout` (`10min` in the `helm-prereqs` PostgreSQL template), so the server ends a statement before the attempt is abandoned. Must be at least `1s` and at most `24h`, and startup rejects other values. Read at startup. A change needs a restart. |
-| `rotate_switch_nvos_credentials` | `bool` | `false` | Auto-rotate switch NVOS admin credentials. |
+| `rotate_switch_nvos_credentials` | `bool` | `false` | Deprecated compatibility field; ignored. Every switch enters [NVOS password handling during preingestion](../../../../docs/operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion). |
 | `override_target_ip` | `Option<String>` | — | **Deprecated.** Use `bmc_proxy`. Debug BMC IP override. |
 | `override_target_port` | `Option<u16>` | — | **Deprecated.** Use `bmc_proxy`. Debug BMC port override. |
 | `bmc_proxy` | `HostPortPair` | — | BMC proxy host:port for integration testing/dev. |
@@ -750,8 +761,10 @@ to keep the previous behavior.
 | `admin_segment_type_non_dpu` | `bool` | `false` | Non-DPU hosts use `HostInband` admin segment type. |
 | `create_power_shelves` | `bool` | `true` | Auto-create Power Shelf state machines for explored shelves with a matching `expected_power_shelves` record. Shelves are discovered at their `expected_power_shelves` static IP even without a DHCP lease. |
 | `power_shelves_created_per_run` | `u64` | `1` | Max power shelves created per run. `0` creates none. |
-| `create_switches` | `bool` | `true` | Auto-create Switch state machines for explored switches with a matching `expected_switches` record. |
+| `create_switches` | `bool` | `true` | Auto-create Switch state machines for explored switches with a matching `expected_switches` record. Disabling creation does not disable switch BMC preingestion or initial NVOS password rotation. |
 | `switches_created_per_run` | `u64` | `9` | Max switches created per run. `0` creates none. |
+| `host_bluefield_rules` | `HostBlueFieldRules` (array of rule tables) | `[]` | `nico-api` loads these part-number rules at startup and checks them before built-in rules. See [OEM part numbers for host–DPU pairing](../../../../docs/provisioning/boot-interfaces-and-dpu-modes.md#oem-part-numbers-for-hostdpu-pairing). |
+| `host_serial_rules` | `HostSerialRules` (array of rule tables) | `[]` | Site-specific Redfish serial sources for host Expected Machine audits, checked in order before built-ins. Chassis patterns in `chassis_assembly` rules select Assembly collection. A later config layer that sets the list replaces it. `nico-api` reads the list at startup. See [Select the host inventory serial number](../../../../docs/provisioning/ingesting-hosts.md#select-the-host-inventory-serial-number). |
 | `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. |
 | `dpu_policy` | `Option<HostDpuPolicy>` | — (effective: `manage`) | Site-wide policy for DPU hardware: `manage`, `nic`, or `ignore`. Per-host `nic` and `ignore` override it; per-host `manage` inherits it for backward compatibility. When omitted, the site default is `manage`. The previous `use_as_nic` value and the legacy `dpu_mode` field with `dpu_mode` / `nic_mode` / `no_dpu` values remain accepted during deserialization. |
 
@@ -844,6 +857,14 @@ TOML section: `[rack_state_controller]`.
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
 | `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` binds `nvue_api` before RMS V2. RMS V2 binds NMX-C on the selected primary. gNMI requires an explicit `switch_mtls_services` entry; nmx-telemetry uses the effective service list. |
 
+### `NvLinkDomainStateControllerConfig`
+
+TOML section: `[nvlink_domain_state_controller]`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). Omission uses the shared defaults. |
+
 ### `SpdmStateControllerConfig`
 
 TOML section: `[spdm_state_controller]`. Changes require an API restart.
@@ -919,7 +940,7 @@ TOML section: `[observability.per_object_state_metrics]`.
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Registers per-object state metrics and starts the dedicated listener. When `object_types` is empty, registration and the listener are both skipped even if this is `true`. |
 | `listen_address` | `SocketAddr` | `[::]:9091` | Dual-stack address serving `/metrics`; the Helm chart derives it from `service.perObjectStateMetrics.port`. |
-| `object_types` | `Vec<PerObjectStateMetricObjectType>` | all supported types | Types to publish: `machine`, `switch`, `power_shelf`, `rack`, `network_segment`, `vpc_prefix`, `spdm_attestation`, and/or `ib_partition`. An empty list publishes no state series and skips the dedicated listener. |
+| `object_types` | `Vec<PerObjectStateMetricObjectType>` | all supported types | Types to publish: `machine`, `switch`, `power_shelf`, `rack`, `network_segment`, `vpc_prefix`, `spdm_attestation`, `ib_partition`, and/or `nvlink_domain`. An empty list publishes no state series and skips the dedicated listener. |
 
 ### `MachineStateControllerConfig`
 
@@ -1037,11 +1058,13 @@ restart. Base configuration is overridden by site configuration, then
 `CARBIDE_API_` environment configuration.
 
 See the [firmware download operational guide](../../../../docs/operations/firmware-updates/configuration.md#firmware-downloads)
-for affected workflows, deployment guidance, and failure handling.
+for affected workflows, deployment guidance, and failure handling. For NIC site-cache requests, see
+[request admission, reader limits and retry responses](../../../../docs/operations/firmware-updates/configuration.md#scout-nic-firmware-delivery).
+The request and reader limits are independent of `max_concurrent_downloads`.
 
 | Field | Type | Default | Accepted range and behavior |
 | ------- | ------ | --------- | ------------- |
-| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` cache-verification/download workers per Core process, shared by NIC artifact checks, legacy firmware updates, and preingestion. A slot remains occupied through filesystem work and cleanup after cancellation. Saturation defers the next check, even for a cached artifact, without queuing work or consuming a recorded failure; NIC HTTP callers receive `202` with `Retry-After: 5`. Established NIC response readers have a separate 32-reader limit. |
+| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` workers per Core process, shared by NIC artifact checks, legacy firmware updates and pre-ingestion. A busy pool queues no download waiter. The caller polls again, even for cached content. A worker stays occupied through filesystem work and cleanup after cancellation. |
 | `max_download_bytes` | `u64` | `4294967296` (4 GiB) | `1`–`17179869184` (16 GiB) bytes per HTTP response body, counted while streaming regardless of `Content-Length`. Each active NIC transfer reserves this many cache bytes, so `nic_firmware_cache_capacity_bytes` must cover at least one maximum transfer. |
 | `connect_timeout_seconds` | `u64` | `30` | `1`–`300` seconds to connect. |
 | `read_timeout_seconds` | `u64` | `60` | `1`–`600` seconds from starting the request through receiving final response headers, including connection establishment; then an idle timer that resets after each body read. |
@@ -1877,8 +1900,13 @@ the existing `DPUDevice` values and does not apply the new prefixes.
 | ------- | ------ | --------- | ------------- |
 | `underlay_rail_route_prefix_len` | `u8` | `16` | Optional override for IPv4 route prefix length (0–31) for each rail in Astra DPUDevice values. |
 | `underlay_software_plane_route_prefix_len` | `u8` | `13` | Optional override for IPv4 route prefix length (0–31) for each software plane in Astra DPUDevice values. |
-| `underlay_ip_rail_id_bit_len` | `u8` | `4` | Optional override for the number of bits used to identify a rail in the Weave service configuration. |
-| `underlay_ip_software_plane_id_bit_len` | `u8` | `8` | Optional override for the number of bits used to identify a software plane in the Weave service configuration. |
+| `underlay_ip_rail_id_bit_len` | `u8` | `3` | Optional override for the number of bits used to identify a rail in the Weave service configuration. |
+| `underlay_ip_software_plane_id_bit_len` | `u8` | `2` | Optional override for the number of bits used to identify a software plane in the Weave service configuration. |
+
+Weave adds the software-plane identifier bit length to `ewethers_config.subnet_mask`
+to derive the software-plane DHCP route prefix, then adds the rail identifier bit
+length for the rail route prefix. With the default `/11` overlay, the default bit
+lengths `2` and `3` produce `/13` software-plane and `/16` rail DHCP routes.
 
 Configuration loading rejects route prefix lengths of 32 or greater and a combined
 rail/software-plane identifier bit length of 32 or greater for IPv4.
@@ -2091,6 +2119,10 @@ be propagated there by DPF.
 | `tests` | `Vec<MachineValidationTestConfig>` | `[]` | Per-test enable/disable overrides. |
 | `approved_plugin_registries` | `Vec<String>` | `[]` | Registries allowed for Machine Validation plugin images. Empty denies plugin registration; legacy tests are unaffected. |
 | `allowed_plugin_types` | `Vec<String>` | `["container"]` | Plugin execution types allowed for the site. Empty denies plugin registration; the only accepted value is `container`. |
+| `allowed_container_plugin_adapters` | `Vec<String>` | `[]` | Named container adapters approved for registration, enablement, and launch authorization. Empty denies named adapters; omission retains the standard NICo contract. `DSXHealthValidation` requires all three `allow_plugin_host_*` settings, including socket approval without GPU-count overrides. Remove it from this list before disabling any required setting. Revocation blocks new launches; running attempts retain liveness reporting. |
+| `allow_plugin_host_network` | `bool` | `false` | Allows approved adapters to share the host network namespace. |
+| `allow_plugin_host_pid` | `bool` | `false` | Allows approved adapters to share the host PID namespace. |
+| `allow_plugin_host_sockets` | `bool` | `false` | Allows approved adapters to connect to explicitly mounted host Unix sockets. Read-only socket mounts still permit protocol requests. |
 | `allow_privileged_plugins` | `bool` | `false` | Allows registration of plugins that request the privileged container profile. |
 | `allow_full_host_plugins` | `bool` | `false` | Allows registration of privileged plugins that request a writable host-root mount. Each revision still needs separate approval before it can be enabled. |
 | `attempt_logs` | `MachineValidationAttemptLogConfig` | enabled, 16 KiB/chunk, 1 MiB/attempt, 30d | Site-wide storage policy for Machine Validation attempt logs. |
@@ -2163,9 +2195,11 @@ local environment and file sources before the configured persistent backends.
 | `file` | `Option<CredentialFileSourceConfig>` | — | Watched JSON or YAML static-credential file (see [CredentialFileSourceConfig](#credentialfilesourceconfig)). When present, it replaces the legacy file source selected by `CARBIDE_CREDENTIALS_FILE_*`; the environment source remains first when enabled. |
 
 When `ufm_source = "local"` and InfiniBand management is enabled, startup
-requires a local `ufm_auth_by_fabric` entry for every configured fabric. The
-mode is all-or-nothing: NICo does not fall back to Vault or Postgres for a
-missing fabric. When `ufm_source` is omitted, `local_first` preserves the
+requires a local `ufm_auth_by_fabric` entry for every configured fabric unless
+that fabric sets `auth = "client_certificate"`. For `auth = "token"`, the first
+local entry found must have a non-blank password. The mode is all-or-nothing:
+NICo does not fall back to Vault or Postgres for a missing or blank required
+fabric credential. When `ufm_source` is omitted, `local_first` preserves the
 pre-existing local-override behavior.
 
 When `bmc_site_wide_root_source = "local"`, readers report a missing local
@@ -2210,8 +2244,13 @@ UFM fabric using the default prefix:
 ```bash
 export CARBIDE_CREDENTIALS_ENV_ENABLED=true
 export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__USERNAME=ignored-for-token-or-certificate-auth
-export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-token-or-empty
+export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=ufm-token-or-empty
 ```
+
+With `auth = "token"`, the password must be a nonblank UFM token. With
+`auth` unset, an empty or whitespace-only password selects the default SPIFFE
+client certificate. A fabric with `auth = "client_certificate"` does not read
+these variables.
 
 Environment credentials are snapshotted at process startup. Changing them
 requires restarting `nico-api`; use the watched file source for supported
@@ -2219,7 +2258,8 @@ live-reload workflows. The site-wide BMC root version 0 has the bootstrap-only
 boundary described above. With `ufm_source = "local_first"`, an environment entry
 overrides the corresponding file and persistent-backend entries. With
 `ufm_source = "local"`, every configured fabric must be present in the enabled
-environment/file sources.
+environment/file sources unless it sets `auth = "client_certificate"`; an
+explicit token entry must have a non-blank password.
 
 For version 0 of the site-wide BMC root, the environment entry likewise
 precedes the file entry in `local_first` and `local` modes. Versioned roots do
@@ -2233,15 +2273,17 @@ not use either local source.
 | `poll_interval` | `Duration` | `60s` | Nonzero interval used in addition to filesystem events to detect projected-Secret replacements. Startup rejects zero. |
 
 The watcher keeps the last valid snapshot when a reload fails. A UFM-only YAML
-file has the following shape; both `username` and `password` are required. The
-password is the bearer token, while an empty password selects the default
-SPIFFE client certificate:
+file has the following shape; both `username` and `password` are required. With
+`auth = "token"`, the password is a nonblank UFM token. With `auth` unset, an
+empty or whitespace-only password selects the default SPIFFE client certificate
+and any other password is the UFM token. A fabric with
+`auth = "client_certificate"` does not read this credential:
 
 ```yaml
 ufm_auth_by_fabric:
   default:
     username: ignored-for-token-or-certificate-auth
-    password: bearer-token-or-empty
+    password: ufm-token-or-empty
 ```
 
 A sparse file may instead contain only version 0 of the site-wide BMC root:

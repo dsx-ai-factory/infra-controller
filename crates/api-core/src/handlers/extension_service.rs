@@ -17,6 +17,7 @@
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
+use ::rpc::model::instance::config::extension_services::service_vpc_ids_for_attachment;
 use carbide_extension_service_controller::interface_mac::ensure_interface_mac;
 use carbide_instrument::{Event, LabelValue};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
@@ -1202,6 +1203,12 @@ pub(crate) async fn find_instances_by_extension_service(
                 instance_id: instance.id.to_string(),
                 service_id: service_id.to_string(),
                 version: service_version.to_string(),
+                attachment_id: ext_service_config.id.map(Into::into),
+                service_vpc_ids: service_vpc_ids_for_attachment(
+                    ext_service_config,
+                    &instance.config.network.service_interfaces,
+                )
+                .map_err(|error| CarbideError::internal(error.to_string()))?,
                 removed: ext_service_config
                     .removed
                     .or(instance.deleted)

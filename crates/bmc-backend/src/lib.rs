@@ -33,6 +33,7 @@ mod power;
 mod secure_boot;
 mod status;
 mod storage;
+mod super_nic;
 
 pub use accounts::{BackendAccountBmc, BackendAccounts};
 pub use bios::BackendBios;
@@ -50,6 +51,7 @@ pub use status::{
     idrac_job, idrac_outcome, libredfish_operation_status, redfish_task, redfish_task_id,
 };
 pub use storage::BackendStorage;
+pub use super_nic::BackendSuperNic;
 
 /// A connected BMC on the configured backend.
 pub enum BackendBmc {

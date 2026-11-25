@@ -1,17 +1,16 @@
-# `nico-admin-cli expected-nvlink-domain delete`
+# `nico-admin-cli nvlink-domain delete`
 
-*[Tenant commands](../../tenant.md) › [expected-nvlink-domain](./expected-nvlink-domain.md) › **delete***
+*[Tenant commands](../../tenant.md) › [nvlink-domain](./nvlink-domain.md) › **delete***
 
 ## NAME
 
-nico-admin-cli-expected-nvlink-domain-delete - Delete a declaration and
-release its members without changing hardware
+nico-admin-cli-nvlink-domain-delete - Delete a declaration and release
+its members without changing hardware
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli expected-nvlink-domain delete [-h|--help]
-<ID>
+nico-admin-cli nvlink-domain delete [-h|--help] <ID>
 ```
 
 ## DESCRIPTION
@@ -32,7 +31,7 @@ not change hardware or observed NVLink domains.
 ## Examples
 
 ```sh
-nico-admin-cli expected-nvlink-domain delete 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli nvlink-domain delete 12345678-1234-5678-90ab-cdef01234567
 ```
 
 ---

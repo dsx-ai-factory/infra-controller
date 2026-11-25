@@ -31,6 +31,7 @@ use carbide_firmware::defaults::{
     BF3_CEC_VERSION, BF3_NIC_VERSION, BF3_UEFI_VERSION,
 };
 use carbide_host_support::bootstrap_ca::BootstrapCaSource;
+pub use carbide_ib_fabric::config::UfmAuthMode;
 use carbide_ib_fabric::config::{IBFabricConfig, IbFabricDefinition};
 use carbide_machine_controller::config::power_manager::default_power_options;
 use carbide_machine_controller::config::{
@@ -655,6 +656,10 @@ pub struct CarbideConfig {
     /// RackStateController related configuration parameter
     #[serde(default)]
     pub rack_state_controller: RackStateControllerConfig,
+
+    /// NVLink Domain controller scheduling, independent of the Rack controller.
+    #[serde(default)]
+    pub nvlink_domain_state_controller: NvLinkDomainStateControllerConfig,
 
     /// PowerShelfStateController related configuration parameter
     #[serde(default)]
@@ -1321,8 +1326,9 @@ pub enum UfmCredentialSource {
     /// Local environment/file UFM entries are ignored.
     Backend,
     /// Read UFM credentials only from the local environment/file sources.
-    /// Every configured fabric must be present when IB management starts, and
-    /// persistent backend mutation is disabled.
+    /// Every configured fabric without explicit client-certificate authentication
+    /// must be present when IB management starts, and persistent backend mutation
+    /// is disabled.
     Local,
 }
 
@@ -1654,10 +1660,11 @@ pub enum PerObjectStateMetricObjectType {
     VpcPrefix,
     SpdmAttestation,
     IbPartition,
+    NvlinkDomain,
 }
 
 impl PerObjectStateMetricObjectType {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Machine,
         Self::Switch,
         Self::Rack,
@@ -1666,6 +1673,7 @@ impl PerObjectStateMetricObjectType {
         Self::VpcPrefix,
         Self::SpdmAttestation,
         Self::IbPartition,
+        Self::NvlinkDomain,
     ];
 
     /// The `object_type` label token; must match what the controllers record.
@@ -1679,6 +1687,7 @@ impl PerObjectStateMetricObjectType {
             Self::VpcPrefix => "vpc_prefix",
             Self::SpdmAttestation => "spdm_attestation",
             Self::IbPartition => "ib_partition",
+            Self::NvlinkDomain => "nvlink_domain",
         }
     }
 }
@@ -2329,7 +2338,7 @@ impl DpfConfig {
 }
 
 fn default_dpf_bfb_url() -> String {
-    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.5.0-89_26.07_ubuntu-24.04_64k_prod.bfb".to_string()
+    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.6.0-86_26.10_ubuntu-24.04_64k_prod.bfb".to_string()
 }
 
 fn default_dpf_deployment_name() -> String {
@@ -4298,6 +4307,15 @@ pub struct PowerShelfStateControllerConfig {
     pub rack_firmware_reprovisioning_enabled: bool,
 }
 
+/// NVLink Domain controller scheduling configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NvLinkDomainStateControllerConfig {
+    /// Common scheduling and concurrency settings; defaults match Rack.
+    #[serde(default)]
+    pub controller: StateControllerConfig,
+}
+
 /// RackStateController related config
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -5656,6 +5674,25 @@ mod tests {
     use model::vpc::VpcRoutingProfileOverrides;
 
     use super::*;
+
+    #[test]
+    fn per_object_state_metrics_accepts_nvlink_domains() {
+        let config: PerObjectStateMetricsConfig = toml::from_str(
+            r#"enabled = true
+object_types = ["nvlink_domain"]"#,
+        )
+        .unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.object_types.len(), 1);
+        let domain = config.object_types[0];
+        assert_eq!(domain.as_str(), "nvlink_domain");
+        assert_eq!(serde_json::to_value(domain).unwrap(), "nvlink_domain");
+        assert!(
+            PerObjectStateMetricsConfig::default()
+                .object_types
+                .contains(&domain)
+        );
+    }
 
     /// Disabling both bearer tokens and machine mTLS would lock every node out
     /// of the API; validation must refuse the combination, and each mechanism
@@ -8847,7 +8884,7 @@ mqtt_endpoint = "mqtt.forge"
                 dpa_config.astra.underlay_ip_rail_id_bit_len,
                 dpa_config.astra.underlay_ip_software_plane_id_bit_len,
             ),
-            (16, 13, 4, 8)
+            (16, 13, 3, 2)
         );
     }
 

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 
 	"github.com/google/uuid"
@@ -125,6 +126,15 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 		}
 
 		reportedVpcPrefixIDMap[vpcPrefix.ID] = true
+
+		// Runs before the missing flag and status updates below, which change the
+		// row's Updated time.
+		if controllerVpcPrefix.Metadata != nil {
+			serr := mvp.updateVpcPrefixMetadataFromSite(ctx, site, vpcPrefix, controllerVpcPrefix)
+			if serr != nil {
+				slogger.Error().Err(serr).Msg("failed to update VPC Prefix name and labels from Site")
+			}
+		}
 
 		// Reset missing flag if necessary
 		var isMissingOnSite *bool
@@ -493,8 +503,17 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 				return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to clear soft-delete timestamp for VPC Prefix, DB error: %w", clearErr)
 			}
 			status, statusMessage := getControllerVpcPrefixStatus(controllerVpcPrefix.GetStatus())
+			// This update changes the row's Updated time, so inventory leaves the row
+			// alone for the stale inventory threshold. Replace the labels here, or the
+			// ones from before the delete stay until then. Nil is not written by the
+			// DAO, so an empty map clears them.
+			labels := reportedVpcPrefix.Labels
+			if labels == nil {
+				labels = cdbm.Labels{}
+			}
 			updated, updateErr := vpcPrefixDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{
 				VpcPrefixID: restored.ID,
+				Labels:      labels,
 				Status:      &status,
 			})
 			if updateErr != nil {
@@ -531,6 +550,7 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			VpcID:        vpc.ID,
 			TenantID:     vpc.TenantID,
 			IpBlockID:    &ipBlock.ID,
+			Labels:       reportedVpcPrefix.Labels,
 			Prefix:       reportedVpcPrefix.Prefix,
 			PrefixLength: reportedPrefixLength,
 			Status:       cdbm.VpcPrefixStatusReady,
@@ -552,6 +572,82 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 		return nil
 	}
 	return vpcPrefix
+}
+
+// updateVpcPrefixMetadataFromSite copies the name and labels the Site reports
+// into the REST row. Core is the source of truth for both, and the REST handlers
+// already write to Core synchronously, so a difference means Core changed.
+func (mvp ManageVpcPrefix) updateVpcPrefixMetadataFromSite(
+	ctx context.Context,
+	site *cdbm.Site,
+	vpcPrefix *cdbm.VpcPrefix,
+	controllerVpcPrefix *corev1.VpcPrefix,
+) error {
+	reportedVpcPrefix := new(cdbm.VpcPrefix)
+	reportedVpcPrefix.FromProto(controllerVpcPrefix)
+
+	nameChanged := reportedVpcPrefix.Name != "" && vpcPrefix.Name != reportedVpcPrefix.Name
+	labelsChanged := !maps.Equal(vpcPrefix.Labels, reportedVpcPrefix.Labels)
+	if !nameChanged && !labelsChanged {
+		return nil
+	}
+
+	// A row written since the Site collected this inventory holds changes the
+	// snapshot cannot know about, such as labels just cleared through the API.
+	if site.IsTimeWithinStaleInventoryThreshold(vpcPrefix.Updated) {
+		return nil
+	}
+
+	updated, err := cdb.WithTxResult(ctx, mvp.dbSession, func(tx *cdb.Tx) (*cdbm.VpcPrefix, error) {
+		// Same lock as UpdateVpcPrefixHandler, so an API update cannot interleave.
+		lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(vpcPrefix.ID.String()), nil)
+		if lockErr != nil {
+			return nil, fmt.Errorf("failed to acquire VPC Prefix update lock: %w", lockErr)
+		}
+
+		vpcPrefixDAO := cdbm.NewVpcPrefixDAO(mvp.dbSession)
+		locked, getErr := vpcPrefixDAO.GetByID(ctx, tx, vpcPrefix.ID, nil)
+		if getErr != nil {
+			return nil, fmt.Errorf("failed to retrieve VPC Prefix from DB: %w", getErr)
+		}
+		if !locked.Updated.Equal(vpcPrefix.Updated) {
+			return nil, nil
+		}
+
+		input := cdbm.VpcPrefixUpdateInput{VpcPrefixID: locked.ID}
+		if labelsChanged {
+			// Nil is not written by the DAO, so an empty map clears the labels.
+			input.Labels = reportedVpcPrefix.Labels
+			if input.Labels == nil {
+				input.Labels = cdbm.Labels{}
+			}
+		}
+		if nameChanged {
+			nameConflicts, _, nameErr := vpcPrefixDAO.GetAll(ctx, tx, cdbm.VpcPrefixFilterInput{
+				Names: []string{reportedVpcPrefix.Name}, TenantIDs: []uuid.UUID{locked.TenantID}, SiteIDs: []uuid.UUID{locked.SiteID},
+			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if nameErr != nil {
+				return nil, fmt.Errorf("failed to retrieve VPC Prefix by name, DB error: %w", nameErr)
+			}
+			// REST keeps names unique for the Tenant on the Site and Core does not,
+			// so a name another VPC Prefix already uses is not copied.
+			if len(nameConflicts) == 0 {
+				input.Name = &reportedVpcPrefix.Name
+			}
+		}
+		if input.Name == nil && input.Labels == nil {
+			return nil, nil
+		}
+
+		return vpcPrefixDAO.Update(ctx, tx, input)
+	})
+	if err != nil {
+		return err
+	}
+	if updated != nil {
+		*vpcPrefix = *updated
+	}
+	return nil
 }
 
 // getControllerVpcPrefixStatus maps Controller VPC Prefix tenant state into REST status and status-detail text.

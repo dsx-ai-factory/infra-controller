@@ -659,8 +659,8 @@ fn catalog_component_regex(
             }
 
             match component_type {
-                FirmwareComponentType::Bmc => Some("^BMC-Primary"),
-                FirmwareComponentType::Uefi => Some("^UEFI"),
+                FirmwareComponentType::Bmc => Some("^BMC-Primary$"),
+                FirmwareComponentType::Uefi => Some("^UEFI$"),
                 _ => None,
             }
         }
@@ -949,7 +949,7 @@ fn host_firmware_version_config_response(
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
 
@@ -985,7 +985,7 @@ mod tests {
             FirmwareComponentType::Bmc,
         )
         .unwrap();
-        assert_eq!(lenovo_ami_regex.as_str(), "^BMC-Primary");
+        assert_eq!(lenovo_ami_regex.as_str(), "^BMC-Primary$");
 
         let gb300_regex = component_regex(
             bmc_vendor::BMCVendor::LenovoAMI,
@@ -996,6 +996,29 @@ mod tests {
         assert!(gb300_regex.is_match("BMC"));
         assert!(!gb300_regex.is_match("BMC-Primary"));
         assert!(!gb300_regex.is_match("HGX_BMC_0"));
+    }
+
+    #[test]
+    fn component_regex_lenovo_matches_active_inventory_only() {
+        for vendor in [
+            bmc_vendor::BMCVendor::Lenovo,
+            bmc_vendor::BMCVendor::LenovoAMI,
+        ] {
+            value_scenarios!(run = |(component, id)| {
+                component_regex(vendor, "ThinkSystem SR650 V4", component)
+                    .unwrap()
+                    .is_match(id)
+            };
+                "active inventory" {
+                    (FirmwareComponentType::Bmc, "BMC-Primary") => true,
+                    (FirmwareComponentType::Uefi, "UEFI") => true,
+                }
+                "pending inventory" {
+                    (FirmwareComponentType::Bmc, "BMC-Primary-Pending") => false,
+                    (FirmwareComponentType::Uefi, "UEFI-Pending") => false,
+                }
+            );
+        }
     }
 
     #[test]

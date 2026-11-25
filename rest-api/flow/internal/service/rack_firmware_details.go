@@ -20,8 +20,7 @@ import (
 // rackFirmwareDetails holds each component's firmware evidence and shared tasks.
 // Actions stay with their component; tasks appear once, with references from all
 // selected components. Any later task-list replacement must also replace those
-// references and their errors. The rack RPC is tracked in
-// https://github.com/dsx-ai-factory/infra-controller/issues/8637.
+// references and their errors.
 type rackFirmwareDetails struct {
 	components []rackFirmwareComponentDetails
 	actual     rackFirmwareCoverage
@@ -31,7 +30,7 @@ type rackFirmwareDetails struct {
 
 // firmwareCoreDetails keeps the three independently available Core sections
 // together after the caller has checked response identity and cardinality and
-// applied readCoreFirmwareDetails' section-presence rules. Present wrappers must
+// applied coreFirmwareDetailsSections' section-presence rules. Present wrappers must
 // contain a value or read error; Core values require installed/expected results
 // and both stored/backend action sections. Known read failures belong in explicit
 // error wrappers, so assembly never has to infer a deadline or configuration error.
@@ -113,7 +112,7 @@ func assembleRackFirmwareDetails(members []component.Component, core map[uuid.UU
 			code = pb.FirmwareDetailsReadError_FIRMWARE_DETAILS_READ_ERROR_READ_FAILED
 		}
 		actual, desired, actions := unavailableCoreFirmwareDetails(code)
-		// Missing individual sections follow readCoreFirmwareDetails' Unsupported
+		// Missing individual sections follow coreFirmwareDetailsSections' Unsupported
 		// contract, while the other sections keep their successful evidence.
 		if !found || sections.actual == nil {
 			sections.actual = actual

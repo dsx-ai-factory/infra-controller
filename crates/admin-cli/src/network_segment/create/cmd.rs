@@ -20,6 +20,7 @@ use rpc::forge;
 
 use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
+use crate::network_segment::show::cmd::format_segment_after_mutation;
 use crate::rpc::ApiClient;
 
 pub(super) async fn create(
@@ -39,10 +40,7 @@ pub(super) async fn create(
         OutputFormat::AsciiTable => {
             println!(
                 "{}",
-                crate::network_segment::show::cmd::convert_network_to_nice_format(
-                    segment, None, api_client,
-                )
-                .await?
+                format_segment_after_mutation(segment, api_client).await?
             );
         }
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&segment)?),

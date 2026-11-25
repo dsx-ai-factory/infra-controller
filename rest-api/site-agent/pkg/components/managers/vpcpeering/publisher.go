@@ -30,7 +30,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverVpcPeeringInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("VpcPeering: Successfully registered DiscoverVpcPeeringInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

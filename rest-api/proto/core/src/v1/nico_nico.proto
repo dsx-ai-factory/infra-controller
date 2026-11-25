@@ -706,7 +706,8 @@ service Forge {
   // or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
   // Positions already claimed by another domain return ALREADY_EXISTS.
   rpc CreateNvLinkDomain(CreateNvLinkDomainRequest) returns (NvLinkDomain);
-  // Delete only the declaration and release its positions; no hardware operations occur.
+  // Delete an unadopted declaration and release its positions; no hardware operations occur.
+  // Controller-owned domains are marked for asynchronous deletion and retain their positions.
   // Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
   rpc DeleteNvLinkDomain(NvLinkDomainRequest) returns (google.protobuf.Empty);
   rpc GetNvLinkDomain(NvLinkDomainRequest) returns (NvLinkDomain);
@@ -5060,6 +5061,10 @@ message MachineStatus {
   repeated InterfaceLldp lldp_neighbors = 25;
   // Observed BMC versions, populated even when individual versions are unknown.
   BmcStatus bmc_status = 26;
+  // Last hardware command reserved on this host, including a command targeting an attached DPU.
+  // Read the host's status for that reservation. Without a saved record this protobuf field
+  // is unset and the Rust machine JSON renders it as null.
+  optional NicFirmwareDispatchStatus nic_firmware_dispatch = 27;
 }
 
 message Machine {
@@ -8568,11 +8573,19 @@ message MachineValidationHeartbeatRequest {
     common.UUID run_item_id = 2;
     common.UUID attempt_id = 3;
     string test_id = 4;
+    // Authorize a new plugin launch for this test's active immutable run item.
+    // Does not record liveness or stop an already running container. Callers
+    // must require plugin_launch_authorized in the response, including when
+    // talking to older servers that do not understand this target.
+    string plugin_launch_test_id = 5;
   }
 }
 
 message MachineValidationHeartbeatResponse {
   bool accepted = 1;
+  // Explicit acknowledgement of an accepted plugin_launch_test_id request.
+  // False for ordinary heartbeats and responses from older servers.
+  bool plugin_launch_authorized = 2;
 }
 
 message IsBmcInManagedHostResponse {
@@ -8702,6 +8715,10 @@ message MachineValidationTest {
 // entrypoint arguments are passed directly to the container runtime.
 message MachineValidationPlugin {
   string image = 1;
+  // Command vector invoked without a shell. The standard contract appends it
+  // to the image ENTRYPOINT (or uses it as the command when ENTRYPOINT is empty).
+  // DSXHealthValidation overrides the executable with the first element and
+  // passes the remaining elements as arguments.
   repeated string entrypoint = 2;
   // JSON object of non-secret site-defined values included in input.json.
   string parameters_json = 3;
@@ -8709,6 +8726,11 @@ message MachineValidationPlugin {
   bool host_access_full = 5;
   // Plugin implementation type. `container` is the currently supported type.
   string type = 6;
+  // Optional contract adapter for this immutable container revision.
+  // Omission uses the standard NICo input.json/result.json contract.
+  // DSXHealthValidation prepares HealthValidation inputs and interprets only
+  // overall_severity in its JSON stdout. Unknown or empty names are rejected.
+  optional string container_plugin_adapter = 7;
 }
 
 message MachineValidationTestFullHostApprovalRequest {
@@ -9463,6 +9485,8 @@ message DpaInterface {
   optional string device_description = 20;
 
   DpaInterfaceType interface_type = 21;
+
+  optional string interface_name = 22;
 }
 
 enum DpaInterfaceType {
@@ -10713,6 +10737,10 @@ message InstanceDpuExtensionServiceInfo {
   // instance, this falls back to the instance-deletion timestamp. It is unset
   // only while both the attachment and instance remain active.
   optional string removed = 4;
+  // Server-owned identity of the selected attachment. Legacy attachments may omit it.
+  common.UUID attachment_id = 5;
+  // VPC selections in interface ordinal order while the attachment retains service interfaces.
+  repeated common.VpcId service_vpc_ids = 6;
 }
 
 message DpuExtensionServiceObservabilityConfigPrometheus {
@@ -14359,5 +14387,58 @@ message CancelVpcCreationResponse {
     Vpc created_vpc = 1;
     // This ID cannot be created later and unfinished allocation cleanup is complete.
     google.protobuf.Empty cancelled = 2;
+  }
+}
+
+// Read-only evidence of the hardware reservation used to exclude conflicting NIC firmware work.
+// Core retains the last command after settlement until a new command replaces it.
+message NicFirmwareDispatchStatus {
+  // Always populated. Request identity assigned before dispatch.
+  common.UUID token = 1;
+  // Always populated. When Core recorded ownership, before transport delivery.
+  google.protobuf.Timestamp started_at = 2;
+  // When Core released the reservation. Absent while unresolved. For example, Core may
+  // settle when the BMC accepts a reboot, before any observed OS restart, or when it
+  // establishes that a command was never sent. The record does not distinguish the outcomes.
+  optional google.protobuf.Timestamp settled_at = 3;
+
+  // Core sets exactly one origin with the saved target. A reader that does not recognize
+  // the origin cannot use that absence to infer that the command is safe to replay.
+  oneof origin {
+    MlxAdmin mlx_admin = 4;
+    InstanceReboot instance_reboot = 5;
+  }
+
+  message MlxAdmin {
+    // Always populated. The host or attached DPU whose Scout was selected for this request.
+    common.MachineId machine_id = 1;
+    // The mutating MLX admin command saved before delivery. An unknown value conveys no
+    // evidence that the operation can be replayed.
+    Command command = 2;
+
+    enum Command {
+      COMMAND_UNSPECIFIED = 0; // Never emitted by Core.
+      COMMAND_PROFILE_SYNC = 1; // Apply a named configuration profile.
+      COMMAND_CONFIG_SET = 2; // Apply individual configuration settings.
+      COMMAND_CONFIG_SYNC = 3; // Synchronize the supplied configuration assignments.
+      COMMAND_LOCK = 4; // Enable device lockdown.
+      COMMAND_UNLOCK = 5; // Disable device lockdown.
+    }
+  }
+
+  message InstanceReboot {
+    // Always populated. Host selected for the reboot.
+    common.MachineId machine_id = 1;
+    // Always populated. Allocation that authorized the request, even after release.
+    common.InstanceId instance_id = 2;
+    // Always populated from the BMC endpoint captured for this request. Unknown fields are unset.
+    BmcEndpoint bmc = 3;
+    // Latest attempt checkpoint, saved before sending. Absent when no attempt is recorded.
+    optional google.protobuf.Timestamp last_attempt_at = 4;
+    // Earliest time the original worker's reservation permits another controller to reconcile.
+    // The separate retry interval must also elapse. Neither expiry settles the command.
+    // An older unresolved attempt can omit this timestamp. When the reboot handler encounters
+    // such an attempt it requires manual intervention.
+    optional google.protobuf.Timestamp reconcile_after = 5;
   }
 }

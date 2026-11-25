@@ -425,6 +425,10 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
         (Some("machine-validation"), Some("logs"))
             | (Some("machine"), Some("states"))
             | (Some("network-segment"), Some("add-prefix"))
+            | (
+                Some("instance"),
+                Some("allocate" | "update-extension-services")
+            )
             | (Some("nvlink-domain"), Some("create" | "show"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)

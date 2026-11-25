@@ -14,6 +14,8 @@
 				<dd>{% if let Some(machine_id) = dpa.machine_id %}{{ machine_id|machine_id_link|safe }}{% else %}<span class="text-muted">None</span>{% endif %}</dd>
 				<dt>MAC Address</dt>
 				<dd><code class="mac">{{ dpa.mac_addr }}</code></dd>
+				<dt>Interface Name</dt>
+				<dd>{{ dpa.interface_name|option_fmt }}</dd>
 				<dt>Underlay IP</dt>
 				<dd>{{ dpa.underlay_ip }}</dd>
 				<dt>Overlay IP</dt>

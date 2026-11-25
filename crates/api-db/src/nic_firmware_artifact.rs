@@ -61,7 +61,8 @@ pub async fn lock_retention_for_update(txn: &mut PgConnection) -> DatabaseResult
 /// Use read-committed isolation and call `snapshot` after this returns, so its
 /// statement snapshot includes a writer that committed while the lock waited.
 /// Keep the transaction through physical cache open/eviction, then release it
-/// before a source download or response stream. Callers bound the SQL wait.
+/// before hashing the leased descriptor, downloading, or streaming. Callers
+/// bound the SQL wait.
 pub async fn lock_retention(txn: &mut PgConnection) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock_shared(hashtextextended('nic_firmware_artifact_retention', 0))";
     sqlx::query(query)

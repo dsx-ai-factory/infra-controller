@@ -21,7 +21,7 @@ use std::sync::Arc;
 use carbide_api_core::bootstrap::acquire_vault_import_work_lock;
 use carbide_api_core::cfg::file::{
     BmcSiteWideRootSource, CarbideConfig, CertBackendKind, CredentialBackend, ImportSource,
-    ProviderConfig, SecretsConfig, UfmCredentialSource,
+    ProviderConfig, SecretsConfig, UfmAuthMode, UfmCredentialSource,
 };
 use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, SecretsContext};
 use carbide_kmip::KmipClientConfig;
@@ -630,22 +630,35 @@ async fn validate_local_ufm_credentials(
     {
         return Ok(());
     }
-    for fabric in carbide_config.ib_fabrics.keys() {
+    for (fabric, definition) in &carbide_config.ib_fabrics {
+        // Explicit certificate authentication has no credential prerequisite.
+        if definition.auth == Some(UfmAuthMode::ClientCertificate) {
+            continue;
+        }
         let key = carbide_secrets::credentials::CredentialKey::UfmAuth {
             fabric: fabric.clone(),
         };
-        let mut found = false;
+        // Validate the first local entry only, matching runtime reader-chain precedence.
+        let mut local_credentials = None;
         for reader in local_readers {
-            if reader.get_credentials(&key).await?.is_some() {
-                found = true;
+            if let Some(credentials) = reader.get_credentials(&key).await? {
+                local_credentials = Some(credentials);
                 break;
             }
         }
-        if !found {
+        let Some(local_credentials) = local_credentials else {
             return Err(SecretsError::UfmCredentialReadBlocked {
                 fabric: fabric.clone(),
             }
             .into());
+        };
+        let carbide_secrets::credentials::Credentials::UsernamePassword { password, .. } =
+            local_credentials;
+        if definition.auth == Some(UfmAuthMode::Token) && password.trim().is_empty() {
+            return Err(eyre::eyre!(
+                "UFM fabric {fabric:?} sets auth = \"token\", but its local UFM credential has an \
+                 empty password"
+            ));
         }
     }
     Ok(())
@@ -1490,6 +1503,110 @@ mod tests {
         )
         .await
         .expect("disabled IB management must not require dormant UFM credentials");
+    }
+
+    /// Verifies local startup applies each explicit authentication mode to the highest-priority
+    /// credential while preserving legacy empty-password selection.
+    #[tokio::test]
+    async fn local_ufm_validation_follows_explicit_auth_mode() {
+        /// Describes one authentication policy, its ordered local passwords, and any startup error.
+        #[derive(Debug)]
+        struct Case {
+            name: &'static str,
+            auth: Option<UfmAuthMode>,
+            passwords: &'static [&'static str],
+            expected_error: Option<&'static str>,
+        }
+
+        const EMPTY_TOKEN_ERROR: &str = "UFM fabric \"default\" sets auth = \"token\", but its local UFM credential has an empty password";
+        let cases = [
+            // Explicit certificate mode must start without a local credential because it never reads one.
+            Case {
+                name: "client certificate",
+                auth: Some(UfmAuthMode::ClientCertificate),
+                passwords: &[],
+                expected_error: None,
+            },
+            // Explicit token mode must retain the local credential prerequisite for its UFM token.
+            Case {
+                name: "token without credential",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &[],
+                expected_error: Some("credentials.ufm_source"),
+            },
+            // The first empty token entry must fail instead of falling through to a later valid entry.
+            Case {
+                name: "token with empty password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &["", "later-token"],
+                expected_error: Some(EMPTY_TOKEN_ERROR),
+            },
+            // Whitespace-only input differs from exact empty input but is equally invalid as a token.
+            Case {
+                name: "token with whitespace-only password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &[" \t"],
+                expected_error: Some(EMPTY_TOKEN_ERROR),
+            },
+            // A nonblank local password satisfies explicit token mode.
+            Case {
+                name: "token with nonblank password",
+                auth: Some(UfmAuthMode::Token),
+                passwords: &["token"],
+                expected_error: None,
+            },
+            // Legacy selection still uses an empty password to select the SPIFFE certificate.
+            Case {
+                name: "legacy with empty password",
+                auth: None,
+                passwords: &[""],
+                expected_error: None,
+            },
+        ];
+
+        for case in cases {
+            // Enable IB and apply the case's auth policy to the configured default fabric.
+            let mut config = carbide_api_core::test_support::default_config::get();
+            config.ib_config.get_or_insert_default().enabled = true;
+            config
+                .ib_fabrics
+                .get_mut("default")
+                .expect("default fabric")
+                .auth = case.auth;
+
+            // Build local readers in runtime priority order from the case's credential entries.
+            let key = CredentialKey::UfmAuth {
+                fabric: "default".to_string(),
+            };
+            let mut readers = Vec::<Box<dyn CredentialReader>>::new();
+            for password in case.passwords {
+                let reader = MemoryCredentialStore::default();
+                reader
+                    .set_credentials(&key, &Credentials::new("", *password))
+                    .await
+                    .unwrap_or_else(|error| panic!("{}: seed credential: {error}", case.name));
+                readers.push(Box::new(reader));
+            }
+
+            let result = validate_local_ufm_credentials(&config, &readers).await;
+
+            match case.expected_error {
+                Some(expected) => {
+                    let error = match result {
+                        Ok(()) => panic!("{}: startup unexpectedly succeeded", case.name),
+                        Err(error) => error,
+                    };
+                    assert!(
+                        error.to_string().contains(expected),
+                        "{}: {error}",
+                        case.name
+                    );
+                }
+                None => result.unwrap_or_else(|error| {
+                    panic!("{}: startup unexpectedly failed: {error}", case.name)
+                }),
+            }
+        }
     }
 
     #[tokio::test]

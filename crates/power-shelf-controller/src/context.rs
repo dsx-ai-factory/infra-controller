@@ -20,7 +20,6 @@ use std::sync::Arc;
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::redfish::BmcAccessInfo;
 use component_manager::component_manager::ComponentManager;
@@ -48,17 +47,8 @@ pub struct PowerShelfStateHandlerServices {
     /// `false` so power shelves stay out of rack firmware wait unless explicitly
     /// enabled.
     pub rack_firmware_reprovisioning_enabled: bool,
-    /// Libredfish pool used to converge the power shelf BMC (PMC) credential
-    /// The same shared instance the machine- and switch-controllers use.
-    pub redfish_client_pool: Arc<dyn RedfishClientPool>,
     /// Connects moved BMC operations through the site's `bmc_backend`.
     pub bmc_connector: BmcConnector,
-    /// Credential-lifecycle operations (password set/rotate/clear,
-    /// candidate validation). A sealed trait implemented only by the direct
-    /// pool, so handing these to a wrapper pool is a compile error (a
-    /// wrong-pool guard, not a wire-path guarantee -- see
-    /// [`BmcCredentialOps`]).
-    pub bmc_credential_ops: Arc<dyn BmcCredentialOps>,
     /// Short-TTL cache of the site-wide BMC rotation aggregate, shared across
     /// this replica's per-object ticks so the steady state costs one aggregate
     /// query per TTL window rather than a per-device query every sweep.

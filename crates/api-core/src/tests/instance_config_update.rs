@@ -2548,6 +2548,282 @@ async fn test_update_instance_config(_: PgPoolOptions, options: PgConnectOptions
     );
 }
 
+#[crate::sqlx_test]
+async fn test_infrastructure_workload_update_preserves_legacy_cleanup(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let (original_segment, replacement_segment) = env.create_vpc_and_dual_tenant_segment().await;
+    let host = create_managed_host(&env).await;
+    let instance = host
+        .instance_builer(&env)
+        .single_interface_network_config(original_segment)
+        .build()
+        .await;
+    let original = instance.rpc_instance().await;
+    let original_addresses = db::instance_address::find_by_segment_id(&env.pool, &original_segment)
+        .await
+        .unwrap();
+    assert_eq!(original_addresses.len(), 1);
+    let original_address = original_addresses[0].address;
+    sqlx::query("UPDATE network_segments SET network_segment_type = $2 WHERE id = $1")
+        .bind(replacement_segment)
+        .bind(model::network_segment::NetworkSegmentType::Underlay)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    let mut requested = original.config().inner().clone();
+    requested.network = Some(single_interface_network_config(replacement_segment));
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: None,
+            config: Some(requested),
+            metadata: Some(original.metadata().clone()),
+        }))
+        .await
+        .expect_err("replacement infrastructure attachment must fail");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(
+        error.message().contains(&format!(
+            "network segment {replacement_segment} has type Underlay"
+        )),
+        "{error}"
+    );
+    let retained = instance.db_instance(&env.pool).await;
+    assert!(retained.update_network_config_request.is_none());
+    let [retained_interface] = retained.config.network.interfaces.as_slice() else {
+        panic!("rejection must retain exactly the original interface");
+    };
+    assert_eq!(
+        retained_interface.network_segment_id,
+        Some(original_segment)
+    );
+    let retained_addresses = db::instance_address::find_by_segment_id(&env.pool, &original_segment)
+        .await
+        .unwrap();
+    assert_eq!(retained_addresses.len(), 1);
+    assert_eq!(retained_addresses[0].instance_id, instance.id);
+    assert_eq!(retained_addresses[0].address, original_address);
+    let rejected_counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM instance_addresses WHERE segment_id = $1),
+                (SELECT count(*) FROM machine_interface_addresses a
+                 JOIN machine_interfaces i ON i.id = a.interface_id WHERE i.segment_id = $1)",
+    )
+    .bind(replacement_segment)
+    .fetch_one(&env.pool)
+    .await
+    .unwrap();
+    assert_eq!(rejected_counts, (0, 0));
+
+    // Retyping a valid allocation seeds a stored infrastructure binding without
+    // admitting a new one. Restore Tenant on the replacement for normal cleanup.
+    for (segment_id, segment_type) in [
+        (
+            original_segment,
+            model::network_segment::NetworkSegmentType::Admin,
+        ),
+        (
+            replacement_segment,
+            model::network_segment::NetworkSegmentType::Tenant,
+        ),
+    ] {
+        sqlx::query("UPDATE network_segments SET network_segment_type = $2 WHERE id = $1")
+            .bind(segment_id)
+            .bind(segment_type)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+    }
+    let inspected = instance.rpc_instance().await;
+    let [inspected_interface] = inspected.config().network().interfaces.as_slice() else {
+        panic!("inspection must expose exactly the stored infrastructure binding");
+    };
+    assert_eq!(
+        inspected_interface.network_segment_id,
+        Some(original_segment)
+    );
+    let [inspected_status] = inspected.status().network().interfaces.as_slice() else {
+        panic!("inspection must expose the applied interface");
+    };
+    assert_eq!(inspected_status.addresses, [original_address.to_string()]);
+    let mut removal = inspected.config().inner().clone();
+    removal.network = Some(single_interface_network_config(replacement_segment));
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: None,
+            config: Some(removal),
+            metadata: Some(inspected.metadata().clone()),
+        }))
+        .await
+        .expect("legacy infrastructure binding can be replaced with Tenant");
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&host, false)
+        .await;
+    let completed = instance.db_instance(&env.pool).await;
+    assert!(completed.update_network_config_request.is_none());
+    let [completed_interface] = completed.config.network.interfaces.as_slice() else {
+        panic!("cleanup must retain exactly the replacement interface");
+    };
+    assert_eq!(
+        completed_interface.network_segment_id,
+        Some(replacement_segment)
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&env.pool, &original_segment)
+            .await
+            .unwrap(),
+        0
+    );
+    let replacement_addresses =
+        db::instance_address::find_by_segment_id(&env.pool, &replacement_segment)
+            .await
+            .unwrap();
+    let [replacement_address] = replacement_addresses.as_slice() else {
+        panic!("replacement must own exactly one address");
+    };
+    assert_eq!(replacement_address.instance_id, instance.id);
+    assert_eq!(
+        completed_interface
+            .ip_addrs
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        [replacement_address.address]
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_infrastructure_workload_retains_slaac_binding_during_sibling_removal(
+    pool: sqlx::PgPool,
+) {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant = default_tenant_config();
+    create_fixture_tenant(&env, tenant.tenant_organization_id.clone())
+        .await
+        .unwrap();
+    let fixture = create_fnn_vpc_prefix_fixture(
+        &env,
+        &tenant.tenant_organization_id,
+        "retained SLAAC VPC",
+        "retained SLAAC prefix",
+        "fd42:2403:9::/62",
+        true,
+    )
+    .await;
+    let mut network =
+        single_vpc_interface_network(NetworkDetails::VpcPrefixId(fixture.vpc_prefix_id));
+    let mut sibling = network.interfaces[0].clone();
+    sibling.function_type = rpc::InterfaceFunctionType::Virtual as i32;
+    sibling.virtual_function_id = Some(1);
+    network.interfaces.push(sibling);
+    let host = create_managed_host(&env).await;
+    let instance = host.instance_builer(&env).network(network).build().await;
+    let initial = instance.db_instance(&env.pool).await;
+    assert_eq!(initial.config.network.interfaces.len(), 2);
+    let physical = initial
+        .config
+        .network
+        .interfaces
+        .iter()
+        .find(|interface| {
+            matches!(
+                interface.function_id,
+                model::instance::config::network::InterfaceFunctionId::Physical { .. }
+            )
+        })
+        .unwrap();
+    assert!(physical.ip_addrs.is_empty());
+    assert_eq!(physical.interface_prefixes.len(), 1);
+    let retained_segment = physical.network_segment_id.unwrap();
+    let retained_prefixes = physical.interface_prefixes.clone();
+    let removed_segment = initial
+        .config
+        .network
+        .interfaces
+        .iter()
+        .find(|interface| interface.network_segment_id != Some(retained_segment))
+        .unwrap()
+        .network_segment_id
+        .unwrap();
+
+    // Both interfaces were admitted as Tenant. Retype the stored physical
+    // binding to represent history without exercising infrastructure admission.
+    sqlx::query("UPDATE network_segments SET network_segment_type = $2 WHERE id = $1")
+        .bind(retained_segment)
+        .bind(model::network_segment::NetworkSegmentType::Admin)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let inspected = instance.rpc_instance().await;
+    assert_eq!(inspected.config().network().interfaces.len(), 2);
+    let status = inspected
+        .status()
+        .network()
+        .interfaces
+        .iter()
+        .find(|interface| interface.virtual_function_id.is_none())
+        .unwrap();
+    assert!(status.addresses.is_empty());
+    assert_eq!(
+        status.prefixes,
+        retained_prefixes
+            .values()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+    let mut requested = inspected.config().inner().clone();
+    requested
+        .network
+        .as_mut()
+        .unwrap()
+        .interfaces
+        .retain(|interface| interface.network_segment_id == Some(retained_segment));
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: None,
+            config: Some(requested),
+            metadata: Some(inspected.metadata().clone()),
+        }))
+        .await
+        .expect("removing a sibling must preserve the stored SLAAC binding");
+    let staged = instance.db_instance(&env.pool).await;
+    let pending = staged.update_network_config_request.as_ref().unwrap();
+    let [staged_interface] = pending.new_config.interfaces.as_slice() else {
+        panic!("only the retained SLAAC binding must be staged");
+    };
+    assert_eq!(staged_interface.network_segment_id, Some(retained_segment));
+    assert_eq!(staged_interface.interface_prefixes, retained_prefixes);
+    assert!(staged_interface.ip_addrs.is_empty());
+
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&host, false)
+        .await;
+    let completed = instance.db_instance(&env.pool).await;
+    assert!(completed.update_network_config_request.is_none());
+    let [retained_interface] = completed.config.network.interfaces.as_slice() else {
+        panic!("cleanup must retain exactly the original SLAAC binding");
+    };
+    assert_eq!(
+        retained_interface.network_segment_id,
+        Some(retained_segment)
+    );
+    assert_eq!(retained_interface.interface_prefixes, retained_prefixes);
+    assert!(retained_interface.ip_addrs.is_empty());
+    assert!(
+        db::instance_address::segment_has_allocations(&env.pool, &retained_segment)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db::instance_address::segment_has_allocations(&env.pool, &removed_segment)
+            .await
+            .unwrap()
+    );
+}
+
 /// Verifies release finishes an already staged host edit before termination,
 /// because rejecting a deleted instance during promotion would strand its resources.
 #[crate::sqlx_test]

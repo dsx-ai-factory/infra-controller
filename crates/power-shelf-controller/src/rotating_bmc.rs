@@ -32,11 +32,10 @@
 //!   [`advance`] retry seam, and returns to `Ready` (clearing a satisfied force
 //!   request) or re-enters `RotatingBmc` with an incremented retry budget.
 //!
-//! Unlike the switch path (all NVIDIA MGX, so a fixed dispatch vendor), a power
-//! shelf's Lite-On/Delta PMC vendor is not persisted and is not exposed in the
-//! Redfish service root, so the engine probes it at rotation time
-//! ([`BmcEndpoint::into_target_probing_vendor`]) -- the repo's standard
-//! power-shelf vendor determination.
+//! A power shelf's Lite-On/Delta PMC vendor is not exposed in the Redfish
+//! service root, so the engine identifies it from the Chassis manufacturer in
+//! the PMC's exploration report, or by reading it from the PMC when there is
+//! no report -- the repo's standard power-shelf vendor determination.
 //!
 //! A BMC password change never touches the power shelf's power delivery, so this
 //! is safe in `Ready`.
@@ -207,29 +206,23 @@ async fn rotate_power_shelf_bmc(
     endpoint: BmcEndpoint,
     force: bool,
 ) -> BmcRotationTick {
-    // A power shelf's Lite-On/Delta PMC vendor is neither persisted nor exposed
-    // in the Redfish service root, so the engine resolves it at rotation time by
-    // probing the Chassis manufacturer (the repo's standard power-shelf vendor
-    // determination). The probe runs inside the engine's quarantine-on-failure
-    // envelope, so a failed probe records backoff rather than looping the guard.
-    let target = endpoint.into_target_probing_vendor();
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.bmc_credential_ops.as_ref(),
-        &target,
+        &services.bmc_connector,
+        &endpoint,
         force,
         &services.instrumentation,
     )
     .await
     {
         Ok(RotateOutcome::Converged) => {
-            tracing::info!(mac = %target.device_mac, force, "power shelf BMC (PMC) converged to site-wide rotation target");
+            tracing::info!(mac = %endpoint.device_mac, force, "power shelf BMC (PMC) converged to site-wide rotation target");
             BmcRotationTick::Settled
         }
         Ok(RotateOutcome::Quarantined { until }) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 %until,
                 "power shelf BMC (PMC) rotation attempt failed; quarantined until backoff elapses"
             );
@@ -237,7 +230,7 @@ async fn rotate_power_shelf_bmc(
         }
         Ok(RotateOutcome::CredentialStoreReconcilePending) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 "PMC's credential changed but persisting the new credential to the credential store failed; holding rotation until the credential store reconciles"
             );
             BmcRotationTick::WaitForCredentialStoreReconcile
@@ -245,7 +238,7 @@ async fn rotate_power_shelf_bmc(
         Ok(RotateOutcome::NoWork) => BmcRotationTick::Settled,
         Err(e) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 error = %e,
                 "transient power shelf BMC (PMC) rotation bookkeeping failure; will retry the tick"
             );

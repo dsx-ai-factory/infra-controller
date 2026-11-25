@@ -26,23 +26,30 @@ repository.workspace = true
 name = "carbide_credential_rotation"
 
 [dependencies]
+bmc-backend = { path = "../bmc-backend" }
+bmc-platform = { path = "../bmc-platform" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-instrument = { path = "../instrument" }
-carbide-redfish = { path = "../redfish", default-features = false }
 carbide-secrets = { path = "../secrets" }
+carbide-utils = { path = "../utils", default-features = false }
 carbide-uuid = { path = "../uuid" }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }
-libredfish = { workspace = true }
 mac_address = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+arc-swap = { workspace = true }
+axum = { workspace = true }
+bmc-drivers = { path = "../bmc-drivers" }
+bmc-mock = { path = "../bmc-mock" }
+bmc-runtime = { path = "../bmc-runtime" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-ipmi = { path = "../ipmi" }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-macros = { path = "../macros" }

@@ -507,6 +507,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.FirmwareTaskReferenceList"><span class="badge">M</span>FirmwareTaskReferenceList</a>
+                </li>
+
+                <li>
                   <a href="#v1.FirmwareTaskWaitingContext"><span class="badge">M</span>FirmwareTaskWaitingContext</a>
                 </li>
 
@@ -584,6 +588,14 @@
 
                 <li>
                   <a href="#v1.GetOperationRunResponse"><span class="badge">M</span>GetOperationRunResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetRackFirmwareDetailsRequest"><span class="badge">M</span>GetRackFirmwareDetailsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetRackFirmwareDetailsResponse"><span class="badge">M</span>GetRackFirmwareDetailsResponse</a>
                 </li>
 
                 <li>
@@ -996,6 +1008,26 @@
 
                 <li>
                   <a href="#v1.Rack"><span class="badge">M</span>Rack</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackComponentFirmwareDetails"><span class="badge">M</span>RackComponentFirmwareDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackComponentFirmwareOperations"><span class="badge">M</span>RackComponentFirmwareOperations</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackFirmwareCoverage"><span class="badge">M</span>RackFirmwareCoverage</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackFirmwareDetails"><span class="badge">M</span>RackFirmwareDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackFirmwareOperations"><span class="badge">M</span>RackFirmwareOperations</a>
                 </li>
 
                 <li>
@@ -4135,7 +4167,7 @@ backend applies the update. </p></td>
 
 
         <h3 id="v1.FirmwareTaskDetailsList">FirmwareTaskDetailsList</h3>
-        <p>Waiting/Pending/Running firmware tasks in creation-time then UUID order.</p><p>Tray results select recorded UUID/type membership in the current rack only;</p><p>a power-shelf firmware task is listed only for the shelf it selects.</p><p>Missing rack is NotLinked. A failed rack query or invalid stored row makes</p><p>the whole task section unavailable, before filtering for this tray.</p><p>More than 256 outstanding rack firmware tasks makes the whole section</p><p>unavailable even when fewer select this tray. Error is absent on success,</p><p>including empty; entries is empty on failure. No execution reports are exposed.</p>
+        <p>Waiting/Pending/Running firmware tasks in creation-time then UUID order.</p><p>Rack results include all outstanding tasks for the selected rack. Tray results</p><p>select recorded UUID/type membership in their current rack only;</p><p>a power-shelf firmware task is listed only for the shelf it selects.</p><p>A tray without a rack reports NotLinked. A failed query or invalid stored row</p><p>makes the whole task section unavailable, before any tray filtering.</p><p>More than 256 outstanding rack firmware tasks makes the whole section</p><p>unavailable even when fewer select a requested tray. Error is absent on success,</p><p>including empty; entries is empty on failure. No execution reports are exposed.</p>
 
 
           <table class="field-table">
@@ -4185,6 +4217,37 @@ backend applies the update. </p></td>
                 <tr>
                   <td>targets</td>
                   <td><a href="#v1.ExternalRef">ExternalRef</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.FirmwareDetailsReadError">FirmwareDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTaskReferenceList">FirmwareTaskReferenceList</h3>
+        <p>Tasks selecting this member's recorded UUID and type, in root task order.</p><p>References are listed even for unlinked or unsupported members. A shelf</p><p>firmware task is referenced only by its recorded selection. Successful empty references</p><p>have no error; a failed task read has an error and no IDs.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>ids</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
                   <td>repeated</td>
                   <td><p> </p></td>
                 </tr>
@@ -4850,6 +4913,54 @@ and returns OperationRun.stats. </p></td>
                 <tr>
                   <td>operation_run</td>
                   <td><a href="#v1.OperationRun">OperationRun</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetRackFirmwareDetailsRequest">GetRackFirmwareDetailsRequest</h3>
+        <p>Selects an external rack ID, as GetRackInfoByID does. Empty IDs return</p><p>InvalidArgument; unknown or deleted racks return NotFound. Inventory failures</p><p>return sanitized Internal or Unavailable errors; a missing rack value is</p><p>Internal. Caller cancellation returns Canceled; expired inventory reads or</p><p>caller deadlines return DeadlineExceeded. Internal Flow UUIDs are not selectors.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External rack ID, not a rack name or internal Flow UUID. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetRackFirmwareDetailsResponse">GetRackFirmwareDetailsResponse</h3>
+        <p>Contains the whole rack within the 1,991,680-byte encoded proxy allowance.</p><p>Overflow replaces populated waiting-context lists with LimitExceeded first.</p><p>If the response still cannot fit, ResourceExhausted fails the RPC; components,</p><p>tasks, primary target selections, external identities and actions are not clipped.</p><p>Response encoding failures return Internal.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>details</td>
+                  <td><a href="#v1.RackFirmwareDetails">RackFirmwareDetails</a></td>
                   <td></td>
                   <td><p> </p></td>
                 </tr>
@@ -8571,6 +8682,227 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><a href="#v1.RackOperationStatusDetails">RackOperationStatusDetails</a></td>
                   <td></td>
                   <td><p>Output only. Absent on older servers; ignored on inventory writes. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackComponentFirmwareDetails">RackComponentFirmwareDetails</h3>
+        <p>One inventory member with the same Core section meanings as tray firmware.</p><p>Unsupported or unlinked members remain visible with explicit Core read errors.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>internal_component_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Inventory UUID used to associate reads and saved selections; not a hardware ID. </p></td>
+                </tr>
+
+                <tr>
+                  <td>component_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Stored hardware link, absent when empty. A malformed link remains visible
+alongside ReadFailed errors; its presence does not prove a valid Core identity. </p></td>
+                </tr>
+
+                <tr>
+                  <td>component_type</td>
+                  <td><a href="#v1.ComponentType">ComponentType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>actual</td>
+                  <td><a href="#v1.FirmwareActualDetails">FirmwareActualDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>desired</td>
+                  <td><a href="#v1.FirmwareDesiredDetails">FirmwareDesiredDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operations</td>
+                  <td><a href="#v1.RackComponentFirmwareOperations">RackComponentFirmwareOperations</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackComponentFirmwareOperations">RackComponentFirmwareOperations</h3>
+        <p>Core actions and references to shared tasks are independent observations.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.FirmwareActionDetails">FirmwareActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.FirmwareTaskReferenceList">FirmwareTaskReferenceList</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackFirmwareCoverage">RackFirmwareCoverage</h3>
+        <p>Independent installed/expected collection availability. The three categories</p><p>sum to total. All zero counts describe an empty rack; they do not prove an</p><p>update completed or that firmware versions match their expectations.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>total</td>
+                  <td><a href="#uint64">uint64</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>reporting</td>
+                  <td><a href="#uint64">uint64</a></td>
+                  <td></td>
+                  <td><p>A received collection, including empty collections or failed entries. </p></td>
+                </tr>
+
+                <tr>
+                  <td>unsupported</td>
+                  <td><a href="#uint64">uint64</a></td>
+                  <td></td>
+                  <td><p>Unsupported inventory kinds or explicit Core backend Unsupported errors. </p></td>
+                </tr>
+
+                <tr>
+                  <td>unavailable</td>
+                  <td><a href="#uint64">uint64</a></td>
+                  <td></td>
+                  <td><p>Other missing collections, including unlinked members, failed reads,
+missing RPCs and missing required sections. These are not empty collections. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackFirmwareDetails">RackFirmwareDetails</h3>
+        <p>Firmware collections remain on their components; there is no rack-wide version</p><p>or compliance verdict. Inventory and dependency reads share at most 30 seconds,</p><p>ending one second before an earlier caller deadline. Core batches run in</p><p>compute, NVLink switch, power shelf order, with at most 64 unique targets each.</p><p>Later failed or expired batches retain earlier completed evidence. After the</p><p>budget expires, remaining batches report DeadlineExceeded without a Core call.</p><p>Caller cancellation fails the RPC after both readers have been joined.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Internal Flow rack UUID, also used by saved tasks. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External identifier accepted by this RPC; never a UUID fallback. </p></td>
+                </tr>
+
+                <tr>
+                  <td>actual</td>
+                  <td><a href="#v1.RackFirmwareCoverage">RackFirmwareCoverage</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>desired</td>
+                  <td><a href="#v1.RackFirmwareCoverage">RackFirmwareCoverage</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operations</td>
+                  <td><a href="#v1.RackFirmwareOperations">RackFirmwareOperations</a></td>
+                  <td></td>
+                  <td><p>Shared tasks only; actions remain with their component. </p></td>
+                </tr>
+
+                <tr>
+                  <td>components</td>
+                  <td><a href="#v1.RackComponentFirmwareDetails">RackComponentFirmwareDetails</a></td>
+                  <td>repeated</td>
+                  <td><p>Every current inventory member, including unlinked and unsupported types,
+ordered by component_type then internal_component_id ascending. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackFirmwareOperations">RackFirmwareOperations</h3>
+        <p>Outstanding firmware tasks appear once, including selections no longer in</p><p>current inventory. FirmwareTaskDetailsList supplies ordering and error meanings.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.FirmwareTaskDetailsList">FirmwareTaskDetailsList</a></td>
+                  <td></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -12578,6 +12910,15 @@ Passive and non-atomic; child failures remain independent section errors.</p></t
                 <td><p>Reads full current rack membership once, with batched Core details and one
 power-task list. This is informational, not an atomic snapshot.
 It does not change power or task state.</p></td>
+              </tr>
+
+              <tr>
+                <td>GetRackFirmwareDetails</td>
+                <td><a href="#v1.GetRackFirmwareDetailsRequest">GetRackFirmwareDetailsRequest</a></td>
+                <td><a href="#v1.GetRackFirmwareDetailsResponse">GetRackFirmwareDetailsResponse</a></td>
+                <td><p>Reads current rack membership, batched Core firmware and outstanding Flow
+firmware tasks. Passive and non-atomic; completed batches remain available
+when another batch fails. Does not change firmware or task state.</p></td>
               </tr>
 
           </tbody>

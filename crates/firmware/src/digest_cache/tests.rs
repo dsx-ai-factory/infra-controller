@@ -228,12 +228,21 @@ async fn repeated_reader_errors_do_not_poll_a_completed_worker() {
     let mut reader = ready(&cache, &source, wanted, &HashSet::new()).await;
     // A write-only descriptor deterministically fails reads, including a second
     // call after the completed worker has returned its first I/O error.
-    reader.file = Arc::new(Mutex::new(
+    Arc::get_mut(&mut reader.lease)
+        .expect("exclusive test reader")
+        .file = Arc::new(
         File::options()
             .write(true)
             .open(cache.inner.path(wanted))
             .unwrap(),
-    ));
+    );
+    let failed_check = CachedArtifact::verify(reader.lease.clone(), wanted);
+    assert!(matches!(failed_check, Err(CacheError::Io(_))));
+    assert_eq!(
+        fs::read(cache.inner.path(wanted)).unwrap(),
+        b"data",
+        "a failed read is not evidence of a corrupt inode"
+    );
     for _ in 0..2 {
         assert!(reader.read(&mut [0; 1]).await.is_err());
     }
@@ -281,9 +290,7 @@ async fn retention_release_precedes_transfer_and_failure_releases_cache_ownershi
             .unwrap();
         assert!(futures_util::poll!(&mut opening).is_pending(), "{scenario}");
         assert_eq!(
-            cache.inner.state.lock().unwrap().entries[&image]
-                .readers
-                .load(Ordering::Acquire),
+            cache.inner.state.lock().unwrap().entries[&image].reader_count(),
             usize::from(warm),
             "{scenario}"
         );
@@ -317,11 +324,7 @@ async fn retention_release_precedes_transfer_and_failure_releases_cache_ownershi
             );
             {
                 let state = cache.inner.state.lock().unwrap();
-                assert_eq!(
-                    state.entries[&image].readers.load(Ordering::Acquire),
-                    0,
-                    "{scenario}"
-                );
+                assert_eq!(state.entries[&image].reader_count(), 0, "{scenario}");
                 assert!(!state.entries[&image].downloading, "{scenario}");
                 assert!(
                     state.entries[&image].failure.is_none(),
@@ -426,6 +429,366 @@ async fn retention_owner_cleans_up_on_early_and_registration_rejection() {
     }
 }
 
+// Before a worker accepts the request, its caller still owns the retention
+// snapshot. Both input validation and a refused send must settle that ownership.
+#[tokio::test]
+async fn prepared_rejections_release_the_snapshot_before_returning() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let requests = Arc::new(Semaphore::new(1));
+    let invalid = cache
+        .prepare_open(Arc::new(requests.clone().try_acquire_owned().unwrap()))
+        .unwrap();
+    let (released, observed) = oneshot::channel();
+    let invalid_source = Url::parse("file:///firmware").unwrap();
+    let result = invalid
+        .open(
+            &invalid_source,
+            digest(b"data"),
+            HashSet::new(),
+            async move {
+                released.send(()).unwrap();
+                Ok(())
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(CacheError::InvalidSource)));
+    observed.await.unwrap();
+    until(|| requests.available_permits() == 1).await;
+
+    // The worker exited after signaling readiness. Its release error takes
+    // precedence over the failed send, and no reservation reaches storage.
+    let exited_worker = |signaled: bool| {
+        let (worker, _) = oneshot::channel();
+        let (started, ready) = oneshot::channel();
+        if signaled {
+            started.send(()).unwrap();
+        }
+        PreparedCacheOpen {
+            worker,
+            ready,
+            cache: cache.inner.clone(),
+        }
+    };
+    let source = "http://unused.test/firmware".parse().unwrap();
+    let result = exited_worker(true)
+        .open(&source, digest(b"data"), HashSet::new(), async {
+            Err(CacheError::RetentionLockRelease)
+        })
+        .await;
+    assert!(matches!(result, Err(CacheError::RetentionLockRelease)));
+    // A worker that disappeared before readiness cannot accept a later handoff.
+    let (released, observed) = oneshot::channel();
+    let result = exited_worker(false)
+        .open(&source, digest(b"data"), HashSet::new(), async {
+            released.send(()).unwrap();
+            Ok(())
+        })
+        .await;
+    assert!(matches!(result, Err(CacheError::Cancelled)));
+    observed.await.unwrap();
+    assert!(cache.inner.downloader.try_capacity().is_some());
+    assert!(!cache.inner.directory.exists());
+    cache.finish().await;
+}
+
+#[tokio::test]
+async fn shutdown_drains_worker_waiting_for_a_retention_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let inner = cache.inner.clone();
+    let requests = Arc::new(Semaphore::new(1));
+    let permit = requests.clone().try_acquire_owned().unwrap();
+    let worker = cache
+        .prepare_open(Arc::new(permit))
+        .expect("prepare physical worker");
+    until(|| !worker.ready.is_empty()).await;
+    assert_eq!(requests.available_permits(), 0);
+    assert!(
+        inner.downloader.try_capacity().is_some(),
+        "authorization leaves shared transfer capacity available"
+    );
+    cache.finish().await;
+    assert_eq!(requests.available_permits(), 1);
+    let (finished, release) = oneshot::channel();
+    let result = worker
+        .open(
+            &Url::parse("http://127.0.0.1:1/unused").unwrap(),
+            digest(b"data"),
+            HashSet::new(),
+            async move {
+                finished.send(()).expect("release observed");
+                Ok(())
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(CacheError::Cancelled)));
+    release
+        .await
+        .expect("abandoned handoff releases its snapshot");
+    assert!(!inner.directory.exists());
+}
+
+// This current-thread runtime cannot poll the registered worker until the test
+// yields. Shutdown therefore finds a transferred release callback in the channel.
+#[tokio::test]
+async fn shutdown_releases_a_snapshot_already_sent_to_its_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let source = Url::parse("http://unused.test/firmware").unwrap();
+    let retained = HashSet::new();
+    let (released, observed) = oneshot::channel();
+    let mut open =
+        Box::pin(
+            cache.open_with_retention_lock(&source, digest(b"data"), &retained, async {
+                released.send(()).expect("release observer");
+                Ok(())
+            }),
+        );
+    assert!(futures_util::poll!(&mut open).is_pending());
+    cache.inner.cancel.cancel();
+    assert!(matches!(
+        within("shutdown returns the open", open).await,
+        Err(CacheError::Cancelled)
+    ));
+    observed
+        .await
+        .expect("accepted snapshot explicitly released");
+    assert!(!cache.inner.directory.exists());
+    cache.finish().await;
+}
+
+// The registered parent cannot run on this current-thread runtime until the
+// test yields. A pending response still has one bounded job to reap.
+#[tokio::test]
+async fn queued_preparation_keeps_admission_until_the_owner_reaps_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let requests = Arc::new(Semaphore::new(1));
+    let prepared = cache
+        .prepare_open(Arc::new(requests.clone().try_acquire_owned().unwrap()))
+        .unwrap();
+    let result = prepared
+        .open(
+            &Url::parse("http://unused.test/firmware").unwrap(),
+            digest(b"data"),
+            HashSet::new(),
+            async { Ok(()) },
+        )
+        .await;
+    assert!(matches!(result, Ok(CacheLookup::Pending)));
+    // Take the registered task before the owner can poll on this current-thread
+    // runtime. Its completed result must still carry the request slot.
+    let mut tasks = std::mem::take(&mut cache.inner.work.state.lock().unwrap().tasks);
+    let completed = within("abandoned preparation finishes", tasks.join_next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requests.available_permits(), 0);
+    drop(completed);
+    assert_eq!(requests.available_permits(), 1);
+    assert!(!cache.inner.directory.exists());
+    cache.finish().await;
+}
+
+#[tokio::test]
+async fn queued_open_reports_shutdown_during_snapshot_release() {
+    for release_fails in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        let admission = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        let prepared = cache.prepare_open(Arc::new(admission)).unwrap();
+        let cancel = cache.inner.cancel.clone();
+        let result = prepared
+            .open(
+                &"http://unused.test/firmware".parse().unwrap(),
+                digest(b"data"),
+                HashSet::new(),
+                async move {
+                    cancel.cancel();
+                    if release_fails {
+                        Err(CacheError::RetentionLockRelease)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        if release_fails {
+            assert!(matches!(result, Err(CacheError::RetentionLockRelease)));
+        } else {
+            assert!(matches!(result, Err(CacheError::Cancelled)));
+        }
+        cache.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn busy_prepared_worker_returns_admission_while_snapshot_release_waits() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let requests = Arc::new(Semaphore::new(1));
+    let prepared = cache
+        .prepare_open(Arc::new(requests.clone().try_acquire_owned().unwrap()))
+        .unwrap();
+    until(|| !prepared.ready.is_empty()).await;
+    let busy = cache.inner.downloader.try_capacity().unwrap();
+    let (finish, wait) = oneshot::channel();
+    let source = Url::parse("http://unused.test/firmware").unwrap();
+    let mut open = Box::pin(
+        prepared.open(&source, digest(b"data"), HashSet::new(), async {
+            wait.await.unwrap();
+            Ok(())
+        }),
+    );
+    assert!(futures_util::poll!(&mut open).is_pending());
+    until(|| requests.available_permits() == 1).await;
+    finish.send(()).unwrap();
+    assert!(matches!(open.await, Ok(CacheLookup::Pending)));
+    assert!(!cache.inner.directory.exists());
+    drop(busy);
+    cache.finish().await;
+}
+
+// A verified file can be ready before the owner delivers it to the HTTP route.
+// Starting shutdown in that interval must return both the refusal and the lease.
+#[tokio::test]
+async fn shutdown_discards_a_verified_reader_before_delivery() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let image = digest(b"data");
+    fs::create_dir_all(&cache.inner.directory).unwrap();
+    fs::write(cache.inner.path(image), b"data").unwrap();
+    let OpenResult::Verify(lease) = cache.inner.clone().open(image, &HashSet::new()).unwrap()
+    else {
+        panic!("expected a cached file");
+    };
+    let verified = CachedArtifact::verify(lease, image).unwrap();
+    assert!(matches!(verified, CacheLookup::Ready(_)));
+    let (response, received) = oneshot::channel();
+    let capacity = Arc::new(cache.inner.downloader.try_capacity().unwrap());
+    cache
+        .inner
+        .work
+        .register(async move {
+            WorkResult::Opened {
+                response,
+                result: Ok(verified),
+                _capacity: capacity,
+            }
+        })
+        .unwrap();
+    cache.inner.cancel.cancel();
+    assert!(matches!(
+        received.await.unwrap(),
+        Err(CacheError::Cancelled)
+    ));
+    assert_eq!(cache.inner.readers.available_permits(), MAX_READERS);
+    cache.finish().await;
+}
+
+#[test]
+fn shutdown_after_lease_acquisition_skips_corrupt_file_verification() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        let image = digest(b"data");
+        fs::create_dir_all(&cache.inner.directory).unwrap();
+        fs::write(cache.inner.path(image), b"bad").unwrap();
+        let cancel = cache.inner.cancel.clone();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let (leased, lease_acquired) = oneshot::channel();
+        let worker = async {
+            lease_acquired.await.unwrap();
+            tokio::task::spawn_blocking(move || {
+                cancel.cancel();
+                wait.recv().ok();
+            })
+            .await
+            .unwrap();
+        };
+        let source = "http://unused.test/firmware".parse().unwrap();
+        let retained = HashSet::new();
+        let shutdown = cache.inner.cancel.clone();
+        let open = cache.open_with_retention_lock(&source, image, &retained, async move {
+            leased.send(()).unwrap();
+            shutdown.cancelled().await;
+            Ok(())
+        });
+        let check = async {
+            let result = within("cancelled open queued a checksum", open).await;
+            assert!(matches!(result, Err(CacheError::Cancelled)));
+            assert_eq!(fs::read(cache.inner.path(image)).unwrap(), b"bad");
+            resume.send(()).unwrap();
+        };
+        tokio::join!(check, worker);
+        cache.finish().await;
+    });
+}
+
+#[tokio::test]
+async fn shutdown_during_a_checksum_read_stops_before_the_next_read() {
+    struct CancelDuringRead(CancellationToken);
+
+    impl Read for CancelDuringRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            assert!(
+                !self.0.is_cancelled(),
+                "started another read after shutdown"
+            );
+            self.0.cancel();
+            buffer[0] = b'x';
+            Ok(1)
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let result = cache
+        .inner
+        .checksum(CancelDuringRead(cache.inner.cancel.clone()));
+    assert!(matches!(result, Err(CacheError::Cancelled)));
+    cache.finish().await;
+}
+
+#[tokio::test]
+async fn shutdown_while_corrupt_retirement_waits_preserves_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let image = digest(b"expected");
+    let path = cache.inner.path(image);
+    fs::create_dir_all(&cache.inner.directory).unwrap();
+    fs::write(&path, b"bad").unwrap();
+    let OpenResult::Verify(lease) = cache.inner.clone().open(image, &HashSet::new()).unwrap()
+    else {
+        panic!("expected the cached inode");
+    };
+    let inner = cache.inner.clone();
+    let (locked, acquired) = oneshot::channel();
+    let holder = tokio::task::spawn_blocking(move || {
+        let _state = inner.state.lock().unwrap();
+        locked.send(()).unwrap();
+        tokio::runtime::Handle::current().block_on(within(
+            "verifier reached corrupt-file retirement",
+            inner.corrupt_file_verified.notified(),
+        ));
+        inner.cancel.cancel();
+    });
+    acquired.await.unwrap();
+    let result = tokio::task::spawn_blocking(move || CachedArtifact::verify(lease, image))
+        .await
+        .unwrap();
+    holder.await.unwrap();
+    assert!(matches!(result, Err(CacheError::Cancelled)));
+    assert_eq!(fs::read(path).unwrap(), b"bad");
+    cache.finish().await;
+}
+
 // A consumed source failure must still be reported once if releasing exclusion
 // also fails. The release callback runs, but cannot replace that prior error.
 #[tokio::test]
@@ -505,9 +868,7 @@ fn cancelled_open_keeps_retention_until_its_physical_worker_finishes() {
             Box::pin(
                 cache.open_with_retention_lock(&source, image, &retained, async move {
                     assert_eq!(
-                        inner.state.lock().unwrap().entries[&image]
-                            .readers
-                            .load(Ordering::Acquire),
+                        inner.state.lock().unwrap().entries[&image].reader_count(),
                         1,
                         "physical reader acquired before retention ends"
                     );
@@ -712,6 +1073,77 @@ async fn physical_completion_and_cancellation_settle_reservations_without_pollin
     }
 }
 
+// All verifiers open the corrupt generation before the first retires it.
+#[tokio::test]
+async fn overlapping_corrupt_verifiers_remove_one_inode_and_charge_its_live_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 10, 1);
+    let image = digest(b"expected");
+    let path = cache.inner.path(image);
+    fs::create_dir_all(&cache.inner.directory).unwrap();
+    fs::write(&path, b"x").unwrap();
+    let open = || match cache.inner.clone().open(image, &HashSet::new()).unwrap() {
+        OpenResult::Verify(lease) => lease,
+        _ => panic!("expected the cached inode"),
+    };
+    let first = open();
+    let obstructed = open();
+    let last = open();
+    fs::write(&path, b"broken").unwrap();
+    assert!(matches!(
+        CachedArtifact::verify(first, image),
+        Ok(CacheLookup::Pending)
+    ));
+    assert!(!path.exists());
+    let reserve = || cache.inner.clone().open(digest(b"new"), &HashSet::new());
+    assert!(
+        matches!(reserve(), Err(CacheError::Capacity)),
+        "the remaining open inode grew from one byte to six"
+    );
+
+    // A non-file at the old pathname prevents cleanup. Preserve the obstruction
+    // and report I/O instead of advertising an immediate refill.
+    fs::create_dir(&path).unwrap();
+    assert!(matches!(
+        CachedArtifact::verify(obstructed, image),
+        Err(CacheError::Io(_))
+    ));
+    assert!(path.is_dir());
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, b"replacement").unwrap();
+    // Pause final unregistration. The verifier must close its own descriptor
+    // before it can release the accounting descriptor for the unlinked inode.
+    let stream = Arc::downgrade(&last.file);
+    let registrations = last._registration.0.clone();
+    std::thread::scope(|scope| {
+        let active = registrations.lock().unwrap();
+        let verifying = scope.spawn(move || CachedArtifact::verify(last, image));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while stream.strong_count() != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "verifier retained its descriptor"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(active.count, 1);
+        assert_eq!(active.file.as_ref().unwrap().metadata().unwrap().len(), 6);
+        drop(active);
+        assert!(matches!(
+            verifying.join().unwrap(),
+            Ok(CacheLookup::Pending)
+        ));
+    });
+    assert!(registrations.lock().unwrap().file.is_none());
+    assert_eq!(fs::read(path).unwrap(), b"replacement");
+    assert!(
+        matches!(reserve(), Ok(OpenResult::Download)),
+        "last old lease released"
+    );
+    cache.inner.settle(digest(b"new"), None);
+    cache.finish().await;
+}
+
 // Reopen a damaged namespace, then fetch on a second empty replica. Both must
 // verify owned files and preserve unrelated files and symlink targets.
 #[tokio::test]
@@ -748,6 +1180,19 @@ async fn restart_removes_owned_partials_refills_corruption_and_preserves_unknown
         .await;
     let source = Url::parse(&format!("{}/firmware", server.url())).unwrap();
     let first = cache(directory.path(), 8, 2);
+    let retained = digest(b"reserved");
+    let retained_path = first.inner.path(retained);
+    fs::write(&retained_path, b"reserved").unwrap();
+    assert!(matches!(
+        first.open(&source, image, &HashSet::new()).await.unwrap(),
+        CacheLookup::Pending
+    ));
+    assert!(!first.inner.path(image).exists(), "discard corrupt bytes");
+    assert!(matches!(
+        first.open(&source, image, &HashSet::from([retained])).await,
+        Err(CacheError::Capacity)
+    ));
+    assert_eq!(fs::read(retained_path).unwrap(), b"reserved");
     drop(ready(&first, &source, image, &HashSet::new()).await);
     assert!(!orphan.exists());
     first.finish().await;
@@ -924,7 +1369,7 @@ fn dropping_a_reader_keeps_its_lease_until_a_queued_physical_read_finishes() {
         drop(reader);
         {
             let mut state = cache.inner.state.lock().unwrap();
-            assert_eq!(state.entries[&image].readers.load(Ordering::Acquire), 1);
+            assert_eq!(state.entries[&image].reader_count(), 1);
             assert_eq!(cache.inner.readers.available_permits(), MAX_READERS - 1);
             assert!(matches!(
                 cache
@@ -936,10 +1381,7 @@ fn dropping_a_reader_keeps_its_lease_until_a_queued_physical_read_finishes() {
         release_tx.send(()).unwrap();
         blocker.await.unwrap();
         until(|| {
-            cache.inner.state.lock().unwrap().entries[&image]
-                .readers
-                .load(Ordering::Acquire)
-                == 0
+            cache.inner.state.lock().unwrap().entries[&image].reader_count() == 0
                 && cache.inner.readers.available_permits() == MAX_READERS
         })
         .await;
@@ -998,10 +1440,10 @@ async fn ready_readers_do_not_starve_the_legacy_download_pool() {
 #[tokio::test]
 async fn unlinked_content_stays_charged_until_its_last_reader_drops() {
     let directory = tempfile::tempdir().unwrap();
-    let cache = cache(directory.path(), 8, 2);
+    let cache = cache(directory.path(), 10, 2);
     let image = digest(b"data");
     fs::create_dir_all(&cache.inner.directory).unwrap();
-    fs::write(cache.inner.path(image), b"data").unwrap();
+    fs::write(cache.inner.path(image), b"d").unwrap();
     let mut server = mockito::Server::new_async().await;
     let refill = server
         .mock("GET", "/firmware")
@@ -1010,7 +1452,18 @@ async fn unlinked_content_stays_charged_until_its_last_reader_drops() {
         .create_async()
         .await;
     let source = Url::parse(&format!("{}/firmware", server.url())).unwrap();
-    let mut reader = ready(&cache, &source, image, &HashSet::new()).await;
+    let path = cache.inner.path(image);
+    let CacheLookup::Ready(mut reader) = cache
+        .open_with_retention_lock(&source, image, &HashSet::new(), async move {
+            fs::write(path, b"data").unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("in-place repair verified")
+    };
+    assert_eq!(reader.content_length(), 4);
     fs::remove_file(cache.inner.path(image)).unwrap();
     assert!(matches!(
         cache.open(&source, image, &HashSet::new()).await.unwrap(),
@@ -1019,7 +1472,7 @@ async fn unlinked_content_stays_charged_until_its_last_reader_drops() {
     {
         let state = cache.inner.state.lock().unwrap();
         assert_eq!(state.entries[&image].charged_bytes, 4);
-        assert_eq!(state.entries[&image].readers.load(Ordering::Acquire), 1);
+        assert_eq!(state.entries[&image].reader_count(), 1);
     }
     assert!(matches!(
         cache.open(&source, digest(b"next"), &HashSet::new()).await,
@@ -1050,7 +1503,14 @@ async fn over_budget_restart_content_streams_multiple_chunks_and_accounts_other_
     let source = Url::parse("http://unused.test/firmware").unwrap();
     let retained = HashSet::from([image, other]);
     let mut reader = ready(&cache, &source, image, &retained).await;
-    let mut actual = Vec::new();
+    let mut second = ready(&cache, &source, image, &retained).await;
+    // Overlapping readers share accounting, but must each start at byte zero
+    // and advance their own cursor across more than one physical read.
+    let mut actual = vec![0; 16];
+    reader.read_exact(&mut actual).await.unwrap();
+    let mut other_read = Vec::new();
+    second.read_to_end(&mut other_read).await.unwrap();
+    assert_eq!(other_read, contents);
     reader.read_to_end(&mut actual).await.unwrap();
     assert_eq!(actual, contents);
     assert_eq!(reader.content_length(), contents.len() as u64);
@@ -1063,7 +1523,7 @@ async fn over_budget_restart_content_streams_multiple_chunks_and_accounts_other_
         Err(CacheError::Capacity)
     ));
     assert_eq!(fs::read(cache.inner.path(other)).unwrap(), b"retained");
-    drop(reader);
+    drop((reader, second));
     cache.finish().await;
 }
 
@@ -1145,14 +1605,26 @@ async fn cold_concurrent_origins_share_one_physical_digest_download() {
         .await;
     let alternate_source = Url::parse(&format!("{}/second", alternate.url())).unwrap();
     let image = digest(b"data");
+    let requests = Arc::new(Semaphore::new(1));
+    let permit = requests.clone().try_acquire_owned().unwrap();
+    let prepared = cache.prepare_open(Arc::new(permit)).unwrap();
+    until(|| !prepared.ready.is_empty()).await;
     assert!(matches!(
-        cache.open(&source, image, &HashSet::new()).await.unwrap(),
+        prepared
+            .open(&source, image, HashSet::new(), async { Ok(()) })
+            .await
+            .unwrap(),
         CacheLookup::Pending
     ));
     tokio::time::timeout(Duration::from_secs(5), started_rx)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        requests.available_permits(),
+        1,
+        "the accepted transfer holds only downloader capacity while the origin waits"
+    );
     assert!(matches!(
         cache
             .open(&alternate_source, image, &HashSet::new())
@@ -1416,15 +1888,17 @@ async fn unrelated_reservations_refresh_grown_and_deleted_retained_files() {
         GrowInactive,
         DeleteRetained,
     }
-    for (scenario, change) in [
-        ("grown inactive candidate", Change::GrowInactive),
+    for (scenario, change, capacity) in [
+        // Four cached bytes leave room for the eight-byte reservation. Five do not.
+        ("grown inactive candidate", Change::GrowInactive, 12),
         (
             "deleted retained file after its last reader",
             Change::DeleteRetained,
+            8,
         ),
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let cache = cache(directory.path(), 8, 2);
+        let cache = cache(directory.path(), capacity, 2);
         fs::create_dir_all(&cache.inner.directory).unwrap();
         let previous = digest(b"data");
         fs::write(cache.inner.path(previous), b"data").unwrap();

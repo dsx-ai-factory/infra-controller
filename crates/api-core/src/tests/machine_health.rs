@@ -514,25 +514,6 @@ async fn test_machine_health_history(pool: sqlx::PgPool) -> Result<(), Box<dyn s
         health1,
     );
 
-    // Test limit
-    const EXPECTED_LIMIT: usize = 250;
-    for i in 0..EXPECTED_LIMIT + 10 {
-        let health = hr(
-            "override",
-            vec![],
-            vec![(&format!("Fan {i}"), None, "Reason")],
-        );
-        send_health_report_entry(
-            &env,
-            &host_machine_id,
-            (health.clone(), HealthReportApplyMode::Replace),
-        )
-        .await;
-        env.run_machine_state_controller_iteration().await;
-    }
-    let records = load_host_health_history(&env, &host_machine_id).await;
-    assert_eq!(records.len(), EXPECTED_LIMIT);
-
     Ok(())
 }
 

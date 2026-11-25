@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use db::resource_pool::{DefineResourcePoolError, binding};
-use db::{DatabaseError, TransactionVending as _};
+use db::{DatabaseError, Transaction, TransactionVending as _};
 use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
 use model::resource_pool::{
     ResourcePoolBackendKind, ResourcePoolDef, ResourcePoolSelection, ValueType,
@@ -107,9 +107,55 @@ impl ResourcePoolRegistry {
         .await?;
         // Dispatch from the binding we resolved, not an earlier READ COMMITTED
         // lookup that may have run before another caller created the binding.
-        let remote_pool = pools.keys().find(|name| {
-            resolved
+        resolved.apply_growth(database, pools, txn).await
+    }
+
+    /// `grow_resolved` adds values to pools whose bindings are already committed
+    /// and resolved in this registry, without scanning unrelated pools.
+    /// Empty input does no database work. Missing pools, empty names, and changes
+    /// to a binding's value domain fail before inventory changes.
+    /// Integrated batches, remote single-pool requests, and registration retries
+    /// follow the same transaction and replay rules as [`Self::grow`].
+    pub async fn grow_resolved(
+        &self,
+        database: &PgPool,
+        pools: &HashMap<String, ResourcePoolDef>,
+    ) -> Result<(), ResourcePoolGrowthError> {
+        if pools.is_empty() {
+            return Ok(());
+        }
+        for (name, definition) in pools {
+            if name.trim().is_empty() {
+                return Err(DefineResourcePoolError::InvalidArgument(
+                    "resource pool name must not be empty".to_owned(),
+                )
+                .into());
+            }
+            let selected = self
                 .get(name)
+                .ok_or_else(|| ResourcePoolRegistryError::MissingPool { name: name.clone() })?;
+            let value_domain = ValueType::from(definition.pool_type).into();
+            if value_domain != selected.binding.value_domain {
+                return Err(ResourcePoolRegistryError::ValueDomainConflict {
+                    name: name.clone(),
+                    stored: selected.binding.value_domain,
+                    configured: value_domain,
+                }
+                .into());
+            }
+        }
+        let txn = database.txn_begin().await?;
+        self.apply_growth(database, pools, txn).await
+    }
+
+    async fn apply_growth(
+        &self,
+        database: &PgPool,
+        pools: &HashMap<String, ResourcePoolDef>,
+        mut txn: Transaction<'_>,
+    ) -> Result<(), ResourcePoolGrowthError> {
+        let remote_pool = pools.keys().find(|name| {
+            self.get(name)
                 .is_some_and(|selected| selected.backend.remote().is_some())
         });
         if remote_pool.is_some() && pools.len() != 1 {
@@ -126,7 +172,7 @@ impl ResourcePoolRegistry {
         // Registration owns its binding lock and saved request. Release this
         // preflight transaction before reading eligibility or contacting a provider.
         txn.rollback().await?;
-        let selected = resolved
+        let selected = self
             .get(name)
             .ok_or_else(|| ResourcePoolRegistryError::MissingPool { name: name.clone() })?;
         let remote = selected.backend.remote().ok_or_else(|| {
@@ -162,5 +208,24 @@ impl ResourcePoolRegistry {
         )
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    use crate::ResourcePoolRegistry;
+
+    #[tokio::test]
+    async fn empty_resolved_growth_does_not_access_database() {
+        let database = PgPoolOptions::new().connect_lazy_with(PgConnectOptions::new());
+        database.close().await;
+        ResourcePoolRegistry::default()
+            .grow_resolved(&database, &HashMap::new())
+            .await
+            .expect("empty growth does not need a database connection");
     }
 }

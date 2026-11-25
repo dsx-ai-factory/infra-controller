@@ -861,6 +861,7 @@ mod tests {
                 boot_interface_mac: None,
                 error_classifier: &|_| None,
                 retry_timeout: std::time::Duration::ZERO,
+                collect_chassis_assembly: &|_| false,
                 explore_drive_firmware: false,
             };
             let config = Config {

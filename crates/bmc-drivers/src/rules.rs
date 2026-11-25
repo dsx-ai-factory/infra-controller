@@ -447,13 +447,24 @@ fn built_ins() -> Vec<Rule> {
         .quirks([Quirk::DellUefiPasswordClearJobFails]),
     );
 
-    // ARS-121L-DNR loses BMC reachability when its host interface is disabled.
+    // ARS-121L-DNR and ARS-221GL-FNB-NC24B cannot PXE boot when their host
+    // interface is disabled.
     rules.push(
         Rule::new(
             "supermicro-ars121l-host-interface-required",
             [
                 Match::vendor("Supermicro"),
                 Match::contains(IdentityField::SystemModel, "ARS-121L-DNR"),
+            ],
+        )
+        .quirks([Quirk::SupermicroHostInterfaceRequired]),
+    );
+    rules.push(
+        Rule::new(
+            "supermicro-ars221gl-fnb-nc24b-host-interface-required",
+            [
+                Match::vendor("Supermicro"),
+                Match::contains(IdentityField::SystemModel, "ARS-221GL-FNB-NC24B"),
             ],
         )
         .quirks([Quirk::SupermicroHostInterfaceRequired]),

@@ -31,7 +31,5 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(tenantInventoryManager.DiscoverTenantInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("Tenant: Successfully registered DiscoverTenantInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	return api.RegisterCron()
 }

@@ -113,6 +113,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(grpc_client_tracing)]
     async fn client_spans_pair_with_servers_and_record_grpc_outcomes() {
         opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
         for (scenario, reply, expected_status, expected_code) in [

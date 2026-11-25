@@ -15,7 +15,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	temporalCommon "go.temporal.io/api/common/v1"
+	temporalFailure "go.temporal.io/api/failure/v1"
 	tmocks "go.temporal.io/sdk/mocks"
+	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -28,33 +33,62 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 func TestCreateMeasuredBootTrustedMachineHandler(t *testing.T) {
-	record := &corev1.MeasurementApprovedMachineRecordPb{
-		ApprovalId:   &corev1.MeasurementApprovedMachineId{Value: "00000000-0000-0000-0000-000000000010"},
-		MachineId:    "*",
-		ApprovalType: corev1.MeasurementApprovedTypePb_Persist,
+	cases := []struct {
+		name        string
+		machineID   string
+		coreRejects bool
+	}{
+		{name: "Core machine ID", machineID: "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"},
+		{name: "wildcard", machineID: "*"},
+		{name: "malformed ID rejected by Core", machineID: "not-a-machine-id", coreRejects: true},
+		{name: "whitespace rejected by Core", machineID: " ", coreRejects: true},
 	}
-	fixture := newMeasuredBootHandlerFixture(t, &corev1.AddMeasurementTrustedMachineResponse{ApprovalRecord: record}, nil)
-	handler := NewCreateMeasuredBootTrustedMachineHandler(fixture.dbSession, fixture.scp)
-
-	rec := fixture.request(t, handler.Handle, http.MethodPost, "/", "", model.APIMeasuredBootTrustedMachineCreateRequest{
-		SiteID:       fixture.siteID,
-		MachineID:    "*",
-		ApprovalType: model.MeasuredBootApprovalTypePersist,
-	})
-	assert.Equal(t, http.StatusCreated, rec.Code)
-	assert.Equal(t, corev1.Forge_AddMeasurementTrustedMachine_FullMethodName, fixture.proxiedReq.FullMethod)
-
-	var coreReq corev1.AddMeasurementTrustedMachineRequest
-	require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreReq))
-	assert.Equal(t, "*", coreReq.GetMachineId())
-	assert.Equal(t, corev1.MeasurementApprovedTypePb_Persist, coreReq.GetApprovalType())
-
-	var resp model.APIMeasuredBootTrustedMachine
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, record.GetApprovalId().GetValue(), resp.ApprovalID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := &corev1.MeasurementApprovedMachineRecordPb{
+				ApprovalId: &corev1.MeasurementApprovedMachineId{Value: "00000000-0000-0000-0000-000000000010"},
+				MachineId:  tc.machineID, ApprovalType: corev1.MeasurementApprovedTypePb_Persist,
+			}
+			var getErr error
+			if tc.coreRejects {
+				// Temporal serializes the application error and does not retain the gRPC status type.
+				converter := tp.GetDefaultFailureConverter()
+				getErr = converter.FailureToError(&temporalFailure.Failure{
+					Message: "activity failed",
+					Cause:   converter.ErrorToFailure(swe.WrapErr(status.Error(codes.InvalidArgument, "Invalid machine ID"))),
+					FailureInfo: &temporalFailure.Failure_ActivityFailureInfo{
+						ActivityFailureInfo: &temporalFailure.ActivityFailureInfo{
+							ActivityType: &temporalCommon.ActivityType{Name: "InvokeCoreGRPCOnSite"},
+						},
+					},
+				})
+			}
+			fixture := newMeasuredBootHandlerFixture(t, &corev1.AddMeasurementTrustedMachineResponse{ApprovalRecord: record}, nil, getErr)
+			handler := NewCreateMeasuredBootTrustedMachineHandler(fixture.dbSession, fixture.scp)
+			rec := fixture.request(t, handler.Handle, http.MethodPost, "/", "", model.APIMeasuredBootTrustedMachineCreateRequest{
+				SiteID: fixture.siteID, MachineID: tc.machineID, ApprovalType: model.MeasuredBootApprovalTypePersist,
+			})
+			assert.Equal(t, corev1.Forge_AddMeasurementTrustedMachine_FullMethodName, fixture.proxiedReq.FullMethod)
+			var coreReq corev1.AddMeasurementTrustedMachineRequest
+			require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreReq))
+			assert.Equal(t, tc.machineID, coreReq.GetMachineId())
+			if tc.coreRejects {
+				assert.Equal(t, http.StatusBadRequest, rec.Code)
+				assert.Contains(t, rec.Body.String(), "Invalid machine ID")
+				assert.NotContains(t, rec.Body.String(), "activity failed")
+				return
+			}
+			assert.Equal(t, http.StatusCreated, rec.Code)
+			var resp model.APIMeasuredBootTrustedMachine
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, record.GetApprovalId().GetValue(), resp.ApprovalID)
+			assert.Equal(t, tc.machineID, resp.MachineID)
+		})
+	}
 }
 
 func TestGetAllMeasuredBootTrustedMachineHandler(t *testing.T) {
@@ -62,7 +96,7 @@ func TestGetAllMeasuredBootTrustedMachineHandler(t *testing.T) {
 		ApprovalId: &corev1.MeasurementApprovedMachineId{Value: "00000000-0000-0000-0000-000000000010"},
 		MachineId:  "00000000-0000-0000-0000-000000000011",
 	}
-	fixture := newMeasuredBootHandlerFixture(t, &corev1.ListMeasurementTrustedMachinesResponse{ApprovalRecords: []*corev1.MeasurementApprovedMachineRecordPb{record}}, nil)
+	fixture := newMeasuredBootHandlerFixture(t, &corev1.ListMeasurementTrustedMachinesResponse{ApprovalRecords: []*corev1.MeasurementApprovedMachineRecordPb{record}}, nil, nil)
 	handler := NewGetAllMeasuredBootTrustedMachineHandler(fixture.dbSession, fixture.scp)
 
 	rec := fixture.request(t, handler.Handle, http.MethodGet, "/?siteId="+fixture.siteID, "", nil)
@@ -76,21 +110,57 @@ func TestGetAllMeasuredBootTrustedMachineHandler(t *testing.T) {
 }
 
 func TestDeleteMeasuredBootTrustedMachineHandler(t *testing.T) {
-	record := &corev1.MeasurementApprovedMachineRecordPb{
-		ApprovalId: &corev1.MeasurementApprovedMachineId{Value: "00000000-0000-0000-0000-000000000010"},
-		MachineId:  "00000000-0000-0000-0000-000000000011",
+	cases := []struct {
+		name        string
+		machineID   string
+		coreRejects bool
+	}{
+		{name: "Core machine ID", machineID: "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"},
+		{name: "wildcard", machineID: "*"},
+		{name: "malformed ID rejected by Core", machineID: "not-a-machine-id", coreRejects: true},
+		{name: "whitespace rejected by Core", machineID: " ", coreRejects: true},
 	}
-	fixture := newMeasuredBootHandlerFixture(t, &corev1.RemoveMeasurementTrustedMachineResponse{ApprovalRecord: record}, nil)
-	handler := NewDeleteMeasuredBootTrustedMachineHandler(fixture.dbSession, fixture.scp)
-
-	target := "/?siteId=" + fixture.siteID + "&selector=" + model.MeasuredBootTrustedMachineSelectorMachineID
-	rec := fixture.request(t, handler.Handle, http.MethodDelete, target, record.GetMachineId(), nil)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, corev1.Forge_RemoveMeasurementTrustedMachine_FullMethodName, fixture.proxiedReq.FullMethod)
-
-	var coreReq corev1.RemoveMeasurementTrustedMachineRequest
-	require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreReq))
-	assert.Equal(t, record.GetMachineId(), coreReq.GetMachineId())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := &corev1.MeasurementApprovedMachineRecordPb{
+				ApprovalId: &corev1.MeasurementApprovedMachineId{Value: "00000000-0000-0000-0000-000000000010"},
+				MachineId:  tc.machineID, ApprovalType: corev1.MeasurementApprovedTypePb_Persist,
+			}
+			var getErr error
+			if tc.coreRejects {
+				// Temporal serializes the application error and does not retain the gRPC status type.
+				converter := tp.GetDefaultFailureConverter()
+				getErr = converter.FailureToError(&temporalFailure.Failure{
+					Message: "activity failed",
+					Cause:   converter.ErrorToFailure(swe.WrapErr(status.Error(codes.InvalidArgument, "Invalid machine ID"))),
+					FailureInfo: &temporalFailure.Failure_ActivityFailureInfo{
+						ActivityFailureInfo: &temporalFailure.ActivityFailureInfo{
+							ActivityType: &temporalCommon.ActivityType{Name: "InvokeCoreGRPCOnSite"},
+						},
+					},
+				})
+			}
+			fixture := newMeasuredBootHandlerFixture(t, &corev1.RemoveMeasurementTrustedMachineResponse{ApprovalRecord: record}, nil, getErr)
+			handler := NewDeleteMeasuredBootTrustedMachineHandler(fixture.dbSession, fixture.scp)
+			target := "/?siteId=" + fixture.siteID + "&selector=" + model.MeasuredBootTrustedMachineSelectorMachineID
+			rec := fixture.request(t, handler.Handle, http.MethodDelete, target, tc.machineID, nil)
+			assert.Equal(t, corev1.Forge_RemoveMeasurementTrustedMachine_FullMethodName, fixture.proxiedReq.FullMethod)
+			var coreReq corev1.RemoveMeasurementTrustedMachineRequest
+			require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreReq))
+			assert.Equal(t, tc.machineID, coreReq.GetMachineId())
+			if tc.coreRejects {
+				assert.Equal(t, http.StatusBadRequest, rec.Code)
+				assert.Contains(t, rec.Body.String(), "Invalid machine ID")
+				assert.NotContains(t, rec.Body.String(), "activity failed")
+				return
+			}
+			assert.Equal(t, http.StatusOK, rec.Code)
+			var resp model.APIMeasuredBootTrustedMachine
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, record.GetApprovalId().GetValue(), resp.ApprovalID)
+			assert.Equal(t, tc.machineID, resp.MachineID)
+		})
+	}
 }
 
 func TestCreateMeasuredBootTrustedProfileHandler(t *testing.T) {
@@ -98,7 +168,7 @@ func TestCreateMeasuredBootTrustedProfileHandler(t *testing.T) {
 		ApprovalId: &corev1.MeasurementApprovedProfileId{Value: "00000000-0000-0000-0000-000000000010"},
 		ProfileId:  &corev1.MeasurementSystemProfileId{Value: "00000000-0000-0000-0000-000000000012"},
 	}
-	fixture := newMeasuredBootHandlerFixture(t, &corev1.AddMeasurementTrustedProfileResponse{ApprovalRecord: record}, nil)
+	fixture := newMeasuredBootHandlerFixture(t, &corev1.AddMeasurementTrustedProfileResponse{ApprovalRecord: record}, nil, nil)
 	handler := NewCreateMeasuredBootTrustedProfileHandler(fixture.dbSession, fixture.scp)
 
 	rec := fixture.request(t, handler.Handle, http.MethodPost, "/", "", model.APIMeasuredBootTrustedProfileCreateRequest{
@@ -115,7 +185,7 @@ func TestGetAllMeasuredBootTrustedProfileHandler(t *testing.T) {
 		ApprovalId: &corev1.MeasurementApprovedProfileId{Value: "00000000-0000-0000-0000-000000000010"},
 		ProfileId:  &corev1.MeasurementSystemProfileId{Value: "00000000-0000-0000-0000-000000000012"},
 	}
-	fixture := newMeasuredBootHandlerFixture(t, &corev1.ListMeasurementTrustedProfilesResponse{ApprovalRecords: []*corev1.MeasurementApprovedProfileRecordPb{record}}, nil)
+	fixture := newMeasuredBootHandlerFixture(t, &corev1.ListMeasurementTrustedProfilesResponse{ApprovalRecords: []*corev1.MeasurementApprovedProfileRecordPb{record}}, nil, nil)
 	handler := NewGetAllMeasuredBootTrustedProfileHandler(fixture.dbSession, fixture.scp)
 
 	rec := fixture.request(t, handler.Handle, http.MethodGet, "/?siteId="+fixture.siteID, "", nil)
@@ -128,7 +198,7 @@ func TestDeleteMeasuredBootTrustedProfileHandler(t *testing.T) {
 		ApprovalId: &corev1.MeasurementApprovedProfileId{Value: "00000000-0000-0000-0000-000000000010"},
 		ProfileId:  &corev1.MeasurementSystemProfileId{Value: "00000000-0000-0000-0000-000000000012"},
 	}
-	fixture := newMeasuredBootHandlerFixture(t, &corev1.RemoveMeasurementTrustedProfileResponse{ApprovalRecord: record}, nil)
+	fixture := newMeasuredBootHandlerFixture(t, &corev1.RemoveMeasurementTrustedProfileResponse{ApprovalRecord: record}, nil, nil)
 	handler := NewDeleteMeasuredBootTrustedProfileHandler(fixture.dbSession, fixture.scp)
 
 	target := "/?siteId=" + fixture.siteID + "&selector=" + model.MeasuredBootTrustedProfileSelectorApprovalID
@@ -138,7 +208,7 @@ func TestDeleteMeasuredBootTrustedProfileHandler(t *testing.T) {
 }
 
 func TestMeasuredBootHandlersRejectInvalidInput(t *testing.T) {
-	fixture := newMeasuredBootHandlerFixture(t, nil, nil)
+	fixture := newMeasuredBootHandlerFixture(t, nil, nil, nil)
 	createMachineHandler := NewCreateMeasuredBootTrustedMachineHandler(fixture.dbSession, fixture.scp)
 	createProfileHandler := NewCreateMeasuredBootTrustedProfileHandler(fixture.dbSession, fixture.scp)
 
@@ -161,11 +231,11 @@ func TestMeasuredBootHandlersRejectInvalidInput(t *testing.T) {
 			message: "Failed to parse request data, potentially invalid structure",
 		},
 		{
-			name:    "invalid machine request",
+			name:    "missing machine ID",
 			handler: createMachineHandler.Handle,
 			body: model.APIMeasuredBootTrustedMachineCreateRequest{
 				SiteID:       fixture.siteID,
-				MachineID:    "invalid",
+				MachineID:    "",
 				ApprovalType: model.MeasuredBootApprovalTypeOneshot,
 			},
 			message: "Error validating Measured Boot Trusted Machine creation request data",
@@ -227,7 +297,7 @@ func TestMeasuredBootHandlersRejectInvalidInput(t *testing.T) {
 }
 
 func TestMeasuredBootHandlerRequiresProviderAdmin(t *testing.T) {
-	fixture := newMeasuredBootHandlerFixture(t, nil, []string{authz.TenantAdminRole})
+	fixture := newMeasuredBootHandlerFixture(t, nil, []string{authz.TenantAdminRole}, nil)
 	listHandler := NewGetAllMeasuredBootTrustedMachineHandler(fixture.dbSession, fixture.scp)
 
 	rec := fixture.request(t, listHandler.Handle, http.MethodGet, "/?siteId="+fixture.siteID, "", nil)
@@ -250,7 +320,7 @@ type measuredBootHandlerFixture struct {
 	proxiedReq *grpcproxy.Request
 }
 
-func newMeasuredBootHandlerFixture(t *testing.T, response proto.Message, roles []string) measuredBootHandlerFixture {
+func newMeasuredBootHandlerFixture(t *testing.T, response proto.Message, roles []string, getErr error) measuredBootHandlerFixture {
 	t.Helper()
 
 	dbSession := common.TestInitDB(t)
@@ -277,7 +347,7 @@ func newMeasuredBootHandlerFixture(t *testing.T, response proto.Message, roles [
 		responseJSON, err := protojson.Marshal(response)
 		require.NoError(t, err)
 		args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
-	}).Return(nil)
+	}).Return(getErr)
 
 	tsc := &tmocks.Client{}
 	tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.MatchedBy(func(req grpcproxy.Request) bool {

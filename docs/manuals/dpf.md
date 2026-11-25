@@ -919,7 +919,7 @@ Create it before enabling `[dpf.deployments.bf4_astra]`.
 ```toml
 # BF3 is present by default. Override only if any change is needed.
 [dpf.deployments.bf3]
-bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.2-125_26.02_ubuntu-24.04_64k_prod.bfb"
+bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.6.0-86_26.10_ubuntu-24.04_64k_prod.bfb"
 flavor_name     = "carbide-dpu-flavor"
 deployment_name = "nico-deployment-v2"
 node_label_key  = "carbide.nvidia.com/controlled.node.v2"
@@ -997,14 +997,14 @@ except `dts` and `doca_hbn`; it is a fallback rather than an override for
 resolved Astra extra services.
 
 ```toml
-# Pin a BF4-specific HBN chart/image while keeping the other services on defaults.
+# Pin HBN for this deployment while keeping the other services on defaults.
 [dpf.deployments.bf4_generic.services.doca_hbn]
 name                     = "doca-hbn"
 helm_repo_url            = "https://helm.ngc.nvidia.com/nvidia/doca"
 helm_chart               = "doca-hbn"
-helm_version             = "3.4.0"
+helm_version             = "3.6.0"
 docker_repo_url          = "nvcr.io/nvidia/doca/doca_hbn"
-docker_image_tag         = "3.4.0-doca3.4.0"
+docker_image_tag         = "3.6.0-doca3.6.0"
 ```
 
 BF4 Astra includes three built-in deployment-specific services. Configure their
@@ -1285,6 +1285,12 @@ for them on its own:
   provisioning strands hosts in `HostInit`, and the fix is a new DPUService
   version those hosts cannot receive while they are held. Releasing by hand is
   how such a host is recovered.
+
+The `carbide_hosts_dpu_service_sync_pending_count` gauge counts hosts with outstanding records on the [`dpf service-sync list`](#dpf-service-sync-list) worklist as of the replica's last successful read. The `carbide_hosts_dpu_service_sync_oldest_pending_age_seconds` gauge reports the age in seconds of the oldest outstanding hold, measured from its initial request.
+
+Both gauges carry two labels. The `above_sla` label is `true` when the host is past the SLA of its current state. The `in_use` label is `true` when an instance is allocated on the host. The automatic release does not apply to a host with an instance, so a non-zero count for `in_use="true"` is expected during a rollout.
+
+On a site that has applied the NICo alert rules, the `NicoHostsAboveSLAWithDpuServiceSyncHold` alert warns when held hosts are past the SLA of their current state. The alert does not show that the hold is the cause. Refer to [DPUService rollout holds](../observability/alerts.md#dpuservice-rollout-holds) for the rule, how to respond, and how to aggregate the gauges.
 
 #### DPU Agent Bootstrap CA
 

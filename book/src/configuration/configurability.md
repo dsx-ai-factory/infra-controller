@@ -406,6 +406,10 @@ plus thresholds for DPU agent compliance. Operators flip this from
   no DHCP lease is discovered at its static `expected_power_shelves` IP as a
   matter of course.
 
+These creation toggles do not control BMC pre-ingestion. In particular, disabling
+switch creation still allows [initial NVOS password rotation](../../../docs/operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
+to complete before a switch state machine is created.
+
 Site Explorer auto-creation is additionally gated per device on a matching
 expected-hardware record (`expected_machines`, `expected_switches`,
 `expected_power_shelves`), so it only ingests declared hardware; other
@@ -834,8 +838,13 @@ advertised. Both are documented field-by-field in
 `[ib_config]` toggles InfiniBand support fleet-wide. When enabled, it supports
 at most one configured fabric, named `default`. The
 [InfiniBand partitioning manual](../../../docs/manuals/networking/infiniband_partitioning.md#configuring-nico-to-talk-to-ufm)
-defines the supported fabric settings, P_Key ranges and separate credential
-configuration.
+defines the supported fabric settings, P_Key ranges, and credential
+configuration. The optional `auth` setting selects `"client_certificate"` or
+`"token"`. Client-certificate mode uses the default SPIFFE files and needs no
+UFM credential. Token mode requires a stored, nonblank UFM token. When
+`auth` is omitted, an empty or whitespace-only password selects the client
+certificate and any other password is a token. An `auth` change takes effect
+when Core restarts.
 
 ### Operator dev / debug knobs
 
