@@ -21,69 +21,15 @@
 
 use std::collections::BTreeMap;
 
-use bmc_backend::{idrac_outcome, libredfish_operation_status, platform_error};
-use bmc_platform::{
-    BiosSettings, DriverOutcome, ManagerSettings, OperationReference, OperationStatus,
-    PlatformError, PlatformIdentity,
-};
-use bmc_runtime::ConnectedBmc;
+use bmc_backend::{idrac_outcome, platform_error};
+use bmc_platform::{BiosSettings, DriverOutcome, ManagerSettings, PlatformError, PlatformIdentity};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
-use carbide_redfish::nv_redfish::RedfishBmc;
 use libredfish::{BiosProfileVendor, Redfish, RedfishError};
-use model::machine::ManagedHostStateSnapshot;
 use serde_json::Value;
-use state_controller::state_handler::StateHandlerError;
 
 use super::DpuSettings;
 use crate::config::MachineStateHandlerSiteConfig;
-use crate::context::MachineStateHandlerServices;
-
-/// A host's BMC for its platform settings: the libredfish client the caller
-/// already holds, or the drivers.
-pub enum PlatformBmc<'a> {
-    Libredfish {
-        client: &'a dyn Redfish,
-        /// libredfish reports a host without a boot interface as an error,
-        /// which stands only when the host has DPUs to boot from.
-        expected_dpu_count: usize,
-    },
-    Drivers(Box<ConnectedBmc<RedfishBmc>>),
-}
-
-impl<'a> PlatformBmc<'a> {
-    /// The host's BMC through the site's `bmc_backend`, reusing
-    /// `redfish_client` under libredfish.
-    pub(crate) async fn connect(
-        services: &MachineStateHandlerServices,
-        mh_snapshot: &ManagedHostStateSnapshot,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        let host = &mh_snapshot.host_snapshot;
-        Ok(match services.connect_drivers(host).await? {
-            Some(bmc) => Self::Drivers(bmc),
-            None => Self::Libredfish {
-                client: redfish_client,
-                expected_dpu_count: host.associated_dpu_machine_ids().len(),
-            },
-        })
-    }
-
-    /// See [`ConnectedBmc::operation_status`] and
-    /// [`libredfish_operation_status`].
-    pub(crate) async fn operation_status(
-        &self,
-        reference: &OperationReference,
-    ) -> Result<OperationStatus, PlatformError> {
-        match self {
-            // Boxed so the state handler's future stays within the stack limit.
-            Self::Drivers(bmc) => Box::pin(bmc.operation_status(reference)).await,
-            Self::Libredfish { client, .. } => {
-                libredfish_operation_status(*client, reference).await
-            }
-        }
-    }
-}
 
 /// See [`super::apply`].
 pub(super) async fn apply(

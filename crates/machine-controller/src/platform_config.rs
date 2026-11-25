@@ -35,8 +35,6 @@ use crate::config::MachineStateHandlerSiteConfig;
 
 mod legacy;
 
-pub use legacy::PlatformBmc;
-
 /// The vendor job `outcome` started, which the host must wait for before
 /// restarting; other work is not waited on.
 pub fn vendor_job_id(outcome: &DriverOutcome) -> Option<VendorJobId> {
@@ -79,18 +77,35 @@ impl PlatformConfig {
 /// configuration work the BMC has queued. A BMC may refuse the secure boot
 /// write while that BIOS work is pending; the BIOS work is still returned, and
 /// secure boot is written once a later apply finds the BIOS settings in effect.
+///
+/// libredfish reports a host without a boot interface as an error, which
+/// stands only when the host has some of its `expected_dpu_count` DPUs.
 pub async fn apply(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
+    site_config: &MachineStateHandlerSiteConfig,
+    boot_interface: Option<&BootInterfaceTarget>,
+    expected_dpu_count: usize,
+) -> Result<DriverOutcome, PlatformError> {
+    match bmc {
+        BackendBmc::Libredfish(client) => {
+            legacy::apply(
+                client.as_ref(),
+                site_config,
+                boot_interface,
+                expected_dpu_count,
+            )
+            .await
+        }
+        BackendBmc::Drivers(bmc) => apply_through_drivers(bmc, site_config, boot_interface).await,
+    }
+}
+
+/// [`apply`] through the drivers.
+pub async fn apply_through_drivers(
+    bmc: &ConnectedBmc<RedfishBmc>,
     site_config: &MachineStateHandlerSiteConfig,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<DriverOutcome, PlatformError> {
-    let bmc = match bmc {
-        PlatformBmc::Libredfish {
-            client,
-            expected_dpu_count,
-        } => return legacy::apply(*client, site_config, boot_interface, *expected_dpu_count).await,
-        PlatformBmc::Drivers(bmc) => bmc,
-    };
     let config = PlatformConfig::new(site_config, bmc, boot_interface);
     let apply_settings = async {
         bmc.bmc_control()?
@@ -145,15 +160,15 @@ fn after_pending_bios(
 
 /// Whether every platform setting the platform reports is in effect.
 pub(crate) async fn in_effect(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     site_config: &MachineStateHandlerSiteConfig,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<bool, PlatformError> {
     let bmc = match bmc {
-        PlatformBmc::Libredfish { client, .. } => {
-            return legacy::in_effect(*client, boot_interface).await;
+        BackendBmc::Libredfish(client) => {
+            return legacy::in_effect(client.as_ref(), boot_interface).await;
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        BackendBmc::Drivers(bmc) => bmc,
     };
     let config = PlatformConfig::new(site_config, bmc, boot_interface);
     let secure_boot_disabled =
@@ -176,36 +191,42 @@ pub(crate) async fn in_effect(
 
 /// Puts `boot_interface`'s HTTP boot option first in the host's persistent
 /// boot order. The order takes effect on the next host restart, which must
-/// wait for the returned work.
+/// wait for the returned work. See [`apply`] for `expected_dpu_count`.
 pub async fn configure_boot_order(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     boot_interface: &BootInterfaceTarget,
+    expected_dpu_count: usize,
 ) -> Result<DriverOutcome, PlatformError> {
     match bmc {
-        PlatformBmc::Libredfish {
-            client,
-            expected_dpu_count,
-        } => legacy::configure_boot_order(*client, boot_interface, *expected_dpu_count).await,
-        PlatformBmc::Drivers(bmc) => {
-            bmc.boot_order()?
-                .configure(&BootInterfaceSelector::from(boot_interface))
-                .await
+        BackendBmc::Libredfish(client) => {
+            legacy::configure_boot_order(client.as_ref(), boot_interface, expected_dpu_count).await
         }
+        BackendBmc::Drivers(bmc) => configure_boot_order_through_drivers(bmc, boot_interface).await,
     }
+}
+
+/// [`configure_boot_order`] through the drivers.
+pub async fn configure_boot_order_through_drivers(
+    bmc: &ConnectedBmc<RedfishBmc>,
+    boot_interface: &BootInterfaceTarget,
+) -> Result<DriverOutcome, PlatformError> {
+    bmc.boot_order()?
+        .configure(&BootInterfaceSelector::from(boot_interface))
+        .await
 }
 
 /// Whether `boot_interface`'s HTTP boot option is first in the host's boot
 /// order. Unlike the other settings, a platform without boot order support is
 /// an error: the host could not boot for provisioning.
 pub(crate) async fn boot_order_in_effect(
-    bmc: &PlatformBmc<'_>,
+    bmc: &BackendBmc,
     boot_interface: &BootInterfaceTarget,
 ) -> Result<bool, PlatformError> {
     match bmc {
-        PlatformBmc::Libredfish { client, .. } => {
-            legacy::boot_order_in_effect(*client, boot_interface).await
+        BackendBmc::Libredfish(client) => {
+            legacy::boot_order_in_effect(client.as_ref(), boot_interface).await
         }
-        PlatformBmc::Drivers(bmc) => Ok(bmc
+        BackendBmc::Drivers(bmc) => Ok(bmc
             .boot_order()?
             .status(&BootInterfaceSelector::from(boot_interface))
             .await?

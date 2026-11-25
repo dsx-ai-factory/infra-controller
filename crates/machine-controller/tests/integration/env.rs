@@ -207,8 +207,8 @@ impl EnvBuilder {
         let credential_manager =
             credential_manager.unwrap_or_else(|| api.credential_manager().clone());
         let redfish_client_pool: Arc<dyn RedfishClientPool> = match controller_redfish_pool {
-            Some(pool) => pool(controller_redfish_sim.clone(), credential_manager.clone()),
-            None => controller_redfish_sim.clone(),
+            Some(pool) => pool(controller_redfish_sim, credential_manager.clone()),
+            None => controller_redfish_sim,
         };
         let services = MachineStateHandlerServices {
             instrumentation: api.instrumentation().clone(),
@@ -216,7 +216,6 @@ impl EnvBuilder {
             db_reader: pool.clone().into(),
             redfish_client_pool: redfish_client_pool.clone(),
             bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_client_pool),
-            direct_redfish_pool: controller_redfish_sim.into(),
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: runtime_config.machine_state_handler_site_config().into(),
             component_manager,

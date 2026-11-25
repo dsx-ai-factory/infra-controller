@@ -19,12 +19,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
-use bmc_runtime::{ConnectedBmc, ExploredBmcRefError, ExploredConnectError};
+use bmc_runtime::{ExploredBmcRefError, ExploredConnectError};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
-use carbide_redfish::libredfish::{DirectRedfishPool, RedfishClientPool};
-use carbide_redfish::nv_redfish::RedfishBmc;
+use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
@@ -60,9 +59,6 @@ pub struct MachineStateHandlerServices {
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
     /// Connects moved BMC operations through the site's `bmc_backend`.
     pub bmc_connector: BmcConnector,
-    /// Reaches the BMC without nico-bmc-proxy, which authenticates with stored
-    /// credentials a factory-reset BMC no longer accepts.
-    pub direct_redfish_pool: DirectRedfishPool,
     /// An implementation of the IPMITool that understands how to reboot a machine
     pub ipmi_tool: Arc<dyn IPMITool>,
     /// Configuration used by MachineStateHandler.
@@ -183,21 +179,6 @@ impl MachineStateHandlerServices {
                 error,
             )
             .into(),
-        })
-    }
-
-    /// Connects to `machine`'s BMC through the drivers; `None`, without
-    /// connecting, when the site runs libredfish.
-    pub(crate) async fn connect_drivers(
-        &self,
-        machine: &Machine<impl MachineIdSubtypeTrait>,
-    ) -> Result<Option<Box<ConnectedBmc<RedfishBmc>>>, StateHandlerError> {
-        if !matches!(self.bmc_connector, BmcConnector::Drivers(_)) {
-            return Ok(None);
-        }
-        Ok(match self.connect_bmc(machine).await? {
-            BackendBmc::Drivers(bmc) => Some(bmc),
-            BackendBmc::Libredfish(_) => None,
         })
     }
 
