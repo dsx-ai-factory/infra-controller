@@ -2373,14 +2373,13 @@ async fn resolve_switch_identities(
     Ok(map)
 }
 
-/// Resolve RMS identities for pre-ingestion (row-less) switches from the
-/// expected inventory, keyed by BMC MAC.
+/// Resolve RMS identities from expected switch inventory, keyed by BMC MAC.
 ///
 /// Every switch is rack-scale (RMS-managed), so its expected record is expected
 /// to declare a `rack_id`; that rack is required to build the RMS node
 /// descriptor. A record missing a `rack_id` is a misconfiguration and is
 /// omitted here, surfacing as an identity-lookup error at dispatch. The BMC MAC
-/// doubles as the RMS node id because no switch id exists yet — RMS treats
+/// doubles as the RMS node id for this fallback — RMS treats
 /// `node_id` as an opaque string and the request also carries the full node
 /// descriptor and endpoints. Mirrors `resolve_pre_ingestion_compute_identities`.
 async fn resolve_pre_ingestion_switch_identities(
@@ -2403,6 +2402,22 @@ async fn resolve_pre_ingestion_switch_identities(
         .into_iter()
         .map(|row| (row.bmc_mac_address, row.into()))
         .collect())
+}
+
+/// Resolve certificate identities from managed switches, then expected inventory
+/// for unresolved MACs.
+async fn resolve_switch_certificate_identities(
+    db: &PgPool,
+    macs: &[MacAddress],
+) -> Result<HashMap<MacAddress, RmsIdentity>, ComponentManagerError> {
+    let mut identities = resolve_switch_identities(db, macs).await?;
+    let unresolved: Vec<_> = macs
+        .iter()
+        .copied()
+        .filter(|mac| !identities.contains_key(mac))
+        .collect();
+    identities.extend(resolve_pre_ingestion_switch_identities(db, &unresolved).await?);
+    Ok(identities)
 }
 
 fn to_rms_power_operation(action: PowerAction) -> Result<i32, ComponentManagerError> {
@@ -4690,8 +4705,11 @@ impl NvSwitchManager for RmsBackend {
         domain_name: Option<&str>,
         services: Option<&[i32]>,
     ) -> Result<String, ComponentManagerError> {
-        let ids =
-            resolve_switch_identities(&self.db, std::slice::from_ref(&endpoint.bmc_mac)).await?;
+        let ids = resolve_switch_certificate_identities(
+            &self.db,
+            std::slice::from_ref(&endpoint.bmc_mac),
+        )
+        .await?;
 
         let resolved = match self.resolve_switch_or_power_shelf_node(
             &ids,
@@ -4846,7 +4864,7 @@ impl NvSwitchManager for RmsBackend {
             ComponentManagerError::RejectedBeforeDispatch(error.to_string())
         };
         let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
-        let identities = resolve_switch_identities(&self.db, &macs)
+        let identities = resolve_switch_certificate_identities(&self.db, &macs)
             .await
             .map_err(reject)?;
         let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints)
@@ -8315,6 +8333,16 @@ mod tests {
                 Err(RackManagerError::ApiInvocationError(
                     tonic::Status::unavailable("connection lost"),
                 )),
+                None,
+            ),
+            (
+                Ok(rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                }),
                 None,
             ),
             (
@@ -12577,8 +12605,9 @@ mod tests {
         assert_eq!(mock.update_switch_system_password_calls().await.len(), 1);
     }
 
-    #[carbide_macros::sqlx_test]
-    async fn sw_pre_ingestion_password_rotation_dispatches_via_expected_rack(pool: sqlx::PgPool) {
+    async fn make_pre_ingestion_switch_backend(
+        pool: &sqlx::PgPool,
+    ) -> (Arc<MockRmsApi>, RmsBackend, RackId, SwitchEndpoint) {
         let endpoint = make_sw_endpoint(SW_MAC_1);
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
         let mut txn = pool.txn_begin().await.unwrap();
@@ -12622,8 +12651,8 @@ mod tests {
         .unwrap();
         txn.commit().await.unwrap();
 
-        // Neither a managed switch nor a live rack exists. Password rotation
-        // addresses the expected switch and its unassociated NVOS interface.
+        // Neither a managed switch nor a live rack exists. Security operations
+        // address the expected switch and its unassociated NVOS interface.
         let mock = Arc::new(MockRmsApi::new());
         let backend = RmsBackend::new(
             mock.clone(),
@@ -12633,6 +12662,150 @@ mod tests {
             true,
             carbide_instrument::Instrumentation::noop(),
         );
+        (mock, backend, rack_id, endpoint)
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_pre_ingestion_certificate_rotation_dispatches_via_expected_rack(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, rack_id, endpoint) = make_pre_ingestion_switch_backend(&pool).await;
+        let node_id = endpoint.bmc_mac.to_string();
+        let services = [rms::SwitchService::NvueApi as i32];
+        mock.enqueue_batch_disable_switch_mtls(Ok(rms::BatchDisableSwitchMtlsResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "disable-mtls-job".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+        mock.enqueue_configure_switch_certificate(Ok(MockRmsApi::configure_switch_certificate_ok(
+            &node_id, "cert-job",
+        )))
+        .await;
+
+        assert_eq!(
+            NvSwitchManager::batch_disable_switch_mtls(
+                &backend,
+                std::slice::from_ref(&endpoint),
+                &services,
+            )
+            .await
+            .unwrap(),
+            "disable-mtls-job"
+        );
+        assert_eq!(
+            NvSwitchManager::configure_switch_certificate(
+                &backend,
+                &endpoint,
+                None,
+                Some(&services),
+            )
+            .await
+            .unwrap(),
+            "cert-job"
+        );
+
+        let disable_calls = mock.batch_disable_switch_mtls_calls().await;
+        let certificate_calls = mock.configure_switch_certificate_calls().await;
+        assert_eq!(disable_calls.len(), 1);
+        assert_eq!(certificate_calls.len(), 1);
+        for (operation, nodes, actual_services) in [
+            (
+                "disable mTLS",
+                &disable_calls[0].nodes,
+                &disable_calls[0].services,
+            ),
+            (
+                "configure certificate",
+                &certificate_calls[0].nodes,
+                &certificate_calls[0].services,
+            ),
+        ] {
+            assert_eq!(actual_services, &services, "{operation}");
+            let nodes = &nodes.as_ref().unwrap().nodes;
+            assert_eq!(nodes.len(), 1, "{operation}");
+            let node = &nodes[0];
+            assert_eq!(node.node_id, node_id, "{operation}");
+            assert_eq!(node.rack_id, rack_id.to_string(), "{operation}");
+            assert_descriptor_node(node, ROLE_SWITCH);
+            let host = node.host_endpoint.as_ref().unwrap();
+            let interface = host.interface.as_ref().unwrap();
+            assert_eq!(
+                interface.ip_address,
+                endpoint.nvos_ip.to_string(),
+                "{operation}"
+            );
+            assert_eq!(
+                interface.host_name.as_deref(),
+                Some("preingestion-nvos"),
+                "{operation}"
+            );
+            assert_eq!(
+                host.credentials,
+                Some(credentials_to_rms(&endpoint.nvos_credentials)),
+                "{operation}"
+            );
+        }
+
+        // A managed switch without a rack can also use expected inventory.
+        let mut txn = pool.txn_begin().await.unwrap();
+        db::switch::create(
+            &mut txn,
+            &model::switch::NewSwitch {
+                id: crate::test_support::test_switch_id("managed-without-rack"),
+                config: model::switch::SwitchConfig {
+                    name: "managed-without-rack".to_string(),
+                    enable_nmxc: false,
+                    fabric_manager_config: None,
+                },
+                bmc_mac_address: Some(endpoint.bmc_mac),
+                metadata: None,
+                rack_id: None,
+                slot_number: None,
+                tray_index: None,
+            },
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        let identities =
+            resolve_switch_certificate_identities(&pool, std::slice::from_ref(&endpoint.bmc_mac))
+                .await
+                .unwrap();
+        let identity = identities.get(&endpoint.bmc_mac).unwrap();
+        assert_eq!(identity.node_id, node_id);
+        assert_eq!(identity.rack_id, rack_id.to_string());
+        assert_eq!(
+            identity.rack_profile_id,
+            Some(RackProfileId::new(TEST_RACK_PROFILE_ID))
+        );
+
+        sqlx::query("UPDATE expected_switches SET rack_id = NULL WHERE bmc_mac_address = $1")
+            .bind(endpoint.bmc_mac)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = NvSwitchManager::configure_switch_certificate(
+            &backend,
+            &endpoint,
+            None,
+            Some(&services),
+        )
+        .await
+        .expect_err("certificate setup requires a managed or expected rack identity");
+        assert!(matches!(
+            error,
+            ComponentManagerError::Internal(message) if message == RMS_IDENTITY_LOOKUP_ERROR
+        ));
+        assert_eq!(mock.configure_switch_certificate_calls().await.len(), 1);
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_pre_ingestion_password_rotation_dispatches_via_expected_rack(pool: sqlx::PgPool) {
+        let (mock, backend, rack_id, endpoint) = make_pre_ingestion_switch_backend(&pool).await;
         let node_id = endpoint.bmc_mac.to_string();
         mock.enqueue_update_switch_system_password(Ok(rms::UpdateSwitchSystemPasswordResponse {
             response: Some(rms::NodeBatchResponse {

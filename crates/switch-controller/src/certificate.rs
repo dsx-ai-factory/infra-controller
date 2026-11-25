@@ -18,7 +18,7 @@
 //! Switch certificate configuration via Component Manager.
 
 use carbide_uuid::switch::SwitchId;
-use component_manager::config::{SwitchMtlsService, switch_mtls_services_as_i32};
+use component_manager::config::switch_mtls_services_for_role;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::SwitchMtlsDisableState;
 use model::component_manager::ConfigureSwitchCertificateState;
@@ -80,18 +80,7 @@ fn switch_mtls_services_for(
     state: &Switch,
     ctx: &StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Vec<i32> {
-    // Rack maintenance binds cluster applications after RMS selects the primary.
-    let primary_only_services = switch_mtls_services_as_i32(&[
-        SwitchMtlsService::ScaleUpFabricManager,
-        SwitchMtlsService::ScaleUpFabricTelemetry,
-    ]);
-
-    ctx.services
-        .switch_mtls_services
-        .iter()
-        .copied()
-        .filter(|service| state.is_primary || !primary_only_services.contains(service))
-        .collect()
+    switch_mtls_services_for_role(&ctx.services.switch_mtls_services, state.is_primary)
 }
 
 pub async fn start_configure_switch_certificate(

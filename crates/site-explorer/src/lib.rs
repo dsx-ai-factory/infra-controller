@@ -2712,6 +2712,18 @@ impl SiteExplorer {
             return;
         }
 
+        let primary_bmc_ip_address = endpoint.iface.primary_bmc_address();
+        if primary_bmc_ip_address != Some(endpoint.address) {
+            tracing::info!(
+                %endpoint,
+                bmc_mac_address = %endpoint.iface.mac_address,
+                ?primary_bmc_ip_address,
+                %error,
+                "Site explorer will not remediate error through a secondary BMC address",
+            );
+            return;
+        }
+
         // If site explorer can't log in, there's nothing we can do.
         if !self.bmc_client.have_credentials(endpoint.iface).await {
             return;

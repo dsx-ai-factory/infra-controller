@@ -4339,10 +4339,10 @@ pub struct SwitchStateControllerConfig {
     pub controller: StateControllerConfig,
 
     /// Switch services that receive installed mTLS certificates during RMS
-    /// `configure_switch_certificate` calls initiated by the switch state
-    /// machine or the direct `ComponentConfigureSwitchCertificate` RPC path.
-    /// The switch state machine omits primary-only cluster applications on
-    /// non-primary switches; the direct RPC is unchanged. Rack
+    /// `configure_switch_certificate` calls initiated by switch preingestion,
+    /// the switch state machine, or the direct `ComponentConfigureSwitchCertificate` RPC path.
+    /// Preingestion and non-primary switches omit primary-only cluster applications;
+    /// the direct RPC uses the full list. Rack
     /// `ConfigureNmxCluster` uses the effective list for the primary NMX-T
     /// binding, but applies gNMI only when explicitly listed.
     ///

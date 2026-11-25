@@ -21,6 +21,7 @@ mod errors;
 mod metrics;
 mod nvos_password_rotation;
 mod rack_firmware;
+mod switch_certificate_rotation;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -151,6 +152,7 @@ struct RackFirmwareDependencies {
 struct ComponentManager {
     component_manager: Arc<BackendComponentManager>,
     credential_manager: Arc<dyn CredentialManager>,
+    switch_mtls_services: Vec<i32>,
 }
 
 impl db::TransactionVending for PreingestionManagerStatic {
@@ -241,15 +243,22 @@ impl PreingestionManager {
         self
     }
 
-    /// Configure the component backend and credential store for preingestion work.
+    /// Configure the component backend, credential store, and effective switch
+    /// mTLS service list for preingestion work. Primary-only services are deferred
+    /// until a primary switch has been selected after ingestion.
     pub fn with_component_manager(
         mut self,
         component_manager: Arc<BackendComponentManager>,
         credential_manager: Arc<dyn CredentialManager>,
+        switch_mtls_services: Vec<i32>,
     ) -> Self {
         Arc::make_mut(&mut self.static_info).component_manager = Some(ComponentManager {
             component_manager,
             credential_manager,
+            switch_mtls_services: component_manager::config::switch_mtls_services_for_role(
+                &switch_mtls_services,
+                false,
+            ),
         });
         self
     }
@@ -457,18 +466,7 @@ async fn one_endpoint(
     // Main state machine match.
     let delayed_upgrade = match &endpoint.preingestion_state {
         PreingestionState::Initial => {
-            // Kick off a one-shot BMC reset before the time-sync / firmware
-            // checks so pairing sees a stable BMC.
-            static_info
-                .with_txn(|txn| {
-                    db::explored_endpoints::set_preingestion_initial_bmc_reset(
-                        endpoint.address,
-                        InitialBmcResetPhase::Start { attempts: 0 },
-                        txn,
-                    )
-                    .boxed()
-                })
-                .await??;
+            static_info.start_preingestion(endpoint).await?;
             false
         }
         PreingestionState::InitialBMCReset { phase } => {
@@ -524,6 +522,12 @@ async fn one_endpoint(
         PreingestionState::NvosPasswordRotation { rotation_state } => {
             static_info
                 .rotate_switch_nvos_password(endpoint, rotation_state)
+                .await?;
+            false
+        }
+        PreingestionState::SwitchCertificateRotation { rotation_state } => {
+            static_info
+                .rotate_switch_certificates(endpoint, rotation_state)
                 .await?;
             false
         }
@@ -631,6 +635,60 @@ async fn one_endpoint(
 }
 
 impl PreingestionManagerStatic {
+    async fn start_preingestion(
+        &self,
+        endpoint: &ExploredEndpoint,
+    ) -> PreingestionManagerResult<()> {
+        if let Some(interface) =
+            db::machine_interface::find_by_ip(&self.database_connection, endpoint.address).await?
+            && let Some(primary_address) = interface.primary_bmc_address()
+            && primary_address != endpoint.address
+        {
+            let primary = db::explored_endpoints::find_by_ips(
+                &self.database_connection,
+                vec![primary_address],
+            )
+            .await?
+            .pop();
+            let primary_state = primary.as_ref().map(|primary| &primary.preingestion_state);
+            if primary_state == Some(&PreingestionState::Complete) {
+                self.with_txn(|txn| {
+                    db::explored_endpoints::set_preingestion_complete(endpoint.address, txn).boxed()
+                })
+                .await??;
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    bmc_mac_address = %interface.mac_address,
+                    primary_bmc_ip_address = %primary_address,
+                    "Skipping preingestion because the primary BMC address completed it",
+                );
+            } else {
+                // Complete endpoints are eligible for ingestion, so the alias must
+                // wait until the primary has actually finished the work.
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    bmc_mac_address = %interface.mac_address,
+                    primary_bmc_ip_address = %primary_address,
+                    ?primary_state,
+                    "Waiting for preingestion on the primary BMC address",
+                );
+            }
+            return Ok(());
+        }
+
+        // Kick off a one-shot BMC reset before time-sync and firmware checks.
+        self.with_txn(|txn| {
+            db::explored_endpoints::set_preingestion_initial_bmc_reset(
+                endpoint.address,
+                InitialBmcResetPhase::Start { attempts: 0 },
+                txn,
+            )
+            .boxed()
+        })
+        .await??;
+        Ok(())
+    }
+
     /// Connects to the BMC at `address` through the configured `bmc_backend`,
     /// loading its explored endpoint only for the drivers.
     async fn connect_bmc(&self, address: IpAddr) -> PreingestionManagerResult<BackendBmc> {

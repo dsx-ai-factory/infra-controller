@@ -894,7 +894,7 @@ TOML section: `[switch_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `switch_mtls_services` | `Vec<SwitchMtlsService>` | all four values below for switch and direct operations | mTLS certificate bindings selected by switch state-controller and direct `ComponentConfigureSwitchCertificate` operations. The switch state-controller omits primary-only cluster applications on non-primary switches; the direct RPC is unchanged. Rack `ConfigureNmxCluster` uses this effective list for primary nmx-telemetry and requires an explicit entry for gNMI. A non-empty list replaces the switch/direct default. Omission and `[]` both use that default. |
+| `switch_mtls_services` | `Vec<SwitchMtlsService>` | all four values below before role filtering | mTLS certificate bindings selected by switch pre-ingestion, switch state-controller, and direct `ComponentConfigureSwitchCertificate` operations. Pre-ingestion omits primary-only cluster applications; the switch state-controller omits them on non-primary switches. The direct RPC forwards the effective list. Rack `ConfigureNmxCluster` uses this effective list for primary nmx-telemetry and requires an explicit entry for gNMI. A non-empty list replaces the default. Omission and `[]` both use that default. |
 
 `switch_mtls_services` accepts these RMS service values:
 
@@ -904,6 +904,13 @@ TOML section: `[switch_state_controller]`.
 | `scale_up_fabric_telemetry` | Scale-up fabric telemetry service |
 | `scale_up_fabric_manager` | Scale-up fabric manager service |
 | `scale_up_fabric_telemetry_interface` | Scale-up fabric telemetry interface service |
+
+Switch pre-ingestion excludes `scale_up_fabric_manager` and
+`scale_up_fabric_telemetry`. If no services remain, either submission phase
+returns an error and retains its state for retry after the configuration is
+repaired; polling a saved job does not repeat this check. Otherwise it clears
+stale mTLS bindings and installs certificates after initial NVOS password
+rotation and before firmware checks.
 
 Rack `ConfigureNmxCluster` always applies `nvue_api` to every switch and also
 applies `scale_up_fabric_telemetry_interface` when explicitly configured. RMS V2 selects

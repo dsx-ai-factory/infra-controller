@@ -108,6 +108,21 @@ pub fn effective_switch_mtls_services(services: &[SwitchMtlsService]) -> Vec<Swi
     }
 }
 
+/// Select switch mTLS bindings, reserving cluster applications for the primary.
+/// Before primary selection, pass `false` to configure only per-switch services.
+pub fn switch_mtls_services_for_role(services: &[i32], is_primary: bool) -> Vec<i32> {
+    let primary_only_services = switch_mtls_services_as_i32(&[
+        SwitchMtlsService::ScaleUpFabricManager,
+        SwitchMtlsService::ScaleUpFabricTelemetry,
+    ]);
+
+    services
+        .iter()
+        .copied()
+        .filter(|service| is_primary || !primary_only_services.contains(service))
+        .collect()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendEndpointConfig {
@@ -366,6 +381,36 @@ mod tests {
                 },
             ],
             |services| effective_switch_mtls_services(&services),
+        );
+    }
+
+    #[test]
+    fn switch_mtls_services_reserve_cluster_applications_for_primary() {
+        let services = switch_mtls_services_as_i32(&[
+            SwitchMtlsService::NvueApi,
+            SwitchMtlsService::ScaleUpFabricManager,
+            SwitchMtlsService::NvueApi,
+            SwitchMtlsService::ScaleUpFabricTelemetry,
+            SwitchMtlsService::ScaleUpFabricTelemetryInterface,
+        ]);
+        check_values(
+            [
+                Check {
+                    scenario: "primary preserves configured bindings and order",
+                    input: true,
+                    expect: services.clone(),
+                },
+                Check {
+                    scenario: "non-primary preserves only per-switch bindings",
+                    input: false,
+                    expect: switch_mtls_services_as_i32(&[
+                        SwitchMtlsService::NvueApi,
+                        SwitchMtlsService::NvueApi,
+                        SwitchMtlsService::ScaleUpFabricTelemetryInterface,
+                    ]),
+                },
+            ],
+            |is_primary| switch_mtls_services_for_role(&services, is_primary),
         );
     }
 

@@ -643,7 +643,7 @@ pub struct HostPrimaryInterfaceSelection {
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum PreingestionState {
     Initial,
-    /// Check firmware prerequisites after initial NVOS password handling.
+    /// Check firmware prerequisites after switch password and TLS setup.
     CheckFirmware,
     RecheckVersions,
     ScriptRunning,
@@ -732,6 +732,10 @@ pub enum PreingestionState {
     NvosPasswordRotation {
         /// Eligibility check or the captured password operation to resume.
         rotation_state: NvosPasswordRotationState,
+    },
+    /// Replace switch TLS certificates after NVOS password rotation and before firmware work.
+    SwitchCertificateRotation {
+        rotation_state: SwitchCertificateRotationState,
     },
     UpgradeFirmwareWait {
         task_id: String,
@@ -834,6 +838,18 @@ pub enum NvosPasswordRotationState {
         /// same target; `Some` retains the backend job for status polling.
         job_id: Option<String>,
     },
+}
+
+/// Durable progress of switch TLS setup before ingestion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SwitchCertificateRotationState {
+    /// Remove stale mTLS bindings over SSH. `None` submits the operation;
+    /// `Some` polls the saved job. A restart before saving the ID may resubmit.
+    DisableMtls { job_id: Option<String> },
+    /// Install new certificates after mTLS removal completes.
+    /// `None` submits the operation; `Some` polls the saved job.
+    ConfigureCertificate { job_id: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

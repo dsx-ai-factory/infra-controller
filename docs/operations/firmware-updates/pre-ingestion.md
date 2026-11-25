@@ -14,16 +14,91 @@ This page covers host firmware selected from the
 recovery also runs in the pre-ingestion state machine, but installs a DPU boot
 image to recover the DPU; it is not a host firmware-catalog workflow.
 
-After successful BMC time synchronization, every switch BMC enters
+At `Initial`, NICo selects one primary BMC address per machine interface: the
+allocated IPv4 address when present, otherwise IPv6. Only that address begins
+the full pre-ingestion workflow. While a secondary address is in `Initial`, it
+waits for the primary endpoint to reach `Complete`, then becomes `Complete` and
+logs that its work was skipped. A missing primary endpoint or one that has not
+completed, including `Failed`, keeps the secondary waiting; NICo does not
+automatically fall back to IPv6. The rack compute-tray firmware workflow can
+advance aliases together after this selection, as described below.
+If no machine-interface record exists, the endpoint begins the normal workflow.
+
+Only the selected primary address can perform Site Explorer error remediation,
+including after pre-ingestion completes. Pre-ingestion evaluates this selection
+at `Initial`; adding an address does not cancel or reassign pre-ingestion already
+in progress. Each interface permits one address per family.
+Interfaces on different segments are selected independently, even
+when they share a BMC MAC.
+
+After successful BMC time synchronization, the selected switch BMC endpoint enters
 [initial NVOS password rotation](../nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
-before firmware checks and updates. Completing or skipping that password step
-allows firmware work to proceed. Disabling firmware updates or switch creation
-does not disable the password step.
-Compute-tray and DPU BMCs do not enter `NvosPasswordRotation` or its
-`CheckFirmware` continuation; they proceed through their existing firmware path.
-For a switch BMC with IPv4 and IPv6 endpoints, one endpoint owns the persisted
-NVOS rotation and the other waits in `Check`. Both continue to firmware checks
-after the owner records the confirmed password version.
+and then [switch certificate rotation](#switch-certificates-before-firmware)
+before firmware checks and updates. Firmware work proceeds after the password
+step completes or is skipped and certificate handling completes. Disabling
+firmware updates or switch creation does not disable these steps.
+Compute-tray and DPU BMCs do not enter `NvosPasswordRotation`,
+`SwitchCertificateRotation`, or their `CheckFirmware` continuation; they proceed
+through their existing firmware path.
+
+## Switch certificates before firmware
+
+`SwitchCertificateRotation` removes stale mTLS bindings over SSH, then installs
+the switch TLS certificate through RMS using the working NVOS credentials from
+the password step. Both operations use expected-switch inventory before a managed
+switch exists. Firmware checks wait until certificate handling completes.
+The switch controller's certificate workflow still runs after ingestion;
+see [Switch Certificate Configuration](../../architecture/state_machines/switch_configure_certificate.md).
+
+The stage uses the effective
+[`[switch_state_controller].switch_mtls_services`](../../configuration/rms.md#switch_mtls_services)
+list. Omission and `[]` select all four default services, then pre-ingestion
+omits `scale_up_fabric_manager` and `scale_up_fabric_telemetry` because no primary
+switch has been elected. The default therefore binds `nvue_api` and
+`scale_up_fabric_telemetry_interface`. A non-empty configured list replaces the
+defaults before this filtering. If no services remain, or the expected switch
+has no rack association, either submission phase returns an error and retains
+its state for retry after the configuration or expected inventory is repaired.
+
+The two persisted states each carry an optional `job_id`. `None` submits the
+operation; `Some(job_id)` polls the saved job.
+
+| State | Behavior |
+|---|---|
+| `DisableMtls { job_id }` | Clear stale bindings for the selected services over SSH. Job completion advances to `ConfigureCertificate { job_id: None }`. |
+| `ConfigureCertificate { job_id }` | Install certificates for the selected services using the rotated NVOS credentials. Job completion advances to `CheckFirmware`. |
+
+Missing component-manager dependencies, expected inventory, working credentials,
+or a resolvable NVOS endpoint return an error and retain the current phase for
+retry when detected before the component-manager call.
+Inventory, rack, service, credential, and endpoint checks apply to both
+`DisableMtls { job_id: None }` and `ConfigureCertificate { job_id: None }`.
+Polling a saved job does not repeat these submission checks.
+Every iteration, including polling, still requires a switch endpoint, a BMC
+interface, no existing managed switch, and component-manager dependencies.
+
+A confirmed NVOS version skips password rotation and advances directly to
+`SwitchCertificateRotation`; it does not skip TLS handling. Certificate
+completion or failure changes only that endpoint. Secondary addresses wait in
+`Initial` until the primary reaches `Complete`. Switch creation still requires
+every allocated BMC address to be `Complete`.
+
+Once a job ID is saved, restarts resume polling that job. Every polling error is
+returned while retaining the phase and job ID for another poll on the next
+iteration, including errors reporting a missing job, an unknown outcome, or an
+unsupported operation. Successful `Pending`, `Started`, or `InProgress`
+responses also continue polling. If NICo restarts after dispatch but before saving the job ID,
+the state still has `job_id: None` and submits again; the backend may receive a
+duplicate operation.
+Submission and status reads await the backend directly, as in NVOS password
+rotation, without additional pre-ingestion timeouts.
+Every submission error moves the endpoint to `Failed` and returns the error,
+including unsupported operations and rejection before dispatch. An empty
+returned job ID also fails pre-ingestion. A successful status response reporting
+a failed job moves the endpoint to `Failed`. NICo does not automatically resubmit
+operations or resume polling after these terminal failures.
+Reconcile the RMS operation and the switch's TLS state before clearing errors
+on the failed endpoint and retrying pre-ingestion.
 
 ## Rack compute trays
 
@@ -45,7 +120,10 @@ NICo does not inspect or compare component versions in the SOT. RMS compares
 the SOT with its firmware inventory. A successful RMS response without a job
 lets NICo continue ingestion. When RMS creates a job, NICo persists the
 exact job ID in pre-ingestion state and waits for completion before continuing
-ingestion. Expected switches do not use this compute-tray path. Their existing
+ingestion. This workflow updates the explored aliases together when entering
+`RackFirmwareUpdateWait`, `Complete`, or `Failed`; a secondary can therefore
+leave `Initial` through a shared firmware transition.
+Expected switches do not use this compute-tray path. Their existing
 rack state-machine firmware behavior is unchanged.
 
 ## When this path applies
@@ -112,11 +190,26 @@ For example:
 
 ```mermaid
 flowchart TD
-    A["Fresh BMC exploration report"] --> B["BMC reset and time checks"]
+    A["Fresh BMC exploration report: Initial"] --> AP{"Primary address or no interface record?"}
+    AP -- Yes --> B["BMC reset and time checks"]
+    AP -- No --> AW{"Primary endpoint Complete?"}
+    AW -- "No: remain Initial" --> AP
+    AW -- Yes --> AS["Log skipped work and mark Complete"]
     B --> S{"Switch BMC?"}
     S -- Yes --> N["Handle initial NVOS password"]
     S -- No --> V["Check firmware"]
-    N -- "Complete or confirmed version" --> NV["CheckFirmware state"]
+    N -- "Rotation completed or version already confirmed" --> T["SwitchCertificateRotation"]
+    T -- "Missing component-manager dependencies" --> T
+    T -- "Eligible" --> TD["Disable stale mTLS over SSH"]
+    TD -- "Before submission: prerequisite error and retry" --> TD
+    TD -- "Completed" --> TC["Install TLS certificate"]
+    TC -- "Before submission: prerequisite error and retry" --> TC
+    TC -- "Completed" --> NV["CheckFirmware state"]
+    TD -- "Pending or polling error" --> TD
+    TC -- "In progress or polling error" --> TC
+    TD -- "Submission error, empty job ID, or failed job" --> TF["Failed: operator recovery"]
+    TC -- "Submission error, empty job ID, or failed job" --> TF
+    TF -- "Reconcile and clear errors" --> A
     NV --> V
     N -- "Wait or retryable error" --> NW["Retry password step"]
     NW --> N
@@ -149,16 +242,24 @@ flowchart TD
 
 The state machine performs the following work:
 
+1. **Select the BMC address.** The primary continues below. A secondary waits
+   for the primary to complete, then skips its own pre-ingestion work.
+   An endpoint without a machine-interface record continues below.
 1. **Prepare the BMC.** NICo attempts an initial BMC reset, waits for a fresh
    exploration report, configures the site's NTP servers, and checks BMC time.
    Firmware comparison uses the refreshed inventory.
-1. **Handle switch NVOS credentials.** Every switch BMC enters
+1. **Handle switch NVOS credentials.** The selected switch BMC endpoint enters
    `NvosPasswordRotation` before firmware work. Missing component-manager
    dependencies or an unsupported backend return an error and retain this state
-   for retry. Completing or skipping the password step advances to `CheckFirmware`.
-   NICo skips rotation when the BMC's NVOS credential-rotation record has a
-   confirmed `current_version`, including version `0`.
+   for retry. The endpoint completes or skips the password step and advances to
+   `SwitchCertificateRotation`. NICo skips password rotation when the BMC's NVOS
+   credential-rotation record has a confirmed `current_version`, including
+   version `0`; TLS handling still runs.
    Other BMCs continue directly to firmware checks.
+1. **Configure switch TLS.** NICo clears stale mTLS bindings over SSH and waits
+   for certificate installation through RMS before advancing to `CheckFirmware`.
+   [Service selection, prerequisites, and recovery](#switch-certificates-before-firmware)
+   apply independently of firmware-update settings.
 1. **Evaluate minimums.** NICo selects the effective catalog definition by BMC
    vendor and host model, then compares matched inventory versions with each
    configured pre-ingestion threshold. A component below its minimum starts
@@ -183,9 +284,9 @@ The state machine performs the following work:
 1. **Continue ingestion.** NICo repeats target selection for the remaining
    ordered components. When none need an update, it marks pre-ingestion
    complete and the normal ingestion process can continue. Switch creation
-   waits until every allocated address on the BMC interface has an explored
-   endpoint in `Complete`. An unexplored address or an endpoint with unfinished
-   or failed pre-ingestion blocks creation.
+   waits until every allocated address on every interface sharing the BMC MAC
+   has an explored endpoint in `Complete`. An unexplored address or an endpoint
+   with unfinished or failed pre-ingestion blocks creation.
 
 `firmware_global.max_uploads` limits concurrent uploads across firmware
 workflows. `firmware_global.concurrency_limit` limits how many endpoints the
@@ -205,9 +306,11 @@ The states most relevant to firmware pre-ingestion are:
 
 | State | Meaning |
 |---|---|
+| `Initial` | Select the interface's primary address. A secondary waits here until that primary completes, then skips to `Complete`. An endpoint without a machine-interface record begins the normal workflow. |
 | `InitialBMCReset`, `SetNtpServers`, `TimeSyncReset` | NICo is preparing the BMC and obtaining reliable inventory before comparing versions. |
-| `NvosPasswordRotation` | NICo is checking switch credential eligibility or waiting for the initial NVOS password operation before firmware work. Completion or skipping advances to `CheckFirmware`. |
-| `CheckFirmware` | Initial NVOS password handling is finished or skipped; NICo will check firmware minimums next. Pre-ingestion is not yet complete. |
+| `NvosPasswordRotation` | NICo is checking switch credential eligibility or waiting for the initial NVOS password operation. Completion or an already confirmed version advances to `SwitchCertificateRotation`. |
+| `SwitchCertificateRotation` | NICo clears stale mTLS bindings and installs the switch TLS certificate. Missing submission prerequisites retain the current phase with an error for retry; saved-job polling does not repeat those checks. Every polling error retains the phase and job ID for retry. Firmware waits for certificate completion. |
+| `CheckFirmware` | Initial NVOS password handling is finished or skipped and certificate handling is complete; NICo will check firmware minimums next. Pre-ingestion is not yet complete. |
 | `FirmwareCheckRefreshWait` | The report lacked a host model, or a component's inventory entry or version, or had a version that does not compare with its minimum; NICo is waiting for one refreshed report before deciding. |
 | `UpgradeFirmwareWait` | The firmware was uploaded and NICo is polling the Redfish task. |
 | `ScriptRunning` | The configured firmware upgrade script is running. |
@@ -215,7 +318,7 @@ The states most relevant to firmware pre-ingestion are:
 | `NewFirmwareReportedWait` | NICo is waiting for refreshed inventory to report the target version. |
 | `RecheckVersions`, `RecheckVersionsAfterFailure` | NICo is checking the current component again or selecting the next one. |
 | `RackFirmwareUpdateWait` | Rack compute firmware submission or its exact RMS job is pending. |
-| `Complete` | No applicable pre-ingestion update remains, or firmware autoupdate was disabled. Ingestion can continue. |
+| `Complete` | No applicable pre-ingestion update remains, firmware autoupdate was disabled, or this secondary address skipped work after its primary completed. Ingestion can continue. |
 | `Failed` | Pre-ingestion stopped and requires operator action. The state includes the reason. |
 
 `Complete` does not mean every component matches its steady-state default. It
@@ -250,6 +353,13 @@ retrying pre-ingestion. NICo also marks the tray `Failed` if RMS no longer
 recognizes a persisted job ID. A failed RMS submission is also terminal; when
 the response includes a job ID, reconcile that job before retrying.
 
+Switch certificate handling has a separate
+[recovery boundary](#switch-certificates-before-firmware): every polling error
+retries the saved job. Submission errors, empty job IDs, and successful status
+responses reporting a failed job require operator recovery before clearing the
+error.
+A restart before saving the job ID can resubmit the operation.
+
 The BMC time synchronization and firmware pre-update resets power off the
 host, reset the BMC, power the host on, and wait 20 minutes for it to boot. A
 BlueField-3 DPU that reports `Paused` after power-off is treated as off and is
@@ -268,7 +378,7 @@ nico-admin-cli -a <core-api-url> site-explorer clear-error <bmc-ip>
 ```
 
 The command resets only a terminal `Failed` pre-ingestion state; it does not
-interrupt an update that is still progressing.
+interrupt an update that is still progressing or change other endpoints.
 
 An upgrade script interrupted by a NICo restart is not resumed automatically
 and can remain in `ScriptRunning`. After confirming that the script and firmware

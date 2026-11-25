@@ -3481,6 +3481,17 @@ pub struct MachineInterfaceSnapshot {
 }
 
 impl MachineInterfaceSnapshot {
+    /// Selects the BMC address for preingestion and remediation on this interface.
+    /// Prefers IPv4, falls back to IPv6, and returns `None` without an address.
+    /// Each interface supports at most one address per family.
+    pub fn primary_bmc_address(&self) -> Option<IpAddr> {
+        self.addresses
+            .iter()
+            .find(|address| address.is_ipv4())
+            .or_else(|| self.addresses.first())
+            .copied()
+    }
+
     /// This row's [`MachineBootInterface`]: its MAC plus its captured Redfish
     /// interface id. `None` until site-explorer has recorded the id from an
     /// exploration report.

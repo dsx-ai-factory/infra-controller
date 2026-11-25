@@ -218,7 +218,7 @@ Selects which switch services receive the certificate NICo installs through RMS.
 | --- | --- |
 | Type | Array of strings |
 | Required | No |
-| Default | All four services |
+| Default | All four services before role filtering |
 
 Accepted values, written in snake case:
 
@@ -230,9 +230,15 @@ Accepted values, written in snake case:
 | `scale_up_fabric_telemetry_interface` | ScaleUpFabric telemetry interface (gNMI) |
 
 Omitting the field **and** supplying an empty list select all four services for
-switch state-controller and direct RPC operations. The switch state controller
-omits primary-only cluster applications on non-primary switches; the direct RPC
-is unchanged.
+switch pre-ingestion, switch state-controller, and direct RPC operations. A
+non-empty list replaces these defaults. Pre-ingestion always omits
+`scale_up_fabric_manager` and `scale_up_fabric_telemetry`. The switch state
+controller applies the same filtering to non-primary switches; the direct RPC
+forwards the effective list. If filtering leaves no services, either
+pre-ingestion submission phase returns an error and
+retains its state for retry after the configuration is repaired. Polling an
+already recorded job does not repeat this check. See
+[switch certificates before firmware](../operations/firmware-updates/pre-ingestion.md#switch-certificates-before-firmware).
 
 <Note>
 `[rack_state_controller] nmx_cluster_switch_mtls_services` is deprecated. The setting is still

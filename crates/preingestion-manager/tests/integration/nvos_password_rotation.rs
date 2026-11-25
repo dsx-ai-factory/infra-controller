@@ -13,6 +13,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::component_manager::ComponentManager;
+use component_manager::config::{SwitchMtlsService, switch_mtls_services_as_i32};
 use component_manager::mock::{MockComputeTrayManager, MockNvSwitchManager, MockPowerShelfManager};
 use component_manager::rms::RmsBackend;
 use db::TransactionVending as _;
@@ -28,7 +29,10 @@ use model::rack_type::{
     RackCapabilitiesSet, RackCapabilitySwitch, RackHardwareTopology, RackProductFamily,
     RackProfile, RackProfileConfig,
 };
-use model::site_explorer::{NvosPasswordRotationState, PreingestionState};
+use model::site_explorer::{
+    InitialBmcResetPhase, NvosPasswordRotationState, PreingestionState,
+    SwitchCertificateRotationState,
+};
 use model::switch::{NewSwitch, SwitchConfig};
 use rpc::forge::DhcpDiscovery;
 
@@ -49,6 +53,7 @@ struct Fixture {
     nvos_mac: MacAddress,
     nvos_ip: IpAddr,
     firmware_updates_enabled: bool,
+    switch_mtls_services: Vec<i32>,
 }
 
 impl Fixture {
@@ -145,6 +150,9 @@ impl Fixture {
             nvos_mac,
             nvos_ip,
             firmware_updates_enabled: false,
+            switch_mtls_services: switch_mtls_services_as_i32(
+                &SwitchMtlsService::default_services(),
+            ),
         })
     }
 
@@ -218,6 +226,7 @@ impl Fixture {
             Some(component_manager) => manager.with_component_manager(
                 component_manager,
                 self.env.api().credential_manager().clone(),
+                self.switch_mtls_services.clone(),
             ),
             None => manager,
         }
@@ -328,6 +337,66 @@ async fn enqueue_rotation(fixture: &Fixture, job_id: &str) {
             }),
         }))
         .await;
+}
+
+async fn enqueue_mtls_disable(fixture: &Fixture, job_id: &str) {
+    fixture
+        .rms
+        .enqueue_batch_disable_switch_mtls(Ok(rms::BatchDisableSwitchMtlsResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: job_id.to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+}
+
+async fn enqueue_mtls_completed(fixture: &Fixture, job_id: &str) {
+    let calls = fixture.rms.batch_disable_switch_mtls_calls().await;
+    let node_id = calls
+        .last()
+        .expect("submitted mTLS removal")
+        .nodes
+        .as_ref()
+        .unwrap()
+        .nodes[0]
+        .node_id
+        .clone();
+    let child_id = format!("{job_id}-switch");
+    fixture
+        .rms
+        .enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
+            job_states: vec![
+                rms::JobStatus {
+                    job_id: job_id.to_string(),
+                    child_job_ids: vec![child_id.clone()],
+                    execution_state: rms::JobExecutionState::Completed as i32,
+                    ..Default::default()
+                },
+                rms::JobStatus {
+                    job_id: child_id,
+                    parent_job_id: Some(job_id.to_string()),
+                    node_id: Some(node_id),
+                    execution_state: rms::JobExecutionState::Completed as i32,
+                    ..Default::default()
+                },
+            ],
+        }))
+        .await;
+}
+
+async fn enqueue_certificate(fixture: &Fixture, node_id: &str, job_id: &str) {
+    fixture
+        .rms
+        .enqueue_configure_switch_certificate(Ok(MockRmsApi::configure_switch_certificate_ok(
+            node_id, job_id,
+        )))
+        .await;
+}
+
+fn certificate_state(rotation_state: SwitchCertificateRotationState) -> PreingestionState {
+    PreingestionState::SwitchCertificateRotation { rotation_state }
 }
 
 async fn operation(
@@ -454,7 +523,7 @@ async fn rotates_factory_password_before_firmware_and_resumes_job(pool: PgPool) 
     // The endpoint keeps its captured target even if the site's target advances.
     fixture.publish_target(&pool, TARGET_PASSWORD).await?;
     // Simulate a crash after writing the confirmed password to Vault, before
-    // persisting CheckFirmware. Resume must poll the retained job instead of
+    // persisting the certificate state. Resume must poll the retained job instead of
     // submitting another rotation with the newly stored credential.
     fixture
         .store_credentials(&Credentials::new("admin", INITIAL_TARGET_PASSWORD))
@@ -473,7 +542,7 @@ async fn rotates_factory_password_before_firmware_and_resumes_job(pool: PgPool) 
     fixture.manager(&pool).run_single_iteration().await?;
     assert_eq!(
         fixture.state(&pool).await?,
-        PreingestionState::CheckFirmware
+        certificate_state(SwitchCertificateRotationState::DisableMtls { job_id: None })
     );
     assert_eq!(firmware_uploads(), 0.0);
     assert_eq!(
@@ -521,6 +590,136 @@ async fn rotates_factory_password_before_firmware_and_resumes_job(pool: PgPool) 
             .is_none()
     );
 
+    // A fresh manager submits the persisted phase when it has no job ID yet.
+    enqueue_mtls_disable(&fixture, "disable-job").await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    let disable_wait = certificate_state(SwitchCertificateRotationState::DisableMtls {
+        job_id: Some("disable-job".to_string()),
+    });
+    assert_eq!(fixture.state(&pool).await?, disable_wait);
+    let disable_calls = fixture.rms.batch_disable_switch_mtls_calls().await;
+    assert_eq!(disable_calls.len(), 1);
+    assert_eq!(
+        disable_calls[0].services,
+        vec![
+            rms::SwitchService::NvueApi as i32,
+            rms::SwitchService::ScaleUpFabricTelemetryInterface as i32,
+        ]
+    );
+    let node = &disable_calls[0].nodes.as_ref().unwrap().nodes[0];
+    let host = node.host_endpoint.as_ref().unwrap();
+    let Some(rms::credentials::Auth::UserPass(current)) = &host.credentials.as_ref().unwrap().auth
+    else {
+        panic!("mTLS removal must authenticate with the rotated password");
+    };
+    assert_eq!(current.username, "admin");
+    assert_eq!(current.password, INITIAL_TARGET_PASSWORD);
+    assert_eq!(
+        host.interface.as_ref().unwrap().ip_address,
+        fixture.nvos_ip.to_string()
+    );
+    assert_eq!(firmware_uploads(), 0.0);
+
+    for response in [
+        Err(tonic::Status::unavailable("temporary mTLS observation failure").into()),
+        Err(tonic::Status::not_found("expired mTLS job").into()),
+        Ok(MockRmsApi::job_status_ok(
+            "disable-job",
+            rms::JobExecutionState::Running,
+        )),
+    ] {
+        fixture.rms.enqueue_get_job_status(response).await;
+        fixture.manager(&pool).run_single_iteration().await?;
+        assert_eq!(fixture.state(&pool).await?, disable_wait);
+        assert!(
+            fixture
+                .rms
+                .configure_switch_certificate_calls()
+                .await
+                .is_empty()
+        );
+        assert_eq!(firmware_uploads(), 0.0);
+    }
+    enqueue_mtls_completed(&fixture, "disable-job").await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state(&pool).await?,
+        certificate_state(SwitchCertificateRotationState::ConfigureCertificate { job_id: None })
+    );
+    assert!(
+        fixture
+            .rms
+            .configure_switch_certificate_calls()
+            .await
+            .is_empty()
+    );
+    assert_eq!(fixture.rms.batch_disable_switch_mtls_calls().await.len(), 1);
+    let polls = fixture.rms.get_job_status_calls().await;
+    assert_eq!(
+        polls
+            .iter()
+            .filter(|poll| poll.job_id == "disable-job")
+            .count(),
+        4,
+    );
+
+    // Restart between phases must also submit the unstarted certificate operation.
+    enqueue_certificate(&fixture, &node.node_id, "certificate-job").await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    let certificate_wait =
+        certificate_state(SwitchCertificateRotationState::ConfigureCertificate {
+            job_id: Some("certificate-job".to_string()),
+        });
+    assert_eq!(fixture.state(&pool).await?, certificate_wait);
+    let calls = fixture.rms.configure_switch_certificate_calls().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].domain, None);
+    assert_eq!(calls[0].services, disable_calls[0].services);
+    assert_eq!(calls[0].nodes.as_ref().unwrap().nodes[0], *node);
+    assert_eq!(firmware_uploads(), 0.0);
+
+    for response in [
+        Err(tonic::Status::unavailable("temporary certificate observation failure").into()),
+        Ok(rms::GetConfigureSwitchCertificateJobStatusResponse {
+            status: rms::ReturnCode::Failure as i32,
+            error_message: "expired certificate job".to_string(),
+            ..Default::default()
+        }),
+        Ok(MockRmsApi::configure_switch_certificate_job_status_ok(
+            "in_progress",
+        )),
+    ] {
+        fixture
+            .rms
+            .enqueue_get_configure_switch_certificate_job_status(response)
+            .await;
+        fixture.manager(&pool).run_single_iteration().await?;
+        assert_eq!(fixture.state(&pool).await?, certificate_wait);
+        assert_eq!(firmware_uploads(), 0.0);
+    }
+    fixture
+        .rms
+        .enqueue_get_configure_switch_certificate_job_status(Ok(
+            MockRmsApi::configure_switch_certificate_job_status_ok("completed"),
+        ))
+        .await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state(&pool).await?,
+        PreingestionState::CheckFirmware
+    );
+    assert_eq!(firmware_uploads(), 0.0);
+    assert_eq!(
+        fixture.rms.configure_switch_certificate_calls().await.len(),
+        1
+    );
+    let polls = fixture
+        .rms
+        .get_configure_switch_certificate_job_status_calls()
+        .await;
+    assert_eq!(polls.len(), 4);
+    assert!(polls.iter().all(|poll| poll.job_id == "certificate-job"));
+
     // Only the firmware continuation may start the required BMC upload.
     fixture.manager(&pool).run_single_iteration().await?;
     let state = fixture.state(&pool).await?;
@@ -534,14 +733,14 @@ async fn rotates_factory_password_before_firmware_and_resumes_job(pool: PgPool) 
                 ..
             } if task_id == "0" && final_version == "6.00.30.00"
         ),
-        "expected the BMC firmware job after NVOS rotation, got {state:?}"
+        "expected the BMC firmware job after certificate rotation, got {state:?}"
     );
     assert_eq!(firmware_uploads(), 1.0);
     Ok(())
 }
 
 #[sqlx_test]
-async fn dual_stack_aliases_keep_one_rotation_owner_until_completion(pool: PgPool) -> TestResult {
+async fn dual_stack_aliases_only_run_preingestion_on_ipv4(pool: PgPool) -> TestResult {
     let fixture = Fixture::new(&pool, true).await?;
     fixture.publish_target(&pool, TARGET_PASSWORD).await?;
     let ipv6: IpAddr = "2001:db8::40".parse()?;
@@ -558,84 +757,52 @@ async fn dual_stack_aliases_keep_one_rotation_owner_until_completion(pool: PgPoo
     db::explored_endpoints::insert(ipv6, &endpoint.report, false, &mut txn).await?;
     db::explored_endpoints::set_preingestion_for_addresses(
         &[fixture.bmc_ip, ipv6],
-        check_state(),
+        PreingestionState::Initial,
         &mut txn,
     )
     .await?;
     txn.commit().await?;
 
-    // Both aliases are handled concurrently, but only one may stage Rotate.
     let manager = fixture.manager(&pool);
     manager.run_single_iteration().await?;
-    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![fixture.bmc_ip, ipv6]).await?;
-    assert_eq!(endpoints.len(), 2);
-    let owners: Vec<_> = endpoints
-        .iter()
-        .filter(|endpoint| endpoint.preingestion_state == rotation_state(0, None))
-        .collect();
-    assert_eq!(owners.len(), 1, "persisted endpoints: {endpoints:?}");
-    let owner = owners[0].address;
-    let follower = if owner == ipv6 { fixture.bmc_ip } else { ipv6 };
-    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
-    assert_no_controller_operation(&pool, &fixture).await?;
-
-    // An owner excluded from this iteration still owns the rotation, even
-    // before it has submitted a job. Recreating the manager cannot steal it.
-    let mut txn = pool.txn_begin().await?;
-    db::explored_endpoints::set_waiting_for_explorer_refresh(owner, &mut txn).await?;
-    txn.commit().await?;
-    let runnable = db::explored_endpoints::find_preingest_not_waiting_not_error(&pool).await?;
-    assert_eq!(runnable.len(), 1);
-    assert_eq!(runnable[0].address, follower);
-    let restarted = fixture.manager(&pool);
-    restarted.run_single_iteration().await?;
     assert_eq!(
-        fixture.state_at(&pool, owner).await?,
-        rotation_state(0, None)
+        fixture.state(&pool).await?,
+        PreingestionState::InitialBMCReset {
+            phase: InitialBmcResetPhase::Start { attempts: 0 },
+        }
     );
-    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
-    assert!(
-        fixture
-            .rms
-            .update_switch_system_password_calls()
-            .await
-            .is_empty()
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
     );
-    assert!(fixture.credentials().await?.is_none());
 
-    sqlx::query(
-        "UPDATE explored_endpoints SET waiting_for_explorer_refresh = false WHERE address = $1",
+    // Advance the admitted primary past reset and time synchronization.
+    let mut txn = pool.txn_begin().await?;
+    db::explored_endpoints::set_preingestion_for_addresses(
+        &[fixture.bmc_ip],
+        check_state(),
+        &mut txn,
     )
-    .bind(owner)
-    .execute(&pool)
     .await?;
-    enqueue_rotation(&fixture, "shared-password-job").await;
-    restarted.run_single_iteration().await?;
+    txn.commit().await?;
+    manager.run_single_iteration().await?;
+    assert_eq!(fixture.state(&pool).await?, rotation_state(0, None));
     assert_eq!(
-        fixture.state_at(&pool, owner).await?,
-        rotation_state(0, Some("shared-password-job"))
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
     );
-    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
-    fixture
-        .rms
-        .enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
-            "shared-password-job",
-            rms::JobExecutionState::Running,
-        )))
-        .await;
-    fixture.manager(&pool).run_single_iteration().await?;
-    assert_eq!(
-        fixture.state_at(&pool, owner).await?,
-        rotation_state(0, Some("shared-password-job"))
-    );
-    assert_eq!(fixture.state_at(&pool, follower).await?, check_state());
     assert_no_controller_operation(&pool, &fixture).await?;
 
-    // Run completion before the follower resumes so its next iteration must
-    // observe the committed version and skip rotation.
-    let mut txn = pool.txn_begin().await?;
-    db::explored_endpoints::set_waiting_for_explorer_refresh(follower, &mut txn).await?;
-    txn.commit().await?;
+    enqueue_rotation(&fixture, "shared-password-job").await;
+    manager.run_single_iteration().await?;
+    assert_eq!(
+        fixture.state(&pool).await?,
+        rotation_state(0, Some("shared-password-job"))
+    );
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
+    );
     fixture
         .rms
         .enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
@@ -645,24 +812,83 @@ async fn dual_stack_aliases_keep_one_rotation_owner_until_completion(pool: PgPoo
         .await;
     fixture.manager(&pool).run_single_iteration().await?;
     assert_eq!(
-        fixture.state_at(&pool, owner).await?,
-        PreingestionState::CheckFirmware
+        fixture.state(&pool).await?,
+        certificate_state(SwitchCertificateRotationState::DisableMtls { job_id: None })
+    );
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
     );
     assert_eq!(operation(&pool, &fixture).await?.current_version, Some(0));
     assert_eq!(
         fixture.credentials().await?,
         Some(Credentials::new("nvos-admin", TARGET_PASSWORD))
     );
-    sqlx::query("UPDATE explored_endpoints SET waiting_for_explorer_refresh = (address = $1) WHERE address = ANY($2)")
-        .bind(owner)
-        .bind(vec![owner, follower])
-        .execute(&pool)
-        .await?;
+
+    enqueue_mtls_disable(&fixture, "shared-disable-job").await;
     fixture.manager(&pool).run_single_iteration().await?;
     assert_eq!(
-        fixture.state_at(&pool, follower).await?,
+        fixture.state(&pool).await?,
+        certificate_state(SwitchCertificateRotationState::DisableMtls {
+            job_id: Some("shared-disable-job".to_string()),
+        })
+    );
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
+    );
+    enqueue_mtls_completed(&fixture, "shared-disable-job").await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state(&pool).await?,
+        certificate_state(SwitchCertificateRotationState::ConfigureCertificate { job_id: None })
+    );
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
+    );
+    let calls = fixture.rms.batch_disable_switch_mtls_calls().await;
+    assert_eq!(calls.len(), 1);
+    let node_id = &calls[0].nodes.as_ref().unwrap().nodes[0].node_id;
+    enqueue_certificate(&fixture, node_id, "shared-certificate-job").await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state(&pool).await?,
+        certificate_state(SwitchCertificateRotationState::ConfigureCertificate {
+            job_id: Some("shared-certificate-job".to_string()),
+        })
+    );
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
+    );
+    fixture
+        .rms
+        .enqueue_get_configure_switch_certificate_job_status(Ok(
+            MockRmsApi::configure_switch_certificate_job_status_ok("completed"),
+        ))
+        .await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state(&pool).await?,
         PreingestionState::CheckFirmware
     );
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Initial
+    );
+
+    // The secondary becomes ingestible only after the primary finishes all preingestion.
+    let mut txn = pool.txn_begin().await?;
+    db::explored_endpoints::set_preingestion_complete(fixture.bmc_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    fixture.manager(&pool).run_single_iteration().await?;
+    for address in [fixture.bmc_ip, ipv6] {
+        assert_eq!(
+            fixture.state_at(&pool, address).await?,
+            PreingestionState::Complete
+        );
+    }
     assert_eq!(
         fixture
             .rms
@@ -671,12 +897,26 @@ async fn dual_stack_aliases_keep_one_rotation_owner_until_completion(pool: PgPoo
             .len(),
         1
     );
+    assert_eq!(fixture.rms.batch_disable_switch_mtls_calls().await.len(), 1);
+    assert_eq!(
+        fixture.rms.configure_switch_certificate_calls().await.len(),
+        1
+    );
     let polls = fixture.rms.get_job_status_calls().await;
     assert_eq!(polls.len(), 2);
-    assert!(
+    assert_eq!(
         polls
             .iter()
-            .all(|poll| poll.job_id == "shared-password-job")
+            .filter(|poll| poll.job_id == "shared-password-job")
+            .count(),
+        1
+    );
+    assert_eq!(
+        polls
+            .iter()
+            .filter(|poll| poll.job_id == "shared-disable-job")
+            .count(),
+        1
     );
     Ok(())
 }
@@ -758,7 +998,7 @@ async fn factory_copy_waits_for_address_then_rotates(pool: PgPool) -> TestResult
     manager.run_single_iteration().await?;
     assert_eq!(
         fixture.state(&pool).await?,
-        PreingestionState::CheckFirmware
+        certificate_state(SwitchCertificateRotationState::DisableMtls { job_id: None })
     );
     assert_eq!(
         fixture.credentials().await?,
@@ -907,7 +1147,7 @@ async fn credential_errors_preserve_claim_and_retry_after_repair(pool: PgPool) -
     manager.run_single_iteration().await?;
     assert_eq!(
         fixture.state(&pool).await?,
-        PreingestionState::CheckFirmware
+        certificate_state(SwitchCertificateRotationState::DisableMtls { job_id: None })
     );
     assert_eq!(
         fixture.credentials().await?,
@@ -921,9 +1161,7 @@ async fn credential_errors_preserve_claim_and_retry_after_repair(pool: PgPool) -
 }
 
 #[sqlx_test]
-async fn confirmed_version_skips_preingestion_rotation_even_if_site_target_is_newer(
-    pool: PgPool,
-) -> TestResult {
+async fn confirmed_version_with_completed_secondary_still_starts_tls(pool: PgPool) -> TestResult {
     let fixture = Fixture::new(&pool, true).await?;
     fixture.publish_target(&pool, CURRENT_PASSWORD).await?;
     fixture.publish_target(&pool, TARGET_PASSWORD).await?;
@@ -937,7 +1175,19 @@ async fn confirmed_version_skips_preingestion_rotation_even_if_site_target_is_ne
         .expect("remove newer target credential for confirmed-version skip");
     let stored = Credentials::new("nvos-admin", CURRENT_PASSWORD);
     fixture.store_credentials(&stored).await;
+    let ipv6: IpAddr = "2001:db8::40".parse()?;
+    let interface = db::machine_interface::find_by_ip(&pool, fixture.bmc_ip)
+        .await?
+        .expect("BMC interface");
+    let endpoint = db::explored_endpoints::find_by_ips(&pool, vec![fixture.bmc_ip])
+        .await?
+        .pop()
+        .expect("explored BMC endpoint");
     let mut txn = pool.txn_begin().await?;
+    db::machine_interface_address::insert(&mut txn, interface.id, ipv6, AllocationType::Dhcp)
+        .await?;
+    db::explored_endpoints::insert(ipv6, &endpoint.report, false, &mut txn).await?;
+    db::explored_endpoints::set_preingestion_complete(ipv6, txn.as_mut()).await?;
     db::credential_rotation::record_device_enrolled(
         txn.as_mut(),
         fixture.bmc_mac,
@@ -954,7 +1204,11 @@ async fn confirmed_version_skips_preingestion_rotation_even_if_site_target_is_ne
 
     assert_eq!(
         fixture.state(&pool).await?,
-        PreingestionState::CheckFirmware
+        certificate_state(SwitchCertificateRotationState::DisableMtls { job_id: None })
+    );
+    assert_eq!(
+        fixture.state_at(&pool, ipv6).await?,
+        PreingestionState::Complete
     );
     assert_eq!(operation(&pool, &fixture).await?, before);
     assert_eq!(fixture.credentials().await?, Some(stored));
@@ -1081,7 +1335,7 @@ async fn unversioned_stored_credentials_authenticate_initial_rotation(pool: PgPo
         manager.run_single_iteration().await?;
         assert_eq!(
             fixture.state(&pool).await?,
-            PreingestionState::CheckFirmware,
+            certificate_state(SwitchCertificateRotationState::DisableMtls { job_id: None }),
             "{label}"
         );
         assert_eq!(
@@ -1415,5 +1669,442 @@ async fn live_switch_during_preingestion_reports_invariant_error_and_preserves_j
             .is_empty()
     );
     assert!(fixture.rms.get_job_status_calls().await.is_empty());
+    Ok(())
+}
+
+#[sqlx_test]
+async fn certificate_failures_block_firmware_without_repeating_mutations(
+    pool: PgPool,
+) -> TestResult {
+    enum Response {
+        DisableSubmissionUnknown,
+        CertificateSubmissionUnknown,
+        DisableMissingJobId,
+        CertificateMissingJobId,
+        DisableUnsupported,
+        DisableFailed,
+        CertificateFailed,
+    }
+
+    struct Case {
+        scenario: &'static str,
+        state: SwitchCertificateRotationState,
+        response: Response,
+        submissions: (usize, usize),
+        error_contains: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            scenario: "mTLS submission response is lost",
+            state: SwitchCertificateRotationState::DisableMtls { job_id: None },
+            response: Response::DisableSubmissionUnknown,
+            submissions: (1, 0),
+            error_contains: Some("lost mTLS submission response"),
+        },
+        Case {
+            scenario: "certificate submission response is lost",
+            state: SwitchCertificateRotationState::ConfigureCertificate { job_id: None },
+            response: Response::CertificateSubmissionUnknown,
+            submissions: (0, 1),
+            error_contains: Some("lost certificate submission response"),
+        },
+        Case {
+            scenario: "mTLS submission succeeds without a job ID",
+            state: SwitchCertificateRotationState::DisableMtls { job_id: None },
+            response: Response::DisableMissingJobId,
+            submissions: (1, 0),
+            error_contains: Some("returned no job ID"),
+        },
+        Case {
+            scenario: "certificate submission succeeds without a job ID",
+            state: SwitchCertificateRotationState::ConfigureCertificate { job_id: None },
+            response: Response::CertificateMissingJobId,
+            submissions: (0, 1),
+            error_contains: Some("returned no job id"),
+        },
+        Case {
+            scenario: "mTLS removal is unsupported",
+            state: SwitchCertificateRotationState::DisableMtls { job_id: None },
+            response: Response::DisableUnsupported,
+            submissions: (1, 0),
+            error_contains: Some("RMS does not support switch mTLS disable"),
+        },
+        Case {
+            scenario: "mTLS job failed",
+            state: SwitchCertificateRotationState::DisableMtls {
+                job_id: Some("failed-disable-job".to_string()),
+            },
+            response: Response::DisableFailed,
+            submissions: (0, 0),
+            error_contains: None,
+        },
+        Case {
+            scenario: "certificate job failed",
+            state: SwitchCertificateRotationState::ConfigureCertificate {
+                job_id: Some("failed-certificate-job".to_string()),
+            },
+            response: Response::CertificateFailed,
+            submissions: (0, 0),
+            error_contains: None,
+        },
+    ];
+
+    let mut fixture = Fixture::new(&pool, true).await?;
+    fixture.firmware_updates_enabled = true;
+    fixture
+        .store_credentials(&Credentials::new("nvos-admin", TARGET_PASSWORD))
+        .await;
+    let metrics = carbide_instrument::testing::MetricsCapture::for_registry(
+        fixture.env.test_meter.registry(),
+    );
+    for case in cases {
+        let mut txn = pool.txn_begin().await?;
+        db::explored_endpoints::set_preingestion_for_addresses(
+            &[fixture.bmc_ip],
+            certificate_state(case.state),
+            &mut txn,
+        )
+        .await?;
+        txn.commit().await?;
+        match case.response {
+            Response::DisableSubmissionUnknown => {
+                fixture
+                    .rms
+                    .enqueue_batch_disable_switch_mtls(Err(tonic::Status::unavailable(
+                        "lost mTLS submission response",
+                    )
+                    .into()))
+                    .await
+            }
+            Response::CertificateSubmissionUnknown => {
+                fixture
+                    .rms
+                    .enqueue_configure_switch_certificate(Err(tonic::Status::unavailable(
+                        "lost certificate submission response",
+                    )
+                    .into()))
+                    .await
+            }
+            Response::DisableMissingJobId => enqueue_mtls_disable(&fixture, "").await,
+            Response::CertificateMissingJobId => {
+                fixture
+                    .rms
+                    .enqueue_configure_switch_certificate(Ok(
+                        rms::ConfigureSwitchCertificateResponse {
+                            response: Some(rms::NodeBatchResponse {
+                                status: rms::ReturnCode::Success as i32,
+                                ..Default::default()
+                            }),
+                            jobs: Vec::new(),
+                        },
+                    ))
+                    .await
+            }
+            Response::DisableUnsupported => {
+                fixture
+                    .rms
+                    .enqueue_batch_disable_switch_mtls(Err(tonic::Status::unimplemented(
+                        "unknown method",
+                    )
+                    .into()))
+                    .await
+            }
+            Response::DisableFailed => {
+                fixture
+                    .rms
+                    .enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+                        "failed-disable-job",
+                        rms::JobExecutionState::Failed,
+                    )))
+                    .await
+            }
+            Response::CertificateFailed => {
+                fixture
+                    .rms
+                    .enqueue_get_configure_switch_certificate_job_status(Ok(
+                        MockRmsApi::configure_switch_certificate_job_status_ok("failed"),
+                    ))
+                    .await;
+                fixture
+                    .rms
+                    .enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+                        "failed-certificate-job",
+                        rms::JobExecutionState::Failed,
+                    )))
+                    .await;
+            }
+        }
+        let disable_before = fixture.rms.batch_disable_switch_mtls_calls().await.len();
+        let certificate_before = fixture.rms.configure_switch_certificate_calls().await.len();
+        let (result, logs) = carbide_instrument::testing::capture_logs_async(
+            fixture.manager(&pool).run_single_iteration(),
+        )
+        .await;
+        result?;
+        let failed = fixture.state(&pool).await?;
+        assert!(
+            matches!(&failed, PreingestionState::Failed { reason } if !reason.is_empty()),
+            "{}: {failed:?}",
+            case.scenario
+        );
+        if let Some(expected_error) = case.error_contains {
+            assert!(
+                matches!(&failed, PreingestionState::Failed { reason } if reason.contains(expected_error)),
+                "{}: {failed:?}",
+                case.scenario
+            );
+            assert!(
+                logs.iter().any(|log| {
+                    log.message == "Error handling preingestion update"
+                        && log
+                            .field("error")
+                            .is_some_and(|error| error.contains(expected_error))
+                }),
+                "{}: expected returned TLS error, got {logs:?}",
+                case.scenario
+            );
+        }
+        // A fresh manager reloads terminal failure and must not retry either mutation.
+        fixture.manager(&pool).run_single_iteration().await?;
+        assert_eq!(fixture.state(&pool).await?, failed, "{}", case.scenario);
+        assert_eq!(
+            fixture.rms.batch_disable_switch_mtls_calls().await.len() - disable_before,
+            case.submissions.0,
+            "{}",
+            case.scenario
+        );
+        assert_eq!(
+            fixture.rms.configure_switch_certificate_calls().await.len() - certificate_before,
+            case.submissions.1,
+            "{}",
+            case.scenario
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_preingestion_firmware_upload_total",
+                &[("outcome", "ok"), ("method", "multipart")]
+            ),
+            0.0,
+            "{}",
+            case.scenario
+        );
+    }
+    Ok(())
+}
+
+#[sqlx_test]
+async fn certificate_prerequisite_errors_preserve_phase_and_retry_after_repair(
+    pool: PgPool,
+) -> TestResult {
+    let mut fixture = Fixture::new(&pool, true).await?;
+    fixture
+        .store_credentials(&Credentials::new("nvos-admin", TARGET_PASSWORD))
+        .await;
+    for rotation_state in [
+        SwitchCertificateRotationState::DisableMtls { job_id: None },
+        SwitchCertificateRotationState::ConfigureCertificate { job_id: None },
+    ] {
+        let disable = matches!(
+            rotation_state,
+            SwitchCertificateRotationState::DisableMtls { .. }
+        );
+        let entry = certificate_state(rotation_state);
+        let disable_before = fixture.rms.batch_disable_switch_mtls_calls().await.len();
+        let certificate_before = fixture.rms.configure_switch_certificate_calls().await.len();
+        for (scenario, rack_id, services, expected_error) in [
+            (
+                "no rack association",
+                None,
+                SwitchMtlsService::default_services(),
+                "switch certificate rotation requires a rack association",
+            ),
+            (
+                "only primary-switch services selected",
+                Some("preingestion-switch"),
+                vec![
+                    SwitchMtlsService::ScaleUpFabricManager,
+                    SwitchMtlsService::ScaleUpFabricTelemetry,
+                ],
+                "switch certificate rotation has no applicable mTLS services",
+            ),
+        ] {
+            let scenario = format!("{entry:?}: {scenario}");
+            fixture.switch_mtls_services = switch_mtls_services_as_i32(&services);
+            let mut txn = pool.txn_begin().await?;
+            sqlx::query("UPDATE expected_switches SET rack_id = $2 WHERE bmc_mac_address = $1")
+                .bind(fixture.bmc_mac)
+                .bind(rack_id)
+                .execute(txn.as_mut())
+                .await?;
+            db::explored_endpoints::set_preingestion_for_addresses(
+                &[fixture.bmc_ip],
+                entry.clone(),
+                &mut txn,
+            )
+            .await?;
+            txn.commit().await?;
+            let (result, logs) = carbide_instrument::testing::capture_logs_async(
+                fixture.manager(&pool).run_single_iteration(),
+            )
+            .await;
+            result?;
+            assert_eq!(fixture.state(&pool).await?, entry, "{scenario}");
+            let expected_error = format!(
+                "internal error: {expected_error} for BMC {}",
+                fixture.bmc_mac
+            );
+            assert!(
+                logs.iter().any(|log| {
+                    log.message == "Error handling preingestion update"
+                        && log.field("error") == Some(expected_error.as_str())
+                }),
+                "{scenario}: expected prerequisite error, got {logs:?}"
+            );
+            assert_eq!(
+                fixture.rms.batch_disable_switch_mtls_calls().await.len(),
+                disable_before,
+                "{scenario}"
+            );
+            assert_eq!(
+                fixture.rms.configure_switch_certificate_calls().await.len(),
+                certificate_before,
+                "{scenario}"
+            );
+        }
+
+        fixture.switch_mtls_services =
+            switch_mtls_services_as_i32(&SwitchMtlsService::default_services());
+        let job_id = "prerequisites-repaired-job";
+        let next_rotation_state = if disable {
+            enqueue_mtls_disable(&fixture, job_id).await;
+            SwitchCertificateRotationState::DisableMtls {
+                job_id: Some(job_id.to_string()),
+            }
+        } else {
+            fixture
+                .rms
+                .enqueue_configure_switch_certificate(Ok(rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        job_id: job_id.to_string(),
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                }))
+                .await;
+            SwitchCertificateRotationState::ConfigureCertificate {
+                job_id: Some(job_id.to_string()),
+            }
+        };
+        fixture.manager(&pool).run_single_iteration().await?;
+        assert_eq!(
+            fixture.state(&pool).await?,
+            certificate_state(next_rotation_state)
+        );
+        assert_eq!(
+            fixture.rms.batch_disable_switch_mtls_calls().await.len() - disable_before,
+            usize::from(disable)
+        );
+        assert_eq!(
+            fixture.rms.configure_switch_certificate_calls().await.len() - certificate_before,
+            usize::from(!disable)
+        );
+    }
+    Ok(())
+}
+
+#[sqlx_test]
+async fn certificate_preparation_failure_requires_reset_after_rack_profile_repair(
+    pool: PgPool,
+) -> TestResult {
+    let fixture = Fixture::new(&pool, true).await?;
+    fixture
+        .store_credentials(&Credentials::new("nvos-admin", TARGET_PASSWORD))
+        .await;
+    let entry = certificate_state(SwitchCertificateRotationState::DisableMtls { job_id: None });
+    let mut txn = pool.txn_begin().await?;
+    sqlx::query("UPDATE expected_racks SET rack_profile_id = 'missing-profile' WHERE rack_id = $1")
+        .bind("preingestion-switch")
+        .execute(txn.as_mut())
+        .await?;
+    db::explored_endpoints::set_preingestion_for_addresses(
+        &[fixture.bmc_ip],
+        entry.clone(),
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let (result, logs) = carbide_instrument::testing::capture_logs_async(
+        fixture.manager(&pool).run_single_iteration(),
+    )
+    .await;
+    result?;
+    let failed = fixture.state(&pool).await?;
+    assert!(
+        matches!(&failed, PreingestionState::Failed { reason } if reason.contains("missing-profile")),
+        "{failed:?}"
+    );
+    assert!(
+        logs.iter().any(|log| {
+            log.message == "Error handling preingestion update"
+                && log.field("error").is_some_and(|error| {
+                    error.contains("rejected before dispatch") && error.contains("missing-profile")
+                })
+        }),
+        "expected rejection before dispatch, got {logs:?}"
+    );
+    assert!(
+        fixture
+            .rms
+            .batch_disable_switch_mtls_calls()
+            .await
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .rms
+            .configure_switch_certificate_calls()
+            .await
+            .is_empty()
+    );
+
+    sqlx::query("UPDATE expected_racks SET rack_profile_id = $2 WHERE rack_id = $1")
+        .bind("preingestion-switch")
+        .bind(PROFILE_ID)
+        .execute(&pool)
+        .await?;
+    enqueue_mtls_disable(&fixture, "repaired-disable-job").await;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(fixture.state(&pool).await?, failed);
+    assert!(
+        fixture
+            .rms
+            .batch_disable_switch_mtls_calls()
+            .await
+            .is_empty()
+    );
+
+    // Repair alone does not resume a failed submission; explicitly reset the phase.
+    let mut txn = pool.txn_begin().await?;
+    db::explored_endpoints::set_preingestion_for_addresses(&[fixture.bmc_ip], entry, &mut txn)
+        .await?;
+    txn.commit().await?;
+    fixture.manager(&pool).run_single_iteration().await?;
+    assert_eq!(
+        fixture.state(&pool).await?,
+        certificate_state(SwitchCertificateRotationState::DisableMtls {
+            job_id: Some("repaired-disable-job".to_string()),
+        })
+    );
+    assert_eq!(fixture.rms.batch_disable_switch_mtls_calls().await.len(), 1);
+    assert!(
+        fixture
+            .rms
+            .configure_switch_certificate_calls()
+            .await
+            .is_empty()
+    );
     Ok(())
 }

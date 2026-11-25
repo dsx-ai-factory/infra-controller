@@ -8,7 +8,7 @@ use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_test_harness::prelude::{TestHarness, sqlx_test, sqlx_testing};
 use carbide_uuid::machine::MachineInterfaceId;
 use db::db_read::PgPoolReader;
-use db::test_support::postgres::{wait_for_blocked_queries, wait_for_blocked_query};
+use db::test_support::postgres::wait_for_blocked_queries;
 use model::allocation_type::AllocationType;
 use model::site_explorer::EndpointExplorationReport;
 use sqlx::PgPool;
@@ -17,7 +17,7 @@ use super::*;
 use crate::{PreingestionManager, PreingestionManagerConfig};
 
 #[sqlx_test]
-async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
+async fn concurrent_claims_recheck_persisted_endpoint_state(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = TestHarness::builder(pool.clone()).build().await;
@@ -44,8 +44,7 @@ async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
     );
     let static_info = &manager.static_info;
     let bmc_mac: MacAddress = "02:00:00:00:00:40".parse()?;
-    let ipv4: IpAddr = "192.0.2.40".parse()?;
-    let ipv6: IpAddr = "2001:db8::40".parse()?;
+    let address: IpAddr = "192.0.2.40".parse()?;
     let check = PreingestionState::NvosPasswordRotation {
         rotation_state: NvosPasswordRotationState::Check,
     };
@@ -59,31 +58,23 @@ async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
     let interface_id: MachineInterfaceId = sqlx::query_scalar(
         "WITH segment AS (
             INSERT INTO network_segments (name, version)
-            VALUES ('nvos-alias-claim', 'V1-T0') RETURNING id
+            VALUES ('nvos-endpoint-claim', 'V1-T0') RETURNING id
          ) INSERT INTO machine_interfaces (segment_id, mac_address, primary_interface, hostname)
-           SELECT id, $1, false, 'nvos-alias-claim' FROM segment RETURNING id",
+           SELECT id, $1, false, 'nvos-endpoint-claim' FROM segment RETURNING id",
     )
     .bind(bmc_mac)
     .fetch_one(txn.as_mut())
     .await?;
-    for address in [ipv4, ipv6] {
-        db::machine_interface_address::insert(
-            &mut txn,
-            interface_id,
-            address,
-            AllocationType::Dhcp,
-        )
+    db::machine_interface_address::insert(&mut txn, interface_id, address, AllocationType::Dhcp)
         .await?;
-        db::explored_endpoints::insert(
-            address,
-            &EndpointExplorationReport::default(),
-            false,
-            &mut txn,
-        )
-        .await?;
-    }
-    db::explored_endpoints::set_preingestion_for_addresses(&[ipv4, ipv6], check.clone(), &mut txn)
-        .await?;
+    db::explored_endpoints::insert(
+        address,
+        &EndpointExplorationReport::default(),
+        false,
+        &mut txn,
+    )
+    .await?;
+    db::explored_endpoints::set_preingestion_for_addresses(&[address], check, &mut txn).await?;
     let initial_target = db::credential_rotation::set_initial_target_version(
         &mut txn,
         CredentialRotationType::Nvos,
@@ -106,8 +97,8 @@ async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
     let mut observer = PgPoolReader::from(pool.clone());
     let claims = async {
         tokio::try_join!(
-            static_info.claim_nvos_password_rotation(ipv4, bmc_mac),
-            static_info.claim_nvos_password_rotation(ipv6, bmc_mac),
+            static_info.claim_nvos_password_rotation(address, bmc_mac),
+            static_info.claim_nvos_password_rotation(address, bmc_mac),
         )?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };
@@ -119,77 +110,40 @@ async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
     blocker.commit().await?;
     claims.await?;
 
-    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![ipv4, ipv6]).await?;
-    assert_eq!(endpoints.len(), 2);
-    let owner_address = endpoints
-        .iter()
-        .find(|endpoint| endpoint.preingestion_state == rotating)
-        .expect("one alias must own rotation")
-        .address;
-    let waiting_address = if owner_address == ipv4 { ipv6 } else { ipv4 };
-    for endpoint in endpoints {
-        let expected = if endpoint.address == owner_address {
-            &rotating
-        } else {
-            &check
-        };
-        assert_eq!(&endpoint.preingestion_state, expected);
-    }
+    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![address]).await?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].preingestion_state, rotating);
 
-    // Completion proceeds while another transaction holds the interface lock. Until
-    // completion commits, the claimant still sees the persisted Rotate owner.
-    let mut blocker = pool.txn_begin().await?;
-    db::machine_interface::find_by_mac_address_for_update(&mut blocker, bmc_mac).await?;
-    let mut endpoint_gate = pool.txn_begin().await?;
-    let endpoint_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(endpoint_gate.as_mut())
-        .await?;
-    assert!(db::explored_endpoints::lock_by_address(&mut endpoint_gate, owner_address).await?);
-    let completion = static_info.record_nvos_password_rotation_succeeded(owner_address, bmc_mac, 0);
-    tokio::pin!(completion);
-    tokio::select! {
-        result = &mut completion => panic!("completion must wait for the endpoint lock: {result:?}"),
-        _ = wait_for_blocked_query(&mut observer, endpoint_gate_pid, "explored_endpoints") => {},
-    }
-    blocker.commit().await?;
+    // A stale Check must preserve the submitted NVOS job.
     static_info
-        .claim_nvos_password_rotation(waiting_address, bmc_mac)
+        .set_nvos_rotation_state(address, 0, Some("password-job".to_string()))
         .await?;
-
-    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![ipv4, ipv6]).await?;
-    assert_eq!(endpoints.len(), 2);
-    for endpoint in endpoints {
-        let expected = if endpoint.address == owner_address {
-            &rotating
-        } else {
-            &check
-        };
-        assert_eq!(&endpoint.preingestion_state, expected);
-    }
-    let operation = db::credential_rotation::device_rotation_operation_state(
-        &pool,
-        CredentialRotationType::Nvos,
-        bmc_mac,
-    )
-    .await?;
-    assert!(operation.is_none());
-
-    // After the atomic commit, the claimant observes the confirmed version and
-    // advances to firmware checks without creating another rotation owner.
-    endpoint_gate.commit().await?;
-    completion.await?;
     static_info
-        .claim_nvos_password_rotation(waiting_address, bmc_mac)
+        .claim_nvos_password_rotation(address, bmc_mac)
         .await?;
+    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![address]).await?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(
+        endpoints[0].preingestion_state,
+        PreingestionState::NvosPasswordRotation {
+            rotation_state: NvosPasswordRotationState::Rotate {
+                target_version: 0,
+                job_id: Some("password-job".to_string()),
+            },
+        }
+    );
 
-    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![ipv4, ipv6]).await?;
-    assert_eq!(endpoints.len(), 2);
-    for endpoint in endpoints {
-        assert_eq!(
-            endpoint.preingestion_state,
-            PreingestionState::CheckFirmware
-        );
-    }
+    static_info
+        .record_nvos_password_rotation_succeeded(address, bmc_mac, 0)
+        .await?;
+    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![address]).await?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(
+        endpoints[0].preingestion_state,
+        PreingestionState::SwitchCertificateRotation {
+            rotation_state: SwitchCertificateRotationState::DisableMtls { job_id: None },
+        }
+    );
     let operation = db::credential_rotation::device_rotation_operation_state(
         &pool,
         CredentialRotationType::Nvos,
@@ -200,5 +154,22 @@ async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
         operation.and_then(|operation| operation.current_version),
         Some(0)
     );
+
+    // The confirmed password version must not restart TLS from a stale Check.
+    let tls_state = PreingestionState::SwitchCertificateRotation {
+        rotation_state: SwitchCertificateRotationState::ConfigureCertificate {
+            job_id: Some("certificate-job".to_string()),
+        },
+    };
+    let mut txn = pool.txn_begin().await?;
+    db::explored_endpoints::set_preingestion_for_addresses(&[address], tls_state.clone(), &mut txn)
+        .await?;
+    txn.commit().await?;
+    static_info
+        .claim_nvos_password_rotation(address, bmc_mac)
+        .await?;
+    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![address]).await?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].preingestion_state, tls_state);
     Ok(())
 }

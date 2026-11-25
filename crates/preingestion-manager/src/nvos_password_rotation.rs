@@ -13,7 +13,9 @@ use component_manager::switch_endpoint::resolve_pre_ingestion_switch_endpoints;
 use db::TransactionVending;
 use db::credential_rotation::CredentialRotationType;
 use mac_address::MacAddress;
-use model::site_explorer::{ExploredEndpoint, NvosPasswordRotationState, PreingestionState};
+use model::site_explorer::{
+    ExploredEndpoint, NvosPasswordRotationState, PreingestionState, SwitchCertificateRotationState,
+};
 
 #[cfg(test)]
 mod tests;
@@ -223,37 +225,29 @@ impl PreingestionManagerStatic {
         Ok(())
     }
 
-    /// Claim rotation under the common interface lock, respecting aliases excluded
-    /// from the current iteration by an exploration error or refresh wait.
+    /// Capture the target version while rechecking the persisted endpoint state.
     async fn claim_nvos_password_rotation(
         &self,
         address: IpAddr,
         bmc_mac: MacAddress,
     ) -> PreingestionManagerResult<()> {
         let mut txn = self.txn_begin().await?;
-        let interfaces =
-            db::machine_interface::find_by_mac_address_for_update(&mut txn, bmc_mac).await?;
-        let addresses = interfaces
-            .into_iter()
-            .flat_map(|interface| interface.addresses)
-            .collect();
-        // Read aliases before the version: completion atomically publishes the
-        // version and removes the Rotate owner, so a claimant sees at least one.
-        let aliases = db::explored_endpoints::find_by_ips(&mut *txn, addresses).await?;
-        if !aliases.iter().any(|alias| {
-            alias.address == address
-                && matches!(
-                    alias.preingestion_state,
-                    PreingestionState::NvosPasswordRotation {
-                        rotation_state: NvosPasswordRotationState::Check,
-                    }
-                )
+        db::machine_interface::find_by_mac_address_for_update(&mut txn, bmc_mac).await?;
+        let endpoint = db::explored_endpoints::find_by_ips(&mut *txn, vec![address])
+            .await?
+            .pop();
+        if !endpoint.is_some_and(|endpoint| {
+            matches!(
+                endpoint.preingestion_state,
+                PreingestionState::NvosPasswordRotation {
+                    rotation_state: NvosPasswordRotationState::Check,
+                }
+            )
         }) {
             // A stale Check must not overwrite a claim or a later state.
             txn.commit().await?;
             return Ok(());
         }
-
         let operation = db::credential_rotation::device_rotation_operation_state(
             &mut *txn,
             CredentialRotationType::Nvos,
@@ -265,11 +259,13 @@ impl PreingestionManagerStatic {
                 %bmc_mac,
                 bmc_ip_address = %address,
                 current_version,
-                "NVOS password already has a confirmed site version; continuing to firmware checks"
+                "NVOS password already has a confirmed site version; advancing preingestion"
             );
             db::explored_endpoints::set_preingestion_for_addresses(
                 &[address],
-                PreingestionState::CheckFirmware,
+                PreingestionState::SwitchCertificateRotation {
+                    rotation_state: SwitchCertificateRotationState::DisableMtls { job_id: None },
+                },
                 &mut txn,
             )
             .await?;
@@ -277,23 +273,6 @@ impl PreingestionManagerStatic {
             return Ok(());
         }
 
-        if let Some(owner) = aliases.iter().find(|alias| {
-            matches!(
-                alias.preingestion_state,
-                PreingestionState::NvosPasswordRotation {
-                    rotation_state: NvosPasswordRotationState::Rotate { .. },
-                }
-            )
-        }) {
-            tracing::info!(
-                %bmc_mac,
-                bmc_ip_address = %address,
-                owner_ip_address = %owner.address,
-                "Waiting for the NVOS password rotation owner"
-            );
-            txn.commit().await?;
-            return Ok(());
-        }
         let Some(target_version) = db::credential_rotation::current_target_version(
             &mut *txn,
             CredentialRotationType::Nvos,
@@ -339,7 +318,9 @@ impl PreingestionManagerStatic {
         .await?;
         db::explored_endpoints::set_preingestion_for_addresses(
             &[address],
-            PreingestionState::CheckFirmware,
+            PreingestionState::SwitchCertificateRotation {
+                rotation_state: SwitchCertificateRotationState::DisableMtls { job_id: None },
+            },
             &mut txn,
         )
         .await?;

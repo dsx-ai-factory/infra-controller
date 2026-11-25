@@ -424,6 +424,8 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         &self,
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError>;
+    /// Submit certificate configuration for a managed or expected switch.
+    /// Identity and endpoint resolution errors are returned before submission.
     async fn configure_switch_certificate(
         &self,
         endpoint: &SwitchEndpoint,

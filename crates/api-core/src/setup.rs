@@ -2821,8 +2821,13 @@ async fn initialize_and_start_controllers<'a>(
     .with_driver_connector(driver_connector.clone());
 
     let preingestion_manager = match component_manager.as_ref() {
-        Some(manager) => preingestion_manager
-            .with_component_manager(Arc::new(manager.clone()), credential_manager.clone()),
+        Some(manager) => preingestion_manager.with_component_manager(
+            Arc::new(manager.clone()),
+            credential_manager.clone(),
+            carbide_config
+                .switch_state_controller
+                .effective_switch_mtls_services_as_i32(),
+        ),
         None => preingestion_manager,
     };
 
