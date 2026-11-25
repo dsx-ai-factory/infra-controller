@@ -448,7 +448,7 @@ For a full guide on diagnosing stuck objects, including how to use the NICo Graf
 
 ### Endpoint Exploration Errors
 
-For a `SerialNumberMismatch` health alert, compare the ExpectedMachine serial
+For a `SerialNumberMismatch` health alert, compare the Expected Machine serial
 with the selected field in the saved host report. Check the effective rule
 list and wait for a successful exploration when a rule needs a newly collected
 Assembly. See [Select the host inventory serial number](#select-the-host-inventory-serial-number).
