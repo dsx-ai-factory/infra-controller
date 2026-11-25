@@ -80,7 +80,7 @@ fi
 
 dpf_prereqs_line="$(grep -nF 'DPF stack installed (Core will start with carbide-api DPF enabled in phase 6)' "${SETUP_SH}" | cut -d: -f1)"
 bmc_secret_line="$(grep -nF '    _prepare_bmc_v0_bootstrap_secret "${_CONFIGURED_CREDENTIAL_FILE_SECRET}"' "${SETUP_SH}" | cut -d: -f1)"
-dpf_values_line="$(grep -nF '_CORE_VALUES_ARG="${_DPF_VALUES}"' "${SETUP_SH}" | cut -d: -f1)"
+dpf_values_line="$(grep -nF '_CORE_VALUES_ARG="${_DPF_VALUES}"' "${SETUP_SH}" | head -1 | cut -d: -f1)"
 preserve_existing_line="$(grep -nF '    elif _current_core_uses_setup_bmc_v0_secret; then' "${SETUP_SH}" | cut -d: -f1)"
 preserve_override_line="$(grep -nF '        _append_bmc_v0_core_values' "${SETUP_SH}" | head -1 | cut -d: -f1)"
 manual_command_render_line="$(grep -nF '    _NICO_CORE_CMD_DISPLAY=""' "${SETUP_SH}" | cut -d: -f1)"

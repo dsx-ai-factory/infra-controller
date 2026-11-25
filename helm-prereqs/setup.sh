@@ -20,8 +20,8 @@
 # Tool requirements:
 #   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
 #   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
-#   --skip-vault preflight also requires a python3 TOML parser (3.11 tomllib
-#   or the tomli package) to inspect the site config's [secrets] section.
+#   --skip-vault preflight and --skip-dpf Core rendering require a python3 TOML parser (3.11 tomllib
+#   or the tomli package) to inspect site and custom base TOML configuration.
 #
 # Required environment:
 #   KUBECONFIG            Optional only if the current kubectl context already
@@ -2193,6 +2193,12 @@ else
             exit 1
         fi
         _CORE_VALUES_ARG="${_DPF_VALUES}"
+    else
+        # Core defaults DPF on; skipping its operator must explicitly opt out unless the site
+        # already owns its DPF configuration. Reuse the rendered-values cleanup on exit.
+        _DPF_VALUES="$(mktemp -t nico-core-skip-dpf.XXXXXX)"
+        python3 "${SCRIPT_DIR}/render-skip-dpf-values.py" "${_CORE_VALUES_FILE}" "${_DPF_VALUES}"
+        _CORE_VALUES_ARG="${_DPF_VALUES}"
     fi
 
     NICO_CORE_CMD=(
@@ -2329,15 +2335,11 @@ else
             echo "See docs/manuals/dpf.md §3.6 for the supported credential workflows."
         fi
         _CORE_INSTALLED_THIS_RUN=true
-    elif "${INSTALL_DPF}"; then
-        # The DPF path deploys from a rendered mktemp values file that the EXIT
+    else
+        # Core deploys from a rendered mktemp values file that the EXIT
         # trap deletes, so point back at setup.sh rather than print a command
         # whose values path will no longer exist.
-        echo "Skipped. Re-run setup.sh to deploy NICo Core with DPF enabled,"
-        echo "or pass --skip-dpf to deploy without DPF."
-    else
-        echo "Skipped. To deploy manually, run from $(dirname "${SCRIPT_DIR}"):"
-        echo "  ${_NICO_CORE_CMD_DISPLAY}"
+        echo "Skipped. Re-run setup.sh with the same options to deploy NICo Core."
     fi
 fi
 

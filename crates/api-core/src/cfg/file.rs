@@ -2108,8 +2108,8 @@ fn default_dpf_pf_total_sf_reserved() -> u32 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DpfConfig {
-    /// Enables DPF deployment.
-    #[serde(default)]
+    /// Enables DPF deployment. Defaults to true; set false to disable DPF explicitly.
+    #[serde(default = "default_to_true")]
     pub enabled: bool,
     /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
     /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
@@ -2218,7 +2218,7 @@ pub struct DpfConfig {
 impl Default for DpfConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             multi_cluster_support: false,
             enable_pci_switch_emulation: false,
             deployment_scoped_service_interfaces: false,
@@ -9144,6 +9144,28 @@ firmware_url = "https://firmware.example.com/fw-b.bin"
             .unwrap();
 
         assert!(config.supernic_firmware_profiles.is_empty());
+    }
+
+    #[test]
+    fn dpf_enabled_defaults_to_true_and_accepts_false() {
+        assert!(DpfConfig::default().enabled);
+        value_scenarios!(
+            run = |overrides: &str| {
+                Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .merge(Toml::string(overrides))
+                    .extract::<CarbideConfig>()
+                    .expect("valid DPF configuration")
+                    .dpf.enabled
+            };
+            "DPF is enabled by default" {
+                "" => true,
+                "[dpf]" => true,
+            }
+            "DPF can be explicitly disabled" {
+                "[dpf]\nenabled = false" => false,
+            }
+        );
     }
 
     #[test]

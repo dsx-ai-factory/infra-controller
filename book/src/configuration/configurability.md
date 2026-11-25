@@ -1564,7 +1564,7 @@ on or off.
 | RBAC bypass (dev only) | siteConfig | `bypass_rbac = true` | off | Disables RBAC; never set in production. |
 | Passive mode (debug only) | siteConfig | `listen_only = true` | off | RPC/web only, no background controllers. CI/dev shells only. |
 | TPM bypass (testing only) | siteConfig | `tpm_required = false` | required | Allows machine registration without TPM. Testing only. |
-| DPF (Kubernetes DPU workloads) | siteConfig | `[dpf].enabled` | off | Requires the DPF operator (`setup.sh` installs and enables it by default; `--skip-dpf` to opt out). |
+| DPF (Kubernetes DPU workloads) | siteConfig | `[dpf].enabled` | on | Requires the DPF operator. Set `[dpf].enabled = false` to disable DPF explicitly. |
 | Loki sidecar (REST stack) | Helm (REST) | `nico-rest-*` log shipping | off | Optional; pairs with the same OTel collector pattern used by Core. |
 | Bundled dev Keycloak | Helm (REST) | `nico-rest-api.config.keycloak.enabled` | on | Disable for production — use external IdP. |
 

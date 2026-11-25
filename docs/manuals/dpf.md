@@ -1181,7 +1181,7 @@ Field reference (all under `[dpf]`):
 
 | TOML key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | Master switch. Must be `true` to use DPF-based provisioning. |
+| `enabled` | bool | `true` | Master switch. Set `false` to disable DPF-based provisioning explicitly. |
 | `enable_pci_switch_emulation` | bool | `false` | Set `PCI_SWITCH_EMULATION_ENABLE=1` in provisioning nvconfig for all deployments, including BF3 GB200 and the Astra flavor template, to enable PCI switch emulation for DPU-emulated storage such as DOCA SNAP. Omitted or `false` leaves the parameter unset; it does not explicitly disable firmware emulation. |
 | `docker_image_pull_secret` | string (optional) | none | Top-level override for the image-pull Secret of the carbide services (`dpu_agent`, `dhcp_server`, `fmds`, `otel`) and fallback for Astra extra services (Weave DHCP, Weave flow controller, Xplane); never applied to `dts`/`doca_hbn`. An extra service's own secret takes precedence. Unset by default: services pull from a public registry (no `imagePullSecrets`) unless a secret is given here or per-service. |
 | `dpu_agent_bootstrap_ca` | tagged table | `source = "legacy_download"` | Selects legacy download or mounted-object bootstrap trust for the DPU agent. |
