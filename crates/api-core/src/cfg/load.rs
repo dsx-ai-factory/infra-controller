@@ -1049,6 +1049,47 @@ selections = { power = "standard" }"#
         });
     }
 
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn host_serial_rules_load_from_site_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("base.toml", include_str!("test_data/min_config.toml"))?;
+            let load = |site: &str| {
+                jail.create_file("site.toml", &format!("deny_unknown_fields = true\n{site}"))
+                    .unwrap();
+                parse_carbide_config(Path::new("base.toml"), Some(Path::new("site.toml")))
+            };
+            let rule = r#"[[site_explorer.host_serial_rules]]
+id = "site-tray"
+hardware_class = { prefix = "acme_" }
+[site_explorer.host_serial_rules.source]
+kind = "chassis_assembly"
+chassis_id = { prefix = "Enclosure" }
+name = { exact = "Tray FRU" }
+"#;
+            let config = load(rule).unwrap();
+            assert!(
+                config
+                    .site_explorer
+                    .host_serial_rules
+                    .needs_chassis_assembly("ENCLOSURE-2")
+            );
+            // Exercise the production loader's strict field diagnostics and rule validation.
+            for (site, error) in [
+                (
+                    rule.replace("chassis_assembly", "system_sku"),
+                    "source.chassis_id",
+                ),
+                (rule.replace("Tray FRU", " "), "blank assembly selector"),
+            ] {
+                let result = load(&site).map(|_| ());
+                let message = format!("{:#}", result.expect_err(&site));
+                assert!(message.contains(error), "{site}: {message}");
+            }
+            Ok(())
+        })
+    }
+
     /// Existing configurations keep libredfish, and only the two clients parse.
     #[test]
     #[allow(clippy::result_large_err)]

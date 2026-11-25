@@ -120,12 +120,16 @@ fn is_bluefield_system_id(id: &str) -> bool {
     matches!(id, "Bluefield" | "BlueField_0")
 }
 
+/// Selects a Redfish chassis whose Assembly link should be followed.
+pub type ChassisAssemblyFilter<'a> =
+    &'a (dyn Fn(&nv_redfish::schema::chassis::Chassis) -> bool + Sync);
+
 pub struct Config<'a, B: Bmc> {
     pub boot_interface_mac: Option<MacAddress>,
     pub error_classifier: ErrorClassifier<'a, B>,
     pub retry_timeout: Duration,
-    /// Redfish chassis IDs whose Assembly links to follow. An empty list skips assembly collection.
-    pub assembly_chassis_ids: &'a [&'a str],
+    /// Follow the Assembly link when this predicate matches the chassis.
+    pub collect_chassis_assembly: ChassisAssemblyFilter<'a>,
     /// Whether to read drive firmware versions from the primary system's
     /// Storage subsystems and report each enabled drive with a usable model
     /// and version as a `Drive_<Model>_<DriveId>` firmware inventory entry.
@@ -148,14 +152,14 @@ fn should_fetch_bf4_chassis_except_irot_nic(odata_id: &ODataId) -> bool {
 /// and the [`detect_hw_type`] accessor, so detection cannot drift between them.
 fn build_chassis_explore_config<'a, B: Bmc>(
     root: &ServiceRoot<B>,
-    assembly_chassis_ids: &'a [&'a str],
+    collect_chassis_assembly: ChassisAssemblyFilter<'a>,
 ) -> chassis::Config<'a> {
     let is_nvidia_vendor = root.vendor() == Some(Vendor::new("Nvidia"))
         || root.vendor() == Some(Vendor::new("NVIDIA"));
     let need_bf4_network_device_fns = is_nvidia_vendor && is_bf4_product(root.product());
 
     chassis::Config {
-        assembly_chassis_ids,
+        collect_chassis_assembly,
         network_adapter: network_adapter::Config {
             // Dell exploration needs NDF data for host-DPU pairing. BF4 needs
             // NDF0 `PermanentMACAddress` to derive PF0 base MAC as (NDF0 - 0x10)
@@ -243,7 +247,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
-    let chassis_explore_config = build_chassis_explore_config(&root, config.assembly_chassis_ids);
+    let chassis_explore_config =
+        build_chassis_explore_config(&root, config.collect_chassis_assembly);
     let mut explored_chassis =
         ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
             .await?;

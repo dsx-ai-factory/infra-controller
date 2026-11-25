@@ -220,6 +220,14 @@ Both flows assume hardware ingestion is complete -- which this page covers.
 
 ## Troubleshooting
 
+### Serial number mismatch
+
+For a `SerialNumberMismatch` health alert, compare the Expected Machine's
+`chassisSerialNumber` with the value selected by the first usable site rule.
+If no site rule yields a serial, check the primary system serial, primary system
+SKU, and built-in tray serial in the saved report. If no built-in rule finds
+a tray serial, check the chassis serials. See [Select the host inventory serial number](ingesting-hosts.md#select-the-host-inventory-serial-number).
+
 ### Inspecting Machine State
 
 When a machine is not being created or is stuck in a pre-`Ready` state, start with the Machine REST endpoint:

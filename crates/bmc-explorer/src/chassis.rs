@@ -31,11 +31,11 @@ use nv_redfish::pcie_device::PcieDevice;
 use nv_redfish::{Bmc, ServiceRoot};
 
 use crate::network_adapter::ExploredNetworkAdapterCollection;
-use crate::{Error, ErrorClass, ErrorClassifier, network_adapter};
+use crate::{ChassisAssemblyFilter, Error, ErrorClass, ErrorClassifier, network_adapter};
 
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
 pub(crate) struct Config<'a> {
-    pub(crate) assembly_chassis_ids: &'a [&'a str],
+    pub(crate) collect_chassis_assembly: ChassisAssemblyFilter<'a>,
     pub(crate) network_adapter: network_adapter::Config,
     pub(crate) lazy_fetch: Option<fn(&ODataId) -> bool>,
     /// Skip a chassis that the collection lists but that answers 404 when
@@ -395,9 +395,7 @@ impl<B: Bmc> ExploredChassis<B> {
     async fn explore(chassis: NvChassis<B>, config: &Config<'_>) -> Result<Self, Error<B>> {
         let network_adapters =
             ExploredNetworkAdapterCollection::explore(&chassis, &config.network_adapter).await?;
-        let assemblies = if config
-            .assembly_chassis_ids
-            .contains(&chassis.raw().id.as_str())
+        let assemblies = if (config.collect_chassis_assembly)(chassis.raw().as_ref())
             && let Some(assembly) = chassis
                 .assembly()
                 .await

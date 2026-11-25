@@ -229,6 +229,121 @@ Only registered Expected Machines will be ingested.
 
 For optional REST fields and batch JSON examples, use [Ingesting Hosts (REST API)](ingesting-hosts-rest-api.md#registering-expected-machines).
 
+### Select the host inventory serial number
+
+When you register an Expected Machine, set `chassisSerialNumber` to the
+expected host inventory serial. Use the selection and fallback rules below to
+identify the correct Redfish value. Site Explorer compares it with the stored
+exploration report.
+
+On supported GB200 and Vera Rubin compute trays,
+built-in rules identify the chassis field-replaceable unit (FRU) in
+`Chassis_0/Assembly` by its name and model. These rules distinguish the tray
+from board and product FRUs even when their models are identical.
+
+<Note>
+
+During the audit, Site Explorer checks stored host reports that match an
+Expected Machine, including when `create_machines = false`. A mismatch
+increments the site-wide mismatch metric. If the BMC maps to a Machine, Site
+Explorer records the `SerialNumberMismatch` health alert with the
+`PreventAllocations` classification.
+Check the selected source against the Expected Machine before rolling out a rule.
+
+</Note>
+
+This **site TOML** example selects the tray FRU under chassis with IDs such
+as `Enclosure_0` and `Enclosure_1` on hosts in the `acme_` hardware class family.
+
+```toml
+[[site_explorer.host_serial_rules]]
+id = "site-tray"
+hardware_class = { prefix = "acme_" }
+[site_explorer.host_serial_rules.source]
+kind = "chassis_assembly"
+chassis_id = { prefix = "Enclosure_" }
+name = { exact = "Tray FRU" }
+```
+
+`nico-api` loads the rules at startup. With the umbrella Helm chart and
+`nico-api.siteConfig.enabled = true`, add the block to the existing TOML in
+`nico-api.siteConfig.nicoApiSiteConfig` and apply the updated Helm values.
+The Deployment's configuration checksum changes and triggers a rollout. For
+a directly managed site TOML, pass the file through `--site-config-path` and
+restart `nico-api` after saving changes.
+
+Configuration loads from the base TOML passed through `--config-path`, then
+the site TOML, then the environment. Omitting `host_serial_rules` from the
+site TOML inherits the base list. Setting `host_serial_rules = []` under
+`[site_explorer]` clears that list, and a nonempty list replaces it in full.
+A `host_serial_rules` list in the `CARBIDE_API_SITE_EXPLORER` environment
+variable's inline table replaces the result from both files. Built-in rules
+follow the effective configured list in every case.
+
+Each rule requires a nonempty, case-sensitive `id` unique across configured
+and built-in serial rules. A site prefix such as `site-` helps avoid collisions.
+Duplicate IDs, IDs with surrounding whitespace, and blank patterns prevent
+`nico-api` from starting.
+
+The required `source` table selects one serial-bearing field.
+
+| `source.kind` | Field read | Other source fields |
+|---|---|---|
+| `system_serial` | Primary ComputerSystem's `SerialNumber` | None |
+| `system_sku` | Primary ComputerSystem's `SKU` | None |
+| `chassis` | Matching chassis's stored `SerialNumber` | Required `chassis_id` pattern |
+| `chassis_assembly` | Matching Assembly member's `SerialNumber` | Required `chassis_id` pattern and at least one of `name`, `model`, or `member_id` |
+
+Each pattern table contains exactly one of `exact`, `prefix`, or `contains`.
+Patterns trim surrounding whitespace and ignore ASCII case. All supplied
+assembly selectors must match the same member.
+
+The optional `hardware_class` pattern matches the report's `HardwareClass`.
+This value combines the normalized primary-system manufacturer and model with
+`_`, such as `acme_tray`. Normalization lowercases alphanumeric runs and joins
+them with `-`. The Redfish service root supplies manufacturer or model fallbacks.
+A class-specific rule is skipped when an older report has no `HardwareClass`.
+Omitting the pattern makes the rule eligible for every host.
+
+Site rules run in declaration order. If no site rule yields a serial, the
+audit checks the primary-system serial and SKU before the built-in chassis FRU
+rules. Within a rule, matching chassis and their assembly members are tried
+in report order. Missing or whitespace-only serials are skipped. The first
+usable serial is trimmed and compared case-sensitively with the declared
+Expected Machine serial. A site rule's choice is authoritative even when
+another field matches the expected value.
+
+If no site rule yields a serial, the audit accepts the primary system's
+`SerialNumber` or `SKU` exactly as stored. These identifiers remain valid
+after a refresh adds Assembly data. The audit also accepts the built-in tray
+serial, or a matching trimmed chassis serial if no built-in rule yields a value.
+An older report can contain a tray serial in the chassis `SerialNumber` field.
+A `chassis` rule or the chassis fallback uses the stored value until a
+successful exploration replaces the report.
+
+During exploration, Site Explorer reads the advertised `Assembly` property
+for collected chassis whose IDs match a configured or built-in
+`chassis_assembly` rule. A chassis without the property contributes no
+members. An error reading or decoding a selected Assembly or member fails
+the exploration.
+
+Collection uses chassis IDs before the report's hardware class is derived.
+The audit uses `hardware_class` and the Assembly member selectors when
+it evaluates the saved report. Overlapping rules collect each chassis once.
+A broader chassis pattern can read more Assembly resources. A newly selected
+chassis contributes members after a successful exploration saves them.
+
+For diagnosis, inspect the stored `explored_endpoints.exploration_report` JSON,
+including `HardwareClass`, `Systems`, `Chassis[].Id`, and
+`Chassis[].Assemblies[]`. Compare Assembly member `Name`, `Model`, `MemberId`,
+and `SerialNumber` with the BMC's data. Inspect the chassis resource's expanded
+`Assembly` property or follow its advertised `@odata.id` when it contains
+a reference.
+The endpoint report command uses the RPC view, which exposes the compatibility
+chassis serial projection and omits Assembly members and `HardwareClass`.
+Use the stored report or direct Redfish response to choose assembly selectors.
+See the [endpoint report command](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/site-explorer/site-explorer-get-report-endpoint.md).
+
 ### Per-Host Fields With the Admin CLI
 
 The admin CLI's `expected-machine` command (`em`) provides the complete set of
@@ -332,6 +447,11 @@ nicocli machine get <machine-id>
 For a full guide on diagnosing stuck objects, including how to use the NICo Grafana dashboard and how to read state handler error logs, see [Stuck Objects Runbook](../playbooks/stuck_objects/stuck_objects.md).
 
 ### Endpoint Exploration Errors
+
+For a `SerialNumberMismatch` health alert, compare the Expected Machine serial
+with the selected field in the saved host report. Check the effective rule
+list and wait for a successful exploration when a rule needs a newly collected
+Assembly. See [Select the host inventory serial number](#select-the-host-inventory-serial-number).
 
 Before pairing can occur, Site Explorer must successfully explore each BMC endpoint. Exploration failures are logged and surfaced in `nico-api` logs and the NICo Grafana dashboard. Common error types:
 

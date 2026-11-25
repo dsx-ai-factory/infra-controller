@@ -90,12 +90,17 @@ async fn chassis_assemblies_preserve_board_and_tray_serials_on_new_firmware() {
 }
 
 #[test]
-async fn chassis_assemblies_follow_the_configured_chassis_ids() {
+async fn chassis_assemblies_follow_the_configured_chassis_id_pattern() {
     use bmc_mock::injection::{Action, Rule, Selector};
+    use carbide_hw_identification::pattern::Pattern;
 
     // Advertise the same Assembly on two chassis so the report identifies which link was followed.
     const ASSEMBLY: &str = "/redfish/v1/Chassis/Chassis_0/Assembly";
-    for assembly_chassis_ids in [&["BMC_0"][..], &[]] {
+    for (pattern, expected) in [
+        (Pattern::Prefix("bmc_".into()), &["BMC_0"][..]),
+        (Pattern::Contains("_0".into()), &["BMC_0", "Chassis_0"]),
+        (Pattern::Exact("missing".into()), &[]),
+    ] {
         let h = test_support::wiwynn_gb200_bmc().await;
         h.state.injection.upsert(Rule {
             id: "bmc-assembly-link".into(),
@@ -104,25 +109,26 @@ async fn chassis_assemblies_follow_the_configured_chassis_ids() {
             remaining: None,
         });
         let config = bmc_explorer::Config {
-            assembly_chassis_ids,
+            collect_chassis_assembly: &|chassis| pattern.matches(&chassis.id),
             ..common::explorer_config()
         };
         let root = h.service_root.as_ref().clone().restrict_expand().into();
         let report = nv_generate_exploration_report(root, &config).await.unwrap();
-        let collected: Vec<_> = report
+        let mut collected: Vec<_> = report
             .chassis
             .iter()
             .filter(|chassis| !chassis.assemblies.is_empty())
             .map(|chassis| chassis.id.as_str())
             .collect();
-        assert_eq!(collected, assembly_chassis_ids);
+        collected.sort_unstable();
+        assert_eq!(collected, expected);
         let assembly_reads = h
             .http_client
             .take_requests()
             .iter()
             .filter(|req| req.uri.contains(ASSEMBLY))
             .count();
-        assert_eq!(assembly_reads, assembly_chassis_ids.len());
+        assert_eq!(assembly_reads, expected.len());
     }
 }
 

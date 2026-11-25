@@ -703,7 +703,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     );
     let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
         bmc_client.clone(),
-        carbide_config.site_explorer.explore_drive_firmware,
+        &carbide_config.site_explorer,
         db_pool.clone(),
         instrumentation.clone(),
     );

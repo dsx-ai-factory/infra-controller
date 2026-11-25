@@ -94,8 +94,12 @@ impl Pattern {
         }
     }
 
-    pub(crate) fn matches(&self, value: &str) -> bool {
+    /// Tests an inventory value after trimming whitespace and ignoring ASCII case.
+    pub fn matches(&self, value: &str) -> bool {
         let text = self.text().trim().as_bytes();
+        if text.is_empty() {
+            return false;
+        }
         let value = value.trim().as_bytes();
         match self {
             Exact(_) => value.eq_ignore_ascii_case(text),

@@ -21,3 +21,6 @@
 ///
 /// [Vera Rubin PDB chassis FRU assembly]: https://github.com/dsx-ai-factory/infra-controller/blob/eca06f3f26d7d7d6a36808914365bac8dba0051f/crates/bmc-explorer/src/hw/vera_rubin.rs#L24-L31
 pub const CHASSIS_FRU_ASSEMBLY_MODEL: &str = "P4107";
+
+/// Name of the Vera Rubin PDB chassis FRU associated with [`CHASSIS_FRU_ASSEMBLY_MODEL`].
+pub const CHASSIS_FRU_NAME: &str = "PDB_0 Chassis FRU Assembly0";

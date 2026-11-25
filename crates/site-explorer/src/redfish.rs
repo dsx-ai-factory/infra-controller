@@ -27,7 +27,6 @@ use bmc_platform::{
 };
 use bmc_runtime::DriverConnector;
 use carbide_credential_rotation::bmc_accounts;
-use carbide_hw_identification::host_serial::HOST_SERIAL_ASSEMBLY_CHASSIS_IDS;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
     DirectRedfishPool, RedfishAuth, RedfishClientCreationError, RedfishClientPool, probe_bmc_vendor,
@@ -482,6 +481,7 @@ impl RedfishClient {
         access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
         explore_drive_firmware: bool,
+        collect_chassis_assembly: bmc_explorer::ChassisAssemblyFilter<'_>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
         let service_root = nv_pool
@@ -504,7 +504,11 @@ impl RedfishClient {
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
             service_root,
-            &nv_bmc_explore_config(boot_interface, explore_drive_firmware),
+            &nv_bmc_explore_config(
+                boot_interface,
+                explore_drive_firmware,
+                collect_chassis_assembly,
+            ),
         )
         .await
         .map_err(map_nv_redfish_explore_error)?;
@@ -1285,14 +1289,15 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
     }
 }
 
-fn nv_bmc_explore_config(
+fn nv_bmc_explore_config<'a>(
     boot_interface: Option<&BootInterfaceTarget>,
     explore_drive_firmware: bool,
-) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
+    collect_chassis_assembly: bmc_explorer::ChassisAssemblyFilter<'a>,
+) -> bmc_explorer::Config<'a, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
         error_classifier: &bmc_explorer::nv_redfish_error_class,
-        assembly_chassis_ids: HOST_SERIAL_ASSEMBLY_CHASSIS_IDS,
+        collect_chassis_assembly,
         // Chosen arbitrarily: we want to wait a bit between tries,
         // but not for too long relative to the total exploration
         // time.
@@ -1482,7 +1487,7 @@ mod tests {
         };
 
         value_scenarios!(run = |target: Option<BootInterfaceTarget>| {
-            let config = nv_bmc_explore_config(target.as_ref(), false);
+            let config = nv_bmc_explore_config(target.as_ref(), false, &|_| false);
             let mut status = MachineSetupStatus::default();
             record_evaluated_boot_interface(Some(&mut status), target.as_ref());
             (

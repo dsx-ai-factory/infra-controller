@@ -74,7 +74,8 @@ With an authenticated session, Site Explorer queries a comprehensive set of Redf
 | Data Collected | Redfish Source | Purpose |
 |---|---|---|
 | System serial numbers | `GET /redfish/v1/Systems/{id}` | Machine identification |
-| Chassis serial numbers | `GET /redfish/v1/Chassis/{id}` | Fallback identification |
+| Chassis serial numbers | `GET /redfish/v1/Chassis/{id}` | Host inventory serial selection and fallback |
+| Chassis Assembly members | `GET` on selected chassis's `Assembly` link | Host inventory serial selection |
 | Network adapters + serials | `GET /redfish/v1/Chassis/{id}/NetworkAdapters` | DPU-host pairing |
 | PCIe devices + serials | `GET /redfish/v1/Systems/{id}` (PCIeDevices) | DPU-host pairing |
 | Manager info | `GET /redfish/v1/Managers/{id}` | BMC firmware version |
@@ -83,7 +84,14 @@ With an authenticated session, Site Explorer queries a comprehensive set of Redf
 | Boot configuration | `GET /redfish/v1/Systems/{id}/BootOptions` | Boot order state |
 | Power state | `GET /redfish/v1/Systems/{id}` (PowerState) | Current state |
 
-Serial numbers are trimmed of whitespace. If `system.serial_number` is missing, the chassis serial number is used as a fallback.
+The saved report retains serials on their source systems, chassis, and Assembly
+members. For the host Expected Machine audit, `site_explorer.host_serial_rules`
+selects a serial from that report. If no site rule yields a usable value, the
+audit accepts the primary-system serial, the SKU, or the tray serial selected by
+a built-in rule. If no built-in rule finds a tray serial, chassis serials are
+also eligible. Assembly collection follows the chassis patterns from all
+assembly rules. See [Select the host inventory serial number](../provisioning/ingesting-hosts.md#select-the-host-inventory-serial-number)
+for selectors, precedence, and rollout.
 
 **Key files:**
 
