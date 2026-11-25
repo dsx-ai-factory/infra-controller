@@ -692,7 +692,7 @@ async fn find_vanilla_bfb_install(client: &dyn Redfish) -> eyre::Result<Option<S
     let members = collection
         .body
         .remove("Members")
-        .ok_or_else(|| eyre::eyre!("expanded Redfish task collection is missing Members"))?;
+        .ok_or_else(|| eyre::eyre!("expanded task collection is missing the members array"))?;
     let tasks: Vec<Task> = serde_json::from_value(members)?;
     select_vanilla_bfb_install(&tasks)
 }
