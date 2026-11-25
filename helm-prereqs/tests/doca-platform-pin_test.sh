@@ -38,7 +38,7 @@ fi
 # operator version. nico-api exits at startup on a simulated site when it is lower.
 dpf_version="$(python3 "${SCRIPT_DIR}/../read-dpf-version.py")"
 sim_source="${REPO_ROOT}/dev/k8s/dpf-sim-controller/internal/controller/operator_config.go"
-if ! grep -qF "const simulatedOperatorVersion = \"v${dpf_version}\"" "${sim_source}"; then
+if ! grep -qxF "const simulatedOperatorVersion = \"v${dpf_version}\"" "${sim_source}"; then
     echo "dpf-sim-controller must report DPF v${dpf_version} (simulatedOperatorVersion in dev/k8s/dpf-sim-controller/internal/controller/operator_config.go)" >&2
     exit 1
 fi

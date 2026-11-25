@@ -27,10 +27,12 @@ eval "${image_tag_defaults}"
 [[ "${NICO_DPF_IMAGE_TAG}" == "v${version}" ]]
 
 # Explicit image tags and skipped DPF installations do not need a TOML parser.
+# shellcheck disable=SC2329 # Called by the evaluated defaults.
 python3() { return 1; }
 NICO_DPF_IMAGE_TAG="custom-image"
 eval "${image_tag_defaults}"
 [[ "${NICO_DPF_IMAGE_TAG}" == custom-image ]]
+# shellcheck disable=SC2034 # Read by the evaluated defaults.
 INSTALL_DPF=false
 NICO_DPF_IMAGE_TAG=""
 eval "${image_tag_defaults}"
@@ -61,7 +63,8 @@ eval "$(sed -n '/^_DPF_PINNED_LINE=/p; /^_DPF_UPGRADE_SOURCE_LINE=/p' "${PREFLIG
     || fail "could not extract the DPF release lines from preflight.sh"
 extract_functions "${PREFLIGHT_SH}" _resolve_dpf_target_tag _dpf_installed_version _check_dpf_upgrade_source
 
-# A DPF bump moves the release lines in preflight.sh with dpf-versions.toml.
+# A DPF bump moves _DPF_PINNED_LINE in preflight.sh with dpf-versions.toml.
+# Nothing here checks _DPF_UPGRADE_SOURCE_LINE.
 [[ "${version}" == "${_DPF_PINNED_LINE}."* ]] \
     || fail "dpf-versions.toml has ${version}, preflight.sh checks the ${_DPF_PINNED_LINE} release line (_DPF_PINNED_LINE)"
 
@@ -195,5 +198,33 @@ for row in "${cases[@]}"; do
     fi
 done
 unset -f kubectl sleep date
+
+# ---------------------------------------------------------------------------
+# Call sites: preflight resolves the tag before it checks the upgrade source,
+# and setup.sh waits for the operator version between the DPFOperatorConfig
+# apply and Core.
+# ---------------------------------------------------------------------------
+# Prints the number of the only line of file $2 that contains $1, or that
+# equals it with $3 set to x. Prints nothing without exactly one such line.
+line_of() {
+    local _lines
+    _lines="$(grep -n"${3:-}"F -- "$1" "$2" | cut -d: -f1 || true)"
+    [[ "${_lines}" != *$'\n'* ]] || return 0
+    echo "${_lines}"
+}
+resolve_line="$(line_of '    _resolve_dpf_target_tag' "${PREFLIGHT_SH}" x)"
+# shellcheck disable=SC2016 # The line is matched as written in preflight.sh.
+check_line="$(line_of '        _check_dpf_upgrade_source "${_DPF_TARGET_TAG:-}"' "${PREFLIGHT_SH}" x)"
+if [[ -z "${resolve_line}" || -z "${check_line}" ]] || (( resolve_line >= check_line )); then
+    fail "preflight.sh must resolve the DPF image tag before its one DPF upgrade source check"
+fi
+apply_line="$(line_of '< operators/dpf/dpfoperatorconfig.yaml.tmpl | kubectl apply -f -' "${SCRIPT_DIR}/setup.sh")"
+# shellcheck disable=SC2016 # The line is matched as written in setup.sh.
+wait_line="$(line_of '    _wait_for_dpf_operator_version 600 "${NICO_DPF_IMAGE_TAG}"' "${SCRIPT_DIR}/setup.sh" x)"
+core_line="$(line_of 'DPF stack installed (Core will start' "${SCRIPT_DIR}/setup.sh")"
+if [[ -z "${apply_line}" || -z "${wait_line}" || -z "${core_line}" ]] \
+    || (( apply_line >= wait_line || wait_line >= core_line )); then
+    fail "setup.sh must wait 600 seconds for the operator version after the DPFOperatorConfig apply and before Core"
+fi
 
 echo "DPF version selection tests passed"
