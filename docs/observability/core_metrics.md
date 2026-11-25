@@ -313,6 +313,9 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_ib_partitions_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_ib_partitions</td></tr>
 <tr><td>carbide_ib_partitions_per_state</td><td>gauge</td><td>Number of carbide_ib_partitions in the system with a given state</td></tr>
 <tr><td>carbide_ib_partitions_per_state_above_sla</td><td>gauge</td><td>Number of carbide_ib_partitions currently in a state longer than the SLA allows</td></tr>
+<tr><td>carbide_ib_partitions_state_entered_total</td><td>counter</td><td>Number of times objects of type carbide_ib_partitions have entered a certain state</td></tr>
+<tr><td>carbide_ib_partitions_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_ib_partitions have exited a certain state</td></tr>
+<tr><td>carbide_ib_partitions_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_ib_partitions have spent in a certain state</td></tr>
 <tr><td>carbide_ib_partitions_total</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_ib_partitions whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_ipmi_commands_total</td><td>counter</td><td>Number of IPMI command executions, by command and outcome.</td></tr>
