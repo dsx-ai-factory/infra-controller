@@ -6,6 +6,7 @@ package instance
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -232,9 +233,20 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			}
 		}
 
+		createdOrRestoredFromSite := false
 		if instance == nil {
-			logger.Warn().Str("Controller Instance ID", controllerInstance.Id.Value).Msg("Instance does not have a record in DB, possibly created directly on Site")
-			continue
+			instance = mi.createOrUpdateInstanceFromSite(ctx, site, controllerInstance)
+			if instance == nil {
+				continue
+			}
+
+			// Keep in-memory maps in sync so later inventory entries see this Instance.
+			existingInstanceIDMap[instance.ID.String()] = instance
+			if instance.ControllerInstanceID != nil {
+				existingInstanceCtrlIDMap[instance.ControllerInstanceID.String()] = instance
+			}
+			createdOrRestoredFromSite = true
+			slogger.Info().Str("Instance ID", instance.ID.String()).Msg("created or undeleted Instance from Site inventory")
 		}
 
 		sitePropagationStatus := instancePropagationStatus[controllerInstance.Id.Value]
@@ -251,7 +263,8 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		// We'll add a 5 second buffer to account for a little clock skew/drift.
 		// The only thing that might be safe to perform is propagation status clearing,
 		// but only if we never allow multiple inventory processes to run concurrently.
-		if site.IsTimeWithinStaleInventoryThreshold(instance.Updated) {
+		// A record recovered from this inventory is current by construction.
+		if !createdOrRestoredFromSite && site.IsTimeWithinStaleInventoryThreshold(instance.Updated) {
 			slogger.Warn().Msg("instance updated more recently than inventory received time, skipping processing")
 			continue
 		}
@@ -1563,6 +1576,638 @@ func (mi ManageInstance) createOrUpdateDpuExtensionServiceDeploymentFromSite(
 		}
 		return created, nil
 	})
+}
+
+// siteInstanceNetwork is the REST network intent reconstructed from a Site Instance config.
+type siteInstanceNetwork struct {
+	autoNetwork         bool
+	autoControllerVpcID *uuid.UUID
+	interfaces          []siteInstanceInterface
+}
+
+// siteInstanceInterface pairs an Interface create input with the Site network it selects.
+// Site Subnet and VPC IDs are controller IDs; recovery resolves them into the REST IDs on
+// input. VPC Prefix IDs are shared with the Site, so input carries them directly.
+type siteInstanceInterface struct {
+	input           cdbm.InterfaceCreateInput
+	segmentID       *uuid.UUID
+	controllerVpcID *uuid.UUID
+}
+
+// siteInstanceNetworkFromProto converts the Site network config into the intent REST
+// persists for the Instance. It rejects configs that REST Instance creation cannot produce.
+func siteInstanceNetworkFromProto(network *corev1.InstanceNetworkConfig) (*siteInstanceNetwork, error) {
+	if network == nil {
+		return nil, errors.New("site is reporting no network configuration")
+	}
+
+	if network.GetAutoConfig() != nil {
+		if len(network.GetInterfaces()) > 0 {
+			return nil, errors.New("site is reporting both automatic and explicit network interfaces")
+		}
+		vpcID, err := uuid.Parse(network.GetAutoConfig().GetVpcId().GetValue())
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse automatic network VPC ID, not a valid UUID %s", network.GetAutoConfig().GetVpcId().GetValue())
+		}
+		return &siteInstanceNetwork{autoNetwork: true, autoControllerVpcID: &vpcID}, nil
+	}
+
+	if len(network.GetInterfaces()) == 0 {
+		return nil, errors.New("site is reporting no network interfaces")
+	}
+
+	result := &siteInstanceNetwork{}
+	for idx, interfaceConfig := range network.GetInterfaces() {
+		if interfaceConfig == nil {
+			return nil, fmt.Errorf("interface %d config is nil", idx)
+		}
+		if interfaceConfig.GetIpv6InterfaceConfig() != nil {
+			return nil, fmt.Errorf("interface %d IPv6 configuration is not supported", idx)
+		}
+
+		ifc := siteInstanceInterface{}
+		input := &ifc.input
+		input.IsPhysical = interfaceConfig.GetFunctionType() == corev1.InterfaceFunctionType_PHYSICAL_FUNCTION
+		input.RequestedIpAddress = interfaceConfig.IpAddress
+		input.Status = cdbm.InterfaceStatusPending
+		if interfaceConfig.Device != nil {
+			input.Device = interfaceConfig.Device
+			input.DeviceInstance = cwutil.GetPtr(int(interfaceConfig.GetDeviceInstance()))
+		}
+		if !input.IsPhysical && interfaceConfig.VirtualFunctionId != nil {
+			input.VirtualFunctionID = cwutil.GetPtr(int(interfaceConfig.GetVirtualFunctionId()))
+		}
+		// Inventory reconciliation keys device-bound virtual functions by their ID.
+		if input.Device != nil && !input.IsPhysical && input.VirtualFunctionID == nil {
+			return nil, fmt.Errorf("interface %d is a device-bound virtual function without a virtual function ID", idx)
+		}
+		if interfaceConfig.GetRoutingProfile() != nil {
+			input.InlineRoutingProfile = &cdbm.InterfaceInlineRoutingProfile{}
+			input.InlineRoutingProfile.FromProto(interfaceConfig.GetRoutingProfile())
+		}
+
+		var networkID string
+		switch networkDetails := interfaceConfig.GetNetworkDetails().(type) {
+		case *corev1.InstanceInterfaceConfig_SegmentId:
+			networkID = networkDetails.SegmentId.GetValue()
+			id, err := uuid.Parse(networkID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse Interface %d Segment ID, not a valid UUID %s", idx, networkID)
+			}
+			ifc.segmentID = &id
+		case *corev1.InstanceInterfaceConfig_VpcPrefixId:
+			networkID = networkDetails.VpcPrefixId.GetValue()
+			id, err := uuid.Parse(networkID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse Interface %d VPC Prefix ID, not a valid UUID %s", idx, networkID)
+			}
+			input.VpcPrefixID = &id
+		case *corev1.InstanceInterfaceConfig_Vpc:
+			networkID = networkDetails.Vpc.GetVpcId().GetValue()
+			id, err := uuid.Parse(networkID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse Interface %d VPC ID, not a valid UUID %s", idx, networkID)
+			}
+			var familyMode cdbm.InterfaceVpcIPFamilyMode
+			switch networkDetails.Vpc.GetFamilyMode() {
+			case corev1.InstanceInterfaceIpFamilyMode_INSTANCE_INTERFACE_IP_FAMILY_MODE_IPV4_ONLY:
+				familyMode = cdbm.InterfaceVpcIPFamilyModeIPv4Only
+			case corev1.InstanceInterfaceIpFamilyMode_INSTANCE_INTERFACE_IP_FAMILY_MODE_IPV6_ONLY:
+				familyMode = cdbm.InterfaceVpcIPFamilyModeIPv6Only
+			case corev1.InstanceInterfaceIpFamilyMode_INSTANCE_INTERFACE_IP_FAMILY_MODE_DUAL_STACK:
+				familyMode = cdbm.InterfaceVpcIPFamilyModeDualStack
+			default:
+				return nil, fmt.Errorf("interface %d has unsupported VPC IP family mode %s", idx, networkDetails.Vpc.GetFamilyMode())
+			}
+			ifc.controllerVpcID = &id
+			input.VpcIPFamilyMode = &familyMode
+		case nil:
+			// Older Site Controllers report Subnet Interfaces only through the legacy field.
+			networkID = interfaceConfig.GetNetworkSegmentId().GetValue()
+			id, err := uuid.Parse(networkID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse Interface %d Network Segment ID, not a valid UUID %s", idx, networkID)
+			}
+			ifc.segmentID = &id
+		default:
+			return nil, fmt.Errorf("interface %d has unsupported network details", idx)
+		}
+
+		result.interfaces = append(result.interfaces, ifc)
+	}
+
+	return result, nil
+}
+
+// createOrUpdateInstanceFromSite creates a REST Instance from Site inventory, or undeletes
+// a matching soft-deleted row, and assigns its Machine. Interfaces and SSH Key Group
+// associations are recreated from the Site config; UpdateInstancesInDB then reconciles
+// their reported status. Returns nil when skipped or on failure.
+func (mi ManageInstance) createOrUpdateInstanceFromSite(
+	ctx context.Context,
+	site *cdbm.Site,
+	controllerInstance *corev1.Instance,
+) *cdbm.Instance {
+	logger := log.With().
+		Str("Activity", "UpdateInstancesInDB").
+		Str("Site ID", site.ID.String()).
+		Str("Controller Instance ID", controllerInstance.GetId().GetValue()).
+		Logger()
+
+	instanceID, err := uuid.Parse(controllerInstance.GetId().GetValue())
+	if err != nil {
+		logger.Warn().Msgf("unable to create Instance found on Site: failed to parse Controller Instance ID, not a valid UUID %s", controllerInstance.GetId().GetValue())
+		return nil
+	}
+
+	config := controllerInstance.GetConfig()
+	tenantOrg := config.GetTenant().GetTenantOrganizationId()
+	if tenantOrg == "" {
+		logger.Warn().Msg("unable to create Instance found on Site: Instance on Site is reporting empty Tenant organization ID")
+		return nil
+	}
+
+	machineID := controllerInstance.GetMachineId().GetId()
+	if machineID == "" {
+		logger.Warn().Msg("unable to create Instance found on Site: Instance on Site is reporting empty Machine ID")
+		return nil
+	}
+
+	if controllerInstance.GetStatus().GetTenant() == nil {
+		logger.Warn().Msg("unable to create Instance found on Site: Instance on Site is reporting no Tenant status")
+		return nil
+	}
+	status, _ := getNICoInstanceStatus(controllerInstance.GetStatus().GetTenant().GetState())
+	if status == cdbm.InstanceStatusTerminating || status == cdbm.InstanceStatusTerminated {
+		logger.Info().Msgf("skipping create or undelete of Instance from Site inventory: Site reports status %s", status)
+		return nil
+	}
+
+	// TODO: Recover InfiniBand Interfaces, NVLink Interfaces, and SpectrumX Attachments.
+	if len(config.GetInfiniband().GetIbInterfaces()) > 0 ||
+		len(config.GetNvlink().GetGpuConfigs()) > 0 ||
+		len(config.GetSpxconfig().GetSpxAttachments()) > 0 {
+		logger.Warn().Msg("unable to create Instance found on Site: recovery of Instances with InfiniBand, NVLink, or SpectrumX configuration is not supported")
+		return nil
+	}
+
+	network, err := siteInstanceNetworkFromProto(config.GetNetwork())
+	if err != nil {
+		logger.Warn().Msgf("unable to create Instance found on Site: %s", err)
+		return nil
+	}
+
+	var instanceTypeID *uuid.UUID
+	if controllerInstance.InstanceTypeId != nil {
+		id, perr := uuid.Parse(controllerInstance.GetInstanceTypeId())
+		if perr != nil {
+			logger.Warn().Msgf("unable to create Instance found on Site: failed to parse Instance Type ID, not a valid UUID %s", controllerInstance.GetInstanceTypeId())
+			return nil
+		}
+		instanceTypeID = &id
+	}
+
+	var nsgID *string
+	if config.GetNetworkSecurityGroupId() != "" {
+		nsgID = config.NetworkSecurityGroupId
+	}
+
+	osConfig := config.GetOs()
+	var osID *uuid.UUID
+	var ipxeScript *string
+	var userData *string
+	if osConfig != nil {
+		userData = osConfig.UserData
+	}
+	switch variant := osConfig.GetVariant().(type) {
+	case *corev1.InstanceOperatingSystemConfig_Ipxe:
+		// REST sends raw iPXE Operating Systems inline, so their ID is not recoverable.
+		ipxeScript = cwutil.GetPtr(variant.Ipxe.GetIpxeScript())
+	case *corev1.InstanceOperatingSystemConfig_OperatingSystemId:
+		id, perr := uuid.Parse(variant.OperatingSystemId.GetValue())
+		if perr != nil {
+			logger.Warn().Msgf("unable to create Instance found on Site: failed to parse Operating System ID, not a valid UUID %s", variant.OperatingSystemId.GetValue())
+			return nil
+		}
+		osID = &id
+	case *corev1.InstanceOperatingSystemConfig_OsImageId:
+		id, perr := uuid.Parse(variant.OsImageId.GetValue())
+		if perr != nil {
+			logger.Warn().Msgf("unable to create Instance found on Site: failed to parse Operating System image ID, not a valid UUID %s", variant.OsImageId.GetValue())
+			return nil
+		}
+		osID = &id
+	}
+
+	sshKeyGroupIDs := []uuid.UUID{}
+	for _, keysetID := range config.GetTenant().GetTenantKeysetIds() {
+		id, perr := uuid.Parse(keysetID)
+		if perr != nil {
+			logger.Warn().Msgf("unable to create Instance found on Site: failed to parse SSH Key Group ID, not a valid UUID %s", keysetID)
+			return nil
+		}
+		if !slices.Contains(sshKeyGroupIDs, id) {
+			sshKeyGroupIDs = append(sshKeyGroupIDs, id)
+		}
+	}
+
+	metadata := controllerInstance.GetMetadata()
+	name := metadata.GetName()
+	if name == "" {
+		name = fmt.Sprintf("recovered-%s", instanceID.String()[:8])
+	}
+	var description *string
+	if metadata.GetDescription() != "" {
+		description = cwutil.GetPtr(metadata.GetDescription())
+	}
+	labels := cdbm.Labels{}
+	labels.FromProto(metadata.GetLabels())
+
+	// Recovered records have no REST user, so the Site is recorded as creator.
+	createdBy := site.ID
+
+	instance, err := cdb.WithTxResult(ctx, mi.dbSession, func(tx *cdb.Tx) (*cdbm.Instance, error) {
+		// REST Instance creation holds this lock while its transaction creates the Instance on
+		// Site, so a busy lock means the Instance is not an orphan yet. Waiting would stall the
+		// whole inventory page behind that create; a later inventory recovers a real orphan.
+		lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), &cdb.LockRetryOptions{Retries: cwutil.GetPtr(1)})
+		if errors.Is(lockErr, cdb.ErrXactAdvisoryLockFailed) {
+			logger.Info().Msg("not recovering Instance yet because its Machine is locked by another Instance operation")
+			return nil, nil
+		}
+		if lockErr != nil {
+			return nil, fmt.Errorf("unable to create Instance found on Site: failed to acquire advisory lock on Machine, DB error: %w", lockErr)
+		}
+
+		instanceDAO := cdbm.NewInstanceDAO(mi.dbSession)
+
+		// Lookup by primary key globally (not scoped to site.ID). A same-UUID row under
+		// another Site would otherwise be invisible here and Create would fail every cycle.
+		matches, _, serr := instanceDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{
+			InstanceIDs:    []uuid.UUID{instanceID},
+			IncludeDeleted: true,
+		}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if serr != nil {
+			return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Instance by ID, DB error: %w", serr)
+		}
+
+		// Non-nil from here on means this inventory entry is an undelete, not a create.
+		var existingInstance *cdbm.Instance
+		if len(matches) > 0 {
+			existingInstance = &matches[0]
+			if existingInstance.SiteID != site.ID {
+				logger.Warn().Msg("unable to create Instance found on Site: Instance ID already exists under a different Site")
+				return nil, nil
+			}
+			if existingInstance.Deleted == nil {
+				// REST created this row after the inventory lookup. It is not a recovery, so the
+				// next inventory processes it through the stale check like any other Instance.
+				logger.Info().Msg("Instance was created in REST after inventory lookup, skipping recovery")
+				return nil, nil
+			}
+			// Deleted records when the delete happened, so a delete newer than the interval can
+			// postdate this inventory. A later inventory undeletes it if the Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingInstance.Deleted) {
+				logger.Info().Msg("not undeleting Instance yet because it was deleted more recently than the inventory interval")
+				return nil, nil
+			}
+		}
+
+		tenants, _, serr := cdbm.NewTenantDAO(mi.dbSession).GetAll(ctx, tx, cdbm.TenantFilterInput{Orgs: []string{tenantOrg}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if serr != nil {
+			return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Tenant by organization, DB error: %w", serr)
+		}
+		if len(tenants) == 0 {
+			logger.Warn().Msgf("unable to create Instance found on Site: no Tenants were found for org: %s", tenantOrg)
+			return nil, nil
+		}
+		tenant := &tenants[0]
+		if existingInstance != nil && existingInstance.TenantID != tenant.ID {
+			logger.Warn().Msg("unable to create Instance found on Site: Tenant differs in REST cache and Site record")
+			return nil, nil
+		}
+
+		machineDAO := cdbm.NewMachineDAO(mi.dbSession)
+		machine, serr := machineDAO.GetByID(ctx, tx, machineID, nil, true)
+		if serr != nil {
+			if errors.Is(serr, cdb.ErrDoesNotExist) {
+				// The Machine inventory activity creates or restores the Machine, so retry next inventory.
+				logger.Warn().Msgf("unable to create Instance found on Site: no Machine was found for ID: %s", machineID)
+				return nil, nil
+			}
+			return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Machine, DB error: %w", serr)
+		}
+		if machine.SiteID != site.ID {
+			logger.Warn().Msg("unable to create Instance found on Site: Machine belongs to a different Site")
+			return nil, nil
+		}
+		if existingInstance != nil && (existingInstance.MachineID == nil || *existingInstance.MachineID != machine.ID) {
+			logger.Warn().Msg("unable to create Instance found on Site: Machine differs in REST cache and Site record")
+			return nil, nil
+		}
+
+		machineInstances, _, serr := instanceDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{MachineIDs: []string{machine.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(1)}, nil)
+		if serr != nil {
+			return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Instances for Machine, DB error: %w", serr)
+		}
+		if len(machineInstances) > 0 {
+			logger.Warn().Str("Instance ID", machineInstances[0].ID.String()).Msg("unable to create Instance found on Site: Machine is already used by another Instance in REST")
+			return nil, nil
+		}
+
+		// REST sends the Instance Type to Site only when the request named one. An Instance
+		// created by Machine ID still stores its Machine's Instance Type, so recover it from there.
+		if instanceTypeID == nil {
+			instanceTypeID = machine.InstanceTypeID
+		}
+		if instanceTypeID != nil {
+			instanceType, ierr := cdbm.NewInstanceTypeDAO(mi.dbSession).GetByID(ctx, tx, *instanceTypeID, nil)
+			if ierr != nil {
+				if errors.Is(ierr, cdb.ErrDoesNotExist) {
+					logger.Warn().Msgf("unable to create Instance found on Site: no Instance Type was found for ID: %s", instanceTypeID)
+					return nil, nil
+				}
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Instance Type, DB error: %w", ierr)
+			}
+			if instanceType.SiteID == nil || *instanceType.SiteID != site.ID {
+				logger.Warn().Msg("unable to create Instance found on Site: Instance Type belongs to a different Site")
+				return nil, nil
+			}
+			if machine.InstanceTypeID != nil && *machine.InstanceTypeID != instanceType.ID {
+				logger.Warn().Msg("unable to create Instance found on Site: Instance Type differs from the Machine's Instance Type")
+				return nil, nil
+			}
+		}
+
+		// Every Interface must resolve to the Instance's single VPC.
+		vpcDAO := cdbm.NewVpcDAO(mi.dbSession)
+		getVpcByControllerID := func(controllerVpcID uuid.UUID) (*cdbm.Vpc, error) {
+			vpcs, _, verr := vpcDAO.GetAll(ctx, tx, cdbm.VpcFilterInput{
+				ControllerVpcIDs: []uuid.UUID{controllerVpcID}, SiteIDs: []uuid.UUID{site.ID},
+			}, cdbp.PageInput{Limit: cwutil.GetPtr(1)}, nil)
+			if verr != nil || len(vpcs) == 0 {
+				return nil, verr
+			}
+			return &vpcs[0], nil
+		}
+
+		var vpc *cdbm.Vpc
+		if network.autoControllerVpcID != nil {
+			vpc, serr = getVpcByControllerID(*network.autoControllerVpcID)
+			if serr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve VPC, DB error: %w", serr)
+			}
+			if vpc == nil {
+				// The VPC inventory activity will create a missing VPC, so retry next inventory.
+				logger.Warn().Msgf("unable to create Instance found on Site: no VPC was found for Controller ID: %s", network.autoControllerVpcID)
+				return nil, nil
+			}
+		}
+
+		for i := range network.interfaces {
+			ifc := &network.interfaces[i]
+			var ifcVpcID uuid.UUID
+			switch {
+			case ifc.segmentID != nil:
+				subnets, _, rerr := cdbm.NewSubnetDAO(mi.dbSession).GetAll(ctx, tx, cdbm.SubnetFilterInput{
+					ControllerNetworkSegmentIDs: []uuid.UUID{*ifc.segmentID}, SiteIDs: []uuid.UUID{site.ID},
+				}, cdbp.PageInput{Limit: cwutil.GetPtr(1)}, nil)
+				if rerr != nil {
+					return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Subnet, DB error: %w", rerr)
+				}
+				if len(subnets) == 0 {
+					// The Subnet inventory activity will create a missing Subnet, so retry next inventory.
+					logger.Warn().Msgf("unable to create Instance found on Site: no Subnet was found for Segment ID: %s", ifc.segmentID)
+					return nil, nil
+				}
+				if subnets[0].TenantID != tenant.ID {
+					logger.Warn().Msgf("unable to create Instance found on Site: Subnet for Segment %s belongs to a different Tenant", ifc.segmentID)
+					return nil, nil
+				}
+				ifc.input.SubnetID = &subnets[0].ID
+				ifcVpcID = subnets[0].VpcID
+			case ifc.input.VpcPrefixID != nil:
+				vpcPrefix, rerr := cdbm.NewVpcPrefixDAO(mi.dbSession).GetByID(ctx, tx, *ifc.input.VpcPrefixID, nil)
+				if rerr != nil {
+					if errors.Is(rerr, cdb.ErrDoesNotExist) {
+						logger.Warn().Msgf("unable to create Instance found on Site: no VPC Prefix was found for ID: %s", ifc.input.VpcPrefixID)
+						return nil, nil
+					}
+					return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve VPC Prefix, DB error: %w", rerr)
+				}
+				if vpcPrefix.SiteID != site.ID || vpcPrefix.TenantID != tenant.ID {
+					logger.Warn().Msgf("unable to create Instance found on Site: VPC Prefix %s differs in REST cache and Site record", ifc.input.VpcPrefixID)
+					return nil, nil
+				}
+				ifcVpcID = vpcPrefix.VpcID
+			default:
+				selectedVpc, rerr := getVpcByControllerID(*ifc.controllerVpcID)
+				if rerr != nil {
+					return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve VPC, DB error: %w", rerr)
+				}
+				if selectedVpc == nil {
+					logger.Warn().Msgf("unable to create Instance found on Site: no VPC was found for Controller ID: %s", ifc.controllerVpcID)
+					return nil, nil
+				}
+				ifc.input.VpcID = &selectedVpc.ID
+				ifcVpcID = selectedVpc.ID
+			}
+
+			if vpc == nil {
+				vpc, serr = vpcDAO.GetByID(ctx, tx, ifcVpcID, nil)
+				if serr != nil {
+					if errors.Is(serr, cdb.ErrDoesNotExist) {
+						logger.Warn().Msgf("unable to create Instance found on Site: no VPC was found for ID: %s", ifcVpcID)
+						return nil, nil
+					}
+					return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve VPC, DB error: %w", serr)
+				}
+			} else if vpc.ID != ifcVpcID {
+				logger.Warn().Msg("unable to create Instance found on Site: Interfaces reference different VPCs")
+				return nil, nil
+			}
+		}
+
+		if vpc.SiteID != site.ID || vpc.TenantID != tenant.ID {
+			logger.Warn().Msg("unable to create Instance found on Site: VPC differs in REST cache and Site record")
+			return nil, nil
+		}
+		if vpc.IsCreationPendingOrRejected() {
+			logger.Warn().Msg("unable to create Instance found on Site: VPC creation is pending or was rejected in REST")
+			return nil, nil
+		}
+		if existingInstance != nil && existingInstance.VpcID != vpc.ID {
+			logger.Warn().Msg("unable to create Instance found on Site: VPC differs in REST cache and Site record")
+			return nil, nil
+		}
+
+		if nsgID != nil {
+			nsg, nerr := cdbm.NewNetworkSecurityGroupDAO(mi.dbSession).GetByID(ctx, tx, *nsgID, nil)
+			if nerr != nil {
+				if errors.Is(nerr, cdb.ErrDoesNotExist) {
+					logger.Warn().Msgf("unable to create Instance found on Site: no Network Security Group was found for ID: %s", *nsgID)
+					return nil, nil
+				}
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Network Security Group, DB error: %w", nerr)
+			}
+			if nsg.SiteID != site.ID || nsg.TenantID != tenant.ID {
+				logger.Warn().Msg("unable to create Instance found on Site: Network Security Group differs in REST cache and Site record")
+				return nil, nil
+			}
+		}
+
+		if osID != nil {
+			operatingSystem, oerr := cdbm.NewOperatingSystemDAO(mi.dbSession).GetByID(ctx, tx, *osID, nil)
+			if oerr != nil {
+				if errors.Is(oerr, cdb.ErrDoesNotExist) {
+					logger.Warn().Msgf("unable to create Instance found on Site: no Operating System was found for ID: %s", osID)
+					return nil, nil
+				}
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Operating System, DB error: %w", oerr)
+			}
+			if !operatingSystem.IsTenantUsable(tenant.ID.String()) {
+				logger.Warn().Msg("unable to create Instance found on Site: Operating System is not usable by the Tenant")
+				return nil, nil
+			}
+		}
+
+		if len(sshKeyGroupIDs) > 0 {
+			sshKeyGroups, _, kerr := cdbm.NewSSHKeyGroupDAO(mi.dbSession).GetAll(ctx, tx, cdbm.SSHKeyGroupFilterInput{
+				SSHKeyGroupIDs: sshKeyGroupIDs,
+				TenantIDs:      []uuid.UUID{tenant.ID},
+			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if kerr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve SSH Key Groups, DB error: %w", kerr)
+			}
+			if len(sshKeyGroups) != len(sshKeyGroupIDs) {
+				logger.Warn().Msg("unable to create Instance found on Site: one or more SSH Key Groups were not found for the Tenant")
+				return nil, nil
+			}
+		}
+
+		// An undelete restores the row as stored, so its stored name is the one to check. If an
+		// active Instance already uses the name for the Tenant/Site, append a recovered suffix.
+		if existingInstance != nil {
+			name = existingInstance.Name
+		}
+		nameConflicts, _, serr := instanceDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{
+			Names: []string{name}, TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{site.ID},
+		}, cdbp.PageInput{Limit: cwutil.GetPtr(1)}, nil)
+		if serr != nil {
+			return nil, fmt.Errorf("unable to create Instance found on Site: failed to retrieve Instance by name, DB error: %w", serr)
+		}
+		if len(nameConflicts) > 0 {
+			name = fmt.Sprintf("%s-recovered-%s", name, instanceID.String()[:8])
+		}
+
+		var instance *cdbm.Instance
+		if existingInstance != nil {
+			_, serr = instanceDAO.Clear(ctx, tx, cdbm.InstanceClearInput{InstanceID: existingInstance.ID, Deleted: true})
+			if serr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to clear soft-delete timestamp for Instance, DB error: %w", serr)
+			}
+			updateInput := cdbm.InstanceUpdateCommonInput{Status: &status}
+			if name != existingInstance.Name {
+				updateInput.Name = &name
+			}
+			instance, serr = instanceDAO.Update(ctx, tx, cdbm.InstanceUpdateInput{
+				InstanceID:                existingInstance.ID,
+				InstanceUpdateCommonInput: updateInput,
+			})
+			if serr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to update Instance status after undelete, DB error: %w", serr)
+			}
+		} else {
+			instance, serr = instanceDAO.Create(ctx, tx, cdbm.InstanceCreateInput{
+				InstanceID:               &instanceID,
+				Name:                     name,
+				Description:              description,
+				TenantID:                 tenant.ID,
+				InfrastructureProviderID: machine.InfrastructureProviderID,
+				SiteID:                   site.ID,
+				InstanceTypeID:           instanceTypeID,
+				NetworkSecurityGroupID:   nsgID,
+				VpcID:                    vpc.ID,
+				MachineID:                &machine.ID,
+				ControllerInstanceID:     &instanceID,
+				Hostname:                 config.GetTenant().Hostname,
+				OperatingSystemID:        osID,
+				IpxeScript:               ipxeScript,
+				AlwaysBootWithCustomIpxe: osConfig.GetRunProvisioningInstructionsOnEveryBoot(),
+				PhoneHomeEnabled:         osConfig.GetPhoneHomeEnabled(),
+				UserData:                 userData,
+				AutoNetwork:              network.autoNetwork,
+				Labels:                   labels,
+				TpmEkCertificate:         controllerInstance.TpmEkCertificate,
+				Status:                   status,
+				PowerProfile:             config.PowerProfile,
+				CreatedBy:                createdBy,
+			})
+			if serr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to create Instance, DB error: %w", serr)
+			}
+		}
+
+		sdDAO := cdbm.NewStatusDetailDAO(mi.dbSession)
+		_, serr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
+			EntityID: instance.ID.String(), Status: status, Message: cwutil.GetPtr("Instance was found on Site"),
+		})
+		if serr != nil {
+			return nil, fmt.Errorf("unable to create Instance found on Site: failed to create Status Detail, DB error: %w", serr)
+		}
+
+		assignedStatus := machine.StatusForAssignment(true)
+		if !machine.IsAssigned || machine.Status != assignedStatus {
+			_, serr = machineDAO.Update(ctx, tx, cdbm.MachineUpdateInput{
+				MachineID:  machine.ID,
+				IsAssigned: cwutil.GetPtr(true),
+				Status:     &assignedStatus,
+			})
+			if serr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to assign Machine, DB error: %w", serr)
+			}
+			if machine.Status != assignedStatus {
+				_, serr = sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
+					EntityID: machine.ID, Status: assignedStatus, Message: cwutil.GetPtr(cdbm.MachineStatusInUseMessage),
+				})
+				if serr != nil {
+					return nil, fmt.Errorf("unable to create Instance found on Site: failed to create Machine Status Detail, DB error: %w", serr)
+				}
+			}
+		}
+
+		// Deletion soft-deleted the previous children, so both paths recreate them from the Site config.
+		interfaceDAO := cdbm.NewInterfaceDAO(mi.dbSession)
+		for _, ifc := range network.interfaces {
+			input := ifc.input
+			input.InstanceID = instance.ID
+			input.CreatedBy = createdBy
+			_, serr = interfaceDAO.Create(ctx, tx, input)
+			if serr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to create Interface, DB error: %w", serr)
+			}
+		}
+
+		skgiaDAO := cdbm.NewSSHKeyGroupInstanceAssociationDAO(mi.dbSession)
+		for _, sshKeyGroupID := range sshKeyGroupIDs {
+			_, serr = skgiaDAO.Create(ctx, tx, cdbm.SSHKeyGroupInstanceAssociationCreateInput{
+				SSHKeyGroupID: sshKeyGroupID,
+				SiteID:        site.ID,
+				InstanceID:    instance.ID,
+				CreatedBy:     createdBy,
+			})
+			if serr != nil {
+				return nil, fmt.Errorf("unable to create Instance found on Site: failed to create SSH Key Group Instance association, DB error: %w", serr)
+			}
+		}
+
+		return instance, nil
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to recover Instance from Site inventory")
+		return nil
+	}
+	return instance
 }
 
 // deleteInstanceFromDB deletes an instance from the DB

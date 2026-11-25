@@ -1005,6 +1005,21 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 			expectedError: false,
 		},
 		{
+			desc:          "GetAll with Controller Network Segment ID filter returns objects",
+			filter:        SubnetFilterInput{ControllerNetworkSegmentIDs: []uuid.UUID{dummyUUID}},
+			page:          paginator.PageInput{},
+			expectedCount: paginator.DefaultLimit,
+			expectedTotal: &totalCount,
+			expectedError: false,
+		},
+		{
+			desc:          "GetAll with unknown Controller Network Segment ID filter returns no objects",
+			filter:        SubnetFilterInput{ControllerNetworkSegmentIDs: []uuid.UUID{uuid.New()}},
+			page:          paginator.PageInput{},
+			expectedCount: 0,
+			expectedError: false,
+		},
+		{
 			desc:          "GetAll with Vpc filter returns objects",
 			filter:        SubnetFilterInput{VpcIDs: []uuid.UUID{vpc1.ID}},
 			page:          paginator.PageInput{},

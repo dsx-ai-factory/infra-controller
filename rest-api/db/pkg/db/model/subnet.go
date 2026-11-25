@@ -386,16 +386,17 @@ type SubnetClearInput struct {
 
 // SubnetFilterInput input parameters for GetAll method
 type SubnetFilterInput struct {
-	SubnetIDs    []uuid.UUID
-	Names        []string
-	SiteIDs      []uuid.UUID
-	VpcIDs       []uuid.UUID
-	DomainIDs    []uuid.UUID
-	TenantIDs    []uuid.UUID
-	IPv4BlockIDs []uuid.UUID
-	IPv6BlockIDs []uuid.UUID
-	Statuses     []string
-	SearchQuery  *string
+	SubnetIDs                   []uuid.UUID
+	ControllerNetworkSegmentIDs []uuid.UUID
+	Names                       []string
+	SiteIDs                     []uuid.UUID
+	VpcIDs                      []uuid.UUID
+	DomainIDs                   []uuid.UUID
+	TenantIDs                   []uuid.UUID
+	IPv4BlockIDs                []uuid.UUID
+	IPv6BlockIDs                []uuid.UUID
+	Statuses                    []string
+	SearchQuery                 *string
 	// IncludeDeleted returns soft-deleted rows in addition to active ones.
 	IncludeDeleted bool
 }
@@ -597,6 +598,9 @@ func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilt
 	}
 	if filter.SubnetIDs != nil {
 		query = query.Where("su.id IN (?)", bun.In(filter.SubnetIDs))
+	}
+	if filter.ControllerNetworkSegmentIDs != nil {
+		query = query.Where("su.controller_network_segment_id IN (?)", bun.In(filter.ControllerNetworkSegmentIDs))
 	}
 	if filter.Names != nil {
 		query = query.Where("su.name IN (?)", bun.In(filter.Names))
