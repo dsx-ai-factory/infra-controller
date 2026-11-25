@@ -59,6 +59,11 @@ Each `[ib_fabrics.<name>]` table has an optional `auth` setting with no default:
   SPIFFE client certificate, any other password is the UFM token, and a
   missing credential is an error.
 
+`credential add-ufm` rejects a blank token before writing when the `default`
+fabric sets either explicit `auth` value. With `auth = "client_certificate"`,
+do not add a credential. With `auth` unset, the command retains its existing
+blank-password behavior.
+
 Postgres reads an exactly empty password as no credential. An empty entry
 therefore leaves the fabric without a credential and hides an earlier token
 stored in Postgres. `credential add-ufm` without `--token` does not select

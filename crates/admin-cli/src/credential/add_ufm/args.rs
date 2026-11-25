@@ -39,10 +39,10 @@ pub(crate) struct Args {
     #[clap(
         long,
         default_value(""),
-        help = "The UFM token. With auth = \"client_certificate\" in the fabric \
-            configuration, do not add a credential. When auth is not set, omitting --token stores \
-            an empty password, which selects the client certificate; Postgres reads an empty \
-            password as no credential. See \
+        help = "The UFM token. When the default fabric sets auth, a blank token is rejected. With \
+            auth = \"client_certificate\" in the fabric configuration, do not add a credential. \
+            When auth is not set, omitting --token stores an empty password, which selects the \
+            client certificate; Postgres reads an empty password as no credential. See \
             https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy"
     )]
     token: String,

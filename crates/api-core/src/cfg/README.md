@@ -2248,8 +2248,9 @@ export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=ufm-toke
 
 With `auth = "token"`, the password must be a nonblank UFM token. With
 `auth` unset, an empty or whitespace-only password selects the default SPIFFE
-client certificate. A fabric with `auth = "client_certificate"` does not read
-these variables.
+client certificate. With `auth = "client_certificate"`, the enabled environment
+source still parses these variables at startup, but NICo skips the fabric's
+credential lookup.
 
 Environment credentials are snapshotted at process startup. Changing them
 requires restarting `nico-api`; use the watched file source for supported
@@ -2276,7 +2277,8 @@ file has the following shape; both `username` and `password` are required. With
 `auth = "token"`, the password is a nonblank UFM token. With `auth` unset, an
 empty or whitespace-only password selects the default SPIFFE client certificate
 and any other password is the UFM token. A fabric with
-`auth = "client_certificate"` does not read this credential:
+`auth = "client_certificate"` still has this entry parsed by the enabled file
+source, but NICo skips the fabric's credential lookup:
 
 ```yaml
 ufm_auth_by_fabric:
