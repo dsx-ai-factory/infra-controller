@@ -2287,7 +2287,6 @@ async fn initialize_and_start_controllers<'a>(
                     direct_redfish_pool.clone(),
                     driver_connector.clone(),
                 ),
-                direct_redfish_pool: direct_redfish_pool.clone(),
                 ipmi_tool: ipmi_tool.clone(),
                 site_config: carbide_config.machine_state_handler_site_config().into(),
                 component_manager: component_manager.clone().map(Arc::new),
@@ -2573,7 +2572,6 @@ async fn initialize_and_start_controllers<'a>(
                 rack_firmware_reprovisioning_enabled: carbide_config
                     .power_shelf_state_controller
                     .rack_firmware_reprovisioning_enabled,
-                redfish_client_pool: shared_redfish_pool.clone(),
                 bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
                     direct_redfish_pool.clone(),
@@ -2664,7 +2662,6 @@ async fn initialize_and_start_controllers<'a>(
                     .switch_state_controller
                     .effective_switch_mtls_services_as_i32(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
-                redfish_client_pool: shared_redfish_pool.clone(),
                 bmc_connector: BmcConnector::new_with_direct(
                     shared_redfish_pool.clone(),
                     direct_redfish_pool.clone(),

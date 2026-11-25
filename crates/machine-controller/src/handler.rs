@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use attestation::{
     handle_spdm_attestation_failed_recovery, handle_spdm_poll_state, handle_spdm_trigger_state,
 };
-use bmc_backend::{BackendBmc, idrac_job, redfish_task, redfish_task_id};
+use bmc_backend::{BackendBmc, BmcConnector, idrac_job, redfish_task, redfish_task_id};
 use bmc_platform::{
     HostPrivilegeLevel, LockdownDesiredState, LockdownScope,
     LockdownState as PlatformLockdownState, OperationStatus, PlatformError, PowerState, ResetType,
@@ -128,7 +128,7 @@ use crate::handler::firmware_artifact::ResolvedFirmwareArtifactSource;
 use crate::health_report::{
     create_host_update_health_report_dpufw, create_host_update_health_report_hostfw,
 };
-use crate::platform_config::{self, DpuSettings, PlatformBmc};
+use crate::platform_config::{self, DpuSettings};
 use crate::redfish::{
     PowerControlError, did_dpu_finish_booting, host_power_control,
     host_power_control_with_location, poll_idrac_job, power_state, power_state_name,
@@ -4816,36 +4816,27 @@ async fn handle_dpu_reprovision_host_boot_config_check(
     reachability_params: &ReachabilityParams,
     dpu_freshness: HostBootConfigDpuFreshness,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&state.host_snapshot)
-        .await?;
+    let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
 
-    let next_state = match check_host_boot_config(
-        redfish_client.as_ref(),
-        state,
-        reachability_params,
-        dpu_freshness,
-        None,
-        ctx,
-    )
-    .await?
-    {
-        HostBootConfigCheckOutcome::Wait(reason) => {
-            return Ok(StateHandlerOutcome::wait(reason));
-        }
-        HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::ConfigureBios) => {
-            ReprovisionState::ConfigureHostBoot { retry_count: 0 }
-        }
-        HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::SetBootOrder) => {
-            ReprovisionState::SetHostBootOrder {
-                set_boot_order_info: initial_set_boot_order_info(),
+    let next_state =
+        match check_host_boot_config(&bmc, state, reachability_params, dpu_freshness, None, ctx)
+            .await?
+        {
+            HostBootConfigCheckOutcome::Wait(reason) => {
+                return Ok(StateHandlerOutcome::wait(reason));
             }
-        }
-        HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::Complete) => {
-            ReprovisionState::LockHostAfterBootRepair
-        }
-    };
+            HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::ConfigureBios) => {
+                ReprovisionState::ConfigureHostBoot { retry_count: 0 }
+            }
+            HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::SetBootOrder) => {
+                ReprovisionState::SetHostBootOrder {
+                    set_boot_order_info: initial_set_boot_order_info(),
+                }
+            }
+            HostBootConfigCheckOutcome::Ready(HostBootConfigDecision::Complete) => {
+                ReprovisionState::LockHostAfterBootRepair
+            }
+        };
 
     Ok(StateHandlerOutcome::transition(
         update_reprovision_targets_to_reprovision_state(state, next_state)?,
@@ -4865,21 +4856,9 @@ async fn handle_dpu_reprovision_host_boot_config_stage(
     reachability_params: &ReachabilityParams,
     stage: HostBootConfigStage,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&state.host_snapshot)
-        .await?;
+    let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
 
-    match run_host_boot_config_stage(
-        ctx,
-        reachability_params,
-        redfish_client.as_ref(),
-        state,
-        None,
-        stage,
-    )
-    .await?
-    {
+    match run_host_boot_config_stage(ctx, reachability_params, &bmc, state, None, stage).await? {
         HostBootConfigOutcome::Continue(stage) => {
             let reprovision_state = match stage {
                 HostBootConfigStage::ConfigureBios { retry_count } => {
@@ -6732,7 +6711,10 @@ async fn trigger_reboot_if_needed_with_policy(
                     )
                     .await?;
                 } else {
-                    if let Ok(client) = ctx.services.create_redfish_client_from_machine(host).await
+                    // The host config diagnostics read through libredfish only.
+                    if !matches!(ctx.services.bmc_connector, BmcConnector::Drivers(_))
+                        && let Ok(client) =
+                            ctx.services.create_redfish_client_from_machine(host).await
                     {
                         log_host_config(client.as_ref(), state).await;
                     }
@@ -7370,7 +7352,7 @@ async fn handle_ready_boot_config_stage(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     mh_snapshot: &ManagedHostStateSnapshot,
     reachability_params: &ReachabilityParams,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     desired: Versioned<MachineBootInterfaceTarget>,
     post_lock_verification_retry_count: u32,
     stage: HostBootConfigStage,
@@ -7379,7 +7361,7 @@ async fn handle_ready_boot_config_stage(
     let outcome = match run_host_boot_config_stage(
         ctx,
         reachability_params,
-        redfish_client,
+        bmc,
         mh_snapshot,
         Some(&boot_interface),
         stage,
@@ -7633,13 +7615,10 @@ async fn handle_ready_boot_config(
                 )));
             }
 
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
             let preflight_decision = match check_host_boot_config(
-                redfish_client.as_ref(),
+                &bmc,
                 mh_snapshot,
                 reachability_params,
                 HostBootConfigDpuFreshness::AlreadyValidated,
@@ -7662,7 +7641,6 @@ async fn handle_ready_boot_config(
                     recovery: None,
                 }
             } else {
-                let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                 match bmc.lockdown_status().await {
                     Ok(None) => {
                         tracing::info!(
@@ -7759,13 +7737,10 @@ async fn handle_ready_boot_config(
             )))
         }
         ReadyBootConfigState::CheckHostConfig => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
             let next_state = match check_host_boot_config(
-                redfish_client.as_ref(),
+                &bmc,
                 mh_snapshot,
                 reachability_params,
                 HostBootConfigDpuFreshness::CurrentHostState,
@@ -7800,15 +7775,12 @@ async fn handle_ready_boot_config(
             )))
         }
         ReadyBootConfigState::ConfigureBios { retry_count } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             handle_ready_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 desired,
                 post_lock_verification_retry_count,
                 HostBootConfigStage::ConfigureBios { retry_count },
@@ -7816,15 +7788,12 @@ async fn handle_ready_boot_config(
             .await
         }
         ReadyBootConfigState::WaitingForBiosJob { bios_config_info } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             handle_ready_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 desired,
                 post_lock_verification_retry_count,
                 HostBootConfigStage::WaitingForBiosJob { bios_config_info },
@@ -7832,15 +7801,12 @@ async fn handle_ready_boot_config(
             .await
         }
         ReadyBootConfigState::PollingBiosSetup { retry_count } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             handle_ready_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 desired,
                 post_lock_verification_retry_count,
                 HostBootConfigStage::PollingBiosSetup { retry_count },
@@ -7850,15 +7816,12 @@ async fn handle_ready_boot_config(
         ReadyBootConfigState::SetBootOrder {
             set_boot_order_info,
         } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             handle_ready_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 desired,
                 post_lock_verification_retry_count,
                 HostBootConfigStage::SetBootOrder {
@@ -8031,20 +7994,16 @@ async fn handle_ready_boot_config(
                 )));
             }
 
-            let redfish_client = match ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await
-            {
-                Ok(redfish_client) => redfish_client,
+            let bmc = match ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await {
+                Ok(bmc) => bmc,
                 Err(error) => {
                     tracing::warn!(
                         machine_id = %mh_snapshot.host_snapshot.id,
                         error = %error,
-                        "Waiting for Redfish access before completing BootConfiguring cleanup",
+                        "Waiting for BMC access before completing BootConfiguring cleanup",
                     );
                     return Ok(StateHandlerOutcome::wait(
-                        "Waiting for host Redfish access before completing BootConfiguring cleanup"
+                        "Waiting for host BMC access before completing BootConfiguring cleanup"
                             .to_string(),
                     ));
                 }
@@ -8056,20 +8015,6 @@ async fn handle_ready_boot_config(
                     "Skipping lockdown restoration because the host profile disables lockdown",
                 );
             } else {
-                let bmc = match ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await {
-                    Ok(bmc) => bmc,
-                    Err(error) => {
-                        tracing::warn!(
-                            machine_id = %mh_snapshot.host_snapshot.id,
-                            error = %error,
-                            "Waiting for BMC access before completing BootConfiguring cleanup",
-                        );
-                        return Ok(StateHandlerOutcome::wait(
-                            "Waiting for host BMC access before completing BootConfiguring cleanup"
-                                .to_string(),
-                        ));
-                    }
-                };
                 let (lockdown_command_required, verify_after_command, require_supported_command) =
                     match bmc.lockdown_status().await {
                         Ok(Some(lockdown_status))
@@ -8269,7 +8214,7 @@ async fn handle_ready_boot_config(
                     // restored rather than trusting an earlier pre-crash read.
                     let inspection = inspect_host_boot_config(
                         ctx.services,
-                        redfish_client.as_ref(),
+                        &bmc,
                         mh_snapshot,
                         &captured_boot_interface,
                     )
@@ -8376,18 +8321,11 @@ async fn handle_host_init_boot_config_stage(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     mh_snapshot: &ManagedHostStateSnapshot,
     reachability_params: &ReachabilityParams,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     stage: HostBootConfigStage,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    match run_host_boot_config_stage(
-        ctx,
-        reachability_params,
-        redfish_client,
-        mh_snapshot,
-        None,
-        stage,
-    )
-    .await?
+    match run_host_boot_config_stage(ctx, reachability_params, bmc, mh_snapshot, None, stage)
+        .await?
     {
         HostBootConfigOutcome::Continue(stage) => {
             let machine_state = match stage {
@@ -8468,18 +8406,14 @@ async fn complete_host_init_lockdown(
         return Ok(outcome);
     }
 
-    let redfish_client = match ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await
-    {
-        Ok(redfish_client) => redfish_client,
+    let bmc = match ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await {
+        Ok(bmc) => bmc,
         Err(error) => {
             tracing::warn!(
                 machine_id = %mh_snapshot.host_snapshot.id,
                 desired_version = %desired.version,
                 error = %error,
-                "Could not create a Redfish client for HostInit boot verification; leaving it pending for Ready reconciliation",
+                "Could not connect to the BMC for HostInit boot verification; leaving it pending for Ready reconciliation",
             );
             return Ok(outcome);
         }
@@ -8487,7 +8421,7 @@ async fn complete_host_init_lockdown(
     let boot_interface: BootInterfaceTarget = desired.value.clone().into();
     let inspection = match inspect_host_boot_config(
         ctx.services,
-        redfish_client.as_ref(),
+        &bmc,
         mh_snapshot,
         &boot_interface,
     )
@@ -8899,11 +8833,6 @@ impl StateHandler for HostMachineStateHandler {
                         machine_id = %host_machine_id,
                         "Starting UEFI / BMC setup");
 
-                    let redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
-
                     let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     match bmc.lockdown_status().await {
                         Ok(None) => {
@@ -8950,7 +8879,7 @@ impl StateHandler for HostMachineStateHandler {
                         ctx,
                         mh_snapshot,
                         &self.host_handler_params.reachability_params,
-                        redfish_client.as_ref(),
+                        &bmc,
                         HostBootConfigStage::ConfigureBios {
                             retry_count: *retry_count,
                         },
@@ -8958,15 +8887,12 @@ impl StateHandler for HostMachineStateHandler {
                     .await
                 }
                 MachineState::WaitingForBiosJob { bios_config_info } => {
-                    let redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     handle_host_init_boot_config_stage(
                         ctx,
                         mh_snapshot,
                         &self.host_handler_params.reachability_params,
-                        redfish_client.as_ref(),
+                        &bmc,
                         HostBootConfigStage::WaitingForBiosJob {
                             bios_config_info: bios_config_info.clone(),
                         },
@@ -8974,15 +8900,12 @@ impl StateHandler for HostMachineStateHandler {
                     .await
                 }
                 MachineState::PollingBiosSetup { retry_count } => {
-                    let redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     handle_host_init_boot_config_stage(
                         ctx,
                         mh_snapshot,
                         &self.host_handler_params.reachability_params,
-                        redfish_client.as_ref(),
+                        &bmc,
                         HostBootConfigStage::PollingBiosSetup {
                             retry_count: *retry_count,
                         },
@@ -9001,15 +8924,12 @@ impl StateHandler for HostMachineStateHandler {
                             },
                         ));
                     };
-                    let redfish_client = ctx
-                        .services
-                        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                        .await?;
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     handle_host_init_boot_config_stage(
                         ctx,
                         mh_snapshot,
                         &self.host_handler_params.reachability_params,
-                        redfish_client.as_ref(),
+                        &bmc,
                         HostBootConfigStage::SetBootOrder {
                             set_boot_order_info,
                         },
@@ -14821,18 +14741,11 @@ async fn handle_instance_host_boot_config_stage(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     mh_snapshot: &ManagedHostStateSnapshot,
     reachability_params: &ReachabilityParams,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     stage: HostBootConfigStage,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    match run_host_boot_config_stage(
-        ctx,
-        reachability_params,
-        redfish_client,
-        mh_snapshot,
-        None,
-        stage,
-    )
-    .await?
+    match run_host_boot_config_stage(ctx, reachability_params, bmc, mh_snapshot, None, stage)
+        .await?
     {
         HostBootConfigOutcome::Continue(stage) => {
             let platform_config_state = match stage {
@@ -14892,21 +14805,14 @@ async fn handle_instance_host_platform_config(
     reachability_params: &ReachabilityParams,
     platform_config_state: HostPlatformConfigurationState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    // The deletion-only BMC factory-reset sub-flow must be dispatched before the
-    // shared stored-credential client is built: during/after the reset the BMC
-    // is down or on factory credentials, so the unconditional authenticated
-    // client build below would fail before we reached the match. That handler
-    // builds exactly the client each of its sub-states needs.
+    // During and after the deletion-only BMC factory reset the BMC is down or
+    // on factory credentials, so that handler builds exactly the connection
+    // each of its sub-states needs.
     if let HostPlatformConfigurationState::FactoryResetBmc { reset_state } = &platform_config_state
     {
         return factory_reset::handle_factory_reset_bmc(ctx, mh_snapshot, reset_state.clone())
             .await;
     }
-
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
 
     let instance_state = match platform_config_state {
         HostPlatformConfigurationState::PowerCycle {
@@ -15117,8 +15023,9 @@ async fn handle_instance_host_platform_config(
             }
         }
         HostPlatformConfigurationState::CheckHostConfig => {
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             match check_host_boot_config(
-                redfish_client.as_ref(),
+                &bmc,
                 mh_snapshot,
                 reachability_params,
                 HostBootConfigDpuFreshness::CurrentHostState,
@@ -15170,31 +15077,34 @@ async fn handle_instance_host_platform_config(
                 ));
             }
 
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             return handle_instance_host_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 HostBootConfigStage::ConfigureBios { retry_count },
             )
             .await;
         }
         HostPlatformConfigurationState::WaitingForBiosJob { bios_config_info } => {
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             return handle_instance_host_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 HostBootConfigStage::WaitingForBiosJob { bios_config_info },
             )
             .await;
         }
         HostPlatformConfigurationState::PollingBiosSetup { retry_count } => {
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             return handle_instance_host_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 HostBootConfigStage::PollingBiosSetup { retry_count },
             )
             .await;
@@ -15202,11 +15112,12 @@ async fn handle_instance_host_platform_config(
         HostPlatformConfigurationState::SetBootOrder {
             set_boot_order_info,
         } => {
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
             return handle_instance_host_boot_config_stage(
                 ctx,
                 mh_snapshot,
                 reachability_params,
-                redfish_client.as_ref(),
+                &bmc,
                 HostBootConfigStage::SetBootOrder {
                     set_boot_order_info,
                 },
@@ -15259,7 +15170,7 @@ fn boot_order_job(info: &SetBootOrderInfo) -> Option<VendorJobId> {
 async fn set_host_boot_order(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     mh_snapshot: &ManagedHostStateSnapshot,
     explicit_target: Option<&BootInterfaceTarget>,
     set_boot_order_info: SetBootOrderInfo,
@@ -15289,9 +15200,8 @@ async fn set_host_boot_order(
             // (iDRAC `SYS011`). If the HTTP device drifted since the owning
             // lifecycle's inspection, return to the shared BIOS/job stages
             // before attempting the order write.
-            let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
             let is_bios_setup =
-                platform_settings_in_effect(ctx.services, &bmc, Some(&boot_interface)).await?;
+                platform_settings_in_effect(ctx.services, bmc, Some(&boot_interface)).await?;
 
             if !is_bios_setup {
                 // The HTTP-boot device drifted after the owning lifecycle's
@@ -15318,7 +15228,7 @@ async fn set_host_boot_order(
             // re-applied this pass -- no pending BIOS job for the boot-order set
             // to collide with. If the boot order is already set too, there's
             // nothing to re-apply: go straight to verification.
-            let is_boot_order_setup = platform_config::boot_order_in_effect(&bmc, &boot_interface)
+            let is_boot_order_setup = platform_config::boot_order_in_effect(bmc, &boot_interface)
                 .await
                 .map_err(|e| platform_error("is_boot_order_setup", e))?;
 
@@ -15334,7 +15244,14 @@ async fn set_host_boot_order(
                 }));
             }
 
-            let jid = match platform_config::configure_boot_order(&bmc, &boot_interface).await {
+            let expected_dpu_count = mh_snapshot.host_snapshot.associated_dpu_machine_ids().len();
+            let jid = match platform_config::configure_boot_order(
+                bmc,
+                &boot_interface,
+                expected_dpu_count,
+            )
+            .await
+            {
                 Ok(outcome) => {
                     platform_config::vendor_job_id(&outcome).map(|job_id| job_id.to_string())
                 }
@@ -15376,8 +15293,10 @@ async fn set_host_boot_order(
                     // triggered so we capture full diagnostic context (UEFI device paths +
                     // PCIe inventory) before state resets. Skipped when waiting on an
                     // already-in-progress reboot to avoid redundant Redfish calls.
-                    if reboot_status.increase_retry_count {
-                        log_host_config(redfish_client, mh_snapshot).await;
+                    if reboot_status.increase_retry_count
+                        && let BackendBmc::Libredfish(client) = bmc
+                    {
+                        log_host_config(client.as_ref(), mh_snapshot).await;
                     }
 
                     // Return WaitingForReboot instead of Err to ensure the transaction is
@@ -15413,9 +15332,8 @@ async fn set_host_boot_order(
                 RequiredBootInterface::Wait(outcome) => return Ok(outcome),
             };
 
-            let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
             let is_bios_setup =
-                platform_settings_in_effect(ctx.services, &bmc, Some(&boot_interface)).await?;
+                platform_settings_in_effect(ctx.services, bmc, Some(&boot_interface)).await?;
 
             if is_bios_setup {
                 tracing::info!(
@@ -15462,10 +15380,9 @@ async fn set_host_boot_order(
         }
         SetBootOrderState::WaitForSetBootOrderJobScheduled => {
             if let Some(job_id) = boot_order_job(&set_boot_order_info) {
-                let job_status =
-                    vendor_job_status(ctx.services, redfish_client, mh_snapshot, &job_id)
-                        .await?
-                        .map_err(|e| platform_error("get_job_state", e))?;
+                let job_status = vendor_job_status(bmc, &job_id)
+                    .await
+                    .map_err(|e| platform_error("get_job_state", e))?;
                 match job_status {
                     OperationStatus::Failed { .. } | OperationStatus::NeedsIntervention { .. } => {
                         tracing::warn!(
@@ -15529,43 +15446,40 @@ async fn set_host_boot_order(
             const JOB_QUERY_WAIT_MINUTES: i64 = 5;
 
             if let Some(job_id) = boot_order_job(&set_boot_order_info) {
-                let job_status =
-                    match vendor_job_status(ctx.services, redfish_client, mh_snapshot, &job_id)
-                        .await?
-                    {
-                        Ok(status) => status,
-                        Err(e) => {
-                            // Wait 5 minutes before declaring the job was lost or failed.
-                            // This helps differentiate between transient errors and true failures.
-                            let minutes_since_state_change = mh_snapshot
-                                .host_snapshot
-                                .state
-                                .version
-                                .since_state_change()
-                                .num_minutes();
+                let job_status = match vendor_job_status(bmc, &job_id).await {
+                    Ok(status) => status,
+                    Err(e) => {
+                        // Wait 5 minutes before declaring the job was lost or failed.
+                        // This helps differentiate between transient errors and true failures.
+                        let minutes_since_state_change = mh_snapshot
+                            .host_snapshot
+                            .state
+                            .version
+                            .since_state_change()
+                            .num_minutes();
 
-                            if minutes_since_state_change < JOB_QUERY_WAIT_MINUTES {
-                                return Err(platform_error("get_job_state", e));
-                            }
-
-                            tracing::warn!(
-                                %job_id,
-                                machine_id = %mh_snapshot.host_snapshot.id,
-                                time_in_state_minutes = minutes_since_state_change,
-                                error = %e,
-                                "SetBootOrder: job lookup failed, transitioning to HandleJobFailure"
-                            );
-
-                            return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
-                                set_boot_order_jid: None,
-                                set_boot_order_state: SetBootOrderState::HandleJobFailure {
-                                    failure: format!("Job {} lookup failed: {}", job_id, e),
-                                    power_state: ExpectedPowerState::Off,
-                                },
-                                retry_count: set_boot_order_info.retry_count,
-                            }));
+                        if minutes_since_state_change < JOB_QUERY_WAIT_MINUTES {
+                            return Err(platform_error("get_job_state", e));
                         }
-                    };
+
+                        tracing::warn!(
+                            %job_id,
+                            machine_id = %mh_snapshot.host_snapshot.id,
+                            time_in_state_minutes = minutes_since_state_change,
+                            error = %e,
+                            "SetBootOrder: job lookup failed, transitioning to HandleJobFailure"
+                        );
+
+                        return Ok(SetBootOrderOutcome::Continue(SetBootOrderInfo {
+                            set_boot_order_jid: None,
+                            set_boot_order_state: SetBootOrderState::HandleJobFailure {
+                                failure: format!("Job {} lookup failed: {}", job_id, e),
+                                power_state: ExpectedPowerState::Off,
+                            },
+                            retry_count: set_boot_order_info.retry_count,
+                        }));
+                    }
+                };
 
                 match job_status {
                     OperationStatus::Completed => {
@@ -15612,8 +15526,7 @@ async fn set_host_boot_order(
             // 2. Reset the BMC
             // 3. Transition to CheckBootOrder to verify and retry if needed
 
-            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
-            let current_power_state = crate::redfish::power_state(&bmc)
+            let current_power_state = crate::redfish::power_state(bmc)
                 .await
                 .map_err(|e| platform_error("get_power_state", e))?;
 
@@ -15637,7 +15550,7 @@ async fn set_host_boot_order(
                         "HandleJobFailure: Resetting BMC after failure"
                     );
 
-                    reset_bmc(&bmc)
+                    reset_bmc(bmc)
                         .await
                         .map_err(|e| platform_error("bmc_reset", e))?;
 
@@ -15726,9 +15639,8 @@ async fn set_host_boot_order(
             // device or another managed BIOS attribute. Verify BIOS first for
             // every platform and return to the shared job-aware repair before
             // declaring the overall boot configuration complete.
-            let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
             let is_bios_setup =
-                platform_settings_in_effect(ctx.services, &bmc, Some(&boot_interface)).await?;
+                platform_settings_in_effect(ctx.services, bmc, Some(&boot_interface)).await?;
 
             if !is_bios_setup {
                 tracing::warn!(
@@ -15751,10 +15663,9 @@ async fn set_host_boot_order(
                 return Ok(SetBootOrderOutcome::Done);
             }
 
-            let boot_order_configured =
-                platform_config::boot_order_in_effect(&bmc, &boot_interface)
-                    .await
-                    .map_err(|e| platform_error("is_boot_order_setup", e))?;
+            let boot_order_configured = platform_config::boot_order_in_effect(bmc, &boot_interface)
+                .await
+                .map_err(|e| platform_error("is_boot_order_setup", e))?;
 
             if boot_order_configured {
                 tracing::info!(
