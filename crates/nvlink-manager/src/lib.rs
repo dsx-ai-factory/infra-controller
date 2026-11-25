@@ -14,17 +14,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub mod config;
 mod errors;
 mod metrics;
 pub mod nmx_c_endpoint;
 pub mod nvlink;
+mod rack_alert;
 mod switch_cert_monitor;
 
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use carbide_secrets::credentials::CredentialManager;
@@ -42,6 +43,7 @@ use db::nvl_partition::IdColumn;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{self, ObjectColumnFilter, TransactionVending, machine};
 use errors::{NvLinkManagerError, NvLinkManagerResult};
+use health_report::HealthReportApplyMode;
 use libnmxc::nmxc_model::{
     GetComputeNodeInfoListRequest, GetGpuInfoListRequest, GetPartitionInfoListRequest,
     PartitionInfo,
@@ -49,7 +51,7 @@ use libnmxc::nmxc_model::{
 use libnmxc::{Endpoint, NMX_C_GATEWAY_ID, Nmxc, NmxcPool};
 use metrics::{
     AppliedChange, ChassisNmxCUnreachableReason, NmxcMetricOperationStatus,
-    NvlPartitionMonitorMetrics,
+    NvlPartitionMonitorMetrics, NvlinkUnhealthyAlertWrite,
 };
 use model::hardware_info::{HardwareInfo, MachineNvLinkInfo, NvLinkGpu};
 use model::instance::status::SyncState;
@@ -60,6 +62,7 @@ use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnap
 use model::nvl_logical_partition::LogicalPartition;
 use model::nvl_partition::{NvlPartition, NvlPartitionName};
 use model::rack_type::RackProfileConfig;
+use rack_alert::{RackAlertAction, RackUnreachableTracker, nmxc_unreachable_report};
 use sqlx::PgPool;
 #[cfg(feature = "test-support")]
 pub use switch_cert_monitor::{SwitchCertificateMonitor, SwitchCertificateMonitorIterationResult};
@@ -74,6 +77,9 @@ pub const DEFAULT_NMX_M_NAME: &str = "default";
 /// partition per tray and 18 tray default partitions, this is floor(1024 / 18) rounded down
 /// to the nearest multiple of 4.
 const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 56;
+
+/// Source name of the health reports the partition monitor writes on racks.
+const NVLINK_PARTITION_MONITOR_REPORT_SOURCE: &str = "nvlink-partition-monitor";
 
 fn rack_id_from_chassis_snapshots(
     chassis_snapshots: &[&ManagedHostStateSnapshot],
@@ -967,6 +973,9 @@ pub struct NvlPartitionMonitor {
     host_health: HostHealthConfig,
     metric_holder: Arc<metrics::MetricHolder>,
     work_lock_manager_handle: WorkLockManagerHandle,
+    /// Consecutive passes each rack's NMX-C was unusable, for the rack's
+    /// debounced `NmxcUnreachable` alert.
+    rack_unreachable: Mutex<RackUnreachableTracker>,
 }
 
 pub struct NvLinkManager {
@@ -1085,6 +1094,7 @@ impl NvlPartitionMonitor {
             host_health,
             metric_holder,
             work_lock_manager_handle,
+            rack_unreachable: Mutex::new(RackUnreachableTracker::default()),
         }
     }
 
@@ -1235,7 +1245,31 @@ impl NvlPartitionMonitor {
         let mut total_completed_operations = 0;
         let mut pending_null_nvlink_observations = Vec::new();
 
+        // Every rack with managed hosts, and this pass's NMX-C outcome for each chassis
+        // in a rack, for the rack's debounced `NmxcUnreachable` alert. A chassis counts
+        // as unusable only when the pass stops before reconciling; work that fails after
+        // Hello succeeded is a reachable NMX-C.
+        let mut managed_rack_ids: HashSet<RackId> = HashSet::new();
+        let mut rack_endpoints: HashMap<RackId, String> = HashMap::new();
+        let mut chassis_outcomes: Vec<(RackId, Option<ChassisNmxCUnreachableReason>)> = Vec::new();
+
         for (chassis_serial, chassis_snapshots) in &managed_host_snapshots_by_chassis_serial {
+            let rack_id = rack_id_from_chassis_snapshots(chassis_snapshots);
+            if let Some(rack_id) = &rack_id {
+                managed_rack_ids.insert(rack_id.clone());
+                if let Some(endpoint_url) = chassis_serial_to_resolved_endpoint.get(chassis_serial)
+                {
+                    rack_endpoints
+                        .entry(rack_id.clone())
+                        .or_insert_with(|| endpoint_url.clone());
+                }
+            }
+            let mut record_outcome = |reason: Option<ChassisNmxCUnreachableReason>| {
+                if let Some(rack_id) = &rack_id {
+                    chassis_outcomes.push((rack_id.clone(), reason));
+                }
+            };
+
             let Some(endpoint_url) = chassis_serial_to_resolved_endpoint.get(chassis_serial) else {
                 tracing::warn!(
                     %chassis_serial,
@@ -1247,6 +1281,7 @@ impl NvlPartitionMonitor {
                     chassis_snapshots,
                     ChassisNmxCUnreachableReason::NoEndpoint,
                 );
+                record_outcome(Some(ChassisNmxCUnreachableReason::NoEndpoint));
                 continue;
             };
 
@@ -1265,6 +1300,7 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::InvalidEndpointUri,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::InvalidEndpointUri));
                     continue;
                 }
             };
@@ -1284,6 +1320,7 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::ClientCreateFailed,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::ClientCreateFailed));
                     continue;
                 }
             };
@@ -1302,6 +1339,7 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::HelloFailed,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::HelloFailed));
                     continue;
                 }
             };
@@ -1320,9 +1358,12 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::DomainUuidParseFailed,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::DomainUuidParseFailed));
                     continue;
                 }
             };
+
+            record_outcome(None);
 
             // Endpoint + component versions for this chassis, so the metric-read failures below log them.
             metrics.nmxc.endpoint = endpoint_url.clone();
@@ -1411,12 +1452,163 @@ impl NvlPartitionMonitor {
             total_completed_operations += num_completed;
         }
 
+        // A rack is one NMX-C, so it is reachable this pass if any of its chassis
+        // got through, and unusable with the first chassis's reason otherwise.
+        let mut rack_outcomes: Vec<(RackId, Option<ChassisNmxCUnreachableReason>)> = Vec::new();
+        for (rack_id, reason) in chassis_outcomes {
+            match rack_outcomes.iter_mut().find(|(id, _)| *id == rack_id) {
+                Some((_, outcome)) => {
+                    if reason.is_none() {
+                        *outcome = None;
+                    }
+                }
+                None => rack_outcomes.push((rack_id, reason)),
+            }
+        }
+        // Before the fallible observation write: a failure there must not
+        // lose this pass's rack outcomes or leave a recovered rack alerted.
+        self.reconcile_rack_unreachable_alerts(&rack_outcomes, &rack_endpoints, &managed_rack_ids)
+            .await;
+
         self.record_null_nvlink_status_observations(&pending_null_nvlink_observations, metrics)
             .await?;
 
         metrics.num_completed_operations = total_completed_operations;
 
         Ok(total_completed_operations)
+    }
+
+    /// Raises or clears each rack's `NmxcUnreachable` merge report from this pass's outcomes.
+    ///
+    /// The alert is debounced by `partition_monitor_unreachable_alert_after`
+    /// consecutive unusable passes and cleared on the first pass that reaches
+    /// NMX-C. Which racks currently carry the report is read from the database
+    /// so a restart or an operator removal cannot desynchronise the two.
+    /// Racks with no managed hosts left have their reports cleared. Failures
+    /// are logged and never block partition reconciliation.
+    async fn reconcile_rack_unreachable_alerts(
+        &self,
+        outcomes: &[(RackId, Option<ChassisNmxCUnreachableReason>)],
+        endpoints: &HashMap<RackId, String>,
+        managed_rack_ids: &HashSet<RackId>,
+    ) {
+        let stored = match db::rack::find_ids_with_health_report_merge_source(
+            &self.db_pool,
+            NVLINK_PARTITION_MONITOR_REPORT_SOURCE,
+        )
+        .await
+        {
+            Ok(rack_ids) => rack_ids.into_iter().collect::<HashSet<RackId>>(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Failed to load racks with NmxcUnreachable alerts; rack alerts not updated this pass"
+                );
+                return;
+            }
+        };
+        if outcomes.is_empty() && stored.is_empty() {
+            return;
+        }
+
+        let threshold = self.config.partition_monitor_unreachable_alert_after.get();
+        let mut actions: Vec<(RackId, RackAlertAction)> = {
+            let mut tracker = self
+                .rack_unreachable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tracker.retain(|rack_id| managed_rack_ids.contains(rack_id));
+            let mut actions = outcomes
+                .iter()
+                .map(|(rack_id, reason)| {
+                    let action =
+                        tracker.observe(rack_id, *reason, threshold, stored.contains(rack_id));
+                    (rack_id.clone(), action)
+                })
+                .collect::<Vec<_>>();
+            // A rack not checked this pass yields no outcome, so a clear that
+            // failed on an earlier pass is retried here.
+            let checked: HashSet<&RackId> = outcomes.iter().map(|(rack_id, _)| rack_id).collect();
+            actions.extend(
+                tracker
+                    .pending_clears(&stored)
+                    .filter(|rack_id| !checked.contains(rack_id))
+                    .map(|rack_id| (rack_id, RackAlertAction::Clear)),
+            );
+            actions
+        };
+        actions.extend(
+            stored
+                .iter()
+                .filter(|rack_id| !managed_rack_ids.contains(rack_id))
+                .map(|rack_id| (rack_id.clone(), RackAlertAction::Clear)),
+        );
+
+        for (rack_id, action) in actions {
+            if action == RackAlertAction::Keep {
+                continue;
+            }
+            let write = async {
+                let mut conn = self.db_pool.acquire().await.map_err(|e| {
+                    NvLinkManagerError::internal(format!("Failed to acquire connection: {e}"))
+                })?;
+                match action {
+                    RackAlertAction::Keep => Ok(()),
+                    RackAlertAction::Set { reason, since } => {
+                        let endpoint = endpoints.get(&rack_id).map(String::as_str);
+                        tracing::warn!(
+                            %rack_id,
+                            endpoint = endpoint.unwrap_or("<none>"),
+                            ?reason,
+                            consecutive_passes = threshold,
+                            unreachable_since = %since,
+                            "NMX-C unusable for consecutive passes - setting NmxcUnreachable alert on rack"
+                        );
+                        let report = nmxc_unreachable_report(
+                            NVLINK_PARTITION_MONITOR_REPORT_SOURCE,
+                            endpoint,
+                            reason,
+                            since,
+                        );
+                        db::rack::insert_health_report(
+                            &mut conn,
+                            &rack_id,
+                            HealthReportApplyMode::Merge,
+                            &report,
+                        )
+                        .await
+                        .map_err(NvLinkManagerError::from)
+                    }
+                    RackAlertAction::Clear => {
+                        tracing::info!(%rack_id, "NMX-C reachable again - clearing NmxcUnreachable alert on rack");
+                        db::rack::remove_health_report(
+                            &mut conn,
+                            &rack_id,
+                            HealthReportApplyMode::Merge,
+                            NVLINK_PARTITION_MONITOR_REPORT_SOURCE,
+                        )
+                        .await
+                        .map_err(NvLinkManagerError::from)
+                    }
+                }
+            };
+            let written = match write.await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %rack_id,
+                        ?action,
+                        %error,
+                        "Failed to update the rack's NmxcUnreachable alert; retried next pass"
+                    );
+                    false
+                }
+            };
+            self.rack_unreachable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .confirm(&rack_id, action, written);
+        }
     }
 
     /// Fetches partition list from NMX-C, checks for needed create/update/delete operations,
@@ -1485,6 +1677,15 @@ impl NvlPartitionMonitor {
                     &GPU_HEALTH_STATES,
                     counts,
                 );
+
+                self.record_nvlink_unhealthy_alerts(
+                    &domain_uuid,
+                    metrics,
+                    &resp.gpu_info_list,
+                    &machine_nvlink_info,
+                    &managed_host_snapshots,
+                )
+                .await;
             }
             Err(e) => tracing::warn!(
                 %domain_uuid,
@@ -1607,6 +1808,107 @@ impl NvlPartitionMonitor {
         txn.commit().await?;
 
         Ok(num_completed_operations)
+    }
+
+    /// Correlates NMX-C per-GPU health for a domain with the locally known NVLink GPUs for
+    /// each machine, and sets/clears a `NvlinkUnhealthy` health alert per machine. The alert
+    /// carries `hardware` only, so it surfaces in host health and metrics without gating
+    /// allocation; it stays until the affected GPUs recover.
+    ///
+    /// Best-effort: failures are logged and never block partition reconciliation, matching the
+    /// handling of the `GetGpuInfoList` call itself.
+    async fn record_nvlink_unhealthy_alerts(
+        &self,
+        domain_uuid: &NvLinkDomainId,
+        metrics: &mut NvlPartitionMonitorMetrics,
+        gpu_info_list: &[libnmxc::nmxc_model::GpuInfo],
+        machine_nvlink_info: &HashMap<MachineId, Option<MachineNvLinkInfo>>,
+        mh_snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+    ) {
+        // UID 0 is NMX-C's placeholder for a GPU under rediscovery, not an identity, so it
+        // must never be matched against inventory (see `next_nvlink_unhealthy_alerts`).
+        let health_by_guid: HashMap<u64, i32> = gpu_info_list
+            .iter()
+            .filter(|gpu| gpu.gpu_uid != 0)
+            .map(|gpu| (gpu.gpu_uid, gpu.gpu_health))
+            .collect();
+
+        for (machine_id, mh) in mh_snapshots {
+            let gpus: &[NvLinkGpu] = machine_nvlink_info
+                .get(machine_id)
+                .and_then(|info| info.as_ref())
+                .map_or(&[], |info| info.gpus.as_slice());
+
+            // This monitor owns exactly one thing: the Merge entry under its own source. Read
+            // that entry directly, in the same mode `set_`/`clear_nvlink_unhealthy_alert`
+            // mutate, rather than `by_source` (which prefers a Replace report) or derived
+            // aggregate health (which a Replace override hides). A Replace report an operator
+            // placed under this source name is a deliberate host-level override: it is neither
+            // read for dedup nor removed on recovery, so recovery can never silently delete it,
+            // and a clear here always removes what it claims to.
+            let existing = mh
+                .host_snapshot
+                .health_reports
+                .merges
+                .get(NVLINK_PARTITION_MONITOR_REPORT_SOURCE);
+            let previous = existing.map_or(&[][..], |report| report.alerts.as_slice());
+
+            let alerts = next_nvlink_unhealthy_alerts(previous, gpus, &health_by_guid);
+
+            let (write, result) = if !alerts.is_empty() {
+                let mut report = nvlink_unhealthy_report(alerts);
+                report.update_in_alert_since(existing);
+                // Skip the write when the affected GPUs and their classifications are
+                // unchanged. Comparing keys rather than full alerts means a link oscillating
+                // between degraded states (which only changes the message label) does not
+                // rewrite the row every pass; the label catches up the next time the key set
+                // changes.
+                if existing.is_some_and(|prev| {
+                    nvlink_alert_keys(&prev.alerts) == nvlink_alert_keys(&report.alerts)
+                }) {
+                    continue;
+                }
+                tracing::warn!(
+                    %machine_id,
+                    %domain_uuid,
+                    affected_gpu_count = report.alerts.len(),
+                    total_gpu_count = gpus.len(),
+                    "NVLink GPU(s) unhealthy - setting NvlinkUnhealthy alert"
+                );
+                (
+                    NvlinkUnhealthyAlertWrite::Set,
+                    set_nvlink_unhealthy_alert(&self.db_pool, machine_id, &report).await,
+                )
+            } else if existing.is_some() {
+                tracing::info!(
+                    %machine_id,
+                    %domain_uuid,
+                    "All affected NVLink GPUs report healthy - clearing NvlinkUnhealthy alert"
+                );
+                (
+                    NvlinkUnhealthyAlertWrite::Clear,
+                    clear_nvlink_unhealthy_alert(&self.db_pool, machine_id).await,
+                )
+            } else {
+                continue;
+            };
+
+            // The pass still reports success; this counter is the only signal that the
+            // alert was not applied or cleared. The write is retried next pass.
+            if let Err(error) = result {
+                tracing::warn!(
+                    %machine_id,
+                    %domain_uuid,
+                    ?write,
+                    %error,
+                    "Failed to update NvlinkUnhealthy health alert; retrying next pass"
+                );
+                *metrics
+                    .num_unhealthy_alert_write_failures
+                    .entry(write)
+                    .or_default() += 1;
+            }
+        }
     }
 
     // Check the passed NvLink partition "observations" (physical partition info from NMX-C supplemented by physical and logical partition info from DB)
@@ -2659,6 +2961,235 @@ fn gpu_health_label(h: i32) -> &'static str {
     }
 }
 
+/// Alerting classification of an NMX-C `GpuHealth` value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GpuHealthState {
+    Healthy,
+    /// NMX-C explicitly reports the GPU in a degraded state.
+    Unhealthy,
+    /// NMX-C has not (yet) determined the GPU's health; neither raises nor clears an alert.
+    Unknown,
+}
+
+/// Exhaustive on the generated enum so a new `GpuHealth` variant fails to compile until classified.
+fn classify_gpu_health(h: i32) -> GpuHealthState {
+    use libnmxc::nmxc_model::GpuHealth::{self, *};
+    match GpuHealth::try_from(h) {
+        Ok(NmxGpuHealthHealthy) => GpuHealthState::Healthy,
+        Ok(NmxGpuHealthDegraded | NmxGpuHealthNoNvlink | NmxGpuHealthDegradedBw) => {
+            GpuHealthState::Unhealthy
+        }
+        Ok(NmxGpuHealthUnknown) | Err(_) => GpuHealthState::Unknown,
+    }
+}
+
+/// Computes the per-GPU `NvlinkUnhealthy` alerts a machine should carry after one NMX-C pass.
+///
+/// Each alert's `target` is the GPU UID, so previously flagged GPUs are known structurally. A
+/// flagged GPU stays until NMX-C reports *that GPU* `Healthy`. NMX-C represents a GPU under
+/// rediscovery as UID 0 with `Unknown` health, so it does not match its stored GUID; treating
+/// "absent" as recovered would let one healthy sibling clear the alert before the fault is
+/// gone. GPUs that were never flagged and are `Unknown` or absent are ignored, so a swapped-in
+/// GPU awaiting discovery does not raise an alert. Retained alerts keep their stored
+/// classifications.
+fn next_nvlink_unhealthy_alerts(
+    previous: &[health_report::HealthProbeAlert],
+    gpus: &[NvLinkGpu],
+    health_by_guid: &HashMap<u64, i32>,
+) -> Vec<health_report::HealthProbeAlert> {
+    let mut alerts: BTreeMap<String, health_report::HealthProbeAlert> = previous
+        .iter()
+        .filter_map(|alert| Some((alert.target.clone()?, alert.clone())))
+        .collect();
+
+    for gpu in gpus {
+        // A stored guid of 0 is the parse-failure placeholder from
+        // `parse_nvlink_gpu_fabric_guid`, not a GPU identity; it can only ever collide with
+        // NMX-C's UID-0 rediscovery rows, so it is never evaluated.
+        if gpu.guid == 0 {
+            continue;
+        }
+        let Some(&health) = health_by_guid.get(&gpu.guid) else {
+            continue;
+        };
+        let guid = gpu.guid.to_string();
+        match classify_gpu_health(health) {
+            GpuHealthState::Healthy => {
+                alerts.remove(&guid);
+            }
+            GpuHealthState::Unhealthy => {
+                let alert = health_report::HealthProbeAlert::nvlink_unhealthy(
+                    guid.clone(),
+                    gpu_health_label(health),
+                );
+                alerts.insert(guid, alert);
+            }
+            GpuHealthState::Unknown => {}
+        }
+    }
+
+    alerts.into_values().collect()
+}
+
+#[cfg(test)]
+mod gpu_health_tests {
+    use carbide_test_support::value_scenarios;
+    use libnmxc::nmxc_model::GpuHealth::*;
+
+    use super::*;
+
+    fn gpu(guid: u64) -> NvLinkGpu {
+        NvLinkGpu {
+            tray_index: 0,
+            slot_id: 0,
+            device_id: 1,
+            guid,
+        }
+    }
+
+    fn flagged(guid: u64) -> health_report::HealthProbeAlert {
+        health_report::HealthProbeAlert::nvlink_unhealthy(guid.to_string(), "degraded")
+    }
+
+    fn targets(alerts: Vec<health_report::HealthProbeAlert>) -> Vec<String> {
+        alerts
+            .into_iter()
+            .filter_map(|alert| alert.target)
+            .collect()
+    }
+
+    #[test]
+    fn affected_gpu_stays_flagged_until_it_reports_healthy() {
+        value_scenarios!(
+            run = |(previous, health): (Vec<u64>, Vec<(u64, i32)>)| {
+                let previous: Vec<_> = previous.into_iter().map(flagged).collect();
+                // guid 0 is the parse-failure placeholder and must never be evaluated.
+                let gpus = vec![gpu(0), gpu(1), gpu(2)];
+                let health_by_guid: HashMap<u64, i32> = health.into_iter().collect();
+                targets(next_nvlink_unhealthy_alerts(&previous, &gpus, &health_by_guid))
+            };
+
+            "degraded GPU is flagged" {
+                (vec![], vec![(1, NmxGpuHealthDegraded as i32), (2, NmxGpuHealthHealthy as i32)])
+                    => vec!["1".to_string()],
+            }
+
+            "rediscovery (UID 0, Unknown) with a healthy sibling keeps the flag" {
+                (vec![1], vec![(0, NmxGpuHealthUnknown as i32), (2, NmxGpuHealthHealthy as i32)])
+                    => vec!["1".to_string()],
+            }
+
+            "explicit Unknown for the affected GPU keeps the flag" {
+                (vec![1], vec![(1, NmxGpuHealthUnknown as i32), (2, NmxGpuHealthHealthy as i32)])
+                    => vec!["1".to_string()],
+            }
+
+            "affected GPU reporting Healthy clears it" {
+                (vec![1], vec![(1, NmxGpuHealthHealthy as i32), (2, NmxGpuHealthHealthy as i32)])
+                    => Vec::<String>::new(),
+            }
+
+            "unflagged absent GPU is ignored" {
+                (vec![], vec![(2, NmxGpuHealthHealthy as i32)]) => Vec::<String>::new(),
+            }
+
+            "empty NMX-C response holds the flag" {
+                (vec![1], vec![]) => vec!["1".to_string()],
+            }
+
+            "placeholder guid 0 never matches a UID-0 report" {
+                (vec![], vec![(0, NmxGpuHealthNoNvlink as i32), (1, NmxGpuHealthHealthy as i32), (2, NmxGpuHealthHealthy as i32)])
+                    => Vec::<String>::new(),
+            }
+        );
+    }
+
+    /// A retained alert is kept as stored, classifications included: the monitor only
+    /// rebuilds an alert on an explicit unhealthy observation.
+    #[test]
+    fn retained_alert_keeps_stored_classifications_while_gpu_is_unknown_or_absent() {
+        let mut stripped = flagged(1);
+        stripped.classifications.clear();
+        let hardware = health_report::HealthAlertClassification::hardware();
+
+        value_scenarios!(
+            run = |health: Vec<(u64, i32)>| {
+                let health_by_guid: HashMap<u64, i32> = health.into_iter().collect();
+                let alerts = next_nvlink_unhealthy_alerts(
+                    std::slice::from_ref(&stripped),
+                    &[gpu(1), gpu(2)],
+                    &health_by_guid,
+                );
+                alerts
+                    .iter()
+                    .map(|alert| {
+                        (
+                            alert.target.clone(),
+                            alert.classifications.contains(&hardware),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            "retained while Unknown" {
+                vec![(1, NmxGpuHealthUnknown as i32)] => vec![(Some("1".to_string()), false)],
+            }
+
+            "retained while absent" {
+                vec![(2, NmxGpuHealthHealthy as i32)] => vec![(Some("1".to_string()), false)],
+            }
+
+            "rebuilt on an unhealthy observation" {
+                vec![(1, NmxGpuHealthDegraded as i32)] => vec![(Some("1".to_string()), true)],
+            }
+        );
+    }
+
+    #[test]
+    fn alert_keys_ignore_message_but_track_classifications() {
+        let blocking = flagged(1);
+
+        // Same GPU, different NMX-C label: same key, so oscillation does not rewrite.
+        let relabeled =
+            health_report::HealthProbeAlert::nvlink_unhealthy("1".to_string(), "degraded_bw");
+        assert_eq!(
+            nvlink_alert_keys(std::slice::from_ref(&blocking)),
+            nvlink_alert_keys(std::slice::from_ref(&relabeled))
+        );
+
+        // Same GPU with its classifications cleared (as the API allows): different key, so
+        // a changed classification set is written rather than deduplicated away.
+        let mut stripped = blocking.clone();
+        stripped.classifications.clear();
+        assert_ne!(
+            nvlink_alert_keys(std::slice::from_ref(&blocking)),
+            nvlink_alert_keys(std::slice::from_ref(&stripped))
+        );
+    }
+
+    #[test]
+    fn classify_gpu_health_buckets_each_value() {
+        value_scenarios!(
+            run = |h: i32| classify_gpu_health(h);
+
+            "unhealthy" {
+                NmxGpuHealthDegraded as i32 => GpuHealthState::Unhealthy,
+                NmxGpuHealthNoNvlink as i32 => GpuHealthState::Unhealthy,
+                NmxGpuHealthDegradedBw as i32 => GpuHealthState::Unhealthy,
+            }
+
+            "healthy" {
+                NmxGpuHealthHealthy as i32 => GpuHealthState::Healthy,
+            }
+
+            "unknown" {
+                NmxGpuHealthUnknown as i32 => GpuHealthState::Unknown,
+                i32::MAX => GpuHealthState::Unknown,
+            }
+        );
+    }
+}
+
 /// Maps an NMX-C `ComputeNodeHealth` enum value to a metric label (matched on the generated enum).
 fn node_health_label(h: i32) -> &'static str {
     use libnmxc::nmxc_model::ComputeNodeHealth::{self, *};
@@ -2748,6 +3279,95 @@ fn aggregate_compute_node_health(
             .or_default() += 1;
     }
     counts
+}
+
+/// What a `NvlinkUnhealthy` report asserts, per alert: probe id, GPU UID target, and
+/// classifications. Message labels are deliberately excluded so a link oscillating between
+/// degraded states does not rewrite the row every pass. Classifications are included so a
+/// change to them is written rather than deduplicated away.
+fn nvlink_alert_keys(
+    alerts: &[health_report::HealthProbeAlert],
+) -> BTreeSet<(
+    health_report::HealthProbeId,
+    Option<String>,
+    BTreeSet<health_report::HealthAlertClassification>,
+)> {
+    alerts
+        .iter()
+        .map(|alert| {
+            (
+                alert.id.clone(),
+                alert.target.clone(),
+                alert.classifications.iter().cloned().collect(),
+            )
+        })
+        .collect()
+}
+
+/// Builds the merge report this monitor writes for a machine with unhealthy NVLink GPUs: one
+/// `hardware` alert per affected GPU, as computed by
+/// [`next_nvlink_unhealthy_alerts`].
+fn nvlink_unhealthy_report(
+    alerts: Vec<health_report::HealthProbeAlert>,
+) -> health_report::HealthReport {
+    health_report::HealthReport {
+        source: NVLINK_PARTITION_MONITOR_REPORT_SOURCE.to_string(),
+        triggered_by: None,
+        observed_at: Some(Utc::now()),
+        successes: vec![],
+        alerts,
+    }
+}
+
+/// Writes a `NvlinkUnhealthy` merge report for the machine, replacing this monitor's previous
+/// entry and leaving reports from other sources untouched.
+async fn set_nvlink_unhealthy_alert(
+    db_pool: &PgPool,
+    machine_id: &MachineId,
+    report: &health_report::HealthReport,
+) -> NvLinkManagerResult<()> {
+    let mut conn = db_pool
+        .acquire()
+        .await
+        .map_err(|e| NvLinkManagerError::internal(format!("Failed to acquire connection: {e}")))?;
+
+    db::machine::insert_health_report(
+        &mut conn,
+        machine_id,
+        HealthReportApplyMode::Merge,
+        report,
+        false, // overwrite existing
+    )
+    .await
+    .map_err(|e| {
+        NvLinkManagerError::internal(format!("Failed to set NVLink unhealthy alert: {e}"))
+    })?;
+
+    Ok(())
+}
+
+/// Clears a previously set `NvlinkUnhealthy` health alert on the machine.
+async fn clear_nvlink_unhealthy_alert(
+    db_pool: &PgPool,
+    machine_id: &MachineId,
+) -> NvLinkManagerResult<()> {
+    let mut conn = db_pool
+        .acquire()
+        .await
+        .map_err(|e| NvLinkManagerError::internal(format!("Failed to acquire connection: {e}")))?;
+
+    db::machine::remove_health_report(
+        &mut conn,
+        machine_id,
+        HealthReportApplyMode::Merge,
+        NVLINK_PARTITION_MONITOR_REPORT_SOURCE,
+    )
+    .await
+    .map_err(|e| {
+        NvLinkManagerError::internal(format!("Failed to clear NVLink unhealthy alert: {e}"))
+    })?;
+
+    Ok(())
 }
 
 /// Records per-domain health counts: seeds every state to `0`, then overlays the observed counts,
@@ -3276,5 +3896,212 @@ mod health_aggregation_tests {
         assert!(parts.iter().any(|(a, v)| a.contains("health=\"healthy\"")
             && a.contains("nvlink_domain_uuid=\"domA\"")
             && v == "1"));
+    }
+}
+
+#[cfg(test)]
+mod nvlink_unhealthy_persistence_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use carbide_macros::sqlx_test;
+    use carbide_utils::test_support::test_meter::TestMeter;
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+    use carbide_uuid::nvlink::NvLinkDomainId;
+    use model::hardware_info::MachineNvLinkInfo;
+    use model::machine::{HostHealthConfig, ManagedHostStateSnapshot};
+    use tokio::task::JoinSet;
+
+    use super::{
+        LoadSnapshotOptions, NVLINK_PARTITION_MONITOR_REPORT_SOURCE, NvLinkConfig,
+        NvlPartitionMonitor, NvlPartitionMonitorMetrics, load_by_machine_ids,
+    };
+    use crate::nvlink::test_support::NmxcSimClient;
+
+    fn machine_id(byte: u8) -> MachineId {
+        MachineId::new(MachineIdSource::Tpm, [byte; 32], MachineType::Host)
+    }
+
+    /// Persistence contract for `record_nvlink_unhealthy_alerts`, which the pure helpers cannot
+    /// prove: an unhealthy GPU writes a `hardware` merge report under this monitor's source
+    /// that aggregate host health reflects without blocking allocation, and recovery removes
+    /// exactly that source, leaving other sources untouched.
+    #[sqlx_test]
+    async fn monitor_pass_persists_then_clears_nvlink_unhealthy_report(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use libnmxc::nmxc_model::{GpuHealth, GpuInfo};
+        use model::hardware_info::NvLinkGpu;
+        use model::machine::ManagedHostState;
+
+        const OTHER_SOURCE: &str = "other-monitor";
+        let gpu_guid: u64 = 0x1234_5678_9abc_def0;
+        let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
+        let id = machine_id(41);
+
+        async fn load(
+            pool: &sqlx::PgPool,
+            id: &MachineId,
+        ) -> Result<ManagedHostStateSnapshot, Box<dyn std::error::Error>> {
+            let mut txn = pool.begin().await?;
+            let mut snapshots = load_by_machine_ids(
+                txn.as_mut(),
+                &[*id],
+                LoadSnapshotOptions {
+                    include_history: false,
+                    include_instance_data: false,
+                    host_health_config: HostHealthConfig::default(),
+                },
+            )
+            .await?;
+            Ok(snapshots.remove(id).expect("seeded machine loads"))
+        }
+
+        let has_hardware_alert = |snapshot: &ManagedHostStateSnapshot| {
+            snapshot
+                .aggregate_health
+                .find_alert_by_classification(&health_report::HealthAlertClassification::hardware())
+                .is_some()
+        };
+        let blocks_allocation = |snapshot: &ManagedHostStateSnapshot| {
+            snapshot
+                .aggregate_health
+                .find_alert_by_classification(
+                    &health_report::HealthAlertClassification::prevent_allocations(),
+                )
+                .is_some()
+        };
+
+        let mut txn = pool.begin().await?;
+        db::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
+        db::machine::update_nvlink_info(
+            txn.as_mut(),
+            &id,
+            MachineNvLinkInfo {
+                domain_uuid,
+                chassis_serial: "CHASSIS-A".to_string(),
+                gpus: vec![NvLinkGpu {
+                    tray_index: 0,
+                    slot_id: 0,
+                    device_id: 1,
+                    guid: gpu_guid,
+                }],
+            },
+        )
+        .await?;
+        // An unrelated merge source the monitor must never touch.
+        db::machine::insert_health_report(
+            txn.as_mut(),
+            &id,
+            health_report::HealthReportApplyMode::Merge,
+            &health_report::HealthReport::empty(OTHER_SOURCE.to_string()),
+            false,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let monitor = NvlPartitionMonitor::new(
+            pool.clone(),
+            Arc::new(NmxcSimClient::default()),
+            TestMeter::default().meter(),
+            NvLinkConfig::default(),
+            HostHealthConfig::default(),
+            work_lock_manager,
+        );
+
+        let nmx_c_reports = |health: GpuHealth| {
+            vec![GpuInfo {
+                gpu_uid: gpu_guid,
+                gpu_health: health as i32,
+                ..Default::default()
+            }]
+        };
+
+        let before = load(&pool, &id).await?;
+        assert!(
+            !has_hardware_alert(&before),
+            "seeded machine starts without a hardware alert"
+        );
+        let machine_nvlink_info = HashMap::from([(id, before.host_snapshot.nvlink_info.clone())]);
+
+        // Pass 1: NMX-C reports the GPU degraded.
+        monitor
+            .record_nvlink_unhealthy_alerts(
+                &domain_uuid,
+                &mut NvlPartitionMonitorMetrics::new(),
+                &nmx_c_reports(GpuHealth::NmxGpuHealthDegraded),
+                &machine_nvlink_info,
+                &HashMap::from([(id, before)]),
+            )
+            .await;
+
+        let after_set = load(&pool, &id).await?;
+        let stored = after_set
+            .host_snapshot
+            .health_reports
+            .merges
+            .get(NVLINK_PARTITION_MONITOR_REPORT_SOURCE)
+            .expect("monitor persisted its merge report");
+        assert_eq!(stored.alerts.len(), 1, "one alert per affected GPU");
+        assert_eq!(
+            stored.alerts[0].target.as_deref(),
+            Some(gpu_guid.to_string().as_str()),
+            "alert targets the affected GPU UID"
+        );
+        assert!(
+            after_set
+                .host_snapshot
+                .health_reports
+                .merges
+                .contains_key(OTHER_SOURCE),
+            "unrelated source survives the set"
+        );
+        assert!(
+            has_hardware_alert(&after_set),
+            "aggregate health carries the hardware alert"
+        );
+        assert!(
+            !blocks_allocation(&after_set),
+            "the alert does not block allocation"
+        );
+
+        // Pass 2: the same GPU reports healthy.
+        monitor
+            .record_nvlink_unhealthy_alerts(
+                &domain_uuid,
+                &mut NvlPartitionMonitorMetrics::new(),
+                &nmx_c_reports(GpuHealth::NmxGpuHealthHealthy),
+                &machine_nvlink_info,
+                &HashMap::from([(id, after_set)]),
+            )
+            .await;
+
+        let after_clear = load(&pool, &id).await?;
+        assert!(
+            !after_clear
+                .host_snapshot
+                .health_reports
+                .merges
+                .contains_key(NVLINK_PARTITION_MONITOR_REPORT_SOURCE),
+            "monitor removed its merge report on recovery"
+        );
+        assert!(
+            after_clear
+                .host_snapshot
+                .health_reports
+                .merges
+                .contains_key(OTHER_SOURCE),
+            "unrelated source survives the clear"
+        );
+        assert!(
+            !has_hardware_alert(&after_clear),
+            "hardware alert is gone after recovery"
+        );
+
+        join_set.shutdown().await;
+        Ok(())
     }
 }

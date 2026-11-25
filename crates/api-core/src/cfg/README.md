@@ -267,6 +267,7 @@ flows.
 | `nmx_c_tls_client_key_path` | `Option<String>` | — | Client private key for mTLS to NMX-C. |
 | `nmx_c_tls_authority` | `Option<String>` | — | TLS server name used for SNI and certificate verification. |
 | `allow_insecure` | `bool` | `false` | Skip TLS verification for NMX-C. |
+| `partition_monitor_unreachable_alert_after` | `NonZeroU32` | `3` | Consecutive partition monitor passes a rack's NMX-C must be unusable before the monitor raises the rack's `NmxcUnreachable` health alert. The first pass that reaches NMX-C clears it. Must be non-zero. |
 
 ### `SiteExplorerConfig`
 

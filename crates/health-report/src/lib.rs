@@ -499,6 +499,56 @@ impl HealthProbeAlert {
         }
     }
 
+    /// Creates a NmxcUnreachable alert for a rack whose NMX-C the partition monitor could not
+    /// use for several consecutive passes. `endpoint` is the NMX-C URL the monitor resolved for
+    /// the rack, absent when no switch yielded one, and `reason` names the failing step. Carries
+    /// `hardware` only: the alert is a signal about the controller, not an allocation gate.
+    /// `in_alert_since` is when the outage was first observed, which precedes the write when
+    /// the caller debounces.
+    pub fn nmxc_unreachable(
+        endpoint: Option<String>,
+        reason: &str,
+        in_alert_since: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let message = match &endpoint {
+            Some(endpoint) => format!(
+                "NMX-C at {endpoint} is unreachable for this rack's NVLink partition monitor ({reason})"
+            ),
+            None => format!(
+                "No NMX-C endpoint resolves for this rack's NVLink partition monitor ({reason})"
+            ),
+        };
+        Self {
+            id: HealthProbeId::nmxc_unreachable(),
+            message,
+            target: endpoint,
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        }
+    }
+
+    /// Creates a NvlinkUnhealthy alert for one GPU. `target` is the NMX-C GPU UID, so each
+    /// affected GPU is tracked individually and stays in the report until NMX-C reports that
+    /// GPU `Healthy` again. Carries `hardware` only: on this release the alert is a signal, not
+    /// an allocation gate.
+    pub fn nvlink_unhealthy(gpu_id: String, health: &str) -> Self {
+        Self {
+            id: HealthProbeId::nvlink_unhealthy(),
+            message: format!("NVLink GPU {gpu_id} is {health} per NMX-C"),
+            target: Some(gpu_id),
+            in_alert_since: Some(chrono::Utc::now()),
+            // The alert is held until the fabric manager confirms recovery, so it may outlive
+            // the last unhealthy observation; the wording must not claim a current fault.
+            tenant_message: Some(
+                "NVLink connectivity issue: a GPU on this host was reported unhealthy by the \
+                 fabric manager and has not been confirmed recovered"
+                    .to_string(),
+            ),
+            classifications: vec![HealthAlertClassification::hardware()],
+        }
+    }
+
     /// Merge a HealthProbeAlert with the report from another probe of the same type
     ///
     /// The function does not check whether the Probe ID and target are equivalent.
@@ -609,6 +659,11 @@ impl HealthProbeId {
         HealthProbeId("IbPortDown".to_string())
     }
 
+    /// The ID used when the NVLink partition monitor cannot reach a rack's NMX-C.
+    pub fn nmxc_unreachable() -> Self {
+        HealthProbeId("NmxcUnreachable".to_string())
+    }
+
     /// The ID used while a host marked for NVLink isolation still has GPUs in an NVLink
     /// partition, or the NVLink partition monitor cannot confirm that it has none.
     pub fn nvlink_isolation_pending() -> Self {
@@ -619,6 +674,13 @@ impl HealthProbeId {
     /// marked host's GPUs in any NVLink partition.
     pub fn nvlink_isolated() -> Self {
         HealthProbeId("NvlinkIsolated".to_string())
+    }
+
+    /// The ID used for NVLink unhealthy GPU alerts.
+    ///
+    /// Used by the NVLink partition monitor when GPUs are detected as unhealthy.
+    pub fn nvlink_unhealthy() -> Self {
+        HealthProbeId("NvlinkUnhealthy".to_string())
     }
 }
 
@@ -1507,5 +1569,21 @@ mod tests {
         };
 
         assert!(report.has_classification(&HealthAlertClassification::prevent_allocations()));
+    }
+
+    #[test]
+    fn test_nvlink_unhealthy_alert_construction() {
+        let alert = HealthProbeAlert::nvlink_unhealthy("gpuid1".to_string(), "degraded");
+
+        assert_eq!(alert.id.as_str(), "NvlinkUnhealthy");
+        // `target` carries the GPU UID so each affected GPU is tracked individually.
+        assert_eq!(alert.target.as_deref(), Some("gpuid1"));
+        assert!(alert.message.contains("gpuid1"));
+        assert!(alert.message.contains("degraded"));
+        assert!(alert.tenant_message.is_some());
+        assert_eq!(
+            alert.classifications,
+            vec![HealthAlertClassification::hardware()]
+        );
     }
 }

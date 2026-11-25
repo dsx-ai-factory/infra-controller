@@ -53,6 +53,10 @@ pub struct NvlPartitionMonitorMetrics {
     pub nvlink_config_apply_durations_ms: Vec<f64>,
     /// Chassis-level NMX-C connectivity failures that caused null nvlink status observations
     pub num_nmx_c_unreachable_chassis: HashMap<ChassisNmxCUnreachableReason, usize>,
+    /// `NvlinkUnhealthy` health-report writes that failed this pass and are retried on
+    /// the next one, by the kind of write. The only signal that a machine's alert was
+    /// not applied or cleared.
+    pub num_unhealthy_alert_write_failures: HashMap<NvlinkUnhealthyAlertWrite, usize>,
 }
 
 /// Why the partition monitor could not use NMX-C for a chassis during an iteration.
@@ -130,6 +134,7 @@ impl NvlPartitionMonitorMetrics {
             operation_latencies: HashMap::new(),
             nvlink_config_apply_durations_ms: Vec::new(),
             num_nmx_c_unreachable_chassis: HashMap::new(),
+            num_unhealthy_alert_write_failures: HashMap::new(),
             nmxc: NmxcMetrics {
                 endpoint: String::new(),
                 connect_error: String::new(),
@@ -166,10 +171,34 @@ impl Display for NvlPartitionMonitorMetrics {
     }
 }
 
+/// Which `NvlinkUnhealthy` health-report write failed: setting the alert or
+/// clearing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NvlinkUnhealthyAlertWrite {
+    Set,
+    Clear,
+}
+
+impl NvlinkUnhealthyAlertWrite {
+    pub fn values() -> impl Iterator<Item = Self> {
+        [Self::Set, Self::Clear].into_iter()
+    }
+}
+
+impl From<NvlinkUnhealthyAlertWrite> for opentelemetry::Value {
+    fn from(value: NvlinkUnhealthyAlertWrite) -> Self {
+        match value {
+            NvlinkUnhealthyAlertWrite::Set => "set",
+            NvlinkUnhealthyAlertWrite::Clear => "clear",
+        }
+        .into()
+    }
+}
 /// Instruments that are used by pub struct NvlPartitionMonitor
 pub struct NvlPartitionMonitorInstruments {
     pub iteration_latency: Histogram<f64>,
     pub nmxc_changes_applied: Counter<u64>,
+    pub unhealthy_alert_write_failures: Counter<u64>,
     pub operations_latency: Histogram<f64>,
     pub nvlink_config_apply_latency: Histogram<f64>,
 }
@@ -237,6 +266,13 @@ impl NvlPartitionMonitorInstruments {
                 })
                 .build();
         }
+
+        let unhealthy_alert_write_failures = meter
+            .u64_counter("carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total")
+            .with_description(
+                "Number of NvlinkUnhealthy health-report writes that failed and were deferred to the next pass",
+            )
+            .build();
 
         let nmxc_changes_applied = meter
             .u64_counter("carbide_nvlink_partition_monitor_nmxc_changes_applied")
@@ -404,6 +440,7 @@ impl NvlPartitionMonitorInstruments {
         Self {
             iteration_latency,
             nmxc_changes_applied,
+            unhealthy_alert_write_failures,
             operations_latency,
             nvlink_config_apply_latency,
         }
@@ -425,6 +462,11 @@ impl NvlPartitionMonitorInstruments {
             );
         }
 
+        for (&write, &count) in metrics.num_unhealthy_alert_write_failures.iter() {
+            self.unhealthy_alert_write_failures
+                .add(count as u64, &[KeyValue::new("write", write)]);
+        }
+
         for (change, latencies) in metrics.operation_latencies.iter() {
             for latency in latencies {
                 self.operations_latency.record(
@@ -443,6 +485,10 @@ impl NvlPartitionMonitorInstruments {
     }
 
     fn init_counters_and_histograms(&self) {
+        for write in NvlinkUnhealthyAlertWrite::values() {
+            self.unhealthy_alert_write_failures
+                .add(0u64, &[KeyValue::new("write", write)]);
+        }
         for status in NmxcMetricOperationStatus::values() {
             for operation in NmxcMetricOperation::values() {
                 self.nmxc_changes_applied.add(
