@@ -171,8 +171,7 @@ conflicts:
   - id: autonomous-bmc-and-uefi-rotation
     options:
     - BMC rotation
-  reason: the pinned DPF v26.4.0 authenticates every DPU BMC with one shared Secret and cannot follow
-    a BMC rotation (issue 6147)
+  reason: do not rotate BMC credentials while DPF manages a DPU (issue 6147)
 - between:
   - id: credential-store
     options:
