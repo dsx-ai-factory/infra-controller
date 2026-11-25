@@ -1732,6 +1732,14 @@ if "${INSTALL_DPF}"; then
     _SETUP_PHASE="[5b] DPF operator stack"
     echo "=== [5b] DPF (DOCA Platform Framework) ==="
 
+    # preflight.sh resolves the DPU cluster CoreDNS upstream. It is empty only
+    # when --ignore-preflight-errors skipped that finding. Stop before any DPF
+    # change.
+    if [[ -z "${_DPF_COREDNS_UPSTREAM:-}" ]]; then
+        echo "Error: no resolver for the DPU cluster CoreDNS. Set nico-dhcp.config.kea.hookParameters.nameservers in the core values file or export NICO_DPF_COREDNS_UPSTREAM." >&2
+        exit 1
+    fi
+
     # 5b.1 Resolve the doca-platform source before anything touches the cluster,
     #      so a missing or unfetchable pin cannot leave a partial install: an
     #      explicit NICO_DPF_SRC override, or the pinned helm-prereqs/doca-platform

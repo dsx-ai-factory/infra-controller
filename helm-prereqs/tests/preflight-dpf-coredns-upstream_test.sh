@@ -84,9 +84,10 @@ echo "${NICO_DPF_COREDNS_UPSTREAM-<unset>}" > "${TEST_TMP_DIR}/caller-value"
 eval "${DPF_CONFIG_STEP}"
 FAKE_SETUP
 
-dpf_config_step="$(sed -n '/^    # 5b\.6 /,/^    # 5b\.7 /p' "${SETUP_SH}")"
-[[ "${dpf_config_step}" == *dpfoperatorconfig.yaml.tmpl* ]] \
-    || { echo "could not extract step 5b.6 from setup.sh" >&2; exit 1; }
+# The check at the start of phase 5b, then the step that applies the object.
+dpf_config_step="$(sed -n '/^    if \[\[ -z "${_DPF_COREDNS_UPSTREAM:-}" \]\]; then$/,/^    fi$/p; /^    # 5b\.6 /,/^    # 5b\.7 /p' "${SETUP_SH}")"
+[[ "${dpf_config_step}" == *'no resolver for the DPU cluster CoreDNS'*dpfoperatorconfig.yaml.tmpl* ]] \
+    || { echo "could not extract the CoreDNS resolver check and step 5b.6 from setup.sh" >&2; exit 1; }
 
 # Prints spec.coreDNS.upstreamNameservers of the applied DPFOperatorConfig after
 # checking the object against the checked-in DPF CRD (crates/dpf/crds).
@@ -132,16 +133,25 @@ for case in "${cases[@]}"; do
         run+=("NICO_DPF_COREDNS_UPSTREAM=${exported}")
         caller_value="${exported}"
     fi
-    if ! "${run[@]}" "${BASH}" "${TEST_TMP_DIR}/setup-dpf-config.sh" > "${TEST_TMP_DIR}/run.out" 2>&1; then
+    status=0
+    "${run[@]}" "${BASH}" "${TEST_TMP_DIR}/setup-dpf-config.sh" > "${TEST_TMP_DIR}/run.out" 2>&1 || status=$?
+    if [[ -z "${expected}" ]]; then
+        # Without a resolver setup stops before it applies anything.
+        if [[ "${status}" -eq 0 || -s "${TEST_TMP_DIR}/applied.yaml" ]]; then
+            echo "FAIL ${name}: the DPFOperatorConfig step ran without a resolver"
+            failures=$((failures + 1))
+        fi
+    elif [[ "${status}" -ne 0 ]]; then
         echo "FAIL ${name}: preflight.sh and the DPFOperatorConfig step did not complete"
         sed 's/^/    /' "${TEST_TMP_DIR}/run.out"
         failures=$((failures + 1))
         continue
-    fi
-    got="$(applied_upstream)" || got="<no valid DPFOperatorConfig>"
-    if [[ "${got}" != "${expected}" ]]; then
-        echo "FAIL ${name}: applied '${got}', want '${expected}'"
-        failures=$((failures + 1))
+    else
+        got="$(applied_upstream)" || got="<no valid DPFOperatorConfig>"
+        if [[ "${got}" != "${expected}" ]]; then
+            echo "FAIL ${name}: applied '${got}', want '${expected}'"
+            failures=$((failures + 1))
+        fi
     fi
     got="$(cat "${TEST_TMP_DIR}/caller-value")"
     if [[ "${got}" != "${caller_value}" ]]; then
@@ -157,6 +167,16 @@ for case in "${cases[@]}"; do
         failures=$((failures + 1))
     fi
 done
+
+# The resolver check stops setup before the first DPF change.
+# shellcheck disable=SC2016 # The line is matched as written in setup.sh.
+resolver_check_line="$(grep -nxF '    if [[ -z "${_DPF_COREDNS_UPSTREAM:-}" ]]; then' "${SETUP_SH}" | cut -d: -f1)"
+dpf_first_mutation="$(grep -nF 'helmfile sync -l name=argo-cd' "${SETUP_SH}" | cut -d: -f1)"
+if [[ -z "${resolver_check_line}" || -z "${dpf_first_mutation}" ]] \
+    || (( resolver_check_line >= dpf_first_mutation )); then
+    echo "FAIL the CoreDNS resolver check must precede the first DPF change in setup.sh"
+    failures=$((failures + 1))
+fi
 
 if (( failures > 0 )); then
     echo "${failures} failure(s)"
