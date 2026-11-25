@@ -188,7 +188,7 @@ cases=(
     "tag without a release waits for the recorded target;custom-image;v26.8.0|v30.0.0 v30.0.0|v30.0.0;2;"
     "operator does not finish;v30.0.0;v26.8.0|v30.0.0;0;${precheck_message}"
     "image tag ahead of the build TAG;v30.1.0;v30.0.0|v30.0.0;0;built with TAG=v30.0.0"
-    "prerelease of the release in the tag does not pass;v30.0.0;v30.0.0-rc.4|v30.0.0-rc.4;0;Use an operator image built with a plain release TAG, such as TAG=v30.0.0,;Resolve what is reported above"
+    "prerelease of the release in the tag does not pass;v30.0.0;v30.0.0-rc.4|v30.0.0-rc.4;0;Use an operator image built with a plain release TAG, such as TAG=v30.0.0, and push it under an image tag that the cluster has not run;Resolve what is reported above"
     "prerelease tag accepts the same prerelease;v30.0.0-rc.4;v30.0.0-rc.4|v30.0.0-rc.4;1;"
     "upgrade between prereleases waits for the new one;v30.0.0-rc.5;v30.0.0-rc.4|v30.0.0-rc.4 v30.0.0-rc.4|v30.0.0-rc.5 v30.0.0-rc.5|v30.0.0-rc.5;3;"
     "prerelease above the release in the tag passes;v30.0.0;v30.0.1-rc.1|v30.0.1-rc.1;1;"

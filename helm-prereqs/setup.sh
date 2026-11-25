@@ -1745,7 +1745,8 @@ _wait_for_dpf_operator_version() {
         if [[ "$(_dpf_release_key "${_version}")" == "${_floor}" ]]; then
             echo "  ${_version} is the release in image tag $2 with a suffix that the tag does not carry, and the operator has recorded no other target." >&2
             echo "  NICo Core does not start on a prerelease of the DPF release that it requires." >&2
-            echo "  The operator reports the TAG it was built with. Use an operator image built with a plain release TAG, such as TAG=${_version%%-*}, then run setup.sh again." >&2
+            echo "  The operator reports the TAG it was built with. Use an operator image built with a plain release TAG, such as TAG=${_version%%-*}, and push it under an image tag that the cluster has not run, so that the rerun replaces the running operator pod." >&2
+            echo "  Set NICO_DPF_IMAGE_TAG to that image tag, then run setup.sh again." >&2
             echo "  This stop does not need clean.sh, which removes the whole installation." >&2
             return 1
         fi
