@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use ::rpc::forge::forge_server::Forge;
-use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_redfish::libredfish::test_support::{RedfishSimAction, RedfishSimTimepoint};
 use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, StableHostMachineId};
@@ -62,9 +62,10 @@ use model::instance::config::network::{
     Ipv6InterfaceConfig, NetworkDetails,
 };
 use model::machine::{
-    AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine, InstanceState,
-    MachineState, MachineValidatingState, ManagedHostState, MeasuringState,
-    NetworkConfigUpdateState, SpdmMeasuringState, ValidationState,
+    AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine,
+    HostPlatformConfigurationState, InstanceState, MachineLastRebootRequestedMode, MachineState,
+    MachineValidatingState, ManagedHostState, MeasuringState, NetworkConfigUpdateState, RetryInfo,
+    SpdmMeasuringState, ValidationState,
 };
 use model::metadata::Metadata;
 use model::network_prefix::NewNetworkPrefix;
@@ -2431,6 +2432,179 @@ async fn test_bootingwithdiscoveryimage_delay(_: PgPoolOptions, options: PgConne
             .formatted_metric("carbide_reboot_attempts_in_booting_with_discovery_image_count")
             .unwrap(),
         "1"
+    );
+}
+
+/// What ends the DPU wait after a `BootingWithDiscoveryImage` power-cycle retry.
+#[derive(Clone, Copy, Debug)]
+enum DiscoveryPowerCycleWaitEnd {
+    DpusReport,
+    NextRetryDue,
+}
+
+#[crate::sqlx_test]
+async fn test_bootingwithdiscoveryimage_restarts_once_dpus_report_after_power_cycle(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    check_discovery_power_cycle_restarts_host_once(options, DiscoveryPowerCycleWaitEnd::DpusReport)
+        .await;
+}
+
+#[crate::sqlx_test]
+async fn test_bootingwithdiscoveryimage_power_cycle_dpu_wait_ends_at_next_retry(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    check_discovery_power_cycle_restarts_host_once(
+        options,
+        DiscoveryPowerCycleWaitEnd::NextRetryDue,
+    )
+    .await;
+}
+
+async fn check_discovery_power_cycle_restarts_host_once(
+    options: PgConnectOptions,
+    wait_end: DiscoveryPowerCycleWaitEnd,
+) {
+    const DPUS_UP_AFTER_POWER_CYCLE_WAIT_REASON: &str =
+        "Waiting for DPUs to come up after host power cycle before PXE reboot";
+
+    fn booting_with_discovery_image(count: u64) -> ManagedHostState {
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage {
+                retry: RetryInfo { count },
+            },
+        }
+    }
+
+    fn power_actions(env: &TestEnv, checkpoint: &RedfishSimTimepoint) -> Vec<RedfishSimAction> {
+        env.redfish_sim
+            .actions_since(checkpoint)
+            .all_hosts()
+            .into_iter()
+            .filter(|action| matches!(action, RedfishSimAction::Power(_)))
+            .collect()
+    }
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+
+    let tinstance = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    env.api
+        .release_instance(tonic::Request::new(InstanceReleaseRequest {
+            id: Some(tinstance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .expect("Delete instance failed.");
+
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        8,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::CheckHostConfig,
+            },
+        },
+    )
+    .await;
+    mh.network_configured(&env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        2,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForDpusToUp,
+        },
+    )
+    .await;
+    mh.network_configured(&env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        1,
+        booting_with_discovery_image(0),
+    )
+    .await;
+
+    // The host never reports back, so retries 1-3 restart it and retry 4 powers it off.
+    for count in 1..=4 {
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        txn.commit().await.unwrap();
+        update_time_params(&env.pool, &host, 1, None).await;
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &mh.host().id,
+            1,
+            booting_with_discovery_image(count),
+        )
+        .await;
+    }
+
+    let checkpoint = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration().await;
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    txn.commit().await.unwrap();
+    assert_eq!(host.current_state(), &booting_with_discovery_image(4));
+    // The backdated retries leave the state above its SLA, which wraps the wait in an error.
+    assert!(
+        matches!(
+            &host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Error { err, .. })
+                if err.contains(DPUS_UP_AFTER_POWER_CYCLE_WAIT_REASON)
+        ),
+        "powered-on host should wait for its DPUs, got {:?}",
+        host.controller_state_outcome,
+    );
+    assert_eq!(
+        power_actions(&env, &checkpoint),
+        vec![RedfishSimAction::Power(libredfish::SystemPowerControl::On)],
+        "host must not be restarted for PXE before its DPUs report after power-on",
+    );
+
+    match wait_end {
+        DiscoveryPowerCycleWaitEnd::DpusReport => mh.network_configured(&env).await,
+        DiscoveryPowerCycleWaitEnd::NextRetryDue => {
+            let mut txn = env.db_txn().await;
+            let host = mh.host().db_machine(&mut txn).await;
+            txn.commit().await.unwrap();
+            update_time_params(&env.pool, &host, 1, None).await;
+        }
+    }
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        1,
+        booting_with_discovery_image(5),
+    )
+    .await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    txn.commit().await.unwrap();
+    assert_eq!(
+        host.status
+            .last_reboot_requested
+            .map(|request| request.mode),
+        Some(MachineLastRebootRequestedMode::Reboot),
+    );
+    assert_eq!(
+        power_actions(&env, &checkpoint),
+        vec![
+            RedfishSimAction::Power(libredfish::SystemPowerControl::On),
+            RedfishSimAction::Power(libredfish::SystemPowerControl::ForceRestart),
+        ],
+        "{wait_end:?}",
     );
 }
 
