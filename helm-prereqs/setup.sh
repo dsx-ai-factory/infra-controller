@@ -1710,9 +1710,8 @@ if "${INSTALL_DPF}"; then
     fi
     _warn_dpf_source_mismatch "${_DPF_SRC}"
 
-    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
-    #      pinned from doca-platform deploy/helmfiles/prereqs.yaml. All land in
-    #      dpf-operator-system, same as upstream.
+    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD)
+    #      use the versions in helmfile.yaml. All land in dpf-operator-system.
     helmfile sync -l name=argo-cd
 
     # Kamaji has a cold-start deadlock: its controller requires the 'default'
@@ -1747,7 +1746,7 @@ if "${INSTALL_DPF}"; then
         # apply order is nondeterministic), so we can't rely on its partial
         # state — create all three explicitly, matching the chart.
         echo "Creating the Kamaji Issuer, webhook Certificate, and default DataStore out-of-band..."
-        helm template kamaji oci://ghcr.io/nvidia/charts/kamaji --version 1.2.0 \
+        helm template kamaji oci://ghcr.io/nvidia/charts/kamaji --version 1.4.0 \
             -n dpf-operator-system -f operators/values/kamaji.yaml \
             --show-only templates/certmanager_issuer.yaml \
             --show-only templates/certmanager_certificate.yaml \

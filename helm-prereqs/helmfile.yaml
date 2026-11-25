@@ -149,11 +149,13 @@ releases:
   # ---------------------------------------------------------------------------
   # DPF prerequisites — Argo CD, Kamaji, maintenance-operator, NFD.
   # Installed by setup.sh phase 5b unless --skip-dpf (per-release
-  # sync; nothing here installs on a normal run). Versions and values are
-  # based on NVIDIA/doca-platform deploy/helmfiles/prereqs.yaml at v26.4.0.
+  # sync; nothing here installs on a normal run). Kamaji follows
+  # NVIDIA/doca-platform deploy/helmfiles/prereqs.yaml at v30.0.0. Argo CD,
+  # maintenance-operator, and NFD keep the versions that file lists for
+  # v26.8.0. At v30.0.0 it lists 10.2.2, 0.4.0, and 0.19.0.
   # All four install into dpf-operator-system, same as upstream.
-  # NOTE: upstream pins cert-manager v1.19.3; we reuse our v1.17.1 release
-  # above (compatible with DPF's Issuer/Certificate v1 usage — known skew).
+  # NOTE: upstream v30.0.0 lists cert-manager v1.21.1. DPF reuses the v1.17.1
+  # release above.
   # ---------------------------------------------------------------------------
   - name: argo-cd
     namespace: dpf-operator-system
@@ -171,7 +173,7 @@ releases:
     namespace: dpf-operator-system
     createNamespace: true
     chart: oci://ghcr.io/nvidia/charts/kamaji
-    version: "1.2.0"
+    version: "1.4.0"
     labels:
       group: dpf-prereqs
     wait: true
@@ -186,7 +188,7 @@ releases:
         args:
           - -c
           - |
-            helm show crds oci://ghcr.io/nvidia/charts/kamaji --version 1.2.0 \
+            helm show crds oci://ghcr.io/nvidia/charts/kamaji --version 1.4.0 \
               | kubectl apply --server-side --field-manager=helmfile --force-conflicts -f - \
               || echo "WARNING: CRD apply for kamaji failed; continuing" >&2
 

@@ -2,10 +2,9 @@
 # operators/values/kamaji.yaml — Kamaji static values
 #
 # DPF prerequisite (installed by default; skip with --skip-dpf).
-# Copied from NVIDIA/doca-platform deploy/helmfiles/values at tag v26.4.0 —
-# keep in sync with the helm-prereqs/doca-platform submodule pin when bumping DPF.
+# Based on the Kamaji values from the pinned NVIDIA/doca-platform release.
 #
-# Chart: oci://ghcr.io/nvidia/charts/kamaji 1.2.0
+# Chart: oci://ghcr.io/nvidia/charts/kamaji 1.4.0
 # =============================================================================
 
 # Kamaji configuration
@@ -34,6 +33,10 @@ tolerations:
     operator: Exists
     effect: NoSchedule
 kamaji-etcd:
+  selfSignedCertificates:
+    enabled: true
+  certManager:
+    enabled: false
   persistentVolumeClaim:
     storageClassName: local-path
   affinity:
@@ -54,6 +57,8 @@ kamaji-etcd:
       operator: Exists
       effect: NoSchedule
   jobs:
+    cfssl:
+      tag: v1.6.5@sha256:c9018c2ddf0b1f8dbef166057cc751d1becd5c3b0b7014cb9fe06972f725106f
     affinity:
       nodeAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
@@ -78,12 +83,5 @@ kamaji-etcd:
     name: default
 image:
   repository: ghcr.io/nvidia/kamaji
-  tag: v1.34.0-25.9.3
+  tag: v1.36.0-26.6.4
   pullPolicy: Always
-# NOTE: this key is currently a no-op in kamaji-etcd 1.2.0 — its cert-preinstall
-# job (charts/kamaji-etcd/templates/etcd_job_preinstall_1.yaml) hardcodes the
-# image as `cfssl/cfssl:latest` and reads no `cfssl.image` value. Kept (matching
-# upstream) to carry the intended pin for a future chart that wires it up.
-cfssl:
-  image:
-    tag: v1.6.5
