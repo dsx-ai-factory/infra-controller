@@ -12157,6 +12157,7 @@ paths:
                           totalMemory: 81559 MiB
                           frequency: 1755 MHz
                           pciBusId: '00000000:17:00.0'
+                          sku: null
                       networkInterfaces:
                         - macAddress: 'c8:4b:d6:7b:ac:a8'
                           vendor: Broadcom Inc. and subsidiaries
@@ -32628,6 +32629,7 @@ components:
               totalMemory: 81559 MiB
               frequency: 1755 MHz
               pciBusId: '00000000:17:00.0'
+              sku: null
           disks:
             - type: nvme
               model: Dell BOSS-N1
@@ -32970,6 +32972,16 @@ components:
           totalMemory: 81559 MiB
           frequency: 1755 MHz
           pciBusId: '00000000:17:00.0'
+          sku: null
+        - name: NVIDIA GB300
+          serial: '165300000001'
+          driverVersion: 580.126.16
+          vbiosVersion: 97.10.4A.00.1A
+          inforomVersion: G548.0301.00.03
+          totalMemory: 284208 MiB
+          frequency: 2070 MHz
+          pciBusId: '00000008:06:00.0'
+          sku: '0x6C070000'
       properties:
         name:
           type:
@@ -33011,6 +33023,13 @@ components:
             - string
             - 'null'
           description: 'PCI BusId of the Machine''s GPU'
+        sku:
+          type:
+            - string
+            - 'null'
+          description: |-
+            SKU ID of the Machine's GPU, exactly as the host BMC reports it on the Redfish GPU chassis whose serial number matches the GPU's serial number, for example `0x6C070000`.
+            Null when the host BMC does not report a SKU, when no GPU chassis matches the GPU's serial number, or when the matching GPU chassis report different SKUs.
     AggregateHealth:
       title: AggregateHealth
       type: object

@@ -37,7 +37,7 @@ use model::site_explorer::{
     Chassis, ComputerSystem, EndpointExplorationError, EndpointExplorationReport, EndpointType,
     ExploredDpu, ExploredManagedHost, MachineSetupStatus, Manager, PCIeDevice, ServiceRoot,
 };
-use model::test_support::{DpuConfig, ManagedHostConfig};
+use model::test_support::{DpuConfig, HardwareInfoTemplate, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
 use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
 use sqlx::PgPool;
@@ -1028,6 +1028,71 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
     assert_eq!(info.compute_tray_index, Some(2));
     assert_eq!(info.topology_id, Some(10));
     assert_eq!(info.revision_id, Some(3));
+
+    Ok(())
+}
+
+/// A host GPU reports the SKU of the GPU chassis with its serial in the host
+/// BMC's Site Explorer report; GPUs without such a chassis report none.
+#[sqlx_test]
+async fn test_find_machines_by_ids_reports_gpu_sku_from_host_bmc_report(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = api_fixtures::create_test_env(pool).await;
+    let host = api_fixtures::create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(api_fixtures::host::GB200_COMPUTE_TRAY_1_INFO_JSON),
+    )
+    .await
+    .host();
+
+    let mut txn = env.pool.txn_begin().await?;
+    let bmc_ip = host
+        .bmc_ip(txn.as_mut())
+        .await
+        .expect("host should have a BMC IP");
+    let existing = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![bmc_ip])
+        .await?
+        .pop()
+        .expect("host should have a Site Explorer report");
+    let mut report = existing.report;
+    report.chassis.push(Chassis {
+        id: "HGX_GPU_0".to_string(),
+        serial_number: Some("1654422005699".to_string()),
+        sku: Some("0x6C070000".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            bmc_ip,
+            existing.report_version,
+            &report,
+            existing.waiting_for_explorer_refresh,
+            txn.as_mut(),
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    let machine = host.rpc_machine().await;
+    let gpus = &machine
+        .status
+        .as_ref()
+        .and_then(|status| status.discovery_info.as_ref())
+        .expect("host should have discovery info")
+        .gpus;
+    assert_eq!(
+        gpus.iter()
+            .map(|gpu| (gpu.serial.as_str(), gpu.sku.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("1654422005699", Some("0x6C070000")),
+            ("1754422005699", None),
+            ("1854422005699", None),
+            ("1954422005699", None),
+        ],
+    );
 
     Ok(())
 }

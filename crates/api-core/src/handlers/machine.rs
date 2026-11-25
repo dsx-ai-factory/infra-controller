@@ -43,6 +43,7 @@ use model::machine::{
 use model::machine_interface::InterfaceType;
 use model::metadata::Metadata;
 use model::network_segment::NetworkSegmentType;
+use model::site_explorer::GpuChassisSku;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -229,6 +230,16 @@ pub(crate) async fn find_machines_by_ids(
         )
         .await?;
 
+    // Machine discovery does not report GPU SKUs; the host BMC reports them on
+    // its GPU chassis, which site explorer stores in the BMC's exploration report.
+    let host_bmc_ips = snapshots
+        .iter()
+        .filter(|(machine_id, _)| matches!(machine_id.host_or_dpu_id(), HostOrDpuId::Host(_)))
+        .filter_map(|(_, snapshot)| snapshot.host_snapshot.status.bmc_info.ip)
+        .collect::<Vec<_>>();
+    let gpu_chassis_skus_by_bmc_ip =
+        db::explored_endpoints::find_gpu_chassis_skus_by_ips(api.pg_pool(), &host_bmc_ips).await?;
+
     let mut lldp_neighbors_by_machine =
         db::machine_lldp_neighbor::find_by_machine_ids(api.pg_pool(), &machine_ids).await?;
 
@@ -238,8 +249,12 @@ pub(crate) async fn find_machines_by_ids(
             .failure_retry_time,
     );
 
-    let mut response =
-        snapshot_map_to_rpc_machines(snapshots, &sla_config, spectrum_x_capabilities_by_machine);
+    let mut response = snapshot_map_to_rpc_machines(
+        snapshots,
+        &sla_config,
+        spectrum_x_capabilities_by_machine,
+        &gpu_chassis_skus_by_bmc_ip,
+    );
 
     // Standalone DPUs have no aggregate host health, so their SLA uses their own
     // state and health reports. A replacement report overrides all merged reports.
@@ -1586,6 +1601,7 @@ fn snapshot_map_to_rpc_machines(
         HostMachineId,
         Vec<db::dpa_interface::SpectrumXDeviceCapability>,
     >,
+    gpu_chassis_skus_by_bmc_ip: &HashMap<IpAddr, Vec<GpuChassisSku>>,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
         machines: Vec::with_capacity(snapshots.len()),
@@ -1593,15 +1609,34 @@ fn snapshot_map_to_rpc_machines(
 
     for (machine_id, snapshot) in snapshots {
         let dpu_machine_id = DpuMachineId::try_from(machine_id).ok();
-        let spectrum_x_capabilities = match machine_id.host_or_dpu_id() {
-            HostOrDpuId::Host(host_id) => spectrum_x_capabilities_by_machine
-                .remove(&host_id)
-                .map(spectrum_x_capabilities),
-            HostOrDpuId::Dpu(_) => None,
+        let (spectrum_x_capabilities, gpu_chassis_skus) = match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => (
+                spectrum_x_capabilities_by_machine
+                    .remove(&host_id)
+                    .map(spectrum_x_capabilities),
+                snapshot
+                    .host_snapshot
+                    .status
+                    .bmc_info
+                    .ip
+                    .and_then(|ip| gpu_chassis_skus_by_bmc_ip.get(&ip)),
+            ),
+            HostOrDpuId::Dpu(_) => (None, None),
         };
         if let Some(mut rpc_machine) =
             snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
         {
+            if let Some(gpu_chassis_skus) = gpu_chassis_skus
+                && let Some(discovery_info) = rpc_machine
+                    .status
+                    .as_mut()
+                    .and_then(|status| status.discovery_info.as_mut())
+            {
+                for gpu in &mut discovery_info.gpus {
+                    gpu.sku = GpuChassisSku::sku_for_gpu_serial(gpu_chassis_skus, &gpu.serial)
+                        .map(str::to_owned);
+                }
+            }
             if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
                 && !spectrum_x_capabilities.is_empty()
             {
