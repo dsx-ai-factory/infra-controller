@@ -221,7 +221,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
 | `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in KMIP KEK provider. When set, `setup.sh` creates or updates the `nico-system/nico-kmip-client` Secret from them before Phase 6 and refuses to overwrite a Secret it did not create. An error with `--skip-core`. Refer to [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider). |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
-| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to the version in `dpf-versions.toml`, prefixed with `v`. Set separately when your self-built image uses a different tag than the chart version. NICo checks the version that the operator reports, which is the `TAG` the image was built with, not this image tag. Refer to [DPF images and registries](#dpf-images-and-registries). |
+| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to the version in `dpf-versions.toml`, prefixed with `v`. Set separately when your self-built image uses a different tag than the chart version. NICo checks the version that the operator reports, which is the `TAG` the image was built with, not this image tag. `setup.sh` reads the release at the start of this tag. Preflight checks the installed DPF version only when the tag is on the release line of `dpf-versions.toml`, and phase 5b waits until the operator reports that release or a later one. Start a custom tag with the `vMAJOR.MINOR.PATCH` of the build `TAG`, for example `v30.0.0-site1`. Refer to [DPF images and registries](#dpf-images-and-registries). |
 | `NICO_DPF_IMAGE_PULL_SECRET` | No | Pull secret for the DPF operator/DOCA images. Unset by default — the GA `nvidia/doca` images are public and pull anonymously. Set only for a private DPF/DOCA registry or mirror. |
 | `NICO_DPF_HELM_REPO_OCI` / `_HTTPS` / `_CARBIDE` | No | Argo CD helm repository URLs DPF pulls operand/service charts from. `_OCI`/`_HTTPS` default to the public `nvidia/doca` repos; `_CARBIDE` defaults to the **private** `0837451325059433/carbide-dev` (the NICo DPUService charts). Must match the `[dpf.services.*].helm_repo_url` carbide-api requests — override in lockstep when mirroring. |
 
@@ -1532,8 +1532,9 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    upstream: the Kea `nameservers` value unless `NICO_DPF_COREDNS_UPSTREAM` is
    set.
    Setup then waits up to 10 minutes until the `DPFOperatorConfig` reports the
-   new operator version in `status.version`. It stops with the operator's
-   `PreUpgradeValidationReady` message when the operator does not finish.
+   new operator version in `status.version`. When the operator does not
+   finish, setup stops and prints the conditions that are not `True`, such as
+   `PreUpgradeValidationReady`.
 5. **carbide-api enablement (phase 6)** — Core starts with `[dpf]` enabled and
    initializes the BFB, DPUFlavor, and DPUDeployment during that deployment.
    The `nico-api-dpf` Role is created via `nico-api.dpf.rbacCreate=true`. The API
@@ -1722,10 +1723,20 @@ is below the minimum. The upstream default `TAG` is `v0.1.0`. A tag with a
 suffix ranks below the plain version. For a minimum of `30.0.0`, NICo rejects
 `v30.0.0-rc.4` and `v30.0.0-latest-stable`.
 
+`setup.sh` reads the release at the start of `NICO_DPF_IMAGE_TAG`. In phase 5b
+it waits until the operator reports that release or a later one, and stops
+before Core after 10 minutes when it does not. An image tag that starts with a
+later release than the build `TAG` fails this wait, so start a custom tag with
+the build `TAG`, for example `v30.0.0-site1`. With a tag that does not start
+with a release, such as `latest`, preflight does not check the installed DPF
+version, and the wait cannot tell a pending upgrade from the previous version.
+
 Set `NICO_DPF_IMAGE_PULL_SECRET` **only** for a private registry — attaching a
 registry-scoped secret to the public `nvidia/doca` pull makes nvcr.io return
 403 (the credential can't be entitled to `nvidia/doca`), and kubelet does not
-fall back to anonymous.
+fall back to anonymous. `setup.sh` passes the name to the operator chart and
+creates pull Secrets only for `nvcr.io`, so a Secret for a private mirror must
+already exist in `dpf-operator-system`.
 
 **2. NICo DPUService images (built from this repo).** These are NICo's own
 DPU-side services and belong in the same registry as Core/REST. Build and push
@@ -1781,14 +1792,18 @@ a leading `v` or build metadata. Updating it requires rebuilding
 NICo. Keep the source chart pin and image compatible. Changing the file does not
 advance the source pin. During a DPF upgrade, use the commit in
 `crates/dpf/Makefile.toml` for the submodule and packaged `.pin` file. Review
-the prerequisite charts and values. Update the release lines in `preflight.sh`
+the prerequisite charts and values. Update `_DPF_PINNED_LINE` in `preflight.sh`
 and the version that the DPF simulator reports. The helm-prereqs tests fail
-when they differ from this file. Rerun setup to install or upgrade DPF through
-Helm.
+when either differs from this file. Also set `_DPF_UPGRADE_SOURCE_LINE` in
+`preflight.sh` to the release line of `LastReleasedDPFGAVersion` in the new DPF
+release. No test checks that value. Rerun setup to install or upgrade DPF
+through Helm.
 
 An installed DPF must be on v26.8.x or v30.0.x before this setup upgrades it.
-Preflight reports any other version as an error. Refer to
-[DPF Upgrade Source](../docs/manuals/upgrade.md#dpf-upgrade-source).
+With the default image tag, or another tag on the v30.0 release line, preflight
+reports any other version as an error. It reports a warning when it cannot read
+the installed version. Do not pass `--ignore-preflight-errors` for this error.
+Refer to [DPF Upgrade Source](../docs/manuals/upgrade.md#dpf-upgrade-source).
 
 ## DPU compatibility DNS (`.forge` zone) — REQUIRED for DPU bring-up
 

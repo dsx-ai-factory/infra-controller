@@ -40,7 +40,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 - CRD schemas are updated to their new versions through server-side apply.
 - ConfigMaps and Secrets produced by Helm are updated to reflect new chart values.
 - The NICo Core and REST database schemas are migrated forward by their respective pre-upgrade Jobs.
-- The DPF operator chart is reinstalled from the `helm-prereqs/doca-platform` commit the new `setup.sh` pins, with the operator image tag from `NICO_DPF_IMAGE_TAG` (default: that release). The DPUServices (`dts`, `doca_hbn`, and NICo's `dpu_agent`, `dhcp_server`, `fmds`, `otel`) are versioned independently by `[dpf.services.*]` in the NICo site config ([dpf.md §3.5](dpf.md#35-enable-dpf-in-the-nico-site-config)); the pin does not change them.
+- The DPF operator chart is reinstalled from the `helm-prereqs/doca-platform` commit the new `setup.sh` pins, with the operator image tag from `NICO_DPF_IMAGE_TAG` (default: the version in `helm-prereqs/dpf-versions.toml`). The DPUServices (`dts`, `doca_hbn`, and NICo's `dpu_agent`, `dhcp_server`, `fmds`, `otel`) are versioned independently by `[dpf.services.*]` in the NICo site config ([dpf.md §3.5](dpf.md#35-enable-dpf-in-the-nico-site-config)); the pin does not change them.
 
 ## Pre-upgrade checklist
 
@@ -206,7 +206,7 @@ On a DPF site, check the installed DPF version:
 kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system -o jsonpath='{.status.version}'
 ```
 
-`setup.sh` installs the DPF v30.0.0 operator. That operator upgrades only from v26.8.x or from another v30.0.x build. Preflight reports an error for any other installed version. Refer to [DPF Upgrade Source](#dpf-upgrade-source).
+`setup.sh` installs the DPF v30.0.0 operator. That operator upgrades only from v26.8.x or from another v30.0.x build. With the default operator image tag, preflight reports an error for any other installed version. Refer to [DPF Upgrade Source](#dpf-upgrade-source).
 
 ### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
 
@@ -407,11 +407,13 @@ Moving a site off Vault entirely, including certificate issuance and the Vault i
 
 `setup.sh` installs DPF v30.0.0, and NICo Core does not start with an older DPF operator. DPF supports an upgrade from the previous release only. The v30.0.0 operator accepts v26.8.x, or another v30.0.x build, as the installed version. Refer to the [DPF upgrade guide](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/operational-readiness/upgrades/README.md#supported-upgrade-path-n-1-policy).
 
-A site on an older release, such as v26.4.0, must upgrade DPF to v26.8.x first. Without that step, the v30.0.0 operator sets the `PreUpgradeValidationReady` condition of the `DPFOperatorConfig` to `False` and leaves `status.version` unchanged. Preflight reports this case as an error before `setup.sh` changes the cluster.
+A site on an older release, such as v26.4.0, must upgrade DPF to v26.8.x first. Without that step, the v30.0.0 operator sets the `PreUpgradeValidationReady` condition of the `DPFOperatorConfig` to `False` and leaves `status.version` unchanged. Preflight reports this case as an error before `setup.sh` changes the cluster. It makes this check when `NICO_DPF_IMAGE_TAG` is unset or names a tag on the v30.0 release line, and it reports a warning when it cannot read the installed version.
 
-Upgrade DPF to v26.8.x as the [DPF v26.8.0 upgrade guide](https://github.com/NVIDIA/doca-platform/blob/f1b50e85122a3df6047708e41a8203f8cdce03a1/docs/public/operational-readiness/upgrades/README.md) and the [v26.8.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/f1b50e85122a3df6047708e41a8203f8cdce03a1/docs/public/release-notes/v26.8.0.md#upgrade-notes) describe. DPF v26.8.0 lists Kamaji chart 1.4.0 and requires `spec.deploymentMode` in the `DPFOperatorConfig`. A NICo site uses `zero-trust`. When `status.version` reports v26.8.x, run `setup.sh`.
+Do not bypass this error with `--ignore-preflight-errors`. `setup.sh` would install the v30.0.0 operator chart before the wait in phase 5b stops the run, and DPF does not support an operator downgrade. Refer to [Rollback](#rollback).
 
-In phase 5b, `setup.sh` waits up to 10 minutes until `status.version` reports the new operator version. A DPU that is still provisioning holds the DPF upgrade until it reaches `Ready` or `Error`. If the operator does not finish in time, `setup.sh` prints the `PreUpgradeValidationReady` message and stops before it deploys Core. Resolve the reported condition and run `setup.sh` again.
+Upgrade DPF to v26.8.x as the [DPF v26.8.0 upgrade guide](https://github.com/NVIDIA/doca-platform/blob/f1b50e85122a3df6047708e41a8203f8cdce03a1/docs/public/operational-readiness/upgrades/README.md) and the [v26.8.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/f1b50e85122a3df6047708e41a8203f8cdce03a1/docs/public/release-notes/v26.8.0.md#upgrade-notes) describe. DPF v26.8.0 lists Kamaji chart 1.4.0 and requires `spec.deploymentMode` in the `DPFOperatorConfig`. A NICo site uses `zero-trust`. From v26.8.0 the DPU cluster CoreDNS runs in the host cluster, so set `spec.coreDNS.upstreamNameservers` in the same step. Refer to [DPFOperatorConfig](dpf.md#32-dpfoperatorconfig). When `status.version` reports v26.8.x, run `setup.sh`.
+
+In phase 5b, `setup.sh` waits up to 10 minutes until `status.version` reports the new operator version. A DPU that is still provisioning holds the DPF upgrade until it reaches `Ready` or `Error`. If the operator does not finish in time, `setup.sh` prints the conditions of the `DPFOperatorConfig` that are not `True`, such as `PreUpgradeValidationReady`, and stops before it deploys Core. Resolve what they report and run `setup.sh` again.
 
 ### Upgrades That Introduce Automatic Site IP Block Reconciliation
 
