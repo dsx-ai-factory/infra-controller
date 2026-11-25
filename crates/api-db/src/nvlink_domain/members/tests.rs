@@ -6,7 +6,7 @@
 use carbide_uuid::machine::{MachineIdSource, MachineType};
 use carbide_uuid::rack::RackGroupId;
 use carbide_uuid::switch::{SwitchIdSource, SwitchType};
-use model::nvlink_domain::NvLinkDomain;
+use uuid::Uuid;
 
 use super::*;
 use crate::TransactionVending as _;
@@ -93,9 +93,7 @@ async fn fixture(pool: &sqlx::PgPool) -> NvLinkDomain {
 async fn resolves_actual_inventory_preserving_missing_positions(pool: sqlx::PgPool) {
     let domain = fixture(&pool).await;
     let mut reader = PgPoolReader::from(pool);
-    let resolved = resolve_domain_members(&mut reader, domain.id)
-        .await
-        .unwrap();
+    let resolved = resolve_domain_members(&mut reader, &domain).await.unwrap();
     assert_eq!(
         resolved
             .iter()
@@ -168,7 +166,7 @@ async fn rejects_ambiguous_inventory_and_invalid_rack_indexes(pool: sqlx::PgPool
     .await
     .unwrap();
     assert!(matches!(
-        resolve_domain_members(&mut txn, domain.id).await,
+        resolve_domain_members(&mut txn, &domain).await,
         Err(DatabaseError::FailedPrecondition(_))
     ));
     assert!(matches!(
@@ -183,19 +181,11 @@ async fn rejects_ambiguous_inventory_and_invalid_rack_indexes(pool: sqlx::PgPool
     ));
     txn.rollback().await.unwrap();
 
-    let mut txn = pool.txn_begin().await.unwrap();
-    sqlx::query("UPDATE nvlink_domain_members SET rack_index=99 WHERE domain_id=$1")
-        .bind(domain.id)
-        .execute(&mut *txn)
-        .await
-        .unwrap();
+    let mut domain = domain;
+    domain.members[0].rack_index = 99;
+    let mut reader = PgPoolReader::from(pool);
     assert!(matches!(
-        resolve_domain_members(&mut txn, domain.id).await,
-        Err(DatabaseError::FailedPrecondition(_))
+        resolve_domain_members(&mut reader, &domain).await,
+        Err(DatabaseError::FailedPrecondition(reason)) if reason.contains("rack index 99")
     ));
-    assert!(matches!(
-        resolve_domain_members(&mut txn, Uuid::new_v4()).await,
-        Err(DatabaseError::NotFoundError { .. })
-    ));
-    txn.rollback().await.unwrap();
 }
