@@ -3104,7 +3104,10 @@ async fn test_ingestion_firmware_start_waits_when_all_compute_is_desired_off(
     let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(rack.controller_state_outcome,
         Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
-        if reason.contains("pending=1") && reason.contains(&off.host_snapshot.id.to_string())
+        if reason.contains("pending=1") && reason.contains(&format!(
+            "excluded because desired power state is Off: [{}]",
+            off.host_snapshot.id
+        ))
     ));
     Ok(())
 }

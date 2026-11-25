@@ -225,7 +225,8 @@ controller-completion fallback applies only to those admitted shelves.
 Automatic ingestion excludes ready hosts with desired power `Off` from initial
 and supplemental firmware batches, allowing eligible compute hosts and switches
 to proceed. Excluded hosts remain pending and receive neither firmware nor
-power-on requests. Subsequent controller iterations reconsider them when desired
+power-on requests; the rack's wait message lists them as excluded because
+their desired power state is Off. Subsequent controller iterations reconsider them when desired
 power permits updates. While an excluded host keeps desired power `Off`, the rack
 stays in `FirmwareUpgrade(WaitForComplete)` and ingestion does not complete.
 When no compute or switch device is eligible, the rack
