@@ -134,7 +134,7 @@ Use these as starting points and tune based on your site characteristics:
 |--------|------------|--------------------|
 | Hosts usable | `carbide_hosts_usable_count` | Site-relative percentage of total hosts |
 | GPUs usable | `carbide_gpus_usable_count` | Site-relative percentage of total GPUs |
-| DPU unhealthy | `(carbide_dpus_up_count - carbide_dpus_healthy_count) / carbide_dpus_up_count` | Warning at > 5%, treat as warning-class with longer `for:` duration |
+| DPU health check failures | `carbide_dpu_health_check_failed_count{fresh="true"} > 0` | Alert per probe and target; tune severity and `for:` duration for the site |
 | DB pool exhaustion | `carbide_db_pool_idle_conns` | Alert on low idle connections or pool timeout errors |
 | DPUService rollout hold age | `max by (in_use) (carbide_hosts_dpu_service_sync_oldest_pending_age_seconds)` | Compare with the rollout window the site allows, separately for hosts with and without an instance |
 
@@ -196,6 +196,12 @@ When a successful read leaves hosts unchecked, nico-api logs `Too many held host
 The series of a replica are absent, not `0`, when that replica has not read the holds successfully in the last 150 seconds. When the series are absent from every replica, a firing alert resolves, and the 30 minutes start again after the series return. To notice that the holds are not being read, alert on `absent(carbide_hosts_dpu_service_sync_pending_count)`.
 
 Each failed read also logs the nico-api warning `Could not read the outstanding DPU service sync holds; their gauges keep the previous read until it expires`. When the stored state of one host cannot be decoded, the read fails and the warning names that machine.
+
+DPU failure counts are per probe and target, not unique unhealthy DPUs. One DPU can
+fail multiple probes; do not sum these counts into an unhealthy percentage. The up
+and healthy gauges measure different conditions, so their difference or ratio does
+not measure unhealthy DPUs. See [DPU health metrics](metrics.md#health-whats-broken-right-now)
+for freshness and missing-series handling.
 
 ## 4. Deploying alert rules
 
