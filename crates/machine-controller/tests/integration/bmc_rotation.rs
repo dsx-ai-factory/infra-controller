@@ -27,9 +27,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
-use carbide_test_harness::test_support::fixture_config::{
-    FixtureDefault as _, ManagedHostConfigExt as _,
-};
+use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use chrono::{Duration, Utc};
 use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, increment_rotate_attempt,
@@ -125,135 +123,6 @@ async fn dpf_adoption_recovers_a_lost_patch_response(pool: PgPool) {
 #[sqlx_test]
 async fn dpf_adoption_recovers_a_lost_patch_response_when_version_advances(pool: PgPool) {
     assert_dpf_adoption_recovers_lost_patch(pool, 1).await;
-}
-
-#[sqlx_test]
-async fn ready_host_adopts_the_shared_secret_and_stops_polling_confirmed_dpus(pool: PgPool) {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use carbide_dpf::{BmcCredentialHealth, BmcCredentialObservation};
-    use carbide_machine_controller::dpf::MockDpfOperations;
-
-    let desired = Arc::new(Mutex::new(None::<String>));
-    let adopted = Arc::new(AtomicBool::new(false));
-    let mut sdk = MockDpfOperations::new();
-    let observed = desired.clone();
-    let adoption_ready = adopted.clone();
-    sdk.expect_observe_bmc_credential()
-        .times(3)
-        .returning(move |id| {
-            let desired = observed.lock().unwrap().clone();
-            let ready = adoption_ready.load(Ordering::Relaxed);
-            Ok(BmcCredentialObservation {
-                device_id: id.to_string(),
-                device_uid: "observed-device".to_string(),
-                resource_version: "10".to_string(),
-                active_secret_name: if ready {
-                    desired.clone()
-                } else {
-                    Some("bmc-shared-password".to_string())
-                },
-                health: if desired.is_none() || ready {
-                    BmcCredentialHealth::Ready
-                } else {
-                    BmcCredentialHealth::Pending
-                },
-                desired_secret_name: desired,
-            })
-        });
-    sdk.expect_ensure_bmc_adoption_secret()
-        .times(1)
-        .returning(|id| Ok(carbide_dpf::bmc_credential_secret_name(id, None)));
-    let updated = desired.clone();
-    sdk.expect_set_bmc_credential_reference()
-        .times(1)
-        .returning(move |observation, target| {
-            assert_eq!(
-                target,
-                carbide_dpf::bmc_credential_secret_name(&observation.device_id, None)
-            );
-            *updated.lock().unwrap() = Some(target.to_string());
-            Ok(())
-        });
-
-    let cm = Arc::new(TestCredentialManager::default());
-    let mut env = Env::builder(pool.clone())
-        .with_dpf_bmc_rotation(Arc::new(sdk))
-        .with_credential_manager(cm.clone())
-        .configure_runtime(|config| config.bmc_rotation_enabled = false)
-        .build()
-        .await;
-    let domain = env.test_harness.test_domain().await;
-    let networks = env.test_harness.network_controller();
-    let underlay = networks.create_underlay_segment(&domain).await;
-    networks.create_admin_segment(&domain).await;
-    let explorer = env.test_harness.default_test_site_explorer();
-    let mh = env
-        .test_harness
-        .managed_host_builder(&explorer, underlay)
-        .with_config(ManagedHostConfig::default().with_dpu_count(2))
-        .build()
-        .await
-        .0;
-    mh.advance_to_converged_ready().await;
-    let host = mh.host.machine().await;
-    let dpus = host.associated_dpu_machine_ids();
-    let dpu_id = dpus[0];
-    let load_dpu = || async {
-        db::machine::find_one(&pool, &dpu_id, Default::default())
-            .await
-            .unwrap()
-            .unwrap()
-    };
-    let dpu_mac = load_dpu().await.status.bmc_info.mac.unwrap();
-    let mut conn = pool.acquire().await.unwrap();
-    sqlx::query(
-        "UPDATE machines SET dpf = jsonb_set(dpf, '{used_for_ingestion}', 'true') WHERE id = $1",
-    )
-    .bind(host.id)
-    .execute(&mut *conn)
-    .await
-    .unwrap();
-    db::machine::set_per_dpu_bmc_secret_confirmed(&mut conn, dpus[1], true)
-        .await
-        .unwrap();
-    assert!(matches!(
-        set_next_target_version(&mut conn, BMC, 0, serde_json::json!({}))
-            .await
-            .unwrap(),
-        db::ConditionalWrite::Applied(_)
-    ));
-    drop(conn);
-    let shared = creds("admin", "shared-password");
-    cm.set_credentials(&per_device_key(dpu_mac), &shared)
-        .await
-        .unwrap();
-    cm.set_credentials(&rotate_to_key(1), &creds("admin", "staged-password"))
-        .await
-        .unwrap();
-
-    env.run_single_iteration_without_requeue().await;
-    assert!(desired.lock().unwrap().is_some());
-    env.run_single_iteration_without_requeue().await;
-    assert_eq!(mh.host.machine().await.state.value, ManagedHostState::Ready);
-    assert!(!load_dpu().await.config.dpf.per_dpu_bmc_secret_confirmed);
-
-    adopted.store(true, Ordering::Relaxed);
-    env.run_single_iteration_without_requeue().await;
-    assert!(load_dpu().await.config.dpf.per_dpu_bmc_secret_confirmed);
-    env.run_single_iteration_without_requeue().await;
-    assert_eq!(mh.host.machine().await.state.value, ManagedHostState::Ready);
-    assert_eq!(
-        cm.get_credentials(&per_device_key(dpu_mac)).await.unwrap(),
-        Some(shared)
-    );
-    assert!(
-        db::dpf_bmc_rotation::get(&pool, dpu_mac)
-            .await
-            .unwrap()
-            .is_none()
-    );
 }
 
 async fn assert_dpf_adoption_recovers_lost_patch(pool: PgPool, target_version: u32) {

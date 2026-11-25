@@ -1733,16 +1733,6 @@ impl MachineStateHandler {
                 )
                 .await?;
 
-                if let Some(outcome) = dpf_bmc_rotation::adopt_shared_credentials(
-                    mh_snapshot,
-                    ctx.services,
-                    self.dpu_handler.dpf_sdk.as_deref(),
-                )
-                .await?
-                {
-                    return Ok(outcome);
-                }
-
                 // Periodic BMC observation is deliberately Ready's final work,
                 // so it cannot preempt lifecycle or operator-requested actions.
                 boot_interface_observation::observe_verified_boot_interface(ctx, mh_snapshot).await

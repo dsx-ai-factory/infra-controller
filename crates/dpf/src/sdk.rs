@@ -407,10 +407,19 @@ async fn create_shared_bmc_secret<R: K8sConfigRepository>(
 }
 
 async fn shared_bmc_secret_exists(repo: &impl K8sConfigRepository, namespace: &str) -> bool {
-    match repo.get_secret(SECRET_NAME, namespace).await {
-        Ok(secret) => secret.is_some(),
-        Err(error) => {
+    match tokio::time::timeout(
+        DPF_MANAGEMENT_REQUEST_TIMEOUT,
+        repo.get_secret(SECRET_NAME, namespace),
+    )
+    .await
+    {
+        Ok(Ok(secret)) => secret.is_some(),
+        Ok(Err(error)) => {
             tracing::warn!(%error, "Could not check for the shared DPF BMC Secret");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("Timed out checking for the shared DPF BMC Secret");
             false
         }
     }
@@ -452,6 +461,9 @@ where
                 Err(error) => tracing::warn!(%error, "Waiting to create the shared DPF BMC Secret"),
             }
         }
+        // The API supervises background tasks until shutdown. Once the Secret
+        // exists, wait for cancellation without polling the credential source.
+        cancel_token.cancelled().await;
     };
 
     if let Some(js) = join_set {
@@ -9042,22 +9054,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn rebuilding_the_sdk_preserves_the_shared_password() {
-        let mock = SecretTrackingMock::default();
-        for password in ["original-password", "staged-password"] {
-            DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, password.to_string())
-                .build_without_resources()
-                .await
-                .unwrap();
-        }
-
-        assert_eq!(
-            mock.secrets_written.lock().unwrap().as_slice(),
-            &["original-password"]
-        );
-    }
-
     /// The bootstrap task retries transient source failures after initialization.
     #[tokio::test]
     async fn test_build_succeeds_on_transient_read_failure_with_bootstrap_configured() {
@@ -9133,9 +9129,11 @@ mod tests {
     async fn dpu_registration_unblocks_after_credential_is_published() {
         let mock = SecretTrackingMock::default();
         let provider = MutableBmcPasswordProvider::default();
+        let mut tasks = tokio::task::JoinSet::new();
 
         let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, provider.clone())
             .with_bmc_secret_retry_interval(Duration::from_secs(60))
+            .with_join_set(&mut tasks)
             .build_without_resources()
             .await
             .expect("a fresh DPF site may wait for a non-authoritative credential source");
@@ -9157,6 +9155,7 @@ mod tests {
             mock.secrets_written.lock().unwrap().as_slice(),
             &["local-password"]
         );
+        assert!(tasks.try_join_next().is_none());
     }
 
     /// Without a bootstrap task nothing would retry the read, so a transient

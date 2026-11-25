@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use tower_test::mock;
 
 use super::OPERATOR_VERSION_READ_TIMEOUT;
-use crate::sdk::{DpfSdkBuilder, SECRET_NAME};
-use crate::{DpfError, KubeRepository};
+use crate::sdk::{DPF_MANAGEMENT_REQUEST_TIMEOUT, DpfSdkBuilder, SECRET_NAME};
+use crate::{BmcPasswordProvider, DpfError, KubeRepository};
 
 const NS: &str = "startup-version-ns";
 type ApiHandle = mock::Handle<Request<Body>, Response<Body>>;
@@ -75,6 +75,53 @@ fn operator_config(version: Option<&str>) -> Value {
         "spec": {"provisioningController": {}},
         "status": {"version": version, "targetVersion": "v99.0.0"},
     })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_shared_secret_lookup_defers_publication_to_bootstrap() {
+    struct MissingPassword;
+
+    #[async_trait::async_trait]
+    impl BmcPasswordProvider for MissingPassword {
+        async fn get_bmc_password(&self) -> Result<String, DpfError> {
+            Err(DpfError::BmcPasswordSourceUnavailable(
+                "missing test credential".to_string(),
+            ))
+        }
+    }
+
+    let (service, mut handle) = mock::pair();
+    let repo = KubeRepository::with_client(Client::new(service, "default"));
+    let startup = tokio::spawn(
+        DpfSdkBuilder::new(repo, NS, MissingPassword)
+            .with_bmc_secret_retry_interval(Duration::from_secs(60))
+            .build_without_resources(),
+    );
+    let version_path = format!(
+        "/apis/operator.dpu.nvidia.com/v1alpha1/namespaces/{NS}/dpfoperatorconfigs/dpfoperatorconfig"
+    );
+    respond(
+        &mut handle,
+        "GET",
+        &version_path,
+        200,
+        operator_config(Some("v30.0.0")),
+    )
+    .await;
+    let (request, _stalled) = handle.next_request().await.unwrap();
+    assert_eq!(request.method(), http::Method::GET);
+    assert_eq!(
+        request.uri().path(),
+        format!("/api/v1/namespaces/{NS}/secrets/{SECRET_NAME}")
+    );
+
+    tokio::time::advance(DPF_MANAGEMENT_REQUEST_TIMEOUT).await;
+    let sdk = tokio::time::timeout(Duration::from_secs(1), startup)
+        .await
+        .expect("startup should finish when the shared Secret GET times out")
+        .unwrap()
+        .unwrap();
+    assert!(sdk._bmc_bootstrap_guard.is_some());
 }
 
 #[tokio::test]

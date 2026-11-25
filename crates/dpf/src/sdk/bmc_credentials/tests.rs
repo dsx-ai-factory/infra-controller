@@ -107,38 +107,6 @@ fn secret_list(items: Vec<Value>) -> Value {
 }
 
 #[tokio::test]
-async fn adoption_copies_the_shared_password_to_an_immutable_device_secret() {
-    let (sdk, mut handle) = fixture();
-    let password = "frozen-shared-password";
-    let target = bmc_credential_secret_name(DEVICE, None);
-    let shared = json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {"name": SECRET_NAME, "namespace": NS},
-        "data": secret(None, password)["data"],
-    });
-    let result = together(sdk.ensure_bmc_adoption_secret(DEVICE), async {
-        exchange(&mut handle, "GET", &secret_path(SECRET_NAME), 200, shared).await;
-        exchange(&mut handle, "GET", &secret_path(&target), 404, missing()).await;
-        let expected = secret(None, password);
-        let created = exchange(&mut handle, "POST", SECRETS_PATH, 201, expected.clone()).await;
-        exchange(
-            &mut handle,
-            "GET",
-            &secret_path(&target),
-            200,
-            expected.clone(),
-        )
-        .await;
-        assert_eq!(created["data"], expected["data"]);
-        assert_eq!(created["immutable"], true);
-        assert_eq!(created["metadata"]["name"], target);
-    })
-    .await;
-    assert_eq!(result.unwrap(), target);
-}
-
-#[tokio::test]
 async fn new_device_credential_creation_rejects_even_identical_existing_secrets() {
     for version in [Some(3), None] {
         let (sdk, mut handle) = fixture();

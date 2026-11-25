@@ -1156,9 +1156,6 @@ pub struct Dpf {
     pub enabled: bool,
     // If dpf is used for ingestion.
     pub used_for_ingestion: bool,
-    /// The DPUDevice has confirmed its per-DPU BMC credential Secret.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub per_dpu_bmc_secret_confirmed: bool,
 }
 
 /// Per-host profile for settings that affect state-machine progression,
@@ -5010,7 +5007,6 @@ mod tests {
         state.host_snapshot.config.dpf = Dpf {
             enabled: input.dpf_enabled_for_host,
             used_for_ingestion: input.used_for_ingestion,
-            ..Default::default()
         };
         state.dpu_snapshots = input
             .dpus
