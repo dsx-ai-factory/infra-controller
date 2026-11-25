@@ -31,8 +31,9 @@ ARG FREEIPMI_VERSION=1.6.20
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 		build-essential ca-certificates curl libgcrypt20-dev && \
-	curl -fsSL "https://ftp.gnu.org/gnu/freeipmi/freeipmi-${FREEIPMI_VERSION}.tar.gz" \
+	curl -fsSL "https://ftpmirror.gnu.org/freeipmi/freeipmi-${FREEIPMI_VERSION}.tar.gz" \
 		-o /tmp/freeipmi.tar.gz && \
+	echo "9cc644530ee629ffb94d6fd209e7cb4a8b8ae6677f89d2dc461efed9b2e709f2  /tmp/freeipmi.tar.gz" | sha256sum -c - && \
 	cd /tmp && tar xzf freeipmi.tar.gz && \
 	cd "freeipmi-${FREEIPMI_VERSION}" && \
 	./configure --prefix=/usr --sysconfdir=/etc --quiet && \
