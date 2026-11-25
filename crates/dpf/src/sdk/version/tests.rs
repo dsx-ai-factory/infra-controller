@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use carbide_test_support::Outcome::*;
+use carbide_test_support::scenarios;
 use futures::FutureExt;
 use http::{Request, Response};
 use kube::Client;
@@ -23,20 +25,25 @@ type ApiHandle = mock::Handle<Request<Body>, Response<Body>>;
 /// The required version uses semver precedence, including prereleases and build metadata.
 #[test]
 fn operator_version_requirement() {
-    for (scenario, installed, required, succeeds) in [
-        ("older release", "29.0.0", "30.0.0", false),
-        ("RC below final", "30.0.0-rc.4", "30.0.0", false),
-        ("numeric RC ordering", "30.0.0-rc.10", "30.0.0-rc.4", true),
-        ("exact version", "30.0.0", "30.0.0", true),
-        ("newer release", "30.0.1", "30.0.0", true),
-        ("metadata ignored", "30.0.0+aaa", "30.0.0+zzz", true),
-    ] {
-        let requirement = VersionRequirement {
-            version: Version::parse(required).unwrap(),
+    scenarios!(
+        run = |(installed, required): (&str, &str)| {
+            VersionRequirement {
+                version: Version::parse(required).unwrap(),
+            }
+            .check_operator_version(&Version::parse(installed).unwrap())
+            .map_err(drop)
         };
-        let result = requirement.check_operator_version(&Version::parse(installed).unwrap());
-        assert_eq!(result.is_ok(), succeeds, "{scenario}: {result:?}");
-    }
+        "meets the minimum" {
+            ("30.0.0", "30.0.0") => Yields(()),
+            ("30.0.1", "30.0.0") => Yields(()),
+            ("30.0.0-rc.10", "30.0.0-rc.4") => Yields(()),
+            ("30.0.0+aaa", "30.0.0+zzz") => Yields(()),
+        }
+        "below the minimum" {
+            ("29.0.0", "30.0.0") => Fails,
+            ("30.0.0-rc.4", "30.0.0") => Fails,
+        }
+    );
 }
 
 /// A rejected version cannot write the shared BMC Secret or start resource initialization.
