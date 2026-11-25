@@ -535,27 +535,6 @@ impl ExploredEndpoint {
         versions
     }
 
-    /// Counts the inventory entries that match the component but carry no
-    /// usable version. Non-zero means Redfish lists the component without
-    /// saying which firmware it runs, so its version can only be read in band
-    /// (e.g. by its Scout firmware script); zero means it is either fully
-    /// versioned or not listed at all.
-    pub fn matching_inventories_without_version(
-        &self,
-        fw_info: &Firmware,
-        firmware_type: FirmwareComponentType,
-    ) -> usize {
-        self.report
-            .service
-            .iter()
-            .flat_map(|service| service.inventories.iter())
-            .filter(|inventory| {
-                fw_info.matching_version_id(&inventory.id, firmware_type)
-                    && inventory.reported_version().is_none()
-            })
-            .count()
-    }
-
     pub fn has_bluefield_part_number(&self) -> bool {
         self.report.chassis.iter().any(|chassis| {
             chassis
@@ -4709,46 +4688,6 @@ mod tests {
                     .into_iter()
                     .cloned()
                     .collect()
-            },
-        );
-    }
-
-    /// Some BMCs list a component's devices (e.g. NIC3..NIC10) in
-    /// FirmwareInventory with `Version: "    "`. Those entries are listed but
-    /// unknown, which is different from a component that is not listed.
-    #[test]
-    fn matching_inventories_without_version_counts_listed_unknown_entries() {
-        check_values(
-            [
-                Check {
-                    scenario: "absent, empty and blank versions all count",
-                    input: vec![
-                        ("NIC2", Some("28.43.3608")),
-                        ("NIC3", None),
-                        ("NIC4", Some("")),
-                        ("NIC5", Some("    ")),
-                        ("NIC10", Some("1.117.5-a-77")),
-                    ],
-                    expect: 3,
-                },
-                Check {
-                    scenario: "fully versioned component has none",
-                    input: vec![
-                        ("NIC3", Some("1.117.5-a-77")),
-                        ("NIC4", Some("1.117.5-a-77")),
-                    ],
-                    expect: 0,
-                },
-                Check {
-                    scenario: "unlisted component has none",
-                    input: vec![("NIC1", None), ("NIC2", Some("28.43.3608"))],
-                    expect: 0,
-                },
-            ],
-            |inventories| {
-                let fw_info = create_test_firmware(FirmwareComponentType::Nic, r"^NIC([3-9]|10)$");
-                create_test_endpoint(inventories)
-                    .matching_inventories_without_version(&fw_info, FirmwareComponentType::Nic)
             },
         );
     }
