@@ -13,9 +13,9 @@ agnostic to the specific cluster implementation (kubeadm, k3s, RKE2, managed clo
 conformant cluster that satisfies the DPF prerequisites is acceptable.
 
 This guide is **not a replacement** for the official DPF documentation. The
-authoritative source for installing and configuring DPF is the [upstream guide](https://docs.nvidia.com/networking/display/dpf26041).
+authoritative source for installing and configuring DPF is the [upstream guide](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/getting-started/dpf-zero-trust.md).
 
-NICo is designed to follow the Zero-Trust use case detailed in the DPF documentation: [DPF Zero-Trust Mode - HBN Usecase](https://docs.nvidia.com/networking/display/dpf26041/hbn-in-dpf-zero-trust).
+NICo is designed to follow the Zero-Trust use case detailed in the DPF documentation: [DPF Zero-Trust Mode - HBN Usecase](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/user-guides/zero-trust/use-cases/hbn/README.md).
 
 Distinguish managed-host DPUs from DPUs in the site controller nodes. NICo
 does not provision the site controller's own DPUs. Provision those separately
@@ -116,7 +116,7 @@ The DPF operator, Kamaji `DPUCluster`, and carbide-api all come up, but `DPFOper
 
 ## 1. Prerequisites
 
-The official DPF guide lists a set of [cluster-level prerequisites](https://docs.nvidia.com/networking/display/dpf26041/helm-prerequisites) (Argo CD, cert-manager, Kamaji etc.). Follow that guide for those components.
+The official DPF guide lists a set of [cluster-level prerequisites](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/getting-started/helm-prerequisites.md) (Argo CD, cert-manager, Kamaji etc.). Follow that guide for those components.
 
 NICo reuses several of those same components (notably Argo CD and cert-manager). If they are already installed for NICo, **do not reinstall them** — only configure the missing pieces and adapt the existing installations so DPF can use them. The subsections below cover the prerequisite configuration that is specific to a NICo + DPF deployment.
 
@@ -132,7 +132,7 @@ kubectl get namespace dpf-operator-system &>/dev/null \
 
 ### 1.2. Image pull and helm repository credentials
 
-Access to the DPF staging Helm chart and related container images requires authentication through NVIDIA NGC. Both the DPF operator and the workloads it deploys will need credentials for pulling Helm charts and container images from private registries. Refer to the [Using Private Registries](https://docs.nvidia.com/networking/display/dpf26041/using-private-registries) section of the DPF documentation for detailed instructions.
+Access to the DPF staging Helm chart and related container images requires authentication through NVIDIA NGC. Both the DPF operator and the workloads it deploys will need credentials for pulling Helm charts and container images from private registries. Refer to the [Using Private Registries](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/advanced-configuration/using-private-registries.md) section of the DPF documentation for detailed instructions.
 
 #### 1.2.a. `hbn-user-password` Secret
 
@@ -374,7 +374,7 @@ Without this binding cert-manager's controller cannot reference the policy and
 
 ## 2. DPF Installation
 
-Follow the [upstream DPF installation guide](https://docs.nvidia.com/networking/display/dpf26041) for the actual install procedure.
+Follow the [upstream DPF installation guide](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/getting-started/dpf-zero-trust.md) for the actual install procedure.
 
 Run these examples from the repository root. The version reader requires
 Python 3.11 or later, or Python 3 with the `tomli` package installed.
